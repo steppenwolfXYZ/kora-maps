@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Car-Free Map — Viewer</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.css" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    #map { width: 100vw; height: 100vh; }
+    #info {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(255,255,255,0.92);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #333;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+      z-index: 10;
+      max-width: 280px;
+    }
+    #info h3 { margin: 0 0 4px; font-size: 14px; }
+    #info p { margin: 0; line-height: 1.4; }
+    #zoom-display {
+      position: absolute;
+      bottom: 30px;
+      left: 12px;
+      background: rgba(255,255,255,0.9);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: #555;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="info">
+    <h3>Car-Free Map</h3>
+    <p>Prototype base map. Roads de-emphasized, walkable streets highlighted.</p>
+  </div>
+  <div id="zoom-display">Zoom: —</div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.5.0/dist/maplibre-gl.js"></script>
+  <script>
+    // Load the generated style
+    fetch('./style.json')
+      .then(r => r.json())
+      .then(style => {
+        const map = new maplibregl.Map({
+          container: 'map',
+          style: style,
+          center: style.center || [7.4474, 46.948],
+          zoom: style.zoom || 13,
+          attributionControl: true
+        });
+
+        map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+        // Show zoom level
+        const zoomEl = document.getElementById('zoom-display');
+        function updateZoom() {
+          zoomEl.textContent = `Zoom: ${map.getZoom().toFixed(1)}`;
+        }
+        map.on('zoom', updateZoom);
+        map.on('load', updateZoom);
+
+        // Click to inspect features (useful for debugging)
+        map.on('click', (e) => {
+          const features = map.queryRenderedFeatures(e.point);
+          if (features.length > 0) {
+            const f = features[0];
+            console.log('Clicked feature:', f.layer.id, f.properties);
+          }
+        });
+      })
+      .catch(err => {
+        document.getElementById('info').innerHTML =
+          `<h3>Error</h3><p>Could not load style.json. Make sure it's in the same directory and you're serving via HTTP (not file://).</p><p>${err}</p>`;
+      });
+  </script>
+</body>
+</html>

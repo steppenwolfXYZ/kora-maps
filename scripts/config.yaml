@@ -1,0 +1,191 @@
+# =============================================================================
+# Car-Free Map Style Configuration
+# =============================================================================
+# High-level design tokens for generating a MapLibre style JSON.
+# Edit values here, rerun the generator, refresh the browser.
+#
+# Color philosophy:
+#   Green  = nature (default, background)
+#   Warm   = urban, human spaces (buildings, residential zones)
+#   Gray   = dead/uninteresting (industry, motorways, inaccessible)
+# =============================================================================
+
+# ── Global ───────────────────────────────────────────────────────────────────
+global:
+  name: "Car-Free Map"
+  center: [7.4474, 46.9480]   # Bern
+  zoom: 13
+  min_zoom: 0
+  max_zoom: 20
+  tile_source: "https://tiles.openfreemap.org/planet"
+  tile_source_type: "tilejson"
+  glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf"
+  sprite: ""
+
+# ── Palette ──────────────────────────────────────────────────────────────────
+palette:
+  # Background: light cool green — unmapped land is probably nature
+  background: "#d6e2ce"
+
+  # Nature (cool green tones)
+  water: "#a4c4e0"
+  water_outline: "#7dabc8"
+  forest: "#a0c8a0"
+  park: "#b4d8a4"
+  farmland: "#ccdcb8"
+  meadow: "#c8d8bc"
+  scrub: "#bcceb0"
+  wetland: "#a8c8b4"
+  glacier: "#e0ecf4"
+  bare_rock: "#ccd2c8"
+  sand_beach: "#e4dcc0"
+
+  # Urban (warm tones)
+  urban_area: "#e6d8c4"
+  buildings: "#dabeac"
+  building_outline: "#b89990"
+  industrial: "#e0d8cf"
+  commercial: "#f4d8c0"
+
+  # Infrastructure
+  rail: "#b0aaa0"
+  bridge_casing: "#a8a090"
+  tunnel_opacity: 0.4
+
+  # Labels
+  label_color: "#3a3a3a"
+  label_halo: "#ffffffcc"
+  label_water: "#4a7da8"
+
+# ── Roads ────────────────────────────────────────────────────────────────────
+roads:
+  motorway:
+    fill_color: "#c4c0b8"
+    casing_color: "#b0aca4"
+    line_color: "#a0a0a0"
+    line_dasharray: [4, 3]
+    area_min_zoom: 13
+    min_zoom: 5
+
+  main_road:
+    line_color: "#b0aca4"
+    fill_color: "#ccc8c0"
+    casing_color: "#b8b4a8"
+    area_min_zoom: 14
+    min_zoom: 8
+
+  walkable:
+    area_min_zoom: 15
+    line_min_zoom: 12
+    casing_color: "#c08040"
+    disappear_zoom: 11
+
+  # Real-world road widths in meters, applied at close zoom
+  real_widths:
+    motorway: 24    # carriageway + shoulders
+    trunk: 18
+    primary: 20     # urban arterials often include tram + parking + sidewalks
+    secondary: 18   # tree-lined boulevards, tram lines
+    tertiary: 12    # main urban street with sidewalks
+    residential: 9  # road + sidewalks on both sides
+    living_street: 8
+    pedestrian: 8   # pedestrian zone — can't distinguish wide shopping street from narrow park path in vector tiles
+    service: 4      # driveway / parking aisle
+    minor: 9        # same as residential
+    track: 4
+    min_zoom: 15
+    full_zoom: 17
+
+# ── Walkability ──────────────────────────────────────────────────────────────
+walkability:
+  color_low: "#c08040"
+  color_mid: "#c08040"
+  color_high: "#c08040"
+
+  scoring_rules:
+    - match: { highway: "pedestrian" }
+      score: 1.0
+    - match: { highway: "living_street" }
+      score: 0.85
+    - match: { maxspeed_lte: 20 }
+      score: 0.80
+    - match: { maxspeed_lte: 30 }
+      score: 0.65
+    - match: { highway: "residential" }
+      score: 0.55
+    - match: { highway: "unclassified" }
+      score: 0.45
+    - match: { maxspeed_lte: 50 }
+      score: 0.35
+    - match: { maxspeed_lte: 60 }
+      score: 0.15
+    - match: { default: true }
+      score: 0.30
+
+  mid_zoom_lines:
+    solid_above: 0.75
+    semi_dashed_above: 0.45
+    dashed_above: 0.15
+    width_high: 2.0
+    width_mid: 1.5
+    width_low: 1.0
+
+# ── Paths & Cycleways ───────────────────────────────────────────────────────
+paths:
+  color: "#c08040"
+  color_unpaved: "#b08050"
+  width: 1.2
+  min_zoom: 14
+  unpaved_dasharray: [3, 2]
+
+# ── Land use ─────────────────────────────────────────────────────────────────
+landuse:
+  min_zoom: 4
+  opacity_low_zoom: 0.6
+  opacity_high_zoom: 0.9
+  park_outline: true
+  park_outline_color: "#80b080"
+  cemetery_color: "#c0ccb4"
+  hospital_color: "#e8d0df"
+  school_color: "#efdfb4"
+
+# ── Buildings ────────────────────────────────────────────────────────────────
+buildings:
+  min_zoom: 14
+  extrude: false
+  height_multiplier: 1.0
+
+# ── Water ────────────────────────────────────────────────────────────────────
+water:
+  river_min_width: 1.5
+  river_min_zoom: 8
+  stream_min_zoom: 12
+  lake_outline: true
+
+# ── Labels ───────────────────────────────────────────────────────────────────
+labels:
+  font: "Noto Sans Regular"
+  font_bold: "Noto Sans Bold"
+  font_italic: "Noto Sans Italic"
+  size_scale: 1.0
+  halo_width: 1.5
+  country_min_zoom: 2
+  country_max_zoom: 9
+  state_min_zoom: 4
+  state_max_zoom: 9
+  city_min_zoom: 4
+  town_min_zoom: 8
+  village_min_zoom: 11
+  suburb_min_zoom: 13
+  street_min_zoom: 15
+  poi_min_zoom: 16
+
+# ── Borders ──────────────────────────────────────────────────────────────────
+borders:
+  country_color: "#888888"
+  country_width: 1.5
+  country_dasharray: [5, 3]
+  state_color: "#aaaaaa"
+  state_width: 0.8
+  state_dasharray: [3, 2]
+  state_min_zoom: 4
