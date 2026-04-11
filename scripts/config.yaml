@@ -48,8 +48,10 @@ palette:
   commercial: "#f4d8c0"
 
   # Infrastructure
-  rail: "#b0aaa0"
-  bridge_casing: "#a8a090"
+  rail: "#ffffff"
+  rail_opacity: 0.2
+  bridge_casing: "#c4c0b8"
+  bridge_deck_opacity: 0.6
   tunnel_opacity: 0.4
 
   # Labels

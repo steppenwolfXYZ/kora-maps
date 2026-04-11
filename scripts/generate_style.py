@@ -80,7 +80,8 @@ MOTORWAY_CLASSES = ["motorway", "trunk"]
 MAIN_ROAD_CLASSES = ["primary", "secondary"]
 PATH_CLASSES = ["path"]
 RAIL_CLASSES = ["rail", "transit"]
-WALKABLE_EXCLUDE = MOTORWAY_CLASSES + MAIN_ROAD_CLASSES + RAIL_CLASSES
+FERRY_CLASSES = ["ferry"]
+WALKABLE_EXCLUDE = MOTORWAY_CLASSES + MAIN_ROAD_CLASSES + RAIL_CLASSES + FERRY_CLASSES
 
 # Walkable road class groups for close-zoom real-width layers.
 # Each group becomes its own layer — MapLibre forbids multiple zoom-based
@@ -315,30 +316,66 @@ def build_building_layers(cfg):
     }]
 
 
-def build_rail_layers(cfg):
+def build_rail_layers(cfg, modes=None):
     """Rail infrastructure as neutral background.
-    Active rail lines will be overlaid by the transit layer later."""
+    Split by brunnel mode so bridge rail renders above the bridge deck."""
+    if modes is None:
+        modes = ["tunnel", "normal", "bridge"]
+    p = cfg["palette"]
     layers = []
 
-    layers.append({
-        "id": "rail",
-        "type": "line",
-        "source": "openmaptiles",
-        "source-layer": "transportation",
-        "minzoom": 8,
-        "filter": class_filter(RAIL_CLASSES),
-        "layout": {"line-cap": "butt", "line-join": "round"},
-        "paint": {
-            "line-color": "#ffffff",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.75, 14, 2.0],
-            "line-opacity": 0.5,
-        }
-    })
+    for mode in modes:
+        bf = brunnel_filter(mode)
+        suffix = "" if mode == "normal" else f"-{mode}"
+        opacity = p["tunnel_opacity"] if mode == "tunnel" else p["rail_opacity"]
+        layers.append({
+            "id": f"rail{suffix}",
+            "type": "line",
+            "source": "openmaptiles",
+            "source-layer": "transportation",
+            "minzoom": 8,
+            "filter": ["all", class_filter(RAIL_CLASSES), bf],
+            "layout": {"line-cap": "butt", "line-join": "round"},
+            "paint": {
+                "line-color": p["rail"],
+                "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.75, 14, 2.0],
+                "line-opacity": opacity,
+            }
+        })
 
     return layers
 
 
-def build_road_layers(cfg):
+def build_bridge_deck_layer(cfg):
+    """Single solid gray deck for ALL bridge transportation features at all zooms.
+    Rendered between normal-mode and bridge-mode road layers: roads below the
+    bridge cover the deck (normal mode renders before this), roads on the bridge
+    render on top (bridge mode renders after). No per-class variants — a single
+    layer avoids hollow/donut artifacts. Width is 1.5px minimum at far zoom,
+    then meter-based (15m) from zoom 14 onwards."""
+    p = cfg["palette"]
+    return [{
+        "id": "bridge-deck",
+        "type": "line",
+        "source": "openmaptiles",
+        "source-layer": "transportation",
+        "minzoom": 8,
+        "filter": ["==", ["get", "brunnel"], "bridge"],
+        "layout": {"line-cap": "butt", "line-join": "round"},
+        "paint": {
+            "line-color": p["bridge_casing"],
+            "line-width": ["interpolate", ["exponential", 2], ["zoom"],
+                8,  1.5,
+                13, 1.5,
+                14, round(meters_to_pixels(15, 14), 2),
+                22, round(meters_to_pixels(15, 22), 1)
+            ],
+            "line-opacity": p["bridge_deck_opacity"]
+        }
+    }]
+
+
+def build_road_layers(cfg, modes=None):
     """Road layers with three-tier hierarchy, bridge/tunnel variants,
     real-width rendering at close zoom, and separated path treatment."""
     r = cfg["roads"]
@@ -353,7 +390,10 @@ def build_road_layers(cfg):
     def px(meters, zoom):
         return round(meters_to_pixels(meters, zoom), 2)
 
-    for mode in ["tunnel", "normal", "bridge"]:
+    if modes is None:
+        modes = ["tunnel", "normal", "bridge"]
+
+    for mode in modes:
         bf = brunnel_filter(mode)
         suffix = "" if mode == "normal" else f"-{mode}"
         opacity_mult = p["tunnel_opacity"] if mode == "tunnel" else 1.0
@@ -394,22 +434,6 @@ def build_road_layers(cfg):
             }
         })
 
-        if mode == "bridge":
-            layers.append({
-                "id": f"road-motorway-casing{suffix}",
-                "type": "line",
-                "source": "openmaptiles",
-                "source-layer": "transportation",
-                "minzoom": mw["area_min_zoom"],
-                "filter": ["all", class_filter(MOTORWAY_CLASSES), bf],
-                "layout": {"line-cap": "butt", "line-join": "round"},
-                "paint": {
-                    "line-color": p["bridge_casing"],
-                    "line-width": _width_interp(rw["motorway"] + 3, mw["area_min_zoom"]),
-                    "line-opacity": 0.4
-                }
-            })
-
         # =================================================================
         # 2. MAIN ROADS
         # =================================================================
@@ -446,22 +470,6 @@ def build_road_layers(cfg):
             }
         })
 
-        if mode == "bridge":
-            layers.append({
-                "id": f"road-main-casing{suffix}",
-                "type": "line",
-                "source": "openmaptiles",
-                "source-layer": "transportation",
-                "minzoom": mr["area_min_zoom"],
-                "filter": ["all", class_filter(MAIN_ROAD_CLASSES), bf],
-                "layout": {"line-cap": "butt", "line-join": "round"},
-                "paint": {
-                    "line-color": p["bridge_casing"],
-                    "line-width": _width_interp(rw["primary"] + 2, mr["area_min_zoom"]),
-                    "line-opacity": 0.3
-                }
-            })
-
         # =================================================================
         # 3. WALKABLE STREETS
         # =================================================================
@@ -474,25 +482,26 @@ def build_road_layers(cfg):
             bf
         ]
 
-        # Mid-zoom: symbolic lines
-        layers.append({
-            "id": f"road-walkable-midline{suffix}",
-            "type": "line",
-            "source": "openmaptiles",
-            "source-layer": "transportation",
-            "minzoom": wk["line_min_zoom"],
-            "maxzoom": wk["area_min_zoom"],
-            "filter": walkable_filter,
-            "layout": {"line-cap": "round", "line-join": "round"},
-            "paint": {
-                "line-color": walkability_color_expr,
-                "line-width": walkability_width_expr,
-                "line-opacity": ["interpolate", ["linear"], ["zoom"],
-                    wk["line_min_zoom"], 0.3 * opacity_mult,
-                    14, 0.8 * opacity_mult
-                ]
-            }
-        })
+        # Mid-zoom: symbolic lines (bridge mode skipped; bridges shown by bridge-deck layer)
+        if mode != "bridge":
+            layers.append({
+                "id": f"road-walkable-midline{suffix}",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "transportation",
+                "minzoom": wk["line_min_zoom"],
+                "maxzoom": wk["area_min_zoom"],
+                "filter": walkable_filter,
+                "layout": {"line-cap": "round", "line-join": "round"},
+                "paint": {
+                    "line-color": walkability_color_expr,
+                    "line-width": walkability_width_expr,
+                    "line-opacity": ["interpolate", ["linear"], ["zoom"],
+                        wk["line_min_zoom"], 0.3 * opacity_mult,
+                        14, 0.8 * opacity_mult
+                    ]
+                }
+            })
 
         # Close zoom: one layer per width group
         # TODO (post-MVP): proper intersection fix requires pre-computing
@@ -519,34 +528,22 @@ def build_road_layers(cfg):
                     "line-opacity": opacity_mult
                 }
             })
-            if mode == "bridge":
-                layers.append({
-                    "id": f"road-walkable-casing-{grp_label}{suffix}",
-                    "type": "line",
-                    "source": "openmaptiles",
-                    "source-layer": "transportation",
-                    "minzoom": wk["area_min_zoom"],
-                    "filter": grp_filter,
-                    "layout": {"line-cap": "butt", "line-join": "round"},
-                    "paint": {
-                        "line-color": p["bridge_casing"],
-                        "line-width": _width_interp(meters + 1.5, wk["area_min_zoom"]),
-                        "line-opacity": 0.25
-                    }
-                })
 
     return layers
 
 
-def build_path_layers(cfg):
+def build_path_layers(cfg, modes=None):
     """Paths, footways, cycleways — separate from walkable streets."""
     pc = cfg["paths"]
     p = cfg["palette"]
     layers = []
 
+    if modes is None:
+        modes = ["tunnel", "normal", "bridge"]
+
     path_filter_base = class_filter(PATH_CLASSES)
 
-    for mode in ["tunnel", "normal", "bridge"]:
+    for mode in modes:
         bf = brunnel_filter(mode)
         suffix = "" if mode == "normal" else f"-{mode}"
         opacity = p["tunnel_opacity"] if mode == "tunnel" else 1.0
@@ -955,9 +952,13 @@ def generate_style(cfg) -> dict:
     style["layers"].extend(build_landuse_layers(cfg))
     style["layers"].extend(build_water_layers(cfg))
     style["layers"].extend(build_building_layers(cfg))
-    style["layers"].extend(build_rail_layers(cfg))
-    style["layers"].extend(build_road_layers(cfg))
-    style["layers"].extend(build_path_layers(cfg))
+    style["layers"].extend(build_rail_layers(cfg, modes=["tunnel", "normal"]))
+    style["layers"].extend(build_road_layers(cfg, modes=["tunnel", "normal"]))
+    style["layers"].extend(build_path_layers(cfg, modes=["tunnel", "normal"]))
+    style["layers"].extend(build_bridge_deck_layer(cfg))
+    style["layers"].extend(build_rail_layers(cfg, modes=["bridge"]))
+    style["layers"].extend(build_road_layers(cfg, modes=["bridge"]))
+    style["layers"].extend(build_path_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_border_layers(cfg))
     style["layers"].extend(build_label_layers(cfg))
 
