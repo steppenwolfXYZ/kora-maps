@@ -923,6 +923,142 @@ def build_label_layers(cfg):
 
 
 # =============================================================================
+# Transit layer
+# =============================================================================
+
+# (mode value in GeoJSON, minzoom)
+# ORDER MATTERS: drawn bottom-to-top — less important modes first,
+# so faster/more important lines always render on top.
+TRANSIT_MODE_LAYERS = [
+    ("mountain",      8),
+    ("regional_bus",  8),
+    ("bus",          11),
+    ("ferry",         8),
+    ("metro",         9),
+    ("tram",         10),
+    ("train",         6),
+    ("intercity",     4),
+]
+
+GTFS_MATCHED_FILTER = ["==", ["get", "gtfs_matched"], True]
+
+def build_transit_layers() -> list:
+    layers = []
+    for mode, minzoom in TRANSIT_MODE_LAYERS:
+        base_filter = ["all", ["==", ["get", "mode"], mode], GTFS_MATCHED_FILTER]
+
+        # Casing — halo drawn under the color line so lines separate visually.
+        casing_color = "#ffffff"
+        layers.append({
+            "id": f"transit-{mode}-casing",
+            "type": "line",
+            "source": "transit_lines",
+            "source-layer": "transit_lines",
+            "minzoom": minzoom,
+            "filter": base_filter,
+            "layout": {
+                "line-cap": "round",
+                "line-join": "round",
+                # Slower lines rendered below faster ones within each mode group
+                "line-sort-key": ["coalesce", ["get", "speed_kmh"], 0]
+            },
+            "paint": {
+                "line-color": casing_color,
+                "line-width": ["interpolate", ["linear"], ["zoom"],
+                    minzoom,     ["*", ["get", "width_base"], 0.4 + 0.6],
+                    14,          ["+", ["get", "width_base"], 1.5],
+                    18,          ["+", ["*", ["get", "width_base"], 4.0], 2.0]
+                ],
+                "line-opacity": ["interpolate", ["linear"], ["zoom"],
+                    minzoom,       0.0,
+                    minzoom + 1.5, 0.9
+                ]
+            }
+        })
+
+        # Color line — drawn on top of casing
+        layers.append({
+            "id": f"transit-{mode}",
+            "type": "line",
+            "source": "transit_lines",
+            "source-layer": "transit_lines",
+            "minzoom": minzoom,
+            "filter": base_filter,
+            "layout": {
+                "line-cap": "round",
+                "line-join": "round",
+                "line-sort-key": ["coalesce", ["get", "speed_kmh"], 0]
+            },
+            "paint": {
+                "line-color": ["get", "color"],
+                "line-width": ["interpolate", ["linear"], ["zoom"],
+                    minzoom,     ["*", ["get", "width_base"], 0.4],
+                    14,          ["get", "width_base"],
+                    18,          ["*", ["get", "width_base"], 4.0]
+                ],
+                "line-opacity": ["interpolate", ["linear"], ["zoom"],
+                    minzoom,       0.0,
+                    minzoom + 1.5, 0.85
+                ]
+            }
+        })
+    return layers
+
+
+def build_station_layers() -> list:
+    """
+    Stop dots per mode group, each appearing at the same zoom as its line.
+    Rail stations: larger, deduplicated, visible from zoom 5.
+    Other modes: smaller, per-stop, appearing at their line's minzoom.
+    All disappear at zoom 16 (close-up design deferred).
+    """
+    layers = []
+
+    # (source, minzoom, border_radii, fill_radii)
+    # Each group has its own PMTiles file with the correct --minimum-zoom baked in,
+    # so tippecanoe cannot drop features below that zoom.
+    stop_groups = [
+        ("transit_stops_rail",      5,
+         [5, 3.5,  10, 6.0,  13, 8.0,  15, 9.0],
+         [5, 2.2,  10, 4.2,  13, 5.6,  15, 6.4]),
+        ("transit_stops_tram",     10,
+         [10, 1.5,  13, 3.5,  15, 5.0],
+         [10, 0.9,  13, 2.2,  15, 3.2]),
+        ("transit_stops_regional",  9,
+         [ 9, 1.2,  13, 3.0,  15, 4.5],
+         [ 9, 0.7,  13, 1.9,  15, 2.9]),
+        ("transit_stops_bus",      11,
+         [11, 1.2,  13, 2.5,  15, 4.0],
+         [11, 0.7,  13, 1.6,  15, 2.6]),
+    ]
+
+    def zoom_interp(stops):
+        expr = ["interpolate", ["linear"], ["zoom"]]
+        for v in stops:
+            expr.append(v)
+        return expr
+
+    for source, minzoom, border_stops, fill_stops in stop_groups:
+        layers.append({
+            "id": f"transit-stop-fill-{source}",
+            "type": "circle",
+            "source": source,
+            "source-layer": "transit_stops",
+            "minzoom": minzoom,
+            "maxzoom": 16,
+            "paint": {
+                "circle-color": ["get", "color"],
+                "circle-radius": zoom_interp(fill_stops),
+                "circle-opacity": ["interpolate", ["linear"], ["zoom"],
+                    minzoom, 0.0, minzoom + 1.0, 1.0
+                ]
+            }
+        })
+
+    return layers
+
+
+# =============================================================================
 # Main assembly
 # =============================================================================
 
@@ -938,7 +1074,29 @@ def generate_style(cfg) -> dict:
     style = {
         "version": 8,
         "name": g["name"],
-        "sources": {"openmaptiles": source_def},
+        "sources": {
+            "openmaptiles": source_def,
+            "transit_lines": {
+                "type": "vector",
+                "url": "pmtiles:///tl_lines.pmtiles"
+            },
+            "transit_stops_rail": {
+                "type": "vector",
+                "url": "pmtiles:///tl_stops_rail.pmtiles"
+            },
+            "transit_stops_tram": {
+                "type": "vector",
+                "url": "pmtiles:///tl_stops_tram.pmtiles"
+            },
+            "transit_stops_regional": {
+                "type": "vector",
+                "url": "pmtiles:///tl_stops_regional.pmtiles"
+            },
+            "transit_stops_bus": {
+                "type": "vector",
+                "url": "pmtiles:///tl_stops_bus.pmtiles"
+            }
+        },
         "glyphs": g["glyphs"],
         "center": g["center"],
         "zoom": g["zoom"],
@@ -959,6 +1117,8 @@ def generate_style(cfg) -> dict:
     style["layers"].extend(build_rail_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_road_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_path_layers(cfg, modes=["bridge"]))
+    style["layers"].extend(build_transit_layers())
+    style["layers"].extend(build_station_layers())
     style["layers"].extend(build_border_layers(cfg))
     style["layers"].extend(build_label_layers(cfg))
 

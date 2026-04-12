@@ -1,12 +1,22 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { Protocol } from 'pmtiles';
+
+	// Register the pmtiles:// protocol handler once at module level
+	const pmtilesProtocol = new Protocol();
+	maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
 
 	/** Resolved MapLibre style object loaded from /style.json */
 	let { style }: { style: maplibregl.StyleSpecification } = $props();
 
 	let container: HTMLDivElement;
 	let zoom = $state(0);
+
+	const TRANSIT_LINE_LAYERS = [
+		'transit-mountain', 'transit-regional_bus', 'transit-bus',
+		'transit-ferry', 'transit-metro', 'transit-tram', 'transit-train', 'transit-intercity'
+	];
 
 	$effect(() => {
 		const map = new maplibregl.Map({
@@ -31,6 +41,39 @@
 		};
 		map.on('load', updateZoom);
 		map.on('zoom', updateZoom);
+
+		// Debug tooltip: click a transit line to see its properties
+		let popup: maplibregl.Popup | null = null;
+
+		map.on('load', () => {
+			// Pointer cursor when hovering transit lines
+			for (const layer of TRANSIT_LINE_LAYERS) {
+				map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
+				map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
+			}
+		});
+
+		map.on('click', (e) => {
+			const features = map.queryRenderedFeatures(e.point, { layers: TRANSIT_LINE_LAYERS });
+			if (popup) { popup.remove(); popup = null; }
+			if (!features.length) return;
+
+			const p = features[0].properties as Record<string, unknown>;
+			const fmt = (v: unknown) => v == null ? '–' : String(v);
+			const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
+				<b>${fmt(p.mode)}</b> &nbsp;ref: ${fmt(p.ref)}<br>
+				${p.name ? String(p.name).substring(0, 60) : ''}<br>
+				freq: ${typeof p.freq_score === 'number' ? p.freq_score.toFixed(2) : fmt(p.freq_score)}&ensp;
+				spd: ${fmt(p.speed_kmh)} km/h&ensp;
+				w: ${fmt(p.width_base)}<br>
+				osm: ${fmt(p.osm_id)}
+			</div>`;
+
+			popup = new maplibregl.Popup({ maxWidth: '320px' })
+				.setLngLat(e.lngLat)
+				.setHTML(html)
+				.addTo(map);
+		});
 
 		return () => map.remove();
 	});
