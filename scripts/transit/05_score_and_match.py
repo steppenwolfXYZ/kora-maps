@@ -314,9 +314,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
                     line_freq[line_key]["we"] += 1
 
         n = len(stops)
-        if n > line_canonical.get(line_key, {}).get("stop_count", 0):
+        canon_score = n * len(active_dates)
+        if canon_score > line_canonical.get(line_key, {}).get("canon_score", 0):
             line_canonical[line_key] = {
                 "stop_count": n,
+                "canon_score": canon_score,
                 "stops": [(s[1], s[2], s[3]) for s in stops],
             }
 
@@ -332,9 +334,10 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
 
         geo_key = (line_key, gb)
         existing = line_canonical_geo.get(geo_key)
-        if existing is None or n > existing["stop_count"]:
+        if existing is None or canon_score > existing.get("canon_score", 0):
             line_canonical_geo[geo_key] = {
                 "stop_count": n,
+                "canon_score": canon_score,
                 "stops": [(s[1], s[2], s[3]) for s in stops],
             }
 

@@ -167,52 +167,54 @@ class TransitExtractor(osmium.SimpleHandler):
                 coords.append(list(c))
         return coords
 
-    # Maximum allowed gap between consecutive way endpoints (km).
-    # Gaps larger than this indicate missing ways in the OSM route relation.
-    # The stitched geometry is split at such gaps and only the longest sub-segment is kept,
-    # preventing straight phantom lines across cities/water.
-    # Maximum gap (km) between consecutive way endpoints before we split into separate segments.
-    # Ferries cross open water so we allow large gaps; aerialways have cable spans.
-    # For ground routes, 0.1km (100m) means a missing way section → phantom straight line.
-    MAX_WAY_GAP_KM = {
-        "ferry":     50.0,   # open water — no way nodes
-        "train":     50.0,   # long tunnels can have large gaps in route relations
-        "aerialway":  5.0,   # cable spans between pylons
-        "light_rail": 5.0,
-        "funicular":  5.0,
-        "default":    0.4,   # 400m for buses/trams — splits obvious phantom connections
-    }
+    # Maximum junction gap (km) between the endpoint of one way and the startpoint
+    # of the next way in the OSM relation.  Adjacent ways in a well-mapped relation
+    # share an OSM node, so the gap is essentially 0.  We allow 100 m of tolerance
+    # for minor OSM imprecision.  Gaps larger than this mean the two ways are not
+    # actually connected (different branch, missing section, cross-border gap) and
+    # should become separate segments.
+    #
+    # This threshold applies only at way boundaries — we never split inside a way.
+    # A single OSM way is always a valid continuous line regardless of node spacing.
+    MAX_JUNCTION_GAP_KM = 0.1   # 100 m, uniform for all route types
 
     def _stitch_ways(self, way_ids: list[int], route_type: str = "default") -> list[list[list[float]]]:
-        """Stitch ways into segments, splitting at gaps > threshold.
-        Returns a list of coordinate lists (one per continuous sub-segment).
-        Segments < 50m are discarded. Ferries return a single segment (large gap allowed).
+        """Stitch consecutive ways into continuous segments.
+
+        Two ways are merged only if their junction gap (haversine distance from the
+        end of the current segment to the nearest endpoint of the next way) is within
+        MAX_JUNCTION_GAP_KM.  Otherwise a new segment is started.
+
+        Coordinates inside a single way are never split — a way is always valid.
+
+        Returns a list of coordinate lists (one per continuous segment).
+        Segments shorter than 50 m are discarded.
         """
         segs = [self._way_coords(wid) for wid in way_ids]
         segs = [s for s in segs if len(s) >= 2]
         if not segs:
             return []
 
-        stitched = list(segs[0])
+        chunks: list[list[list[float]]] = [list(segs[0])]
+
         for seg in segs[1:]:
-            end = stitched[-1]
+            end = chunks[-1][-1]
             s_start, s_end = seg[0], seg[-1]
-            d_fwd = (end[0] - s_start[0]) ** 2 + (end[1] - s_start[1]) ** 2
-            d_rev = (end[0] - s_end[0]) ** 2 + (end[1] - s_end[1]) ** 2
+            d_fwd = haversine_km(*end, *s_start)
+            d_rev = haversine_km(*end, *s_end)
+
             if d_fwd <= d_rev:
-                stitched.extend(seg[1:])
+                junction_gap, coords_to_add = d_fwd, seg[1:]
             else:
-                stitched.extend(reversed(seg[:-1]))
+                junction_gap, coords_to_add = d_rev, list(reversed(seg[:-1]))
 
-        max_gap = self.MAX_WAY_GAP_KM.get(route_type, self.MAX_WAY_GAP_KM["default"])
-        chunks = [[stitched[0]]]
-        for i in range(1, len(stitched)):
-            gap = haversine_km(*stitched[i-1], *stitched[i])
-            if gap > max_gap:
-                chunks.append([])
-            chunks[-1].append(stitched[i])
+            if junction_gap <= self.MAX_JUNCTION_GAP_KM:
+                chunks[-1].extend(coords_to_add)
+            else:
+                # Ways are not adjacent — keep as a separate segment
+                chunks.append(list(seg) if d_fwd <= d_rev else list(reversed(seg)))
 
-        # Drop tiny fragments (< 50m)
+        # Drop tiny fragments (< 50 m)
         return [c for c in chunks if self._route_length_km(c) >= 0.05]
 
     def _route_length_km(self, coords: list) -> float:
