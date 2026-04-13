@@ -936,8 +936,8 @@ TRANSIT_MODE_LAYERS = [
     ("ferry",         8),
     ("metro",         9),
     ("tram",         10),
-    ("train",         6),
-    ("intercity",     4),
+    ("train",         5),
+    ("intercity",     5),
 ]
 
 GTFS_MATCHED_FILTER = ["==", ["get", "gtfs_matched"], True]
@@ -1014,22 +1014,18 @@ def build_station_layers() -> list:
     """
     layers = []
 
-    # (source, minzoom, border_radii, fill_radii)
+    # (source, minzoom, fill_radii)
     # Each group has its own PMTiles file with the correct --minimum-zoom baked in,
     # so tippecanoe cannot drop features below that zoom.
     stop_groups = [
         ("transit_stops_rail",      5,
-         [5, 3.5,  10, 6.0,  13, 8.0,  15, 9.0],
-         [5, 2.2,  10, 4.2,  13, 5.6,  15, 6.4]),
+         [5, 2.8,  10, 5.2,  13, 7.0,  15, 8.0]),
         ("transit_stops_tram",     10,
-         [10, 1.5,  13, 3.5,  15, 5.0],
-         [10, 0.9,  13, 2.2,  15, 3.2]),
+         [10, 1.1,  13, 2.8,  15, 4.0]),
         ("transit_stops_regional",  9,
-         [ 9, 1.8,  13, 4.0,  15, 5.5],
-         [ 9, 1.1,  13, 2.6,  15, 3.6]),
+         [ 9, 1.4,  13, 3.3,  15, 4.5]),
         ("transit_stops_bus",      11,
-         [11, 1.2,  13, 2.5,  15, 4.0],
-         [11, 0.7,  13, 1.6,  15, 2.6]),
+         [11, 0.9,  13, 2.0,  15, 3.3]),
     ]
 
     def zoom_interp(stops):
@@ -1038,8 +1034,12 @@ def build_station_layers() -> list:
             expr.append(v)
         return expr
 
-    for source, minzoom, border_stops, fill_stops in stop_groups:
-        layers.append({
+    for source, minzoom, fill_stops in stop_groups:
+        # Ferry is stored in the regional PMTiles but has its own dedicated layer below.
+        extra_filter = [["!=", ["get", "mode"], "ferry"]] if source == "transit_stops_regional" else []
+        layer_filter = ["all"] + extra_filter if extra_filter else None
+
+        layer = {
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
             "source": source,
@@ -1053,7 +1053,29 @@ def build_station_layers() -> list:
                     minzoom, 0.0, minzoom + 1.0, 1.0
                 ]
             }
-        })
+        }
+        if layer_filter:
+            layer["filter"] = layer_filter
+        layers.append(layer)
+
+    # Ferry stops: own layer, own sizing — independent of any bus/regional sizing.
+    ferry_fill = [9, 4.1,  13, 9.8,  15, 13.5]
+    layers.append({
+        "id": "transit-stop-fill-ferry",
+        "type": "circle",
+        "source": "transit_stops_regional",
+        "source-layer": "transit_stops",
+        "minzoom": 9,
+        "maxzoom": 16,
+        "filter": ["==", ["get", "mode"], "ferry"],
+        "paint": {
+            "circle-color": ["get", "color"],
+            "circle-radius": zoom_interp(ferry_fill),
+            "circle-opacity": ["interpolate", ["linear"], ["zoom"],
+                9, 0.0, 10.0, 1.0
+            ]
+        }
+    })
 
     return layers
 

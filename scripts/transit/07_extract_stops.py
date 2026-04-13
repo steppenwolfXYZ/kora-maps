@@ -186,16 +186,17 @@ def main():
             for lon, lat in stop_coords:
                 rail_stops_raw.append((lon, lat, color, mode))
         elif mode == "ferry":
-            # Ferry: GTFS stops are mid-lake waypoints, not pier positions.
-            # Instead, place dots at the OSM line endpoints (start and end piers only).
-            if len(flat_coords) >= 2:
-                for lon, lat in [flat_coords[0], flat_coords[-1]]:
-                    other_features.append({
-                        "type": "Feature",
-                        "tippecanoe": {"minzoom": minzoom},
-                        "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                        "properties": {"color": color, "mode": mode},
-                    })
+            # Ferry pier positions come from GTFS stops collected in 05_score_and_match.py.
+            # Do NOT snap to line: each route relation gets all piers in its bbox, including
+            # piers not on that specific sub-route. Snapping those to the sailing track puts
+            # them mid-lake. GTFS pier coordinates are already at the correct shore position.
+            for lon, lat in stop_coords:
+                other_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": minzoom},
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": {"color": color, "mode": mode},
+                })
         else:
             # Snap each stop to the line, emit immediately
             for lon, lat in stop_coords:
