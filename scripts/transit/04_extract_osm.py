@@ -82,6 +82,15 @@ class GeometryCollector(osmium.SimpleHandler):
         if dict(w.tags).get("landuse") in URBAN_LANDUSE:
             self.urban_way_ids.add(w.id)
 
+    def relation(self, r):
+        # Large urban landuse areas are usually OSM multipolygon relations whose
+        # member ways don't carry the landuse tag themselves (only the relation does).
+        # Mark all outer member ways of such relations as urban too.
+        if dict(r.tags).get("landuse") in URBAN_LANDUSE:
+            for m in r.members:
+                if m.type == "w":
+                    self.urban_way_ids.add(m.ref)
+
 
 def build_urban_grid(urban_way_ids: set, way_nodes: dict, node_coords: dict) -> set:
     """Build a set of (ix, iy) grid cells covered by urban landuse polygons.
@@ -171,7 +180,7 @@ class TransitExtractor(osmium.SimpleHandler):
         "aerialway":  5.0,   # cable spans between pylons
         "light_rail": 5.0,
         "funicular":  5.0,
-        "default":    0.2,   # 200m for buses/trams — splits obvious phantom connections
+        "default":    0.4,   # 400m for buses/trams — splits obvious phantom connections
     }
 
     def _stitch_ways(self, way_ids: list[int], route_type: str = "default") -> list[list[list[float]]]:

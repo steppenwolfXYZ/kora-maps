@@ -119,6 +119,8 @@ def main():
     print("Loading lines...")
     lines_data = json.loads(LINES.read_text())
     line_lookup = {}
+    # Collect straight-line mountain features that carry embedded gtfs_stops
+    gtfs_stop_features = []
     for feat in lines_data["features"]:
         p = feat["properties"]
         oid = str(p.get("osm_id", ""))
@@ -128,7 +130,9 @@ def main():
                 "mode":   p["mode"],
                 "coords": feat["geometry"]["coordinates"],
             }
-    print(f"  {len(line_lookup):,} lines")
+        if p.get("gtfs_stops"):
+            gtfs_stop_features.append(feat)
+    print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
 
     print("Loading stop coordinates...")
     line_stops = json.loads(LINE_STOPS.read_text())
@@ -138,6 +142,23 @@ def main():
 
     rail_stops_raw = []   # collect all rail stops for deduplication
     other_features = []   # non-rail stop dots (already final)
+
+    # First: render stops for straight-line mountain features using embedded gtfs_stops.
+    # These have no osm_id so would never be matched by the line_stops loop below.
+    for feat in gtfs_stop_features:
+        p     = feat["properties"]
+        color = p["color"]
+        mode  = p["mode"]
+        coords = feat["geometry"]["coordinates"]   # straight-line pts = stop pts
+        minzoom = MODE_MINZOOM.get(mode, 11)
+        for lon, lat in p["gtfs_stops"]:
+            slon, slat = snap_to_line(lon, lat, coords)
+            other_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": minzoom},
+                "geometry": {"type": "Point", "coordinates": [slon, slat]},
+                "properties": {"color": color, "mode": mode},
+            })
 
     for osm_id, stop_coords in line_stops.items():
         line = line_lookup.get(osm_id)

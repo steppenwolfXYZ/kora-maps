@@ -7,3 +7,4 @@
 - [Transit Color Scheme](transit_color_scheme.md) — mode categories, colors, speed/frequency encoding, Swiss rail classification
 - [Transit Style Feedback](feedback_transit_style.md) — casing=white always, mountain=light yellow fixed, width=1.0
 - [Open Tasks](tasks_open.md) — current bugs and open issues in transit layer pipeline
+- [Mountain Pipeline](mountain_pipeline.md) — GTFS-first cable car architecture, OSM geometry lookup, stop rendering, known issues
