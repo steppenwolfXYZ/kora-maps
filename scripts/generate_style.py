@@ -937,7 +937,6 @@ TRANSIT_MODE_LAYERS = [
     ("metro",         9),
     ("tram",         10),
     ("train",         5),
-    ("intercity",     5),
 ]
 
 GTFS_MATCHED_FILTER = ["==", ["get", "gtfs_matched"], True]

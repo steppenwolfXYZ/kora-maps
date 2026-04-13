@@ -5,7 +5,7 @@ Build transit_stops.geojson: stop dots for all visible lines.
 Rules:
   - Every stop of every matched line gets a dot, visible from the same
     zoom level the line itself appears.
-  - Rail (intercity + train): stops clustered within 300m → one dot per
+  - Rail (train): stops clustered within 300m → one dot per
     physical station. Larger circle. Visible from zoom 5.
   - All other modes: one dot per stop, snapped to the line geometry.
     Visible from the mode's minzoom.
@@ -24,7 +24,7 @@ LINES     = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 OUT       = ROOT / "data" / "transit" / "transit_stops.geojson"
 
-RAIL_MODES = {"intercity", "train"}
+RAIL_MODES = {"train"}
 
 # Cluster radius for rail station deduplication (degrees, ~300m at CH latitudes)
 CLUSTER_DEG = 0.003
@@ -32,7 +32,6 @@ CLUSTER_DEG = 0.003
 # Per-mode minzoom — tells tippecanoe at which zoom to first include the feature.
 # Must match the style layer minzooms exactly.
 MODE_MINZOOM = {
-    "intercity":    5,
     "train":        5,
     "tram":        10,
     "metro":        9,
@@ -108,8 +107,7 @@ def cluster_rail_stops(rail_stops: list) -> list:
 
             lon = sum(p[0] for p in group) / len(group)
             lat = sum(p[1] for p in group) / len(group)
-            # Best color = highest-mode point in cluster (intercity > train)
-            best = max(group, key=lambda p: 1 if p[3] == "intercity" else 0)
+            best = group[0]
             clusters.append((lon, lat, best[2], best[3]))
 
     return clusters

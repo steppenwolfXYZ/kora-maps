@@ -10,21 +10,20 @@ Build the final transit GeoJSON by:
   7. Writing data/transit/transit_lines.geojson
 
 Mode categories:
-  intercity      — IC, IR, EC, TGV, ICE, RJ, EN (red, thick)
-  train          — S-Bahn, RegioExpress, RE, R, TER (red, thinner)
-  tram           — trams, light rail (reddish purple)
+  train          — IC, IR, S-Bahn, RegioExpress, RE, R, TER (red)
+  tram           — trams, light rail (turquoise)
   metro          — underground (green)
   bus            — city buses, avg speed <30 km/h (blue)
-  regional_bus   — PostBus/regional, avg speed ≥30 km/h (turquoise)
+  regional_bus   — PostBus/regional, avg speed ≥30 km/h (purple)
   ferry          — boats (blue)
-  mountain       — funicular, gondola, cable car (yellow)
+  mountain       — funicular, gondola, cable car (pink)
 
   Long-distance coaches (Flixbus etc.) → excluded entirely.
   Trolleybuses → treated as bus.
 
 Frequency scoring:
   score = min(1.0, best_headway / actual_headway)
-  Best headways: intercity=30min, train=12min, tram=7min, metro=5min,
+  Best headways: train=15min, tram=7min, metro=5min,
                  bus=6min, regional_bus=30min, ferry=45min, mountain=60min
   Malus applied for sparse evening/weekend service.
 """
@@ -69,29 +68,28 @@ MALUS_LOW_WEEKEND = 0.06   # sparse (but present) weekend service — shared acr
 # a real gap in service.  Values calibrated so that 3 core trips/day with no off-peak service
 # produces a small but positive freq_score (= visible pale colour, not dropped).
 MALUS_NO_EVENING = {
-    "intercity":    0.03, "train":        0.03,
+    "train":        0.03,
     "regional_bus": 0.07, "ferry":        0.10, "mountain": 0.00,
     "bus":          0.18, "tram":         0.18, "metro":    0.18,
 }
 MALUS_NO_WEEKEND = {
-    "intercity":    0.02, "train":        0.02,
+    "train":        0.02,
     "regional_bus": 0.05, "ferry":        0.08, "mountain": 0.00,
     "bus":          0.14, "tram":         0.14, "metro":    0.14,
 }
 
 # "Low service" evening/weekend headway thresholds per mode
 LOW_EVE_HEADWAY = {
-    "intercity": 60, "train": 60, "tram": 20, "metro": 15,
+    "train": 60, "tram": 20, "metro": 15,
     "bus": 20, "regional_bus": 60, "ferry": 90, "mountain": 120,
 }
 LOW_WE_HEADWAY = {
-    "intercity": 60, "train": 60, "tram": 30, "metro": 20,
+    "train": 60, "tram": 30, "metro": 20,
     "bus": 30, "regional_bus": 90, "ferry": 120, "mountain": 120,
 }
 
 # Best headway per mode (minutes) — at this headway, core_score = 1.0
 BEST_HEADWAY = {
-    "intercity":    15,
     "train":        15,
     "tram":          7,
     "metro":         5,
@@ -126,9 +124,6 @@ def osm_to_mode(route_tag: str, ref: str, operator: str, length_km: float):
     if r == "railway":
         return None   # OSM infrastructure track sections, not passenger services
     if r in ("train", "rail", "light_rail"):
-        ref_upper = ref.upper()
-        if any(x in ref_upper for x in ("IC", "IR", "EC", "TGV", "ICE", "RJ", "EN")):
-            return "intercity"
         return "train"
     if r == "tram":
         return "tram"
@@ -161,7 +156,6 @@ def gtfs_type_to_bucket(route_type: str) -> str:
 # ── Color scheme ─────────────────────────────────────────────────────────────
 # Base hue per mode (HSL degrees 0–360)
 MODE_HUE = {
-    "intercity":    0,    # red
     "train":        0,    # red
     "tram":       180,    # turquoise (better contrast in warm urban areas)
     "metro":      120,    # green
@@ -173,9 +167,8 @@ MODE_HUE = {
 
 # Max reference speed per mode (km/h) for normalising speed to a 0–1 score.
 # These are realistic average segment speeds (stop-to-stop from GTFS times),
-# not theoretical top speeds. intercity and train share the same reference.
+# not theoretical top speeds.
 MODE_MAX_SPEED = {
-    "intercity":    100,
     "train":        100,
     "tram":          25,
     "metro":         50,
@@ -250,11 +243,39 @@ def load_stops() -> dict:
 
 
 def load_calendar_dates() -> dict:
+    from datetime import datetime
+
     svc_dates: dict = defaultdict(set)
+
+    # 1. Explicit date additions/removals from calendar_dates.txt
+    removals: dict = defaultdict(set)
     with open(GTFS / "calendar_dates.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             if row["exception_type"] == "1":
                 svc_dates[row["service_id"]].add(row["date"])
+            elif row["exception_type"] == "2":
+                removals[row["service_id"]].add(row["date"])
+
+    # 2. Weekly patterns from calendar.txt (catches services not in calendar_dates.txt,
+    #    e.g. MGB service_id '000000' running Mon-Sun year-round).
+    #    We only need to resolve the two sample dates, not expand every date in the range.
+    DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday",
+                 "friday", "saturday", "sunday"]
+    cal_path = GTFS / "calendar.txt"
+    if cal_path.exists():
+        for date_str in (WEEKDAY_DATE, WEEKEND_DATE):
+            weekday_col = DAY_NAMES[datetime.strptime(date_str, "%Y%m%d").weekday()]
+            with open(cal_path, encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    if (row.get(weekday_col, "0") == "1"
+                            and row["start_date"] <= date_str <= row["end_date"]):
+                        svc_dates[row["service_id"]].add(date_str)
+
+    # 3. Apply removal exceptions to all services (handles calendar.txt services
+    #    that have exception_type=2 overrides on specific dates).
+    for svc_id, removed in removals.items():
+        svc_dates[svc_id] -= removed
+
     return svc_dates
 
 
@@ -312,6 +333,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # E.g. BOB "Grindelwald Terminal Express" (4 stops, 192 active days) would win over
     # full Grindelwald service (9 stops, 0 active days on sample dates) in line_canonical_geo.
     line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → {"stop_count", "stops"}
+    line_stop_union: dict = {}   # (line_key, geo_bucket) → set of all stop_ids seen across all trip variants
 
     current_trip_id = None
     current_stops: list = []
@@ -372,6 +394,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             return
 
         geo_key = (line_key, gb)
+        line_stop_union.setdefault(geo_key, set()).update(s[1] for s in stops)
         existing = line_canonical_geo.get(geo_key)
         if existing is None or canon_score > existing.get("canon_score", 0):
             line_canonical_geo[geo_key] = {
@@ -418,13 +441,37 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # share the same GTFS line_key = ("S6", "S 6", "train").
     # Uses line_canonical_geo_stops (longest trip per cell) so that short high-frequency
     # services don't hide stops of full-length routes (e.g. BOB Grindelwald leg).
+    # Also adds the frequency-weighted canonical (line_canonical_geo) as a second candidate
+    # when it has a different stop set. This handles cases like GoldenPass where an express
+    # tourist train has more total stops (wins line_canonical_geo_stops) but skips many
+    # intermediate stations, while the frequent regular train (wins line_canonical_geo by
+    # n×active_days) stops everywhere — the stop assignment picks whichever candidate has
+    # more stops inside the OSM feature's bbox.
     _line_canonical_export.clear()
-    for (line_key, _gb), canon in line_canonical_geo_stops.items():
+    for (line_key, gb), canon in line_canonical_geo_stops.items():
         short_name, long_name, bucket = line_key
         _line_canonical_export[(short_name, bucket)].append(canon["stops"])
         long_norm = long_name.replace(" ", "")
         if long_norm and long_norm != short_name:
             _line_canonical_export[(long_norm, bucket)].append(canon["stops"])
+        # Add frequency-weighted canonical as an extra candidate if it differs
+        freq_canon = line_canonical_geo.get((line_key, gb))
+        if freq_canon and freq_canon["stops"] != canon["stops"]:
+            _line_canonical_export[(short_name, bucket)].append(freq_canon["stops"])
+            if long_norm and long_norm != short_name:
+                _line_canonical_export[(long_norm, bucket)].append(freq_canon["stops"])
+
+    # Union candidate: aggregates ALL stop_ids from every trip variant in each geo_bucket.
+    # Handles lines like GoldenPass where the longest trip (PE Express Montreux→Interlaken)
+    # skips intermediate stations that PE30 (Montreux→Zweisimmen) stops at. The stop
+    # assignment code filters by stop_near_bbox, so only in-bbox stops survive.
+    for (line_key, _gb), all_sids in line_stop_union.items():
+        short_name, long_name, bucket = line_key
+        union_cand = [(sid, 0, 0) for sid in all_sids]
+        _line_canonical_export[(short_name, bucket)].append(union_cand)
+        long_norm = long_name.replace(" ", "")
+        if long_norm and long_norm != short_name:
+            _line_canonical_export[(long_norm, bucket)].append(union_cand)
 
     # Compute speed from canonical trips
     line_speed: dict = {}
@@ -621,6 +668,25 @@ def stop_near_bbox(lon, lat, bbox, margin=0.02):
     """True if (lon, lat) is within bbox expanded by margin degrees (~2km at CH latitude)."""
     return (bbox[0] - margin <= lon <= bbox[2] + margin and
             bbox[1] - margin <= lat <= bbox[3] + margin)
+
+
+ENDPOINT_THRESHOLD_KM = 5.0
+
+def _covers_endpoints(osm_pts: list, stops: list) -> bool:
+    """True if stops include a point within ENDPOINT_THRESHOLD_KM of both
+    the first and last OSM coordinate.  A canonical GTFS match that fails
+    this check has likely resolved to the wrong GTFS service (e.g. SBB RE
+    for an MGB RE41 ref) and should be superseded by the geo fallback."""
+    if not stops or len(osm_pts) < 2:
+        return True   # can't determine — don't force fallback
+    start, end = osm_pts[0], osm_pts[-1]
+    near_start = any(
+        haversine_km(s[0], s[1], start[0], start[1]) <= ENDPOINT_THRESHOLD_KM
+        for s in stops)
+    near_end = any(
+        haversine_km(s[0], s[1], end[0], end[1]) <= ENDPOINT_THRESHOLD_KM
+        for s in stops)
+    return near_start and near_end
 
 
 def freq_to_width_base(freq_score, mode) -> float:
@@ -849,7 +915,7 @@ def main():
     stats = defaultdict(int)
 
     MODE_TO_BUCKET = {
-        "intercity": "train", "train": "train",
+        "train": "train",
         "tram": "tram", "metro": "metro",
         "bus": "bus", "regional_bus": "bus",
         "ferry": "ferry", "mountain": "mountain",
@@ -1064,12 +1130,6 @@ def main():
         # Skip routes with no service on sample dates (freq_score == 0.0).
         # Mountain mode is exempt: seasonal railways may not run on our specific
         # sample date but are still worth showing (they get clamped to 0.4 below).
-        # DEBUG: trace MGB R43/R44/R45 to understand why R43/R45 may be missing
-        if ref in ("R43", "R44", "R45"):
-            gtfs_detail = gtfs["raw_freq"] if gtfs else None
-            print(f"  [DEBUG] ref={ref!r} mode={mode} bucket={bucket} name={props.get('name','')[:40]!r}"
-                  f" gtfs={'yes' if gtfs else 'no'} freq_score={freq_score} raw={gtfs_detail}")
-
         if freq_score is None or (freq_score == 0.0 and mode != "mountain"):
             continue
 
@@ -1323,12 +1383,13 @@ def main():
                 if len(ccoords) > len(best_coords):
                     best_coords = ccoords
 
-        # Geo-based fallback: triggers when (a) no canon found at all, or (b) canon found
-        # but its stops don't overlap this OSM feature's bbox — e.g. WAB/JB ref=311 matches
-        # an unrelated funicular in the mountain bucket whose stops are elsewhere.
+        # Geo-based fallback: triggers when (a) no canon found at all, (b) canon found
+        # but its stops don't overlap this OSM feature's bbox, or (c) canonical stops
+        # fail endpoint coverage — indicating the ref matched the wrong GTFS service
+        # (e.g. SBB 'RE' for MGB 'RE41', or MGB 'R' for Gornergrat 'R48 (CC)').
         # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
         # is carried as GTFS train type=2 routes under short_name "R".
-        if not best_coords:
+        if not best_coords or not _covers_endpoints(osm_pts, best_coords):
             if mode == "ferry":
                 # Ferry: collect ALL pier stops from any GTFS ferry route within the bbox,
                 # deduped by position. OSM ref ≠ GTFS short_name so we can't ref-match.
@@ -1349,6 +1410,7 @@ def main():
                 if bucket == "mountain":
                     search_buckets.add("train")
                 best_n = 1   # require at least 2 matching stops
+                geo_best: list = []
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
@@ -1360,7 +1422,11 @@ def main():
                                 ccoords.append(list(c))
                         if len(ccoords) > best_n:
                             best_n = len(ccoords)
-                            best_coords = ccoords
+                            geo_best = ccoords
+                # Keep whichever result has more stops (geo may override a wrong
+                # canonical match, or canonical may be kept if it was already better)
+                if len(geo_best) > len(best_coords):
+                    best_coords = geo_best
 
         if best_coords:
             line_stops_out[osm_id] = best_coords
