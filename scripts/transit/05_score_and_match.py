@@ -758,10 +758,25 @@ def main():
         _ref = _mp.get("ref", "").strip()
         _mode = osm_to_mode(_route_tag, _ref, _mp.get("operator", ""), _mp.get("length_km", 0))
         _is_mountain_osm = (_mode == "mountain")
-        _is_train_in_mountain_gtfs = (
-            _mode == "train"
-            and gtfs_index.get(("mountain", _ref)) is not None
-        )
+        _is_train_in_mountain_gtfs = False
+        if _mode == "train" and gtfs_index.get(("mountain", _ref)) is not None:
+            # Guard against ref collisions with unrelated funiculars elsewhere in Switzerland.
+            # e.g. FUN 311 (Stanserhornbahn, near Stans) and FUN 312 (VerticAlp, Martigny)
+            # share short_names "311"/"312" with the BOB/WAB/JB railways near Interlaken.
+            # Only flag this OSM route if at least one canonical GTFS mountain stop for
+            # this ref actually falls within the OSM route's bounding box.
+            _osm_pts_chk = ([c for seg in _mfeat["geometry"]["coordinates"] for c in seg]
+                            if _mfeat["geometry"]["type"] == "MultiLineString"
+                            else _mfeat["geometry"]["coordinates"])
+            _osm_bbox_chk = line_bbox(_osm_pts_chk)
+            for _cand_stops in _line_canonical_export.get((_ref, "mountain"), []):
+                if any(
+                    (_sc := stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0]))
+                    and stop_near_bbox(_sc[0], _sc[1], _osm_bbox_chk)
+                    for _sid, _arr, _dep in _cand_stops
+                ):
+                    _is_train_in_mountain_gtfs = True
+                    break
         if _is_mountain_osm or _is_train_in_mountain_gtfs:
             _geom = _mfeat["geometry"]
             _pts = ([c for seg in _geom["coordinates"] for c in seg]

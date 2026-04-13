@@ -8,3 +8,4 @@
 - [Transit Style Feedback](feedback_transit_style.md) — casing=white always, mountain=light yellow fixed, width=1.0
 - [Open Tasks](tasks_open.md) — current bugs and open issues in transit layer pipeline
 - [Mountain Pipeline](mountain_pipeline.md) — GTFS-first cable car architecture, OSM geometry lookup, stop rendering, known issues
+- [Transit Rebuild Workflow](feedback_rebuild_workflow.md) — use --skip-osm unless 04_extract_osm.py or OSM data changed
