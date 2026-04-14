@@ -242,6 +242,19 @@ def load_stops() -> dict:
     return coords
 
 
+def load_stop_meta() -> dict:
+    """Return {stop_id: (stop_name, parent_station)} for debug annotation."""
+    meta = {}
+    with open(GTFS / "stops.txt", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            sid = row["stop_id"]
+            meta[sid] = (row.get("stop_name", ""), row.get("parent_station", ""))
+            base = sid.split(":")[0]
+            if base not in meta:
+                meta[base] = meta[sid]
+    return meta
+
+
 def load_calendar_dates() -> dict:
     from datetime import datetime
 
@@ -821,6 +834,7 @@ def main():
 
     print("Loading GTFS data...")
     stop_coords  = load_stops()
+    stop_meta    = load_stop_meta()
     svc_dates    = load_calendar_dates()
     route_lookup = load_routes()
     trip_lookup  = load_trips(route_lookup)
@@ -1347,7 +1361,7 @@ def main():
                                 key = (round(c[0], 4), round(c[1], 4))
                                 if key not in seen_pos:
                                     seen_pos.add(key)
-                                    pier_coords.append(list(c))
+                                    pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
                     line_stops_out[osm_id] = pier_coords
             continue
@@ -1379,7 +1393,7 @@ def main():
                 for stop_id, arr, dep in candidate:
                     c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                     if c and stop_near_bbox(c[0], c[1], bbox):
-                        ccoords.append(list(c))
+                        ccoords.append([c[0], c[1], stop_id])
                 if len(ccoords) > len(best_coords):
                     best_coords = ccoords
 
@@ -1404,7 +1418,7 @@ def main():
                                 key = (round(c[0], 4), round(c[1], 4))
                                 if key not in seen_pos:
                                     seen_pos.add(key)
-                                    best_coords.append(list(c))
+                                    best_coords.append([c[0], c[1], stop_id])
             else:
                 search_buckets = {bucket}
                 if bucket == "mountain":
@@ -1419,7 +1433,7 @@ def main():
                         for stop_id, arr, dep in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and stop_near_bbox(c[0], c[1], bbox):
-                                ccoords.append(list(c))
+                                ccoords.append([c[0], c[1], stop_id])
                         if len(ccoords) > best_n:
                             best_n = len(ccoords)
                             geo_best = ccoords

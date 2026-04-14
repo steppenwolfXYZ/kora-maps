@@ -67,5 +67,12 @@ tippecanoe -o "$STATIC/tl_stops_bus.pmtiles" --force \
   "$DATA/transit_stops_bus.geojson"
 
 echo ""
+echo "=== Building tl_stop_pills.pmtiles ==="
+tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
+  -z14 -Z11 --layer transit_stop_pills \
+  --drop-densest-as-needed \
+  "$DATA/transit_stop_pills.geojson"
+
+echo ""
 echo "=== Done! ==="
 ls -lh "$STATIC"/tl_*.pmtiles

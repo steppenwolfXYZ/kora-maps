@@ -15,7 +15,20 @@
 
 	const TRANSIT_LINE_LAYERS = [
 		'transit-mountain', 'transit-regional_bus', 'transit-bus',
-		'transit-ferry', 'transit-metro', 'transit-tram', 'transit-train', 'transit-intercity'
+		'transit-ferry', 'transit-metro', 'transit-tram', 'transit-train'
+	];
+
+	const TRANSIT_STOP_DOT_LAYERS = [
+		'transit-stop-fill-transit_stops_rail',
+		'transit-stop-fill-transit_stops_tram',
+		'transit-stop-fill-transit_stops_regional',
+		'transit-stop-fill-transit_stops_bus',
+		'transit-stop-fill-ferry'
+	];
+
+	const TRANSIT_STOP_PILL_LAYERS = [
+		'transit-stop-pill-fill',
+		'transit-stop-pill-casing'
 	];
 
 	$effect(() => {
@@ -46,20 +59,48 @@
 		let popup: maplibregl.Popup | null = null;
 
 		map.on('load', () => {
-			// Pointer cursor when hovering transit lines
-			for (const layer of TRANSIT_LINE_LAYERS) {
+			// Pointer cursor when hovering transit lines and stops
+			const hoverLayers = [
+				...TRANSIT_LINE_LAYERS,
+				...TRANSIT_STOP_DOT_LAYERS,
+				...TRANSIT_STOP_PILL_LAYERS
+			];
+			for (const layer of hoverLayers) {
 				map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
 				map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
 			}
 		});
 
 		map.on('click', (e) => {
-			const features = map.queryRenderedFeatures(e.point, { layers: TRANSIT_LINE_LAYERS });
 			if (popup) { popup.remove(); popup = null; }
-			if (!features.length) return;
-
-			const p = features[0].properties as Record<string, unknown>;
 			const fmt = (v: unknown) => v == null ? '–' : String(v);
+
+			// Station click takes priority over line click
+			const stopFeatures = map.queryRenderedFeatures(e.point, {
+				layers: [...TRANSIT_STOP_PILL_LAYERS, ...TRANSIT_STOP_DOT_LAYERS]
+			});
+			if (stopFeatures.length) {
+				const p = stopFeatures[0].properties as Record<string, unknown>;
+				const kind = p.feature_type === 'pill' ? 'pill'
+				           : p.feature_type === 'connector' ? 'connector'
+				           : 'stop';
+				const countLine = p.stop_count != null ? `&ensp;count: ${fmt(p.stop_count)}` : '';
+				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
+					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)} ${kind}]${countLine}<br>
+					id: ${fmt(p.stop_id)}<br>
+					parent: ${fmt(p.parent_station)}
+				</div>`;
+				popup = new maplibregl.Popup({ maxWidth: '320px' })
+					.setLngLat(e.lngLat)
+					.setHTML(html)
+					.addTo(map);
+				return;
+			}
+
+			const lineFeatures = map.queryRenderedFeatures(e.point, { layers: TRANSIT_LINE_LAYERS });
+			if (!lineFeatures.length) return;
+
+			const p = lineFeatures[0].properties as Record<string, unknown>;
 			const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
 				<b>${fmt(p.mode)}</b> &nbsp;ref: ${fmt(p.ref)}<br>
 				${p.name ? String(p.name).substring(0, 60) : ''}<br>
@@ -68,7 +109,6 @@
 				w: ${fmt(p.width_base)}<br>
 				osm: ${fmt(p.osm_id)}
 			</div>`;
-
 			popup = new maplibregl.Popup({ maxWidth: '320px' })
 				.setLngLat(e.lngLat)
 				.setHTML(html)
