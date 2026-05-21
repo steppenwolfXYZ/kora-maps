@@ -28,7 +28,9 @@
 
 	const TRANSIT_STOP_PILL_LAYERS = [
 		'transit-stop-pill-fill',
-		'transit-stop-pill-casing'
+		'transit-stop-pill-casing',
+		'transit-stop-pill-connector',
+		'transit-stop-pill-connector-casing',
 	];
 
 	$effect(() => {

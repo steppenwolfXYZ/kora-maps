@@ -4890,17 +4890,25 @@
           ],
           5,
           [
-            "*",
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
             [
               "get",
               "width_base"
             ],
-            0.4
-          ],
-          14,
-          [
-            "get",
-            "width_base"
+            1.5
           ],
           18,
           [
@@ -4923,6 +4931,38 @@
           5,
           0.0,
           6.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          10,
+          0.0,
+          11,
+          [
+            "case",
+            [
+              "==",
+              [
+                "get",
+                "mode"
+              ],
+              "train"
+            ],
+            0.75,
+            0.0
+          ],
+          12,
+          0.75,
+          14,
+          0.75,
+          18,
           1.0
         ]
       }
@@ -4948,17 +4988,25 @@
           ],
           10,
           [
-            "*",
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
             [
               "get",
               "width_base"
             ],
-            0.4
-          ],
-          14,
-          [
-            "get",
-            "width_base"
+            1.5
           ],
           18,
           [
@@ -4981,6 +5029,24 @@
           10,
           0.0,
           11.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12,
+          0.75,
+          14,
+          0.75,
+          18,
           1.0
         ]
       }
@@ -5006,17 +5072,25 @@
           ],
           9,
           [
-            "*",
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
             [
               "get",
               "width_base"
             ],
-            0.4
-          ],
-          14,
-          [
-            "get",
-            "width_base"
+            1.5
           ],
           18,
           [
@@ -5039,6 +5113,24 @@
           9,
           0.0,
           10.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12,
+          0.75,
+          14,
+          0.75,
+          18,
           1.0
         ]
       },
@@ -5075,17 +5167,25 @@
           ],
           11,
           [
-            "*",
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
             [
               "get",
               "width_base"
             ],
-            0.4
-          ],
-          14,
-          [
-            "get",
-            "width_base"
+            1.5
           ],
           18,
           [
@@ -5108,6 +5208,24 @@
           11,
           0.0,
           12.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12,
+          0.75,
+          14,
+          0.75,
+          18,
           1.0
         ]
       }
@@ -5141,17 +5259,25 @@
           ],
           9,
           [
-            "*",
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
             [
               "get",
               "width_base"
             ],
-            0.4
-          ],
-          14,
-          [
-            "get",
-            "width_base"
+            1.5
           ],
           18,
           [
@@ -5174,6 +5300,24 @@
           9,
           0.0,
           10.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12,
+          0.75,
+          14,
+          0.75,
+          18,
           1.0
         ]
       }
@@ -5238,6 +5382,89 @@
                 "width_base"
               ],
               8.0
+            ],
+            2.0
+          ]
+        ],
+        "line-opacity": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": "transit-stop-pill-connector-casing",
+      "type": "line",
+      "source": "transit_stop_pills",
+      "source-layer": "transit_stop_pills",
+      "minzoom": 11,
+      "filter": [
+        "==",
+        [
+          "get",
+          "feature_type"
+        ],
+        "connector"
+      ],
+      "layout": {
+        "line-cap": "round",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#ffffff",
+        "line-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          [
+            "+",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.5
+          ],
+          14,
+          [
+            "+",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              1.0
+            ],
+            1.5
+          ],
+          18,
+          [
+            "+",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              4.0
             ],
             2.0
           ]

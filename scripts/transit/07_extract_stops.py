@@ -16,20 +16,21 @@ Pill rules:
   - Pills appear when a cluster has ≥2 distinct OSM line IDs (osm_id).
   - Pill-appear zoom is determined by line count and dominant mode.
   - Ferry and mountain modes: no pills.
-  - Pill geometry is derived from the dot positions in the cluster, NOT route geometry:
-      → Find the shortest capsule orientation (0–179°) that fits all dots
-        within half_width_m of its axis. This prefers cross-track (perpendicular)
-        orientation — connecting dots on parallel tracks — over along-track.
-      → If no single orientation works (widely separated platform groups),
-        split at the largest gap and emit two pills + a thin connector.
-  - Cross-mode clustering: tram + bus at the same location → one pill in tram color.
-  - Color = dominant line at that stop (by mode hierarchy, then width_base).
+  - Pill geometry is derived from dot positions using a nearest-neighbor path:
+      → Build a greedy nearest-neighbor path through ALL dot positions
+        in the cluster. This ensures every dot is at a vertex of the pill.
+      → If the path has a large gap between two groups (> gap threshold),
+        split there and emit two pills + a thin connector.
+      → Pills prefer cross-track orientation naturally: for parallel-track
+        stops the NN path connects the nearby dots directly.
+  - Cross-mode clustering: tram + bus at same location → one pill in tram color.
+  - Color = dominant line at stop (by mode hierarchy, then width_base).
   - Width encoded as width_base → style applies ×2 multiplier.
 """
 
 import csv
 import json
-from math import radians, cos, sin, sqrt, atan2, degrees, floor, pi
+from math import radians, cos, sin, sqrt, atan2, degrees, floor
 from pathlib import Path
 from collections import defaultdict
 
@@ -47,6 +48,17 @@ PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus"}
 # Cluster radius for rail station dot deduplication (degrees ≈ 300m at CH lat)
 CLUSTER_DEG = 0.003
 
+# Hierarchy for dominant-line selection at mixed-mode clusters (lower = higher priority)
+MODE_RANK = {
+    "train":        0,
+    "metro":        1,
+    "tram":         2,
+    "bus":          3,
+    "mountain":     4,
+    "ferry":        5,
+    "regional_bus": 6,
+}
+
 # Per-mode minzoom for stop dots (must match style layer minzooms)
 MODE_MINZOOM = {
     "train":        5,
@@ -58,17 +70,15 @@ MODE_MINZOOM = {
     "mountain":    11,
 }
 
-# Mode hierarchy for dominant stop color (lower = more important)
-MODE_RANK = {"train": 0, "metro": 1, "tram": 2, "bus": 3, "regional_bus": 4}
-
 # Spatial clustering radius for pill grouping
 PILL_CLUSTER_RAIL_KM    = 0.300   # rail: 300 m (same as dot deduplication)
 PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
 
-# Half-width threshold used when searching for minimum capsule orientation.
-# Physical half-width of the rendered pill ≈ width_base × this scale (meters).
-# Matches rendered pill half-width at zoom ~13.
-PILL_HALF_WIDTH_SCALE = 8
+# When a nearest-neighbor path segment exceeds (max_wb × this / 1000) km,
+# the cluster is split into two pills + a connector at that gap.
+# Tune this to separate distinct platform groups while keeping curved stops
+# in a single bent pill.
+PILL_GAP_SCALE = 12   # metres per unit of width_base
 
 
 # =============================================================================
@@ -133,135 +143,42 @@ def flatten_coords(coords):
 
 
 # =============================================================================
-# Pill geometry — minimum enclosing capsule from dot positions
+# Pill geometry — nearest-neighbor path through dot positions
 # =============================================================================
 
-def to_local_m(positions):
+def nearest_neighbor_path(positions):
     """
-    Convert a list of (lon, lat) to local (x, y) in metres.
-    Uses centroid as reference, applies cos(lat) correction for longitude.
-    Returns (pts_m, ref_lon, ref_lat, cos_lat).
+    Build a greedy nearest-neighbor path visiting every position exactly once.
+    Starts from the position furthest from the centroid (an edge of the cluster).
+    Returns the ordered list of positions.
     """
     n = len(positions)
-    ref_lon = sum(p[0] for p in positions) / n
-    ref_lat = sum(p[1] for p in positions) / n
-    cos_lat = cos(radians(ref_lat))
-    pts_m = [((p[0] - ref_lon) * 111320 * cos_lat,
-              (p[1] - ref_lat) * 111320)
-             for p in positions]
-    return pts_m, ref_lon, ref_lat, cos_lat
+    if n == 1:
+        return list(positions)
 
+    cx = sum(p[0] for p in positions) / n
+    cy = sum(p[1] for p in positions) / n
+    start = max(range(n),
+                key=lambda i: haversine_km(positions[i][0], positions[i][1], cx, cy))
 
-def from_local_m(mx, my, ref_lon, ref_lat, cos_lat):
-    """Convert local metres back to (lon, lat)."""
-    return (ref_lon + mx / (111320 * cos_lat),
-            ref_lat + my / 111320)
+    visited = [False] * n
+    path = [positions[start]]
+    visited[start] = True
 
+    for _ in range(n - 1):
+        last = path[-1]
+        best_d = float("inf")
+        best_j = -1
+        for j in range(n):
+            if not visited[j]:
+                d = haversine_km(last[0], last[1], positions[j][0], positions[j][1])
+                if d < best_d:
+                    best_d = d
+                    best_j = j
+        path.append(positions[best_j])
+        visited[best_j] = True
 
-def fit_capsule(pts_m, half_width_m):
-    """
-    Search 180 orientations (1° steps) for the shortest line-segment axis
-    such that ALL points in pts_m are within half_width_m of the axis.
-
-    Returns (min_idx, max_idx) — indices into pts_m for the pill endpoints —
-    or None if no single orientation can cover all points within half_width_m.
-    """
-    best_span = float("inf")
-    best_pair = None
-
-    for deg in range(180):
-        rad = radians(deg)
-        ux, uy = cos(rad), sin(rad)     # axis unit vector
-        nx, ny = -uy, ux               # normal (perpendicular) unit vector
-
-        projs = [ux * x + uy * y for x, y in pts_m]
-        perps = [abs(nx * x + ny * y) for x, y in pts_m]
-
-        if max(perps) > half_width_m:
-            continue
-
-        span = max(projs) - min(projs)
-        if span < best_span:
-            best_span = span
-            a = projs.index(min(projs))
-            b = projs.index(max(projs))
-            best_pair = (a, b)
-
-    return best_pair
-
-
-def split_and_fit(positions, pts_m, half_width_m):
-    """
-    When a single capsule cannot cover all dots, split them into two groups
-    along the dominant direction (furthest-pair axis) at the largest gap.
-    Returns (pill_coords_list, connector_coords_list).
-    """
-    n = len(pts_m)
-
-    # Dominant direction: from the two furthest-apart points
-    best_d = 0
-    ai, bi = 0, 1
-    for i in range(n):
-        for j in range(i + 1, n):
-            dx = pts_m[i][0] - pts_m[j][0]
-            dy = pts_m[i][1] - pts_m[j][1]
-            d = dx * dx + dy * dy
-            if d > best_d:
-                best_d = d
-                ai, bi = i, j
-
-    ddx = pts_m[bi][0] - pts_m[ai][0]
-    ddy = pts_m[bi][1] - pts_m[ai][1]
-    norm = sqrt(ddx * ddx + ddy * ddy) or 1.0
-    ux, uy = ddx / norm, ddy / norm
-
-    # Sort all points by projection onto dominant direction
-    ordered = sorted([(ux * x + uy * y, idx) for idx, (x, y) in enumerate(pts_m)])
-
-    # Find the largest gap between consecutive projected positions
-    best_gap = 0
-    split_after = 0
-    for k in range(n - 1):
-        gap = ordered[k + 1][0] - ordered[k][0]
-        if gap > best_gap:
-            best_gap = gap
-            split_after = k
-
-    g1_idxs = [idx for _, idx in ordered[:split_after + 1]]
-    g2_idxs = [idx for _, idx in ordered[split_after + 1:]]
-
-    def group_endpoints(idxs):
-        """Furthest pair within a sub-group, or same point if singleton."""
-        grp = [positions[i] for i in idxs]
-        if len(grp) == 1:
-            return [list(grp[0]), list(grp[0])]
-        best = 0
-        pa, pb = grp[0], grp[1]
-        for i in range(len(grp)):
-            for j in range(i + 1, len(grp)):
-                d = haversine_km(grp[i][0], grp[i][1], grp[j][0], grp[j][1])
-                if d > best:
-                    best = d
-                    pa, pb = grp[i], grp[j]
-        return [list(pa), list(pb)]
-
-    pill1 = group_endpoints(g1_idxs)
-    pill2 = group_endpoints(g2_idxs)
-
-    # Connector: nearest endpoint pair between the two pills
-    ends1 = [pill1[0], pill1[-1]]
-    ends2 = [pill2[0], pill2[-1]]
-    best_cd = float("inf")
-    ca, cb = ends1[0], ends2[0]
-    for e1 in ends1:
-        for e2 in ends2:
-            d = haversine_km(e1[0], e1[1], e2[0], e2[1])
-            if d < best_cd:
-                best_cd = d
-                ca, cb = e1, e2
-    connector = [list(ca), list(cb)]
-
-    return [pill1, pill2], [connector]
+    return path
 
 
 # =============================================================================
@@ -298,116 +215,118 @@ def pill_minzoom(mode, stop_count):
         return None
 
 
+def color_luminance(hex_color: str) -> float:
+    """Perceived luminance of a hex color (lower = darker)."""
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return 1.0
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+
 def dominant_line(stops_in_cluster):
     """
-    Return (color, mode, max_width_base, dominant_stop) for the most important
-    line in a stop cluster: lowest MODE_RANK wins; ties broken by width_base.
+    Return (color, mode, max_width_base, dominant_stop).
+    - Mode: highest-priority type present (MODE_RANK; lower = higher priority; strict).
+    - Color: darkest (lowest luminance) among stops of that type.
+    - width_base: max across ALL stops, regardless of type.
     """
-    best_rank   = 999
-    best_wb     = -1.0
-    best_color  = "#888888"
-    best_mode   = "bus"
-    best_wb_out = 2.0
-    best_stop   = {}
-    for s in stops_in_cluster:
-        rank = MODE_RANK.get(s["mode"], 99)
-        wb   = s["width_base"]
-        if rank < best_rank or (rank == best_rank and wb > best_wb):
-            best_rank    = rank
-            best_wb      = wb
-            best_color   = s["color"]
-            best_mode    = s["mode"]
-            best_wb_out  = wb
-            best_stop    = s
-    return best_color, best_mode, best_wb_out, best_stop
+    best_rank = min(MODE_RANK.get(s["mode"], 99) for s in stops_in_cluster)
+    dom_stops = [s for s in stops_in_cluster if MODE_RANK.get(s["mode"], 99) == best_rank]
+
+    best_lum   = 2.0
+    best_color = "#888888"
+    best_stop  = dom_stops[0]
+    for s in dom_stops:
+        lum = color_luminance(s["color"])
+        if lum < best_lum:
+            best_lum   = lum
+            best_color = s["color"]
+            best_stop  = s
+
+    max_wb = max(s["width_base"] for s in stops_in_cluster)
+    return best_color, best_stop["mode"], max_wb, best_stop
 
 
 def make_pill_features(cluster_stops, minzoom):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
 
-    Pill geometry is derived entirely from dot positions:
-    1. Find the shortest capsule orientation (0–179°) that fits all dots
-       within the pill's physical half-width. Naturally prefers cross-track
-       (shortest possible span = perpendicular to parallel tracks).
-    2. If no single orientation works, split at the largest positional gap
-       and emit two pills + a thin connector.
+    Algorithm:
+    1. Build a nearest-neighbor path through ALL dot positions — every dot
+       ends up at a vertex of the pill, so no dot is left standalone.
+    2. Find the longest segment in the path (the biggest positional gap).
+    3. If the gap is small (< max_wb × PILL_GAP_SCALE metres): emit as a
+       single multi-point LineString. Round caps create a bent/curved capsule.
+    4. If the gap is large (two distinct platform groups): split at the gap,
+       emit two pills + a thin connector between the nearest endpoints.
     """
     color, mode, max_wb, dom_stop = dominant_line(cluster_stops)
-    positions = [(s["lon"], s["lat"]) for s in cluster_stops]
+    positions = list({(s["lon"], s["lat"]) for s in cluster_stops})  # deduplicate
     n = len(positions)
 
     if n < 2:
         return []
 
-    # Check if all dots are essentially at the same location (< 1 m apart)
-    max_spread = 0.0
-    for i in range(n):
-        for j in range(i + 1, n):
-            d = haversine_km(
-                positions[i][0], positions[i][1],
-                positions[j][0], positions[j][1],
-            )
-            if d > max_spread:
-                max_spread = d
-    if max_spread < 0.001:   # < 1 m → all coincident, no pill needed
-        return []
+    path = nearest_neighbor_path(positions)
 
-    pts_m, ref_lon, ref_lat, cos_lat = to_local_m(positions)
-    half_w = max_wb * PILL_HALF_WIDTH_SCALE   # metres
+    # Find the largest gap in the NN path
+    gap_threshold_km = max_wb * PILL_GAP_SCALE / 1000.0
+    max_gap_km = 0.0
+    max_gap_idx = 0
+    for k in range(len(path) - 1):
+        d = haversine_km(path[k][0], path[k][1], path[k + 1][0], path[k + 1][1])
+        if d > max_gap_km:
+            max_gap_km = d
+            max_gap_idx = k
 
-    pair = fit_capsule(pts_m, half_w)
+    stop_props = {
+        "color":          color,
+        "mode":           mode,
+        "width_base":     max_wb,
+        "stop_count":     len(cluster_stops),
+        "stop_id":        dom_stop.get("stop_id", ""),
+        "stop_name":      dom_stop.get("stop_name", ""),
+        "parent_station": dom_stop.get("parent_station", ""),
+    }
 
-    if pair is not None:
-        a, b = pair
-        pill_coords_list = [[list(positions[a]), list(positions[b])]]
-        connector_coords_list = []
-    else:
-        pill_coords_list, connector_coords_list = split_and_fit(
-            positions, pts_m, half_w
-        )
-
-    stop_id    = dom_stop.get("stop_id", "")
-    stop_name  = dom_stop.get("stop_name", "")
-    parent_stat = dom_stop.get("parent_station", "")
-    stop_count = len(cluster_stops)
-
-    features = []
-    for pill_coords in pill_coords_list:
-        features.append({
+    def make_feat(coords, feature_type):
+        return {
             "type": "Feature",
             "tippecanoe": {"minzoom": minzoom},
-            "geometry": {"type": "LineString", "coordinates": pill_coords},
-            "properties": {
-                "color":          color,
-                "mode":           mode,
-                "width_base":     max_wb,
-                "feature_type":   "pill",
-                "stop_count":     stop_count,
-                "stop_id":        stop_id,
-                "stop_name":      stop_name,
-                "parent_station": parent_stat,
-            },
-        })
+            "geometry": {"type": "LineString", "coordinates": [list(p) for p in coords]},
+            "properties": {**stop_props, "feature_type": feature_type},
+        }
 
-    for connector_coords in connector_coords_list:
-        features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": minzoom},
-            "geometry": {"type": "LineString", "coordinates": connector_coords},
-            "properties": {
-                "color":          color,
-                "mode":           mode,
-                "width_base":     max_wb,
-                "feature_type":   "connector",
-                "stop_count":     stop_count,
-                "stop_id":        stop_id,
-                "stop_name":      stop_name,
-                "parent_station": parent_stat,
-            },
-        })
+    if max_gap_km <= gap_threshold_km:
+        # All positions close enough — one bent pill covering all dots
+        return [make_feat(path, "pill")]
 
-    return features
+    # Two distinct groups — split at the largest gap
+    group1 = path[:max_gap_idx + 1]
+    group2 = path[max_gap_idx + 1:]
+
+    # Only emit a pill if the group has ≥2 positions (a real capsule shape).
+    # Single-point groups get no pill — the connector's round cap serves as their visual terminus.
+    feats = []
+    for grp in [group1, group2]:
+        if len(grp) >= 2:
+            feats.append(make_feat(grp, "pill"))
+
+    # Connector: nearest endpoint pair between the two groups
+    ends1 = [group1[0], group1[-1]]
+    ends2 = [group2[0], group2[-1]]
+    best_d = float("inf")
+    ca, cb = ends1[0], ends2[0]
+    for e1 in ends1:
+        for e2 in ends2:
+            d = haversine_km(e1[0], e1[1], e2[0], e2[1])
+            if d < best_d:
+                best_d = d
+                ca, cb = e1, e2
+    feats.append(make_feat([ca, cb], "connector"))
+
+    return feats
 
 
 # =============================================================================
@@ -523,18 +442,17 @@ def main():
 
     print("Building stop dots and pill candidates...")
 
-    rail_stops_raw    = []   # (lon, lat, color, mode, width_base) for dot clustering
-    rail_pill_raw     = []   # dicts for rail pill clustering
+    rail_pill_raw     = []   # dicts for rail pill clustering (also used for dots)
     all_nonrail_pills = []   # ALL non-rail pill modes combined (tram+bus+metro+regional_bus)
     other_features    = []   # dot features for non-rail, ferry, mountain
 
     # --- Mountain / straight-line features with embedded gtfs_stops ---
     for feat in gtfs_stop_features:
-        p      = feat["properties"]
-        color  = p["color"]
-        mode   = p["mode"]
-        wb     = p.get("width_base", 3.0)
-        coords = feat["geometry"]["coordinates"]
+        p       = feat["properties"]
+        color   = p["color"]
+        mode    = p["mode"]
+        wb      = p.get("width_base", 3.0)
+        coords  = feat["geometry"]["coordinates"]
         minzoom = MODE_MINZOOM.get(mode, 11)
         for lon, lat in p["gtfs_stops"]:
             slon, slat = snap_to_line(lon, lat, coords)
@@ -566,12 +484,10 @@ def main():
                 meta       = stop_meta.get(sid, {})
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
-                # Dot candidate (raw GTFS position for clustering)
-                rail_stops_raw.append((lon, lat, color, mode, width_base))
-                # Pill candidate — use raw GTFS position (pill geometry from dot positions)
+                slon, slat = snap_to_line(lon, lat, flat)
                 rail_pill_raw.append({
-                    "lon":            lon,
-                    "lat":            lat,
+                    "lon":            slon,
+                    "lat":            slat,
                     "osm_id":         osm_id,
                     "mode":           mode,
                     "color":          color,
@@ -582,11 +498,10 @@ def main():
                 })
 
         elif mode == "ferry":
-            # Ferry: use raw GTFS coordinates (snapping puts stops mid-lake)
             for entry in stop_coords:
-                lon, lat   = entry[0], entry[1]
-                sid        = entry[2] if len(entry) > 2 else ""
-                meta       = stop_meta.get(sid, {})
+                lon, lat = entry[0], entry[1]
+                sid      = entry[2] if len(entry) > 2 else ""
+                meta     = stop_meta.get(sid, {})
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},
@@ -600,7 +515,6 @@ def main():
                         "parent_station": meta.get("parent", ""),
                     },
                 })
-            # Ferry: no pills
 
         elif mode in PILL_MODES:
             for entry in stop_coords:
@@ -610,21 +524,9 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 cx, cy     = snap_to_line(lon, lat, flat)
-                # Dot
-                other_features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": minzoom},
-                    "geometry": {"type": "Point", "coordinates": [cx, cy]},
-                    "properties": {
-                        "color":          color,
-                        "mode":           mode,
-                        "width_base":     width_base,
-                        "stop_id":        sid,
-                        "stop_name":      stop_name,
-                        "parent_station": parent_sta,
-                    },
-                })
-                # Pill candidate — all non-rail modes go into ONE combined pool
+                if haversine_km(lon, lat, cx, cy) > 0.150:
+                    continue  # stop misassigned to this line — GTFS bbox margin too generous
+                # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
                     "lon":            cx,
                     "lat":            cy,
@@ -638,12 +540,13 @@ def main():
                 })
 
         else:
-            # Unknown mode: snap dot, no pill
             for entry in stop_coords:
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 slon, slat = snap_to_line(lon, lat, flat)
+                if haversine_km(lon, lat, slon, slat) > 0.150:
+                    continue  # stop misassigned to this line — GTFS bbox margin too generous
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},
@@ -658,62 +561,128 @@ def main():
                     },
                 })
 
-    # --- Rail dots ---
-    print(f"  {len(rail_stops_raw):,} raw rail stop positions → clustering...")
-    rail_clusters = cluster_rail_stops(rail_stops_raw)
-    print(f"  → {len(rail_clusters):,} rail station clusters")
+    # --- Rail dots + pills (unified pass) ---
+    print(f"  {len(rail_pill_raw):,} raw rail stop positions → clustering...")
+    rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
+    print(f"  → {len(rail_pill_clusters):,} rail station clusters")
 
     rail_features = []
-    for lon, lat, color, mode, max_wb in rail_clusters:
-        rail_features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": 5},
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": {
-                "color":          color,
-                "mode":           mode,
-                "width_base":     max_wb,
-                "stop_id":        "",
-                "stop_name":      "(rail cluster)",
-                "parent_station": "",
-            },
-        })
-
-    # ==========================================================================
-    # Pill generation
-    # ==========================================================================
-
-    pill_features = []
-
-    # --- Rail pills ---
-    print(f"  {len(rail_pill_raw):,} raw rail pill candidates → clustering...")
-    rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
-    rail_pill_count = 0
+    pill_features_rail = []
     for cluster in rail_pill_clusters:
         stop_count = count_unique_lines(cluster)
         mz = pill_minzoom("train", stop_count)
+
+        color, mode, max_wb, dom_stop = dominant_line(cluster)
+        lon = sum(s["lon"] for s in cluster) / len(cluster)
+        lat = sum(s["lat"] for s in cluster) / len(cluster)
+        centroid_props = {
+            "color":          color,
+            "mode":           mode,
+            "width_base":     max_wb,
+            "stop_id":        dom_stop.get("stop_id", ""),
+            "stop_name":      dom_stop.get("stop_name", ""),
+            "parent_station": dom_stop.get("parent_station", ""),
+        }
+
         if mz is None:
-            continue
-        feats = make_pill_features(cluster, mz)
-        pill_features.extend(feats)
-        rail_pill_count += len(feats)
+            # Single-line station: one cluster dot at all zooms
+            rail_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": 5},
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": centroid_props,
+            })
+        else:
+            # Multi-line station: cluster dot at low zoom, individual platform dots at pill zoom+
+            rail_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": 5, "maxzoom": mz - 1},
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": centroid_props,
+            })
+            for s in cluster:
+                rail_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": mz},
+                    "geometry": {"type": "Point", "coordinates": [s["lon"], s["lat"]]},
+                    "properties": {
+                        "color":          s["color"],
+                        "mode":           s["mode"],
+                        "width_base":     s["width_base"],
+                        "stop_id":        s.get("stop_id", ""),
+                        "stop_name":      s.get("stop_name", ""),
+                        "parent_station": s.get("parent_station", ""),
+                    },
+                })
+            pill_features_rail.extend(make_pill_features(cluster, mz))
+
+    rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
           f"from {len(rail_pill_clusters):,} clusters")
+
+    # ==========================================================================
+    # Pill generation (non-rail)
+    # ==========================================================================
+
+    pill_features = list(pill_features_rail)
 
     # --- Non-rail pills (all modes combined → dominant wins) ---
     print(f"  {len(all_nonrail_pills):,} non-rail pill candidates "
           f"(tram+metro+bus+regional combined) → clustering...")
     nonrail_clusters = cluster_stops_for_pills(all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM)
     nonrail_pill_count = 0
+    nonrail_dot_features = []
     for cluster in nonrail_clusters:
         stop_count  = count_unique_lines(cluster)
-        _, dom_mode, _, _ = dominant_line(cluster)
+        color, dom_mode, max_wb, dom_stop = dominant_line(cluster)
         mz = pill_minzoom(dom_mode, stop_count)
+
+        lon_c        = sum(s["lon"] for s in cluster) / len(cluster)
+        lat_c        = sum(s["lat"] for s in cluster) / len(cluster)
+        mode_minzoom = min(MODE_MINZOOM.get(s["mode"], 11) for s in cluster)
+        centroid_props = {
+            "color":          color,
+            "mode":           dom_mode,
+            "width_base":     max_wb,
+            "stop_id":        dom_stop.get("stop_id", ""),
+            "stop_name":      dom_stop.get("stop_name", ""),
+            "parent_station": dom_stop.get("parent_station", ""),
+        }
+
         if mz is None:
-            continue
-        feats = make_pill_features(cluster, mz)
-        pill_features.extend(feats)
-        nonrail_pill_count += len(feats)
+            # Single-line stop: one cluster dot at all zooms
+            nonrail_dot_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": mode_minzoom},
+                "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                "properties": centroid_props,
+            })
+        else:
+            # Multi-line stop: cluster dot at low zoom, individual platform dots at pill zoom+
+            nonrail_dot_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
+                "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                "properties": centroid_props,
+            })
+            for s in cluster:
+                nonrail_dot_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": mz},
+                    "geometry": {"type": "Point", "coordinates": [s["lon"], s["lat"]]},
+                    "properties": {
+                        "color":          color,  # dominant color so pills/dots match
+                        "mode":           s["mode"],
+                        "width_base":     s["width_base"],
+                        "stop_id":        s.get("stop_id", ""),
+                        "stop_name":      s.get("stop_name", ""),
+                        "parent_station": s.get("parent_station", ""),
+                    },
+                })
+            feats = make_pill_features(cluster, mz)
+            pill_features.extend(feats)
+            nonrail_pill_count += len(feats)
+
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
           f"from {len(nonrail_clusters):,} clusters")
 
@@ -721,7 +690,7 @@ def main():
     # Write outputs
     # ==========================================================================
 
-    dot_features = rail_features + other_features
+    dot_features = rail_features + other_features + nonrail_dot_features
     OUT_DOTS.parent.mkdir(parents=True, exist_ok=True)
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
