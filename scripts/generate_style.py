@@ -1013,22 +1013,13 @@ def build_station_layers() -> list:
     """
     layers = []
 
-    # (source, minzoom, fill_radii)
-    # Each group has its own PMTiles file with the correct --minimum-zoom baked in,
-    # so tippecanoe cannot drop features below that zoom.
-    # Circle radius is data-driven: radius = width_base at zoom 14 (= line width in px),
-    # so dot diameter = 2 × line width. Same zoom scaling as the transit line layers.
     def dot_radius(minzoom):
         return ["interpolate", ["linear"], ["zoom"],
-            minzoom, ["*", ["get", "width_base"], 0.4],
-            14,      ["get", "width_base"],
+            minzoom, ["max", ["*", ["get", "width_base"], 0.4], 1.0],
+            14,      ["max", ["get", "width_base"], 1.5],
             18,      ["*", ["get", "width_base"], 4.0],
         ]
 
-    # Dots fade IN at minzoom and then stay visible permanently.
-    # Pills render on top (painter order) and cover dots via their white casing.
-    # No fade-out: stops with no pill remain visible; stops with a pill are hidden
-    # underneath it.
     stop_groups = [
         ("transit_stops_rail",      5),
         ("transit_stops_tram",     10),
@@ -1037,9 +1028,24 @@ def build_station_layers() -> list:
     ]
 
     for source, minzoom in stop_groups:
-        # Ferry is stored in the regional PMTiles but has its own dedicated layer below.
         extra_filter = [["!=", ["get", "mode"], "ferry"]] if source == "transit_stops_regional" else []
         layer_filter = ["all"] + extra_filter if extra_filter else None
+
+        if source == "transit_stops_rail":
+            stroke_width = ["interpolate", ["linear"], ["zoom"],
+                10, 0.0,
+                11, ["case", ["==", ["get", "mode"], "train"], 0.75, 0.0],
+                12, 0.75,
+                14, 0.75,
+                18, 1.0,
+            ]
+        else:
+            stroke_width = ["interpolate", ["linear"], ["zoom"],
+                11, 0.0,
+                12, 0.75,
+                14, 0.75,
+                18, 1.0,
+            ]
 
         layer = {
             "id": f"transit-stop-fill-{source}",
@@ -1053,14 +1059,15 @@ def build_station_layers() -> list:
                 "circle-opacity": ["interpolate", ["linear"], ["zoom"],
                     minzoom,       0.0,
                     minzoom + 1.0, 1.0,
-                ]
+                ],
+                "circle-stroke-color": "#ffffff",
+                "circle-stroke-width": stroke_width,
             }
         }
         if layer_filter:
             layer["filter"] = layer_filter
         layers.append(layer)
 
-    # Ferry stops: own layer, data-driven radius, no fade-out (ferry has no pills).
     layers.append({
         "id": "transit-stop-fill-ferry",
         "type": "circle",
@@ -1073,15 +1080,18 @@ def build_station_layers() -> list:
             "circle-radius": dot_radius(9),
             "circle-opacity": ["interpolate", ["linear"], ["zoom"],
                 9, 0.0, 10.0, 1.0
-            ]
+            ],
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": ["interpolate", ["linear"], ["zoom"],
+                11, 0.0,
+                12, 0.75,
+                14, 0.75,
+                18, 1.0,
+            ],
         }
     })
 
-    # --- Pill layers (LineString features from tl_stop_pills.pmtiles) ---
-    # Three layers in painter order: casing → fill → connector.
-    # All use the same source/source-layer; feature_type property distinguishes them.
-    # width_base on the feature encodes the dominant line width; pill = ×2, connector = ×1.
-    PILL_MINZOOM = 11  # earliest any pill appears (train with ≥5 stops)
+    PILL_MINZOOM = 11
 
     def pill_width(multiplier):
         return ["interpolate", ["linear"], ["zoom"],
@@ -1096,7 +1106,6 @@ def build_station_layers() -> list:
             appear_zoom + 1.0,  1.0,
         ]
 
-    # Casing (white outline behind the colored fill)
     layers.append({
         "id": "transit-stop-pill-casing",
         "type": "line",
@@ -1104,10 +1113,7 @@ def build_station_layers() -> list:
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
         "filter": ["==", ["get", "feature_type"], "pill"],
-        "layout": {
-            "line-cap": "round",
-            "line-join": "round",
-        },
+        "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
             "line-color": "#ffffff",
             "line-width": ["interpolate", ["linear"], ["zoom"],
@@ -1119,7 +1125,26 @@ def build_station_layers() -> list:
         }
     })
 
-    # Pill fill
+    # Connector casing drawn before pill fill so pill fill covers the junction — no white seam
+    layers.append({
+        "id": "transit-stop-pill-connector-casing",
+        "type": "line",
+        "source": "transit_stop_pills",
+        "source-layer": "transit_stop_pills",
+        "minzoom": PILL_MINZOOM,
+        "filter": ["==", ["get", "feature_type"], "connector"],
+        "layout": {"line-cap": "round", "line-join": "round"},
+        "paint": {
+            "line-color": "#ffffff",
+            "line-width": ["interpolate", ["linear"], ["zoom"],
+                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.4], 1.5],
+                14,            ["+", ["*", ["get", "width_base"], 1.0], 1.5],
+                18,            ["+", ["*", ["get", "width_base"], 4.0], 2.0],
+            ],
+            "line-opacity": pill_opacity(PILL_MINZOOM),
+        }
+    })
+
     layers.append({
         "id": "transit-stop-pill-fill",
         "type": "line",
@@ -1127,10 +1152,7 @@ def build_station_layers() -> list:
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
         "filter": ["==", ["get", "feature_type"], "pill"],
-        "layout": {
-            "line-cap": "round",
-            "line-join": "round",
-        },
+        "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
             "line-color": ["get", "color"],
             "line-width": pill_width(2),
@@ -1138,7 +1160,6 @@ def build_station_layers() -> list:
         }
     })
 
-    # Connector (half the pill width, same color, round caps)
     layers.append({
         "id": "transit-stop-pill-connector",
         "type": "line",
@@ -1146,10 +1167,7 @@ def build_station_layers() -> list:
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
         "filter": ["==", ["get", "feature_type"], "connector"],
-        "layout": {
-            "line-cap": "round",
-            "line-join": "round",
-        },
+        "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
             "line-color": ["get", "color"],
             "line-width": pill_width(1),
@@ -1157,11 +1175,8 @@ def build_station_layers() -> list:
         }
     })
 
-    # --- DEBUG: fixed-size 1.5px black dots at every raw stop position ---
-    # Use these to diagnose pill clustering (one dot per raw stop, before clustering).
-    # Remove this block once pills look correct.
     debug_stop_sources = [
-        ("transit_stops_rail",      5),   # rail stops visible from zoom 5
+        ("transit_stops_rail",      5),
         ("transit_stops_tram",     10),
         ("transit_stops_regional",  9),
         ("transit_stops_bus",      11),

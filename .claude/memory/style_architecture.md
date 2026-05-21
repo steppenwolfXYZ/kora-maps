@@ -4,6 +4,8 @@ description: How generate_style.py is structured — layer build functions and t
 type: project
 ---
 
+**Transit stop architecture (as of 2026-05-21):** All stop features (dots, pills, connectors) are `LineString` features in a single PMTile source (`transit_stop_pills` / `tl_stop_pills.pmtiles`). Dots are `[pos, pos]` zero-length lines rendered as circles via `line-cap: round`. The 4 old mode-split dot PMTile sources no longer exist. Layer paint order: dot-casing → connector-casing → pill-casing → dot-fill → pill-fill → connector-fill.
+
 `generate_style.py` builds a MapLibre style JSON via discrete `build_*` functions called in this order in `generate_style()`:
 
 1. `build_background_layer`

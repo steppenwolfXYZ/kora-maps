@@ -346,7 +346,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # E.g. BOB "Grindelwald Terminal Express" (4 stops, 192 active days) would win over
     # full Grindelwald service (9 stops, 0 active days on sample dates) in line_canonical_geo.
     line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → {"stop_count", "stops"}
-    line_stop_union: dict = {}   # (line_key, geo_bucket) → set of all stop_ids seen across all trip variants
+    line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # (line_key, geo_bucket) → {frozenset(stop_ids) → trip_count}
 
     current_trip_id = None
     current_stops: list = []
@@ -407,7 +407,8 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             return
 
         geo_key = (line_key, gb)
-        line_stop_union.setdefault(geo_key, set()).update(s[1] for s in stops)
+        variant = frozenset(s[1] for s in stops)
+        line_variant_counts[geo_key][variant] += 1
         existing = line_canonical_geo.get(geo_key)
         if existing is None or canon_score > existing.get("canon_score", 0):
             line_canonical_geo[geo_key] = {
@@ -474,13 +475,20 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             if long_norm and long_norm != short_name:
                 _line_canonical_export[(long_norm, bucket)].append(freq_canon["stops"])
 
-    # Union candidate: aggregates ALL stop_ids from every trip variant in each geo_bucket.
-    # Handles lines like GoldenPass where the longest trip (PE Express Montreux→Interlaken)
-    # skips intermediate stations that PE30 (Montreux→Zweisimmen) stops at. The stop
-    # assignment code filters by stop_near_bbox, so only in-bbox stops survive.
-    for (line_key, _gb), all_sids in line_stop_union.items():
+    # Filtered union candidate: union of stops from variants that represent ≥10% of trips
+    # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
+    # their stops into the main stop list (e.g. Tram 9 Hasler at 1.8% of trips).
+    for (line_key, _gb), variant_counts in line_variant_counts.items():
         short_name, long_name, bucket = line_key
-        union_cand = [(sid, 0, 0) for sid in all_sids]
+        total = sum(variant_counts.values())
+        threshold = max(1, total * 0.10)
+        union_sids: set = set()
+        for variant, count in variant_counts.items():
+            if count >= threshold:
+                union_sids.update(variant)
+        if not union_sids:
+            continue
+        union_cand = [(sid, 0, 0) for sid in union_sids]
         _line_canonical_export[(short_name, bucket)].append(union_cand)
         long_norm = long_name.replace(" ", "")
         if long_norm and long_norm != short_name:
