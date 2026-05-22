@@ -270,15 +270,7 @@ def make_pill_features(cluster_stops, minzoom):
 
     path = nearest_neighbor_path(positions)
 
-    # Find the largest gap in the NN path
     gap_threshold_km = max_wb * PILL_GAP_SCALE / 1000.0
-    max_gap_km = 0.0
-    max_gap_idx = 0
-    for k in range(len(path) - 1):
-        d = haversine_km(path[k][0], path[k][1], path[k + 1][0], path[k + 1][1])
-        if d > max_gap_km:
-            max_gap_km = d
-            max_gap_idx = k
 
     stop_props = {
         "color":          color,
@@ -298,33 +290,57 @@ def make_pill_features(cluster_stops, minzoom):
             "properties": {**stop_props, "feature_type": feature_type},
         }
 
-    if max_gap_km <= gap_threshold_km:
-        # All positions close enough — one bent pill covering all dots
+    # Find all gaps above threshold — each is a split point between groups
+    split_indices = [
+        k for k in range(len(path) - 1)
+        if haversine_km(path[k][0], path[k][1], path[k + 1][0], path[k + 1][1]) > gap_threshold_km
+    ]
+
+    if not split_indices:
         return [make_feat(path, "pill")]
 
-    # Two distinct groups — split at the largest gap
-    group1 = path[:max_gap_idx + 1]
-    group2 = path[max_gap_idx + 1:]
+    # Split path at every large gap → N groups
+    groups = []
+    prev = 0
+    for idx in split_indices:
+        groups.append(path[prev:idx + 1])
+        prev = idx + 1
+    groups.append(path[prev:])
 
-    # Only emit a pill if the group has ≥2 positions (a real capsule shape).
-    # Single-point groups get no pill — the connector's round cap serves as their visual terminus.
+    # Pill for each group with ≥2 positions; single-point groups rely on connector round caps
     feats = []
-    for grp in [group1, group2]:
+    for grp in groups:
         if len(grp) >= 2:
             feats.append(make_feat(grp, "pill"))
 
-    # Connector: nearest endpoint pair between the two groups
-    ends1 = [group1[0], group1[-1]]
-    ends2 = [group2[0], group2[-1]]
-    best_d = float("inf")
-    ca, cb = ends1[0], ends2[0]
-    for e1 in ends1:
-        for e2 in ends2:
-            d = haversine_km(e1[0], e1[1], e2[0], e2[1])
-            if d < best_d:
-                best_d = d
-                ca, cb = e1, e2
-    feats.append(make_feat([ca, cb], "connector"))
+    # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
+    # a forced chain when groups fan out from a hub rather than lying in a sequence.
+    n_g = len(groups)
+    mst_edges = []   # (dist, ca, cb) for all candidate edges, sorted
+    for i in range(n_g):
+        for j in range(i + 1, n_g):
+            best_d = float("inf")
+            ca, cb = groups[i][0], groups[j][0]
+            for p1 in groups[i]:
+                for p2 in groups[j]:
+                    d = haversine_km(p1[0], p1[1], p2[0], p2[1])
+                    if d < best_d:
+                        best_d, ca, cb = d, p1, p2
+            mst_edges.append((best_d, ca, cb, i, j))
+    mst_edges.sort()
+
+    parent = list(range(n_g))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for best_d, ca, cb, i, j in mst_edges:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+            feats.append(make_feat([ca, cb], "connector"))
 
     return feats
 
@@ -410,6 +426,24 @@ def cluster_stops_for_pills(raw_stops, radius_km):
             clusters.append(group)
 
     return clusters
+
+
+def merge_clusters_by_parent_station(clusters):
+    """
+    Merge spatially separate clusters that share the same parent_station into
+    one super-cluster so make_pill_features can connect them with pills and connectors.
+    Clusters with no parent_station are left as-is.
+    """
+    by_parent = defaultdict(list)
+    no_parent = []
+    for cluster in clusters:
+        parents = [s.get("parent_station", "") for s in cluster if s.get("parent_station", "")]
+        if parents:
+            dominant = max(set(parents), key=parents.count)
+            by_parent[dominant].extend(cluster)
+        else:
+            no_parent.append(cluster)
+    return list(by_parent.values()) + no_parent
 
 
 # =============================================================================
@@ -564,6 +598,7 @@ def main():
     # --- Rail dots + pills (unified pass) ---
     print(f"  {len(rail_pill_raw):,} raw rail stop positions → clustering...")
     rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
+    rail_pill_clusters = merge_clusters_by_parent_station(rail_pill_clusters)
     print(f"  → {len(rail_pill_clusters):,} rail station clusters")
 
     rail_features = []
@@ -630,6 +665,7 @@ def main():
     print(f"  {len(all_nonrail_pills):,} non-rail pill candidates "
           f"(tram+metro+bus+regional combined) → clustering...")
     nonrail_clusters = cluster_stops_for_pills(all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM)
+    nonrail_clusters = merge_clusters_by_parent_station(nonrail_clusters)
     nonrail_pill_count = 0
     nonrail_dot_features = []
     for cluster in nonrail_clusters:
