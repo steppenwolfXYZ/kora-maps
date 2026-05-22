@@ -11,4 +11,5 @@
 - [Mountain Pipeline](mountain_pipeline.md) — GTFS-first cable car architecture, OSM geometry lookup, stop rendering, known issues
 - [Transit Rebuild Workflow](feedback_rebuild_workflow.md) — use --skip-osm unless 04_extract_osm.py or OSM data changed
 - [Script Execution Approval](feedback_run_scripts.md) — always ask user before running pipeline scripts; state reason if Claude should run it
+- [Fix approach — correct data, not thresholds](feedback_fix_approach.md) — fix stop assignment bugs in 05_score_and_match.py, not by tightening downstream snap thresholds
 - **After any transit pipeline change: suggest `./scripts/rebuild_transit.sh --skip-osm` — never individual scripts. Never run it yourself.**
