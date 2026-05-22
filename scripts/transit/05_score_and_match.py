@@ -408,7 +408,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
 
         geo_key = (line_key, gb)
         variant = frozenset(s[1] for s in stops)
-        line_variant_counts[geo_key][variant] += 1
+        line_variant_counts[geo_key][variant] += max(1, len(active_dates))
         existing = line_canonical_geo.get(geo_key)
         if existing is None or canon_score > existing.get("canon_score", 0):
             line_canonical_geo[geo_key] = {
