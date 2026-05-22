@@ -31,6 +31,7 @@
 		'transit-stop-pill-casing',
 		'transit-stop-pill-connector',
 		'transit-stop-pill-connector-casing',
+		'transit-stop-pill-endpoint',
 	];
 
 	$effect(() => {
@@ -85,6 +86,7 @@
 				const p = stopFeatures[0].properties as Record<string, unknown>;
 				const kind = p.feature_type === 'pill' ? 'pill'
 				           : p.feature_type === 'connector' ? 'connector'
+				           : p.feature_type === 'endpoint' ? 'endpoint'
 				           : 'stop';
 				const countLine = p.stop_count != null ? `&ensp;count: ${fmt(p.stop_count)}` : '';
 				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
