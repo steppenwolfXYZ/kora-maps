@@ -375,11 +375,21 @@ def make_pill_features(cluster_stops, minzoom):
         prev = idx + 1
     groups.append(path[prev:])
 
-    # Pill for each group with ≥2 positions; single-point groups rely on connector round caps
+    def make_endpoint(pos):
+        return {
+            "type": "Feature",
+            "tippecanoe": {"minzoom": minzoom},
+            "geometry": {"type": "Point", "coordinates": list(pos)},
+            "properties": {**stop_props, "feature_type": "endpoint"},
+        }
+
+    # Pill for each group with ≥2 positions; single-point groups get an endpoint circle
     feats = []
     for grp in groups:
         if len(grp) >= 2:
             feats.append(make_feat(grp, "pill"))
+        else:
+            feats.append(make_endpoint(grp[0]))
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.

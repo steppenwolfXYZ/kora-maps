@@ -1160,6 +1160,33 @@ def build_station_layers() -> list:
         }
     })
 
+    # Endpoint circles drawn before connector-fill so the connector's colored line
+    # covers the white stroke at the junction — no white seam where they meet.
+    layers.append({
+        "id": "transit-stop-pill-endpoint",
+        "type": "circle",
+        "source": "transit_stop_pills",
+        "source-layer": "transit_stop_pills",
+        "minzoom": PILL_MINZOOM,
+        "filter": ["==", ["get", "feature_type"], "endpoint"],
+        "paint": {
+            "circle-color": ["get", "color"],
+            "circle-radius": ["interpolate", ["linear"], ["zoom"],
+                PILL_MINZOOM, ["max", ["*", ["get", "width_base"], 0.4], 1.0],
+                14,           ["max", ["get", "width_base"], 1.5],
+                18,           ["*", ["get", "width_base"], 4.0],
+            ],
+            "circle-opacity": pill_opacity(PILL_MINZOOM),
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": ["interpolate", ["linear"], ["zoom"],
+                PILL_MINZOOM,       0.0,
+                PILL_MINZOOM + 1.0, 0.75,
+                14,                 0.75,
+                18,                 1.0,
+            ],
+        }
+    })
+
     layers.append({
         "id": "transit-stop-pill-connector",
         "type": "line",

@@ -5559,6 +5559,98 @@
       }
     },
     {
+      "id": "transit-stop-pill-endpoint",
+      "type": "circle",
+      "source": "transit_stop_pills",
+      "source-layer": "transit_stop_pills",
+      "minzoom": 11,
+      "filter": [
+        "==",
+        [
+          "get",
+          "feature_type"
+        ],
+        "endpoint"
+      ],
+      "paint": {
+        "circle-color": [
+          "get",
+          "color"
+        ],
+        "circle-radius": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          [
+            "max",
+            [
+              "*",
+              [
+                "get",
+                "width_base"
+              ],
+              0.4
+            ],
+            1.0
+          ],
+          14,
+          [
+            "max",
+            [
+              "get",
+              "width_base"
+            ],
+            1.5
+          ],
+          18,
+          [
+            "*",
+            [
+              "get",
+              "width_base"
+            ],
+            4.0
+          ]
+        ],
+        "circle-opacity": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12.0,
+          1.0
+        ],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": [
+          "interpolate",
+          [
+            "linear"
+          ],
+          [
+            "zoom"
+          ],
+          11,
+          0.0,
+          12.0,
+          0.75,
+          14,
+          0.75,
+          18,
+          1.0
+        ]
+      }
+    },
+    {
       "id": "transit-stop-pill-connector",
       "type": "line",
       "source": "transit_stop_pills",
