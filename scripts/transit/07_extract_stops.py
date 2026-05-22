@@ -37,9 +37,10 @@ from collections import defaultdict
 ROOT       = Path(__file__).resolve().parents[2]
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
-GTFS_STOPS = ROOT / "data" / "gtfs" / "stops.txt"
-OUT_DOTS   = ROOT / "data" / "transit" / "transit_stops.geojson"
-OUT_PILLS  = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
+GTFS_STOPS   = ROOT / "data" / "gtfs" / "stops.txt"
+OSM_STATIONS = ROOT / "data" / "osm" / "stations.geojson"
+OUT_DOTS     = ROOT / "data" / "transit" / "transit_stops.geojson"
+OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 
 RAIL_MODES = {"train"}
 # Modes that get pills; ferry and mountain are excluded
@@ -99,6 +100,73 @@ def load_stop_meta() -> dict:
             if base not in meta:
                 meta[base] = entry
     return meta
+
+
+# OSM node types considered precise enough to use as coordinate overrides.
+# stop_position and tram_stop are on the track/road; platform is the boarding area.
+# General stations and stop_areas are too coarse.
+_OSM_PRECISE = {
+    ("public_transport", "stop_position"),
+    ("public_transport", "platform"),
+    ("railway", "tram_stop"),
+    ("railway", "platform"),
+    ("railway", "halt"),
+}
+_OSM_INDEX_DEG = 0.002   # grid cell ≈ 200 m at Swiss latitudes
+
+
+def load_osm_stop_nodes() -> dict:
+    """Build a grid-indexed lookup of precise OSM stop nodes from stations.geojson."""
+    index: dict = defaultdict(list)
+    if not OSM_STATIONS.exists():
+        return index
+    data = json.loads(OSM_STATIONS.read_text())
+    for feat in data["features"]:
+        p  = feat["properties"]
+        pt = p.get("public_transport", "")
+        rw = p.get("railway", "")
+        if not (("public_transport", pt) in _OSM_PRECISE or ("railway", rw) in _OSM_PRECISE):
+            continue
+        name = p.get("name", "")
+        if not name:
+            continue
+        lon, lat = feat["geometry"]["coordinates"]
+        name_norm = name.lower().split(", ")[-1].strip()
+        key = (int(lon / _OSM_INDEX_DEG), int(lat / _OSM_INDEX_DEG))
+        index[key].append({"lon": lon, "lat": lat, "name_norm": name_norm})
+    return index
+
+
+def find_osm_stop_override(lon, lat, gtfs_name, osm_index, flat, max_dist_km=0.200):
+    """Return (osm_lon, osm_lat) for the name-matching OSM stop node closest to the
+    line geometry (flat), searching within max_dist_km of the GTFS centroid.
+    Two lines may pass the same station area but stop at different physical nodes;
+    picking by proximity to this line's geometry naturally selects the right one."""
+    gtfs_norm = gtfs_name.lower().split(", ")[-1].strip()
+    if not gtfs_norm:
+        return None
+    gx = int(lon / _OSM_INDEX_DEG)
+    gy = int(lat / _OSM_INDEX_DEG)
+    candidates = []
+    for dx in (-2, -1, 0, 1, 2):
+        for dy in (-2, -1, 0, 1, 2):
+            for node in osm_index.get((gx + dx, gy + dy), []):
+                nn = node["name_norm"]
+                if nn == gtfs_norm or gtfs_norm in nn or nn in gtfs_norm:
+                    d = haversine_km(lon, lat, node["lon"], node["lat"])
+                    if d <= max_dist_km:
+                        candidates.append((node["lon"], node["lat"]))
+    if not candidates:
+        return None
+    if not flat:
+        return min(candidates, key=lambda p: haversine_km(lon, lat, p[0], p[1]))
+    best_d, best = float("inf"), None
+    for clon, clat in candidates:
+        slon, slat = snap_to_line(clon, clat, flat)
+        d = haversine_km(clon, clat, slon, slat)
+        if d < best_d:
+            best_d, best = d, (clon, clat)
+    return best
 
 
 # =============================================================================
@@ -470,9 +538,11 @@ def main():
     print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
 
     print("Loading stop coordinates and metadata...")
-    line_stops = json.loads(LINE_STOPS.read_text())
-    stop_meta  = load_stop_meta()
-    print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
+    line_stops     = json.loads(LINE_STOPS.read_text())
+    stop_meta      = load_stop_meta()
+    osm_stop_index = load_osm_stop_nodes()
+    print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries, "
+          f"{sum(len(v) for v in osm_stop_index.values()):,} OSM stop nodes indexed")
 
     print("Building stop dots and pill candidates...")
 
@@ -519,6 +589,12 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
+                if haversine_km(lon, lat, slon, slat) > 0.050:
+                    osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
+                    if osm_pos:
+                        osm_slon, osm_slat = snap_to_line(osm_pos[0], osm_pos[1], flat)
+                        if haversine_km(osm_pos[0], osm_pos[1], osm_slon, osm_slat) < haversine_km(lon, lat, slon, slat):
+                            slon, slat = osm_slon, osm_slat
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
@@ -558,8 +634,15 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 cx, cy     = snap_to_line(lon, lat, flat)
-                if haversine_km(lon, lat, cx, cy) > 0.150:
+                gtfs_snap_d = haversine_km(lon, lat, cx, cy)
+                if gtfs_snap_d > 0.150:
                     continue  # stop misassigned to this line — GTFS bbox margin too generous
+                if gtfs_snap_d > 0.050:
+                    osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
+                    if osm_pos:
+                        osm_cx, osm_cy = snap_to_line(osm_pos[0], osm_pos[1], flat)
+                        if haversine_km(osm_pos[0], osm_pos[1], osm_cx, osm_cy) < gtfs_snap_d:
+                            cx, cy = osm_cx, osm_cy
                 # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
                     "lon":            cx,
