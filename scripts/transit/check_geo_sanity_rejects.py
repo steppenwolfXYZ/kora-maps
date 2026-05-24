@@ -241,12 +241,14 @@ def main():
                 if len(ccoords) < 2:
                     continue
                 score = len(ccoords) / len(cand)
+                if score < 0.5:
+                    continue
                 geo_candidates.append((score, ccoords))
 
         if not geo_candidates:
             n_skip += 1; continue   # no candidates at all — not a filter issue
 
-        geo_candidates.sort(key=lambda x: -x[0])
+        geo_candidates.sort(key=lambda x: (-x[0], -len(x[1])))
 
         # Old logic: highest scorer wins
         old_best = geo_candidates[0][1]

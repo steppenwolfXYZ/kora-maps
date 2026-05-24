@@ -1321,10 +1321,11 @@ def main():
                     gtfs = gtfs_entry
 
         # Operator-based override for rack/cog railways that are type=2 (rail) in GTFS
-        # but are tourist mountain railways in reality. Keyed by OSM operator abbreviation.
+        # but are tourist mountain railways in reality. Keyed by OSM operator string.
         # WAB and JB are rack railways to Kleine Scheidegg / Jungfraujoch.
         # BRB (Brienz Rothorn Bahn) is a steam rack railway, also type=2 in GTFS.
-        MOUNTAIN_RAIL_OPERATORS = {"WAB", "JB", "BRB"}
+        # SPB (Schynige Platte Bahn) uses the full name in OSM; "BOB" (valley train) does not.
+        MOUNTAIN_RAIL_OPERATORS = {"WAB", "JB", "BRB", "Berner Oberland-Bahnen"}
         if mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS:
             mode = "mountain"
             bucket = "mountain"
@@ -1406,7 +1407,7 @@ def main():
             stats["matched"] += 1
         elif mode == "mountain":
             # Reached only for OSM train routes overridden to mountain via
-            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB). No GTFS mountain bucket match exists.
+            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB, SPB). No GTFS mountain bucket match exists.
             freq_score = 0.6
             stats["matched"] += 1
         else:
@@ -1714,11 +1715,16 @@ def main():
                         if len(ccoords) < 2:
                             continue
                         score = len(ccoords) / len(cand)
+                        if score < 0.5:
+                            continue
                         geo_candidates.append((score, ccoords))
 
-                geo_candidates.sort(key=lambda x: -x[0])
+                # Sort by score desc, then by absolute stop count desc as tiebreaker.
+                # Equal-score candidates (e.g. many 5-stop routes all scoring 1.0) are
+                # ranked by how many stops they contribute — longer routes beat short noise.
+                geo_candidates.sort(key=lambda x: (-x[0], -len(x[1])))
                 geo_best: list = []
-                for _score, _ccoords in geo_candidates[:20]:
+                for _score, _ccoords in geo_candidates[:50]:
                     if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to):
                         geo_best = _ccoords
                         break
