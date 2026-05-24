@@ -43,52 +43,55 @@ def _diagnose_candidate(osm_pts, ccoords, stop_meta, osm_from, osm_to) -> list:
     """Return a list of per-check result strings for the given candidate."""
     lines = []
 
-    # Check 1 – endpoint coverage
+    # Check 1 – terminal name matching (≥1/3 of stops, min 2)
+    norm_from = _m._norm_stop_name(osm_from)
+    norm_to   = _m._norm_stop_name(osm_to)
+    if (norm_from and len(norm_from) >= 4) or (norm_to and len(norm_to) >= 4):
+        threshold = max(2, len(ccoords) // 3)
+        matches = 0
+        matched_names = []
+        for s in ccoords:
+            sid   = s[2] if len(s) > 2 else None
+            sname = _m._norm_stop_name(stop_meta.get(sid, ("", ""))[0]) if sid else ""
+            if norm_from and len(norm_from) >= 4 and norm_from in sname:
+                matches += 1; matched_names.append(sname)
+            elif norm_to and len(norm_to) >= 4 and norm_to in sname:
+                matches += 1; matched_names.append(sname)
+        ok1 = matches >= threshold
+        lines.append(
+            f"  check1 names      {'PASS' if ok1 else 'FAIL'}: "
+            f"from='{norm_from}' to='{norm_to}' "
+            f"{matches}/{len(ccoords)} stops matched (need {threshold})"
+            + (f" → {matched_names[:3]}" if matched_names else "")
+        )
+    else:
+        lines.append(
+            f"  check1 names      SKIP: from/to too short or empty "
+            f"('{norm_from}' / '{norm_to}')"
+        )
+
+    # Check 2 – endpoint coverage
     start, end = osm_pts[0], osm_pts[-1]
     d_start = min(_m.haversine_km(s[0], s[1], start[0], start[1]) for s in ccoords)
     d_end   = min(_m.haversine_km(s[0], s[1], end[0],   end[1])   for s in ccoords)
-    ok1 = d_start <= _m.ENDPOINT_THRESHOLD_KM and d_end <= _m.ENDPOINT_THRESHOLD_KM
+    ok2 = d_start <= _m.ENDPOINT_THRESHOLD_KM and d_end <= _m.ENDPOINT_THRESHOLD_KM
     lines.append(
-        f"  check1 endpoints  {'PASS' if ok1 else 'FAIL'}: "
+        f"  check2 endpoints  {'PASS' if ok2 else 'FAIL'}: "
         f"nearest-to-start={d_start:.1f} km, nearest-to-end={d_end:.1f} km "
         f"(threshold {_m.ENDPOINT_THRESHOLD_KM} km)"
     )
 
-    # Check 2 – sampled proximity
+    # Check 3 – sampled proximity
     step    = max(1, len(ccoords) // 5)
     sampled = ccoords[::step][:5]
     dists   = [_m._min_dist_to_polyline_km(s[0], s[1], osm_pts) for s in sampled]
     close   = sum(1 for d in dists if d <= 0.5)
-    ok2     = close * 2 >= len(sampled)
+    ok3     = close * 2 >= len(sampled)
     lines.append(
-        f"  check2 proximity  {'PASS' if ok2 else 'FAIL'}: "
+        f"  check3 proximity  {'PASS' if ok3 else 'FAIL'}: "
         f"{close}/{len(sampled)} stops ≤500 m from OSM line "
         f"[{', '.join(f'{d:.2f}' for d in dists)} km]"
     )
-
-    # Check 3 – terminal name matching
-    norm_from = _m._norm_stop_name(osm_from)
-    norm_to   = _m._norm_stop_name(osm_to)
-    if (norm_from and len(norm_from) >= 4) or (norm_to and len(norm_to) >= 4):
-        matched_name = None
-        for s in ccoords:
-            sid   = s[2] if len(s) > 2 else None
-            sname = _m._norm_stop_name(stop_meta.get(sid, ("", ""))[0]) if sid else ""
-            if norm_from and len(norm_from) >= 4 and (norm_from in sname or sname in norm_from):
-                matched_name = sname; break
-            if norm_to and len(norm_to) >= 4 and (norm_to in sname or sname in norm_to):
-                matched_name = sname; break
-        ok3 = matched_name is not None
-        lines.append(
-            f"  check3 names      {'PASS' if ok3 else 'FAIL'}: "
-            f"from='{norm_from}' to='{norm_to}'"
-            + (f" → matched '{matched_name}'" if ok3 else "")
-        )
-    else:
-        lines.append(
-            f"  check3 names      SKIP: from/to too short or empty "
-            f"('{norm_from}' / '{norm_to}')"
-        )
 
     return lines
 
@@ -129,6 +132,19 @@ def main():
         features = [f for f in features if f["properties"]["mode"] == args.mode]
         print(f"  {len(features):,} after --mode={args.mode} filter")
 
+    # ── Load from/to tags from raw OSM routes (transit_lines.geojson lacks them) ──
+    osm_routes_path = ROOT / "data" / "osm" / "routes.geojson"
+    osm_from_to: dict = {}
+    if osm_routes_path.exists():
+        for rfeat in json.loads(osm_routes_path.read_text())["features"]:
+            oid = str(rfeat["properties"].get("osm_id", ""))
+            if oid:
+                osm_from_to[oid] = (
+                    rfeat["properties"].get("from", ""),
+                    rfeat["properties"].get("to", ""),
+                )
+        print(f"  {len(osm_from_to):,} from/to values loaded from routes.geojson")
+
     # ── Run the stop-assignment loop in diagnostic mode ───────────────────────
     excluded = []   # lines rejected by sanity check
     kept     = []   # lines accepted by sanity check
@@ -140,8 +156,7 @@ def main():
         ref      = props["ref"]
         osm_id   = str(props["osm_id"])
         osm_name = props.get("name", "")
-        osm_from = props.get("from", "")
-        osm_to   = props.get("to", "")
+        osm_from, osm_to = osm_from_to.get(osm_id, ("", ""))
         bucket   = MODE_TO_BUCKET.get(mode, "bus")
         ref_norm = ref.replace(" ", "")
 
@@ -185,44 +200,18 @@ def main():
         if not osm_pts:
             n_skip += 1; continue
 
-        sub_bboxes = _m.build_sub_bboxes(osm_pts)
-        osm_start  = osm_pts[0]
-        osm_end    = osm_pts[-1]
-        osm_span   = _m.haversine_km(osm_start[0], osm_start[1],
-                                      osm_end[0],   osm_end[1])
+        sub_bboxes  = _m.build_sub_bboxes(osm_pts)
+        osm_start   = osm_pts[0]
+        osm_end     = osm_pts[-1]
+        osm_span_km = _m.haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
 
-        # Reconstruct canonical stops
-        best_coords: list = []
-        ref_keys = [ref, ref_norm, ref.upper(), ref.lower(), ref_norm.upper()]
-        if matched_gtfs_ref and matched_gtfs_ref not in ref_keys:
-            ref_keys += [matched_gtfs_ref, matched_gtfs_ref.upper(),
-                         matched_gtfs_ref.lower()]
-        canon = None
-        for lk_ref in ref_keys:
-            if (lk_ref, bucket) in _m._line_canonical_export:
-                canon = _m._line_canonical_export[(lk_ref, bucket)]; break
-
-        if canon:
-            for (_, candidate, dir_aware) in canon:
-                if dir_aware and osm_span >= 1.0 and candidate:
-                    first_sid = candidate[0][0]
-                    first_c   = (stop_coords.get(first_sid) or
-                                 stop_coords.get(first_sid.split(":")[0]))
-                    if first_c:
-                        d_s = _m.haversine_km(first_c[0], first_c[1],
-                                              osm_start[0], osm_start[1])
-                        d_e = _m.haversine_km(first_c[0], first_c[1],
-                                              osm_end[0],   osm_end[1])
-                        if d_e < d_s * 0.5:
-                            continue
-                ccoords = []
-                for stop_id, _a, _d in candidate:
-                    c = (stop_coords.get(stop_id) or
-                         stop_coords.get(stop_id.split(":")[0]))
-                    if c and any(_m.stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
-                        ccoords.append([c[0], c[1], stop_id])
-                if len(ccoords) > len(best_coords):
-                    best_coords = ccoords
+        # Use the shared canonical-lookup function (same code as main pipeline).
+        # This includes used_name_fallback tracking and Trigger 1 sanity check.
+        best_coords, _used_fallback = _m._lookup_canonical_stops(
+            ref, ref_norm, matched_gtfs_ref, bucket,
+            osm_pts, osm_span_km, osm_from, osm_to,
+            stop_coords, stop_meta, sub_bboxes,
+        )
 
         # Did this line reach the geo fallback?
         if best_coords and _m._covers_endpoints(osm_pts, best_coords):
