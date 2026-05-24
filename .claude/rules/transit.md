@@ -51,11 +51,13 @@ Counts stops whose normalised name contains the normalised OSM `from` or `to` ta
 
 This prevents a long line from passing just because one of its stops happens to share a terminal name — e.g. a 15-stop east-shore line with one stop at Stadelhofen should not pass for a route `from=Zürich Stadelhofen`.
 
-**Check 2 — Endpoint coverage**
-At least one stop within 5 km of the OSM geometry start AND one within 5 km of the end.
+**Check 2 — GTFS stops → OSM geometry proximity**
+Sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
 
-**Check 3 — Sampled proximity**
-5 evenly-sampled stops from the candidate; majority (≥ 50%) must be within 500 m of the nearest OSM polyline vertex.
+**Check 3 — OSM geometry → GTFS stops proximity**
+Sample 5 evenly-spaced points from the OSM geometry (`osm_pts`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m.
+
+Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 is a nearest-neighbour search over all GTFS stops in the candidate. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
 
 ### Known remaining issues with the sanity check
 - `_norm_stop_name` strips `hb`/`hbf`/`bahnhof` — short generic city tokens can still pass Check 1 (e.g. `bern` from `Bern HB`)
@@ -95,6 +97,16 @@ Run: `python3 scripts/transit/check_geo_sanity_rejects.py [--mode train|bus|...]
 - **S18 (Zürich Stadelhofen→Esslingen)** — no longer excluded after fixes; resolved
 - **Regional Bus 108/124 (Flixbus) and Bus 73 (Ouibus/BlaBlaCar Bus)** — now excluded upstream in `osm_to_mode()` by network tag. `EXCLUDED_OPERATORS` extended to include `"blablacar bus"` and `"ouibus"`; `osm_to_mode()` now checks both `operator` and `network` tags (Flixbus subcontractors use their own company name in `operator` but `network="Flixbus"`).
 - **Bus 76 (La Plaine → Viry) and Bus X33 (Bellegarde → Ferney)** — correctly excluded by sanity filter; Geneva cross-border lines with no Swiss GTFS coverage. No fix needed.
+
+#### S18 (Forchbahn) — two-phase fix
+S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as `mode=train` because OSM tags it `route=light_rail`. It has no GTFS match under "S18" so it gets a wrong alpha-prefix fallback to "S" (west-shore S-Bahn) and wrong stops.
+
+**Phase 1:** Make S18 vanish — stop drawing lines that only matched via alpha-prefix fallback (no real GTFS match). All 4 OSM relations (2727252, 2727409, 20153407, 20153408) should be hidden.
+
+**Phase 2:** Revive S18 correctly — find its actual GTFS short_name (likely "FB" or similar under Forchbahn agency), map OSM `route=light_rail` with Forchbahn operator to `mode=tram`, and let it match properly.
+
+#### Pending implementation
+- **Check 2 + Check 3 redesign** — the old Check 2 (endpoint coverage, 5km threshold) and Check 3 (GTFS→OSM vertex, 500m) are being replaced. New Check 2: 5 evenly-spaced GTFS stops → OSM geometry, 3/5 within 200m. New Check 3: 5 evenly-spaced OSM geometry points → nearest GTFS stop, 3/5 within 200m. NOT YET IMPLEMENTED — compact happened before implementation.
 
 #### Still excluded — legitimate lines needing a fix
 - **Train PE (Glacier Express St. Moritz↔Zermatt)** — legitimate famous tourist train, should be shown. Both directions excluded. Best geo candidate is a wrong 5-stop route near Zermatt (start is 143 km off, only 1/5 stops within 500 m). Root cause: GTFS likely doesn't use "PE" as the short_name for this service, so canonical lookup fails entirely and the geo fallback has no valid candidate.
