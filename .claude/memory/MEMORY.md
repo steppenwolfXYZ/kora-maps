@@ -14,4 +14,5 @@
 - [Fix approach — correct data, not thresholds](feedback_fix_approach.md) — fix stop assignment bugs in 05_score_and_match.py, not by tightening downstream snap thresholds
 - [OSM→GTFS Matching Architecture](matching_architecture.md) — _line_canonical_export tuple format, find_best_gtfs_candidate, geo-tiebreaker logic, fallback chain
 - [Geo matching scope](feedback_geo_matching.md) — find_best_gtfs_candidate is for freq/speed only; never feed its stops into stop assignment
+- [Sanity Check Logic](sanity_check_logic.md) — full logic of _passes_geo_sanity: 2 trigger points, 3 checks, failure behaviour, known remaining issues
 - **After any transit pipeline change: suggest `./scripts/rebuild_transit.sh --skip-osm` — never individual scripts. Never run it yourself.**

@@ -203,6 +203,18 @@ def haversine_km(lon1, lat1, lon2, lat2) -> float:
     a = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlam / 2) ** 2
     return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
+
+def _min_dist_to_polyline_km(px: float, py: float, pts: list) -> float:
+    """Minimum haversine distance (km) from point to the nearest vertex in pts."""
+    min_d = float("inf")
+    for p in pts:
+        d = haversine_km(px, py, p[0], p[1])
+        if d < min_d:
+            min_d = d
+            if min_d < 0.1:  # < 100 m — close enough, stop scanning
+                break
+    return min_d
+
 def parse_time(t: str) -> int:
     parts = t.strip().split(":")
     return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
@@ -768,6 +780,70 @@ def _covers_endpoints(osm_pts: list, stops: list) -> bool:
         haversine_km(s[0], s[1], end[0], end[1]) <= ENDPOINT_THRESHOLD_KM
         for s in stops)
     return near_start and near_end
+
+
+def _norm_stop_name(name: str) -> str:
+    """Normalise a stop name for loose terminal matching (lowercase, strip station suffixes)."""
+    name = name.lower().strip()
+    name = re.sub(r',\s*(bahnhof|bhf|hbf|hb|bf|gare|station)\s*$', '', name)
+    name = re.sub(r'\s+(bahnhof|hbf|hb|bhf|bf|gare|station)\s*$', '', name)
+    name = re.sub(r'\s*\(.*?\)\s*$', '', name)  # strip trailing "(Hbf)" etc.
+    return name.strip()
+
+
+def _passes_geo_sanity(
+    osm_pts: list,
+    ccoords: list,
+    stop_meta: dict,
+    osm_from: str = "",
+    osm_to: str = "",
+) -> bool:
+    """Return True if a geo-fallback candidate is a plausible match for the OSM line.
+
+    Checks are ordered cheapest-first; returns True on the first passing check so
+    later (slower) checks are skipped as soon as one piece of evidence is found.
+
+    Check 1 — terminal name matching: does the OSM from/to name appear inside a GTFS stop name?
+    Check 2 — endpoint coverage: do stops reach both OSM geometry endpoints?
+    Check 3 — sampled proximity: are a majority of sampled stops within 500 m of the OSM polyline?
+    """
+    if len(ccoords) < 2 or len(osm_pts) < 2:
+        return False
+
+    # Check 1: terminal name matching — O(N_stops × name_len), pure string ops
+    # The OSM from/to name must be contained within a GTFS stop name (not the reverse —
+    # that direction allows short city prefixes like "zürich" to match "zürich stadelhofen").
+    norm_from = _norm_stop_name(osm_from)
+    norm_to   = _norm_stop_name(osm_to)
+    if (norm_from and len(norm_from) >= 4) or (norm_to and len(norm_to) >= 4):
+        for s in ccoords:
+            sid = s[2] if len(s) > 2 else None
+            if not sid:
+                continue
+            sname = _norm_stop_name(stop_meta.get(sid, ("", ""))[0])
+            if not sname:
+                continue
+            if norm_from and len(norm_from) >= 4 and norm_from in sname:
+                return True
+            if norm_to and len(norm_to) >= 4 and norm_to in sname:
+                return True
+
+    # Check 2: endpoint coverage — ~O(N_stops) haversine calls
+    if _covers_endpoints(osm_pts, ccoords):
+        return True
+
+    # Check 3: sampled stop-to-geometry proximity — O(N_sample × N_osm_pts)
+    # Sample up to 5 stops evenly and check their distance to the OSM polyline.
+    step = max(1, len(ccoords) // 5)
+    sampled = ccoords[::step][:5]
+    close = sum(
+        1 for s in sampled
+        if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.5
+    )
+    if close * 2 >= len(sampled):  # majority (≥ 50%) within 500 m
+        return True
+
+    return False
 
 
 def freq_to_width_base(freq_score, mode) -> float:
@@ -1498,15 +1574,24 @@ def main():
         osm_end   = osm_pts[-1]
         osm_span_km = haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
 
+        # Extract OSM terminal tags — needed for sanity checks below.
+        osm_from = feat["properties"].get("from", "")
+        osm_to   = feat["properties"].get("to", "")
+
         # Reconstruct stop coords from canonical trip.
-        # Try OSM ref variants first, then the matched GTFS short_name.
+        # Try exact OSM ref variants first; only then try the matched GTFS short_name
+        # (which may be a looser fallback like "S" for "S18").  Track whether a fallback
+        # was used so we can apply a geo sanity check before trusting the result.
         canon = None
-        ref_keys = [ref, ref_norm, ref.upper(), ref.lower(), ref_norm.upper()]
-        if matched_gtfs_ref and matched_gtfs_ref not in ref_keys:
-            ref_keys += [matched_gtfs_ref, matched_gtfs_ref.upper(), matched_gtfs_ref.lower()]
-        for lk_ref in ref_keys:
+        used_name_fallback = False
+        exact_ref_keys = [ref, ref_norm, ref.upper(), ref.lower(), ref_norm.upper()]
+        fallback_ref_keys: list = []
+        if matched_gtfs_ref and matched_gtfs_ref not in exact_ref_keys:
+            fallback_ref_keys = [matched_gtfs_ref, matched_gtfs_ref.upper(), matched_gtfs_ref.lower()]
+        for i, lk_ref in enumerate(exact_ref_keys + fallback_ref_keys):
             if (lk_ref, bucket) in _line_canonical_export:
                 canon = _line_canonical_export[(lk_ref, bucket)]
+                used_name_fallback = (i >= len(exact_ref_keys))
                 break
 
         # canon is a list of (line_key, stops, direction_aware) candidates — try all,
@@ -1534,6 +1619,13 @@ def main():
                 if len(ccoords) > len(best_coords):
                     best_coords = ccoords
 
+        # If the canonical match came from a name fallback, sanity-check it before
+        # trusting it.  A wrong GTFS service may have been matched (e.g. "S" for "S18").
+        # Discard if it fails — the geo-fallback below will try to find a replacement.
+        if best_coords and used_name_fallback:
+            if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to):
+                best_coords = []
+
         # Geo-based fallback: triggers when (a) no canon found at all, (b) canon found
         # but its stops don't overlap this OSM feature's bbox, or (c) canonical stops
         # fail endpoint coverage — indicating the ref matched the wrong GTFS service
@@ -1560,8 +1652,10 @@ def main():
                 search_buckets = {bucket}
                 if bucket == "mountain":
                     search_buckets.add("train")
-                geo_best_score = 0
-                geo_best: list = []
+                # Collect all scored candidates, then pick the highest-scoring one
+                # that passes the geo sanity checks.  Sorting first means we check
+                # the most-likely-correct candidates first and exit early.
+                geo_candidates: list = []  # (score, ccoords)
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
@@ -1576,13 +1670,21 @@ def main():
                         if len(ccoords) < 2:
                             continue
                         score = len(ccoords) / len(cand)
-                        if score > geo_best_score:
-                            geo_best_score = score
-                            geo_best = ccoords
-                # Keep whichever result has more stops (geo may override a wrong
-                # canonical match, or canonical may be kept if it was already better)
-                if len(geo_best) > len(best_coords):
+                        geo_candidates.append((score, ccoords))
+
+                geo_candidates.sort(key=lambda x: -x[0])
+                geo_best: list = []
+                for _score, _ccoords in geo_candidates[:20]:
+                    if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to):
+                        geo_best = _ccoords
+                        break
+                if geo_best:
                     best_coords = geo_best
+                else:
+                    # No geo candidate passed sanity. The geo-fallback only triggers when
+                    # best_coords is already suspect (empty or failed endpoint coverage).
+                    # If geo finds nothing valid either, discard rather than keep wrong stops.
+                    best_coords = []
 
         if best_coords:
             line_stops_out[osm_id] = best_coords
