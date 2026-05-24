@@ -331,6 +331,7 @@ def cluster_lines(cluster_stops, line_lookup):
                     "ref":   info.get("ref", ""),
                     "color": info.get("color", "#888888"),
                     "mode":  info.get("mode", ""),
+                    "name":  info.get("name", ""),
                 }
     return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
 
@@ -640,7 +641,7 @@ def main():
                 })
 
         elif mode == "ferry":
-            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode}])
+            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for entry in stop_coords:
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
@@ -691,7 +692,7 @@ def main():
                 })
 
         else:
-            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode}])
+            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for entry in stop_coords:
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
