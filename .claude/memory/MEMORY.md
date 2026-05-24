@@ -12,4 +12,6 @@
 - [Transit Rebuild Workflow](feedback_rebuild_workflow.md) — use --skip-osm unless 04_extract_osm.py or OSM data changed
 - [Script Execution Approval](feedback_run_scripts.md) — always ask user before running pipeline scripts; state reason if Claude should run it
 - [Fix approach — correct data, not thresholds](feedback_fix_approach.md) — fix stop assignment bugs in 05_score_and_match.py, not by tightening downstream snap thresholds
+- [OSM→GTFS Matching Architecture](matching_architecture.md) — _line_canonical_export tuple format, find_best_gtfs_candidate, geo-tiebreaker logic, fallback chain
+- [Geo matching scope](feedback_geo_matching.md) — find_best_gtfs_candidate is for freq/speed only; never feed its stops into stop assignment
 - **After any transit pipeline change: suggest `./scripts/rebuild_transit.sh --skip-osm` — never individual scripts. Never run it yourself.**
