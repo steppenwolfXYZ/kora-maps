@@ -320,7 +320,7 @@ def load_trips(route_lookup: dict) -> dict:
     return trips
 
 
-_line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [(line_key, stop_list), ...]
+_line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [(line_key, stop_list, direction_aware), ...]
 
 # Coarse geo-grid for canonical trip bucketing: ~0.5° ≈ 40 km per cell
 GEO_BUCKET_DEG = 0.5
@@ -347,6 +347,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # full Grindelwald service (9 stops, 0 active days on sample dates) in line_canonical_geo.
     line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → {"stop_count", "stops"}
     line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # (line_key, geo_bucket) → {frozenset(stop_ids) → trip_count}
+    line_variant_sequences: dict = {}  # (geo_key, frozenset) → ordered [(sid, arr, dep), ...] for one representative trip
 
     current_trip_id = None
     current_stops: list = []
@@ -409,6 +410,8 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         geo_key = (line_key, gb)
         variant = frozenset(s[1] for s in stops)
         line_variant_counts[geo_key][variant] += max(1, len(active_dates))
+        if (geo_key, variant) not in line_variant_sequences:
+            line_variant_sequences[(geo_key, variant)] = [(s[1], s[2], s[3]) for s in stops]
         existing = line_canonical_geo.get(geo_key)
         if existing is None or canon_score > existing.get("canon_score", 0):
             line_canonical_geo[geo_key] = {
@@ -464,35 +467,55 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     _line_canonical_export.clear()
     for (line_key, gb), canon in line_canonical_geo_stops.items():
         short_name, long_name, bucket = line_key
-        _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"]))
+        _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"], False))
         long_norm = long_name.replace(" ", "")
         if long_norm and long_norm != short_name:
-            _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"]))
+            _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"], False))
         # Add frequency-weighted canonical as an extra candidate if it differs
         freq_canon = line_canonical_geo.get((line_key, gb))
         if freq_canon and freq_canon["stops"] != canon["stops"]:
-            _line_canonical_export[(short_name, bucket)].append((line_key, freq_canon["stops"]))
+            _line_canonical_export[(short_name, bucket)].append((line_key, freq_canon["stops"], False))
             if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, freq_canon["stops"]))
+                _line_canonical_export[(long_norm, bucket)].append((line_key, freq_canon["stops"], False))
 
     # Filtered union candidate: union of stops from variants that represent ≥10% of trips
     # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
     # their stops into the main stop list (e.g. Tram 9 Hasler at 1.8% of trips).
-    for (line_key, _gb), variant_counts in line_variant_counts.items():
+    #
+    # When qualifying variants have *different* stop sets (divergent directions, like a bus line
+    # where outbound stops differ from inbound), we add each as a separate direction-aware
+    # candidate instead of merging them.  The assignment loop then uses the first stop's
+    # geography to filter out candidates running opposite to the OSM line's direction.
+    for (line_key, geo_bucket), variant_counts in line_variant_counts.items():
         short_name, long_name, bucket = line_key
         total = sum(variant_counts.values())
         threshold = max(1, total * 0.10)
-        union_sids: set = set()
-        for variant, count in variant_counts.items():
-            if count >= threshold:
-                union_sids.update(variant)
-        if not union_sids:
+        qualifying = [(v, c) for v, c in variant_counts.items() if c >= threshold]
+        if not qualifying:
             continue
-        union_cand = [(sid, 0, 0) for sid in union_sids]
-        _line_canonical_export[(short_name, bucket)].append((line_key, union_cand))
         long_norm = long_name.replace(" ", "")
-        if long_norm and long_norm != short_name:
-            _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand))
+        unique_stop_sets = {v for v, _ in qualifying}
+        if len(unique_stop_sets) <= 1:
+            # All qualifying variants cover the same stops → safe to merge
+            union_sids: set = set()
+            for v, _ in qualifying:
+                union_sids.update(v)
+            union_cand = [(sid, 0, 0) for sid in union_sids]
+            _line_canonical_export[(short_name, bucket)].append((line_key, union_cand, False))
+            if long_norm and long_norm != short_name:
+                _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand, False))
+        else:
+            # Divergent stop sets across qualifying variants (e.g. different stops per direction).
+            # Add each qualifying variant as its own direction-aware ordered candidate so the
+            # assignment loop can pick the one whose direction matches the OSM line.
+            for v, _ in qualifying:
+                geo_key = (line_key, geo_bucket)
+                var_stops = line_variant_sequences.get((geo_key, v))
+                if not var_stops:
+                    continue
+                _line_canonical_export[(short_name, bucket)].append((line_key, var_stops, True))
+                if long_norm and long_norm != short_name:
+                    _line_canonical_export[(long_norm, bucket)].append((line_key, var_stops, True))
 
     # Compute speed from canonical trips
     line_speed: dict = {}
@@ -874,7 +897,7 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
     best_stops = None
 
     for rv in ref_variants:
-        for line_key, stops in _line_canonical_export.get((rv, bucket), []):
+        for line_key, stops, _da in _line_canonical_export.get((rv, bucket), []):
             if line_key in seen_line_keys:
                 continue
             seen_line_keys.add(line_key)
@@ -960,7 +983,7 @@ def main():
                             if _mfeat["geometry"]["type"] == "MultiLineString"
                             else _mfeat["geometry"]["coordinates"])
             _osm_bbox_chk = line_bbox(_osm_pts_chk)
-            for (_, _cand_stops) in _line_canonical_export.get((_ref, "mountain"), []):
+            for (_, _cand_stops, _da) in _line_canonical_export.get((_ref, "mountain"), []):
                 if any(
                     (_sc := stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0]))
                     and stop_near_bbox(_sc[0], _sc[1], _osm_bbox_chk)
@@ -1175,7 +1198,7 @@ def main():
                            (ref_norm.upper(), bucket), (ref.lower(), bucket)]:
                     candidates = _line_canonical_export.get(lk)
                     if candidates:
-                        corr_canon = candidates[0][1]   # (line_key, stops) → stops
+                        corr_canon = candidates[0][1]   # (line_key, stops, dir_aware) → stops
                         break
             corr_raw = corridor_freq(corr_canon, pair_freq) if corr_canon else None
             # Only boost via corridor if the line itself has some own service on sample dates.
@@ -1260,7 +1283,7 @@ def main():
 
         # Each entry in stop_list_candidates is one geographic location for this ref.
         # Produce one map feature per location.
-        for (_, stop_list) in stop_list_candidates:
+        for (_, stop_list, _da) in stop_list_candidates:
             # Resolve stop coordinates
             stop_pts = []
             for stop_id, _arr, _dep in stop_list:
@@ -1410,7 +1433,7 @@ def main():
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket != "ferry":
                         continue
-                    for (_, cand) in lk_candidates:
+                    for (_, cand, _da) in lk_candidates:
                         for stop_id, _a, _d in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
@@ -1430,6 +1453,12 @@ def main():
             osm_pts = geom["coordinates"]
         bbox = line_bbox(osm_pts)
 
+        # Precompute OSM direction for direction-aware candidate filtering.
+        # Only meaningful when start and end are well-separated (non-circular routes).
+        osm_start = osm_pts[0]
+        osm_end   = osm_pts[-1]
+        osm_span_km = haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
+
         # Reconstruct stop coords from canonical trip.
         # Try OSM ref variants first, then the matched GTFS short_name.
         canon = None
@@ -1441,10 +1470,23 @@ def main():
                 canon = _line_canonical_export[(lk_ref, bucket)]
                 break
 
-        # canon is a list of (line_key, stops) candidates — try all, keep the richest
+        # canon is a list of (line_key, stops, direction_aware) candidates — try all,
+        # keep the richest.  Direction-aware candidates whose first stop is geographically
+        # much closer to the OSM line's end than its start are skipped: they run in the
+        # opposite direction to this OSM relation (e.g. Köniz→Bern candidate for the
+        # Bern→Köniz OSM relation).  This only activates when qualifying GTFS variants
+        # have divergent stop sets (different stops per direction).
         best_coords: list = []
         if canon:
-            for (_, candidate) in canon:
+            for (_, candidate, dir_aware) in canon:
+                if dir_aware and osm_span_km >= 1.0 and candidate:
+                    first_sid = candidate[0][0]
+                    first_c = stop_coords.get(first_sid) or stop_coords.get(first_sid.split(":")[0])
+                    if first_c:
+                        d_to_start = haversine_km(first_c[0], first_c[1], osm_start[0], osm_start[1])
+                        d_to_end   = haversine_km(first_c[0], first_c[1], osm_end[0],   osm_end[1])
+                        if d_to_end < d_to_start * 0.5:
+                            continue  # candidate runs reverse of this OSM line
                 ccoords = []
                 for stop_id, _arr, _dep in candidate:
                     c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
@@ -1467,7 +1509,7 @@ def main():
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket != "ferry":
                         continue
-                    for (_, cand) in lk_candidates:
+                    for (_, cand, _da) in lk_candidates:
                         for stop_id, _a, _d in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
@@ -1484,7 +1526,7 @@ def main():
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
-                    for (_, cand) in lk_candidates:
+                    for (_, cand, _da) in lk_candidates:
                         if not cand:
                             continue
                         ccoords = []
