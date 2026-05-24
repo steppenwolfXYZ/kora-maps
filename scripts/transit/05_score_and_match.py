@@ -714,6 +714,34 @@ def stop_near_bbox(lon, lat, bbox, margin=0.02):
             bbox[1] - margin <= lat <= bbox[3] + margin)
 
 
+def build_sub_bboxes(pts: list, segment_km: float = 40.0) -> list:
+    """
+    Split a polyline into sub-bboxes of at most segment_km each.
+    Returns a list of (min_lon, min_lat, max_lon, max_lat) tuples.
+    Consecutive segments share their boundary point so no stretch is uncovered.
+
+    Using sub-bboxes instead of a single full bbox prevents long-distance lines
+    (e.g. Glacier Express, full bbox ≈ all of eastern Switzerland) from absorbing
+    stops of unrelated regional lines that happen to lie entirely inside the
+    large bounding box but are 30–40 km from the actual geometry.
+    """
+    if not pts:
+        return []
+    sub_bboxes = []
+    seg_pts = [pts[0]]
+    seg_dist = 0.0
+    for i in range(1, len(pts)):
+        seg_dist += haversine_km(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1])
+        seg_pts.append(pts[i])
+        if seg_dist >= segment_km:
+            sub_bboxes.append(line_bbox(seg_pts))
+            seg_pts = [pts[i]]   # next segment starts from the current point
+            seg_dist = 0.0
+    if seg_pts:
+        sub_bboxes.append(line_bbox(seg_pts))
+    return sub_bboxes
+
+
 ENDPOINT_THRESHOLD_KM = 5.0
 
 def _covers_endpoints(osm_pts: list, stops: list) -> bool:
@@ -1073,6 +1101,7 @@ def main():
         # Primary match: geo-scored candidate selection (all modes).
         # Picks the specific GTFS line whose canonical stops best overlap this OSM route.
         # Geo is a tiebreaker — a single candidate wins even with score=0.
+        gtfs = None
         matched_line_key = None
         matched_canon_stops = None
         gtfs_match = find_best_gtfs_candidate(
@@ -1452,6 +1481,7 @@ def main():
         else:
             osm_pts = geom["coordinates"]
         bbox = line_bbox(osm_pts)
+        sub_bboxes = build_sub_bboxes(osm_pts)   # corridor-aware stop filter
 
         # Precompute OSM direction for direction-aware candidate filtering.
         # Only meaningful when start and end are well-separated (non-circular routes).
@@ -1490,7 +1520,7 @@ def main():
                 ccoords = []
                 for stop_id, _arr, _dep in candidate:
                     c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                    if c and stop_near_bbox(c[0], c[1], bbox):
+                    if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
                         ccoords.append([c[0], c[1], stop_id])
                 if len(ccoords) > len(best_coords):
                     best_coords = ccoords
@@ -1532,7 +1562,7 @@ def main():
                         ccoords = []
                         for stop_id, _arr, _dep in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and stop_near_bbox(c[0], c[1], bbox):
+                            if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
                                 ccoords.append([c[0], c[1], stop_id])
                         if len(ccoords) < 2:
                             continue

@@ -93,7 +93,7 @@
 				let linesHtml = '';
 				if (p.lines_json) {
 					try {
-						const lines: { ref: string; color: string; mode: string }[] =
+						const lines: { ref: string; color: string; mode: string; name?: string }[] =
 							JSON.parse(String(p.lines_json));
 						if (lines.length) {
 							const badges = lines.map(l => {
@@ -102,7 +102,8 @@
 									+ parseInt(l.color.slice(3, 5), 16) * 0.587
 									+ parseInt(l.color.slice(5, 7), 16) * 0.114;
 								const fg = lum > 140 ? '#000' : '#fff';
-								return `<span style="display:inline-block;background:${l.color};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em">${label}</span>`;
+								const title = l.name ? ` title="${l.name.replace(/"/g, '&quot;')}"` : '';
+								return `<span${title} style="display:inline-block;background:${l.color};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em;cursor:default">${label}</span>`;
 							}).join('');
 							linesHtml = `<div style="margin-top:4px">${badges}</div>`;
 						}
