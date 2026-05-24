@@ -482,10 +482,15 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
     # their stops into the main stop list (e.g. Tram 9 Hasler at 1.8% of trips).
     #
-    # When qualifying variants have *different* stop sets (divergent directions, like a bus line
-    # where outbound stops differ from inbound), we add each as a separate direction-aware
-    # candidate instead of merging them.  The assignment loop then uses the first stop's
-    # geography to filter out candidates running opposite to the OSM line's direction.
+    # When qualifying variants are genuinely divergent (different intermediate stops per
+    # direction, e.g. bus 17 outbound via Kaufmännischer Verband vs inbound via Brunnhof),
+    # we emit each as a separate direction-aware candidate so the assignment loop can pick
+    # the one matching the OSM line's direction.
+    #
+    # Detection: a variant is "maximal" if no other qualifying variant is a proper superset
+    # of it.  If only one maximal exists, all others are short-turn/partial trips of the same
+    # route (e.g. S44 Fribourg→Bern ⊆ full Fribourg→Biel) → safe to union.  If two or more
+    # maximals exist, the routes genuinely fork → per-variant with direction filter.
     for (line_key, geo_bucket), variant_counts in line_variant_counts.items():
         short_name, long_name, bucket = line_key
         total = sum(variant_counts.values())
@@ -495,19 +500,23 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             continue
         long_norm = long_name.replace(" ", "")
         unique_stop_sets = {v for v, _ in qualifying}
-        if len(unique_stop_sets) <= 1:
-            # All qualifying variants cover the same stops → safe to merge
-            union_sids: set = set()
-            for v, _ in qualifying:
-                union_sids.update(v)
-            union_cand = [(sid, 0, 0) for sid in union_sids]
+        union_sids: set = set()
+        for v in unique_stop_sets:
+            union_sids.update(v)
+        union_cand = [(sid, 0, 0) for sid in union_sids]
+        maximal_variants = [
+            v for v in unique_stop_sets
+            if not any(v < other for other in unique_stop_sets)
+        ]
+        is_truly_divergent = len(maximal_variants) > 1
+        if not is_truly_divergent:
+            # All qualifying variants nest under one master route → safe union
             _line_canonical_export[(short_name, bucket)].append((line_key, union_cand, False))
             if long_norm and long_norm != short_name:
                 _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand, False))
         else:
-            # Divergent stop sets across qualifying variants (e.g. different stops per direction).
-            # Add each qualifying variant as its own direction-aware ordered candidate so the
-            # assignment loop can pick the one whose direction matches the OSM line.
+            # Genuinely different stops per direction — emit each qualifying variant as its own
+            # direction-aware ordered candidate so the assignment loop picks the matching one.
             for v, _ in qualifying:
                 geo_key = (line_key, geo_bucket)
                 var_stops = line_variant_sequences.get((geo_key, v))
@@ -1151,16 +1160,12 @@ def main():
                     best_n = n_inside
                     gtfs = gtfs_entry
 
-        # Mountain name keyword override: routes with high-alpine destination names in OSM
-        # are tourist mountain railways regardless of GTFS classification.
-        # This catches WAB (Lauterbrunnen→Kleine Scheidegg) and JB (→Jungfraujoch) which
-        # are tagged route=train in OSM and type=2 in GTFS but are clearly tourist railways.
-        MOUNTAIN_PLACE_KEYWORDS = {
-            "Kleine Scheidegg", "Jungfraujoch", "Schilthorn",
-            "Eigergletscher", "Jungfrau",
-        }
-        osm_name = props.get("name", "")
-        if any(kw in osm_name for kw in MOUNTAIN_PLACE_KEYWORDS):
+        # Operator-based override for rack/cog railways that are type=2 (rail) in GTFS
+        # but are tourist mountain railways in reality. Keyed by OSM operator abbreviation.
+        # WAB and JB are rack railways to Kleine Scheidegg / Jungfraujoch.
+        # BRB (Brienz Rothorn Bahn) is a steam rack railway, also type=2 in GTFS.
+        MOUNTAIN_RAIL_OPERATORS = {"WAB", "JB", "BRB"}
+        if mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS:
             mode = "mountain"
             bucket = "mountain"
 
@@ -1240,9 +1245,8 @@ def main():
             freq_score = compute_freq_score(raw_freq, mode)
             stats["matched"] += 1
         elif mode == "mountain":
-            # Reached only for OSM train routes that were overridden to mountain via
-            # MOUNTAIN_PLACE_KEYWORDS (e.g. WAB Lauterbrunnen→Kleine Scheidegg).
-            # These have no GTFS match in the mountain bucket but are real tourist railways.
+            # Reached only for OSM train routes overridden to mountain via
+            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB). No GTFS mountain bucket match exists.
             freq_score = 0.6
             stats["matched"] += 1
         else:
@@ -1472,7 +1476,12 @@ def main():
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
                     line_stops_out[osm_id] = pier_coords
-            continue
+                continue
+            elif mode != "mountain":
+                continue
+            # Mountain rack railways (WAB, JB, BRB) have no GTFS mountain-bucket entry
+            # (they are type=2 rail in GTFS). Fall through to the geo-based fallback
+            # below, which already searches the "train" bucket for mountain-mode lines.
 
         # Compute OSM line bbox (needed for stop filtering and geo fallback)
         geom = feat["geometry"]
