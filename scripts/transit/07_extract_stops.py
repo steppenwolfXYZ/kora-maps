@@ -316,7 +316,26 @@ def dominant_line(stops_in_cluster):
     return best_color, best_stop["mode"], max_wb, best_stop
 
 
-def make_pill_features(cluster_stops, minzoom):
+def cluster_lines(cluster_stops, line_lookup):
+    """
+    Return a sorted list of {ref, color, mode} dicts for all distinct lines
+    serving any stop in the cluster.  Sorted by mode rank then ref.
+    """
+    seen = {}
+    for s in cluster_stops:
+        oid = s.get("osm_id", "")
+        if oid and oid not in seen:
+            info = line_lookup.get(oid, {})
+            if info:
+                seen[oid] = {
+                    "ref":   info.get("ref", ""),
+                    "color": info.get("color", "#888888"),
+                    "mode":  info.get("mode", ""),
+                }
+    return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
+
+
+def make_pill_features(cluster_stops, minzoom, lines_json=""):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
 
@@ -348,6 +367,7 @@ def make_pill_features(cluster_stops, minzoom):
         "stop_id":        dom_stop.get("stop_id", ""),
         "stop_name":      dom_stop.get("stop_name", ""),
         "parent_station": dom_stop.get("parent_station", ""),
+        "lines_json":     lines_json,
     }
 
     def make_feat(coords, feature_type):
@@ -542,6 +562,8 @@ def main():
                 "mode":       p["mode"],
                 "width_base": p.get("width_base", 3.0),
                 "coords":     feat["geometry"]["coordinates"],
+                "ref":        p.get("ref", ""),
+                "name":       p.get("name", ""),
             }
         if p.get("gtfs_stops"):
             gtfs_stop_features.append(feat)
@@ -618,6 +640,7 @@ def main():
                 })
 
         elif mode == "ferry":
+            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode}])
             for entry in stop_coords:
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
@@ -633,6 +656,7 @@ def main():
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
+                        "lines_json":     line_lines_json,
                     },
                 })
 
@@ -667,6 +691,7 @@ def main():
                 })
 
         else:
+            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode}])
             for entry in stop_coords:
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
@@ -685,6 +710,7 @@ def main():
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
+                        "lines_json":     line_lines_json,
                     },
                 })
 
@@ -703,6 +729,7 @@ def main():
         color, mode, max_wb, dom_stop = dominant_line(cluster)
         lon = sum(s["lon"] for s in cluster) / len(cluster)
         lat = sum(s["lat"] for s in cluster) / len(cluster)
+        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
         centroid_props = {
             "color":          color,
             "mode":           mode,
@@ -710,6 +737,7 @@ def main():
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
+            "lines_json":     lines_json_str,
         }
 
         if mz is None:
@@ -740,9 +768,10 @@ def main():
                         "stop_id":        s.get("stop_id", ""),
                         "stop_name":      s.get("stop_name", ""),
                         "parent_station": s.get("parent_station", ""),
+                        "lines_json":     lines_json_str,
                     },
                 })
-            pill_features_rail.extend(make_pill_features(cluster, mz))
+            pill_features_rail.extend(make_pill_features(cluster, mz, lines_json_str))
 
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
@@ -769,6 +798,7 @@ def main():
         lon_c        = sum(s["lon"] for s in cluster) / len(cluster)
         lat_c        = sum(s["lat"] for s in cluster) / len(cluster)
         mode_minzoom = min(MODE_MINZOOM.get(s["mode"], 11) for s in cluster)
+        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
         centroid_props = {
             "color":          color,
             "mode":           dom_mode,
@@ -776,6 +806,7 @@ def main():
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
+            "lines_json":     lines_json_str,
         }
 
         if mz is None:
@@ -806,9 +837,10 @@ def main():
                         "stop_id":        s.get("stop_id", ""),
                         "stop_name":      s.get("stop_name", ""),
                         "parent_station": s.get("parent_station", ""),
+                        "lines_json":     lines_json_str,
                     },
                 })
-            feats = make_pill_features(cluster, mz)
+            feats = make_pill_features(cluster, mz, lines_json_str)
             pill_features.extend(feats)
             nonrail_pill_count += len(feats)
 

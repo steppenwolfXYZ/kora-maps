@@ -89,10 +89,31 @@
 				           : p.feature_type === 'endpoint' ? 'endpoint'
 				           : 'stop';
 				const countLine = p.stop_count != null ? `&ensp;count: ${fmt(p.stop_count)}` : '';
+
+				let linesHtml = '';
+				if (p.lines_json) {
+					try {
+						const lines: { ref: string; color: string; mode: string }[] =
+							JSON.parse(String(p.lines_json));
+						if (lines.length) {
+							const badges = lines.map(l => {
+								const label = l.ref || l.mode || '?';
+								const lum = parseInt(l.color.slice(1, 3), 16) * 0.299
+									+ parseInt(l.color.slice(3, 5), 16) * 0.587
+									+ parseInt(l.color.slice(5, 7), 16) * 0.114;
+								const fg = lum > 140 ? '#000' : '#fff';
+								return `<span style="display:inline-block;background:${l.color};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em">${label}</span>`;
+							}).join('');
+							linesHtml = `<div style="margin-top:4px">${badges}</div>`;
+						}
+					} catch { /* ignore malformed */ }
+				}
+
 				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
 					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)} ${kind}]${countLine}<br>
 					id: ${fmt(p.stop_id)}<br>
 					parent: ${fmt(p.parent_station)}
+					${linesHtml}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '320px' })
 					.setLngLat(e.lngLat)
