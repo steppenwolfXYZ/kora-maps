@@ -496,6 +496,30 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             if frozenset(s[0] for s in c["stops"]) in variant_counts
         ]
 
+    # Exclude line_keys that would not be drawn (freq_score == 0.0) from all three
+    # source dicts before sections 1 and 2 build _line_canonical_export.  This prevents
+    # zero/near-zero-service lines (e.g. EXT Extrazug) from entering the geo-fallback pool
+    # and contaminating stop assignment for other lines.  "bus" bucket uses "regional_bus"
+    # as mode approximation — intentionally conservative; see transit.md for the known edge case.
+    _BUCKET_MODE_APPROX = {
+        "train": "train", "tram": "tram", "metro": "metro",
+        "ferry": "ferry", "bus": "regional_bus", "regional_bus": "regional_bus",
+    }
+    _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
+    zero_service_keys = {
+        geo_key[0] for geo_key in line_canonical_geo_stops
+        if geo_key[0][2] != "mountain"
+        and compute_freq_score(
+            line_freq.get(geo_key[0], _zero_freq),
+            _BUCKET_MODE_APPROX.get(geo_key[0][2], "regional_bus"),
+        ) == 0.0
+    }
+    for geo_key in list(line_canonical_geo_stops.keys()):
+        if geo_key[0] in zero_service_keys:
+            del line_canonical_geo_stops[geo_key]
+            line_variant_counts.pop(geo_key, None)
+            line_canonical_geo.pop(geo_key, None)
+
     # Build canonical export: all unique stop sets per geographic cell per line_key.
     # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
     # share the same GTFS line_key = ("S6", "S 6", "train").  It also preserves minority
@@ -841,6 +865,8 @@ def _passes_geo_sanity(
     stop_meta: dict,
     osm_from: str = "",
     osm_to: str = "",
+    osm_stop_nodes: list = [],
+    osm_line_km: float = 0.0,
 ) -> bool:
     """Return True if a geo-fallback candidate is a plausible match for the OSM line.
 
@@ -849,7 +875,7 @@ def _passes_geo_sanity(
 
     Check 1 — terminal name matching: does the OSM from/to name appear inside a GTFS stop name?
     Check 2 — GTFS stops → OSM geometry: are 3/5 evenly-spaced GTFS stops within 200 m of the OSM line?
-    Check 3 — OSM geometry → GTFS stops: are 3/5 evenly-spaced OSM points within 200 m of any GTFS stop?
+    Check 3 — OSM stops → GTFS stops: are 3/5 evenly-spaced OSM stop nodes within 200 m of any GTFS stop?
     """
     if len(ccoords) < 2 or len(osm_pts) < 2:
         return False
@@ -871,34 +897,51 @@ def _passes_geo_sanity(
             sname = _norm_stop_name(stop_meta.get(sid, ("", ""))[0])
             if not sname:
                 continue
-            if norm_from and len(norm_from) >= 4 and norm_from in sname:
+            if norm_from and len(norm_from) >= 4 and sname == norm_from:
                 matches += 1
-            elif norm_to and len(norm_to) >= 4 and norm_to in sname:
+            elif norm_to and len(norm_to) >= 4 and sname == norm_to:
                 matches += 1
         if matches >= threshold:
             return True
 
-    # Check 2: GTFS stops → OSM geometry — O(5 × N_osm_vertices)
-    # Sample 5 evenly-spaced GTFS stops; require 3/5 within 200 m of OSM line.
-    step2 = max(1, len(ccoords) // 5)
-    sampled_gtfs = ccoords[::step2][:5]
-    close2 = sum(
-        1 for s in sampled_gtfs
-        if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.2
-    )
-    if close2 * 5 >= len(sampled_gtfs) * 3:  # ≥ 3/5
-        return True
+    # Check 2: density gate + GTFS stops → OSM geometry proximity
+    # Density gate (cheap, runs first): if OSM has stop nodes, compare stops/km.
+    # A candidate with more than 2× or less than 0.5× the OSM stop density is
+    # almost certainly a wrong route (e.g. dense regional S-Bahn matching sparse EC).
+    density_ok = True
+    if len(osm_stop_nodes) >= 2 and osm_line_km > 0:
+        cand_span_km = sum(
+            haversine_km(ccoords[i][0], ccoords[i][1], ccoords[i+1][0], ccoords[i+1][1])
+            for i in range(len(ccoords) - 1)
+        )
+        if cand_span_km > 0:
+            osm_density = len(osm_stop_nodes) / osm_line_km
+            cand_density = len(ccoords) / cand_span_km
+            ratio = cand_density / osm_density if osm_density > 0 else 1.0
+            density_ok = 0.5 <= ratio <= 2.0
 
-    # Check 3: OSM geometry → GTFS stops — O(5 × N_gtfs_stops)
-    # Sample 5 evenly-spaced OSM points; require 3/5 within 200 m of any GTFS stop.
-    step3 = max(1, len(osm_pts) // 5)
-    sampled_osm = osm_pts[::step3][:5]
-    close3 = sum(
-        1 for p in sampled_osm
-        if any(haversine_km(p[0], p[1], s[0], s[1]) <= 0.2 for s in ccoords)
-    )
-    if close3 * 5 >= len(sampled_osm) * 3:  # ≥ 3/5
-        return True
+    # Proximity check: 3/5 evenly-spaced GTFS stops within 200 m of OSM polyline.
+    if density_ok:
+        step2 = max(1, len(ccoords) // 5)
+        sampled_gtfs = ccoords[::step2][:5]
+        close2 = sum(
+            1 for s in sampled_gtfs
+            if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.2
+        )
+        if close2 * 5 >= len(sampled_gtfs) * 3:  # ≥ 3/5
+            return True
+
+    # Check 3: OSM stops → GTFS stops — O(5 × N_gtfs_stops)
+    # Sample 5 evenly-spaced OSM stop nodes; require 3/5 within 200 m of any GTFS stop.
+    if osm_stop_nodes and len(osm_stop_nodes) >= 2:
+        step3 = max(1, len(osm_stop_nodes) // 5)
+        sampled_osm = osm_stop_nodes[::step3][:5]
+        close3 = sum(
+            1 for p in sampled_osm
+            if any(haversine_km(p[0], p[1], s[0], s[1]) <= 0.2 for s in ccoords)
+        )
+        if close3 * 5 >= len(sampled_osm) * 3:  # ≥ 3/5
+            return True
 
     return False
 
@@ -915,6 +958,8 @@ def _lookup_canonical_stops(
     stop_coords: dict,
     stop_meta: dict,
     sub_bboxes: list,
+    osm_stop_nodes: list = [],
+    osm_line_km: float = 0.0,
 ) -> tuple[list, bool]:
     """Look up canonical stops for an OSM line and apply the name-fallback sanity check.
 
@@ -963,7 +1008,7 @@ def _lookup_canonical_stops(
 
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
-        if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to):
+        if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
             best_coords = []
 
     return best_coords, used_name_fallback
@@ -1311,6 +1356,10 @@ def main():
         osm_pts = ([c for seg in geom["coordinates"] for c in seg]
                    if geom["type"] == "MultiLineString" else geom["coordinates"])
         osm_bbox = line_bbox(osm_pts)
+        osm_line_km = sum(
+            haversine_km(osm_pts[i][0], osm_pts[i][1], osm_pts[i+1][0], osm_pts[i+1][1])
+            for i in range(len(osm_pts) - 1)
+        ) if len(osm_pts) >= 2 else 0.0
 
         # Primary match: geo-scored candidate selection (all modes).
         # Picks the specific GTFS line whose canonical stops best overlap this OSM route.
@@ -1496,7 +1545,11 @@ def main():
                 "speed_kmh":  speed_kmh,
                 "color":      color,
                 "width_base": width_base,
+                "line_km":    round(osm_line_km, 1),
                 "gtfs_matched": True,
+                "from":       props.get("from", ""),
+                "to":         props.get("to", ""),
+                "stop_nodes": props.get("stop_nodes", []),
             },
         })
 
@@ -1717,16 +1770,18 @@ def main():
         osm_end   = osm_pts[-1]
         osm_span_km = haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
 
-        # Extract OSM terminal tags — needed for sanity checks below.
-        osm_from = feat["properties"].get("from", "")
-        osm_to   = feat["properties"].get("to", "")
+        # Extract OSM terminal tags and stop nodes — needed for sanity checks below.
+        osm_from       = feat["properties"].get("from", "")
+        osm_to         = feat["properties"].get("to", "")
+        osm_stop_nodes = feat["properties"].get("stop_nodes", [])
+        osm_line_km    = feat["properties"].get("line_km", 0.0)
 
         # Reconstruct stop coords from canonical trip, with name-fallback sanity check.
         # Logic is in _lookup_canonical_stops() so the diagnostic script can share it.
         best_coords, used_name_fallback = _lookup_canonical_stops(
             ref, ref_norm, matched_gtfs_ref, bucket,
             osm_pts, osm_span_km, osm_from, osm_to,
-            stop_coords, stop_meta, sub_bboxes,
+            stop_coords, stop_meta, sub_bboxes, osm_stop_nodes, osm_line_km,
         )
         geo_best_ref: Optional[str] = None
 
@@ -1785,7 +1840,7 @@ def main():
                 )
                 geo_best: list = []
                 for _score, _ccoords, _lk_ref in geo_candidates[:50]:
-                    if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to):
+                    if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
                         geo_best = _ccoords
                         geo_best_ref = _lk_ref
                         break
