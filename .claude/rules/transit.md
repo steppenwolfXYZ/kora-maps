@@ -37,12 +37,13 @@ Applied in two situations in `05_score_and_match.py` — function `_passes_geo_s
 If the canonical lookup matched via `matched_gtfs_ref` (not the exact OSM ref), the result is sanity-checked. Tracked via `used_name_fallback = True`. If it fails, `best_coords` is cleared and geo-fallback runs.
 
 ### Trigger 2 — geo-fallback
-When canonical stops are empty or fail endpoint coverage, all GTFS lines in the bucket are scored and each candidate is run through `_passes_geo_sanity`. If nothing passes, `best_coords` is cleared — the line has no stops assigned (appears as EXCLUDED in `check_geo_sanity_rejects.py`). The line is still drawn as a colored line; the sanity check controls stop assignment, not line drawing.
+When canonical stops are empty or fail endpoint coverage, all GTFS lines in the bucket are scored as candidates. Scoring: `score = n_stops_in_bbox / n_total_stops`. Candidates with `score < 0.5` are discarded. Remaining candidates are sorted by `(-score, -len(ccoords))` — highest bbox overlap first, absolute stop count as tiebreaker. The top 50 candidates are run through `_passes_geo_sanity` in order; the first that passes is used. If nothing passes, `best_coords` is cleared — the line has no stops assigned (appears as EXCLUDED in `check_geo_sanity_rejects.py`). The line is still drawn as a colored line; the sanity check controls stop assignment, not line drawing.
 
 ### What the sanity check affects
 - It selects which geo-fallback candidate's stops are assigned to the line
-- If no candidate passes, the line has no stops (EXCLUDED)
+- If no candidate passes, the line has no stops AND is removed from the drawn output entirely (EXCLUDED)
 - A line can also be in KEPT with wrong stops if a bad candidate passes the check — this is a false positive, not a rejection
+- **Rule:** Lines excluded by the geo sanity check (no valid candidate found) must NOT be drawn. Do not draw lines without valid GTFS-backed stops.
 
 ### The three checks (cheapest first, returns True on first pass)
 
@@ -61,7 +62,6 @@ Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 is a neares
 
 ### Known remaining issues with the sanity check
 - `_norm_stop_name` strips `hb`/`hbf`/`bahnhof` — short generic city tokens can still pass Check 1 (e.g. `bern` from `Bern HB`)
-- `_min_dist_to_polyline_km` measures distance to nearest vertex, not segment — sparse-vertex lines may falsely fail Check 3
 - Exact OSM ref matches (where `used_name_fallback=False`) with good endpoint coverage bypass all sanity checks
 - `merge_clusters_by_parent_station` in `07_extract_stops.py` can pull in far-away points via shared parent_station — downstream issue, independent of the sanity check
 
@@ -98,16 +98,16 @@ Run: `python3 scripts/transit/check_geo_sanity_rejects.py [--mode train|bus|...]
 - **Regional Bus 108/124 (Flixbus) and Bus 73 (Ouibus/BlaBlaCar Bus)** — now excluded upstream in `osm_to_mode()` by network tag. `EXCLUDED_OPERATORS` extended to include `"blablacar bus"` and `"ouibus"`; `osm_to_mode()` now checks both `operator` and `network` tags (Flixbus subcontractors use their own company name in `operator` but `network="Flixbus"`).
 - **Bus 76 (La Plaine → Viry) and Bus X33 (Bellegarde → Ferney)** — correctly excluded by sanity filter; Geneva cross-border lines with no Swiss GTFS coverage. No fix needed.
 
-#### S18 (Forchbahn) — two-phase fix
-S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as `mode=train` because OSM tags it `route=light_rail`. It has no GTFS match under "S18" so it gets a wrong alpha-prefix fallback to "S" (west-shore S-Bahn) and wrong stops.
+#### S18 (Forchbahn) — two-phase fix (pending)
+S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as `mode=train` because OSM tags it `route=light_rail`. It has no GTFS match under "S18" so it gets a wrong alpha-prefix fallback to "S" (west-shore S-Bahn). New Check 2/3 (200 m threshold) should now reject the wrong west-shore S-Bahn candidate — verify with the diagnostic script. If it still appears, Phase 1 and 2 are still needed.
 
 **Phase 1:** Make S18 vanish — stop drawing lines that only matched via alpha-prefix fallback (no real GTFS match). All 4 OSM relations (2727252, 2727409, 20153407, 20153408) should be hidden.
 
 **Phase 2:** Revive S18 correctly — find its actual GTFS short_name (likely "FB" or similar under Forchbahn agency), map OSM `route=light_rail` with Forchbahn operator to `mode=tram`, and let it match properly.
 
-#### Pending implementation
-- **Check 2 + Check 3 redesign** — the old Check 2 (endpoint coverage, 5km threshold) and Check 3 (GTFS→OSM vertex, 500m) are being replaced. New Check 2: 5 evenly-spaced GTFS stops → OSM geometry, 3/5 within 200m. New Check 3: 5 evenly-spaced OSM geometry points → nearest GTFS stop, 3/5 within 200m. NOT YET IMPLEMENTED — compact happened before implementation.
+#### Resolved
+- **Train PE (Glacier Express St. Moritz↔Zermatt)** — now KEPT after geo fallback improvements (score ≥ 0.5 filter + better sort). No longer excluded.
+- **Train RE42 (Zermatt→Fiesch)** — now KEPT after same geo fallback improvements. No longer excluded.
 
 #### Still excluded — legitimate lines needing a fix
-- **Train PE (Glacier Express St. Moritz↔Zermatt)** — legitimate famous tourist train, should be shown. Both directions excluded. Best geo candidate is a wrong 5-stop route near Zermatt (start is 143 km off, only 1/5 stops within 500 m). Root cause: GTFS likely doesn't use "PE" as the short_name for this service, so canonical lookup fails entirely and the geo fallback has no valid candidate.
-- **Train RE42 (Zermatt→Fiesch)** — legitimate MGB regional line, should be shown. Identical 5-stop wrong candidate as PE (distances `[0.04, 0.54, 1.40, 3.41, 9.40 km]`), confirming both hit the same spurious Zermatt-area match. Root cause likely the same — GTFS uses a different ref than "RE42".
+- **Regional Bus 171 (Chur→Bellinzona)** — PostBus express (EXB 171). Canonical lookup picks a Bellinzona-local B 171 (44 stops, higher count) over the full-corridor EXB 171 (25 stops). Endpoint check fails → geo fallback runs. Geo fallback also ranks Bellinzona-local variants first (more stops, same score=1.0). EXB 171 is buried past the cap of 50. Fix: use 3-level endpoint coverage `(0/1/2 endpoints covered)` as primary geo fallback sort key, so full-corridor candidates float above partial ones.

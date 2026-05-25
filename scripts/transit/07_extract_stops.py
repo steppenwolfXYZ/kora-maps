@@ -328,12 +328,12 @@ def cluster_lines(cluster_stops, line_lookup):
             info = line_lookup.get(oid, {})
             if info:
                 seen[oid] = {
-                    "ref":   info.get("ref", ""),
-                    "color": info.get("color", "#888888"),
-                    "mode":  info.get("mode", ""),
-                    "name":  info.get("name", ""),
+                    "ref":      info.get("gtfs_ref") or info.get("ref", ""),
+                    "color":    info.get("color", "#888888"),
+                    "mode":     info.get("mode", ""),
+                    "name":     info.get("name", ""),
                 }
-    return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
+    return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x.get("gtfs_ref") or x["ref"]))
 
 
 def make_pill_features(cluster_stops, minzoom, lines_json=""):
@@ -602,7 +602,13 @@ def main():
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
-    for osm_id, stop_coords in line_stops.items():
+    for osm_id, ls_entry in line_stops.items():
+        if isinstance(ls_entry, dict):
+            stop_coords = ls_entry.get("stops", [])
+            if ls_entry.get("gtfs_ref"):
+                line_lookup.setdefault(osm_id, {})["gtfs_ref"] = ls_entry["gtfs_ref"]
+        else:
+            stop_coords = ls_entry
         line = line_lookup.get(osm_id)
         if not line:
             continue
@@ -641,7 +647,7 @@ def main():
                 })
 
         elif mode == "ferry":
-            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
+            line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for entry in stop_coords:
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
@@ -692,7 +698,7 @@ def main():
                 })
 
         else:
-            line_lines_json = json.dumps([{"ref": line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
+            line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for entry in stop_coords:
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
