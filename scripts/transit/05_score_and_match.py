@@ -1747,7 +1747,7 @@ def main():
                                     seen_pos.add(key)
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "stops": pier_coords}
+                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords}
                 continue
             elif mode != "mountain":
                 continue
@@ -1846,6 +1846,45 @@ def main():
                         break
                 if geo_best:
                     best_coords = geo_best
+                elif mode == "mountain":
+                    # Mountain rack railways (WAB, JB, BRB, SPB, GGB, PB, RB, MG, DFB) are
+                    # seasonal — their GTFS CC/type=2 entries may be pruned from
+                    # _line_canonical_export by the low-service filter when sample dates fall
+                    # outside the operating season.  Fall back to a terminal-name stop lookup:
+                    # search stop_meta for stops whose normalised name matches the OSM from/to
+                    # tag and whose coordinates are within this route's bbox.
+                    norm_from = _norm_stop_name(osm_from)
+                    norm_to   = _norm_stop_name(osm_to)
+                    term_stops: list = []
+                    seen_term_coords: set = set()
+                    for _sid, (_sname, _parent) in stop_meta.items():
+                        _norm_sname = _norm_stop_name(_sname)
+                        if not _norm_sname:
+                            continue
+                        if not (
+                            (norm_from and len(norm_from) >= 4 and _norm_sname == norm_from) or
+                            (norm_to   and len(norm_to)   >= 4 and _norm_sname == norm_to)
+                        ):
+                            continue
+                        _tc = stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0])
+                        if not _tc or not stop_near_bbox(_tc[0], _tc[1], bbox, margin=0.05):
+                            continue
+                        _key = (round(_tc[0], 3), round(_tc[1], 3))
+                        if _key in seen_term_coords:
+                            continue
+                        seen_term_coords.add(_key)
+                        term_stops.append([_tc[0], _tc[1], _sid])
+                    if len(term_stops) >= 2:
+                        best_coords = term_stops
+                    else:
+                        best_coords = []
+                        excluded_osm_ids.add(osm_id)
+                        excluded_details.append({
+                            "osm_id": osm_id,
+                            "ref":    feat["properties"]["ref"],
+                            "mode":   feat["properties"]["mode"],
+                            "name":   feat["properties"].get("name", ""),
+                        })
                 else:
                     # No geo candidate passed sanity. The geo-fallback only triggers when
                     # best_coords is already suspect (empty or failed endpoint coverage).
@@ -1861,9 +1900,34 @@ def main():
 
         if best_coords:
             gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "stops": best_coords}
+            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords}
 
     line_canonical_export = None  # free reference
+
+    # Dedup: if a gtfs_ref group has any direct-ref match (osm_ref ≈ gtfs_ref after
+    # normalization), remove all fallback-matched entries (osm_ref ≠ gtfs_ref) so the
+    # same GTFS line doesn't appear twice under different OSM route refs.
+    def _refs_match(osm_ref: str, gtfs_ref: str) -> bool:
+        norm = lambda s: s.replace(" ", "").lower()
+        return norm(osm_ref) == norm(gtfs_ref)
+
+    by_gtfs_ref: dict = defaultdict(list)
+    for osm_id, entry in line_stops_out.items():
+        if entry.get("gtfs_ref"):
+            by_gtfs_ref[entry["gtfs_ref"]].append(osm_id)
+
+    dedup_removed: set = set()
+    for gtfs_r, osm_ids in by_gtfs_ref.items():
+        direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
+        if direct:
+            fallback = [oid for oid in osm_ids if not _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
+            dedup_removed.update(fallback)
+
+    for oid in dedup_removed:
+        del line_stops_out[oid]
+
+    if dedup_removed:
+        print(f"  Dedup-removed:  {len(dedup_removed)} fallback-matched lines superseded by direct-ref match")
 
     OUT_STOPS.write_text(json.dumps(line_stops_out))
     print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
@@ -1872,7 +1936,8 @@ def main():
     print(f"  Sanity log:  {len(excluded_details)} excluded lines → {OUT_EXCLUDED}")
 
     # Remove lines whose geo sanity check rejected all candidates — they have no valid
-    # GTFS-backed stops and must not be drawn.
+    # GTFS-backed stops and must not be drawn.  Also remove dedup-eliminated lines.
+    excluded_osm_ids |= dedup_removed
     if excluded_osm_ids:
         before = len(features)
         features = [f for f in features
