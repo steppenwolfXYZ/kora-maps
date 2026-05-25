@@ -1,0 +1,9 @@
+# =============================================================================
+# Transit Pipeline Configuration
+# =============================================================================
+
+# ── Debug ────────────────────────────────────────────────────────────────────
+debug:
+  # Set true to include stops regardless of snap distance (shows all connectors).
+  # Requires ./scripts/rebuild_transit.sh --skip-osm to take effect.
+  disable_snap_gate: true
