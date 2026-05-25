@@ -44,6 +44,7 @@ OSM_ROUTES = ROOT / "data" / "osm" / "routes.geojson"
 OUT = ROOT / "data" / "transit" / "transit_lines.geojson"
 OUT_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 OUT_EXCLUDED = ROOT / "data" / "transit" / "sanity_excluded.json"
+OUT_NO_OSM   = ROOT / "data" / "transit" / "gtfs_no_osm.json"
 
 # ── Representative dates ─────────────────────────────────────────────────────
 WEEKDAY_DATE = "20260407"   # Tuesday 7 Apr 2026
@@ -859,7 +860,7 @@ def _norm_stop_name(name: str) -> str:
     return name.strip()
 
 
-def _passes_geo_sanity(
+def _osm_matches_gtfs(
     osm_pts: list,
     ccoords: list,
     stop_meta: dict,
@@ -868,12 +869,14 @@ def _passes_geo_sanity(
     osm_stop_nodes: list = [],
     osm_line_km: float = 0.0,
 ) -> bool:
-    """Return True if a geo-fallback candidate is a plausible match for the OSM line.
+    """Return True if an OSM route is a plausible geometric match for a set of GTFS stops.
 
-    Checks are ordered cheapest-first; returns True on the first passing check so
-    later (slower) checks are skipped as soon as one piece of evidence is found.
+    Checks are ordered cheapest-first; returns True on the first passing check.
+    Used symmetrically in both directions:
+      • GTFS-first: validates that a candidate OSM feature actually covers the GTFS stops
+      • (formerly) OSM-first geo-fallback: validated GTFS candidate against OSM line
 
-    Check 1 — terminal name matching: does the OSM from/to name appear inside a GTFS stop name?
+    Check 1 — terminal name matching: does the OSM from/to name appear in a GTFS stop name?
     Check 2 — GTFS stops → OSM geometry: are 3/5 evenly-spaced GTFS stops within 200 m of the OSM line?
     Check 3 — OSM stops → GTFS stops: are 3/5 evenly-spaced OSM stop nodes within 200 m of any GTFS stop?
     """
@@ -1008,7 +1011,7 @@ def _lookup_canonical_stops(
 
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
-        if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
+        if not _osm_matches_gtfs(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
             best_coords = []
 
     return best_coords, used_name_fallback
@@ -1201,6 +1204,147 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
     return best_line_key, raw_freq, speed_kmh, best_stops
 
 
+def _refine_bus_mode(ref: str, osm_props: dict) -> str:
+    """Refine 'bus' → 'regional_bus' based on ref digit count and OSM operator/network/length.
+    Returns the final mode string ('bus' or 'regional_bus').
+    """
+    ref_upper    = ref.strip().upper()
+    digits_only  = "".join(c for c in ref if c.isdigit())
+    n_digits     = len(digits_only)
+    op_lower     = osm_props.get("operator", "").lower()
+    net_lower    = osm_props.get("network", "").lower()
+
+    is_regional_2digit = (
+        "sti"       in op_lower
+        or "chur"   in op_lower
+        or "transreno" in net_lower
+        or "pag"    in op_lower
+        or "postauto" in op_lower
+    )
+
+    if ref_upper == "EV":
+        return "regional_bus"
+    if digits_only:
+        if n_digits >= 3:
+            return "regional_bus"
+        if is_regional_2digit and n_digits == 2:
+            return "regional_bus"
+        return "bus"
+    # Pure-letter ref → 10 km length rule
+    line_length_km = osm_props.get("raw_length_km", osm_props.get("length_km", 0))
+    return "regional_bus" if line_length_km >= 10.0 else "bus"
+
+
+def find_best_osm_for_gtfs(
+    ref: str,
+    bucket: str,
+    stop_pts: list,
+    stop_meta: dict,
+    osm_by_ref: dict,
+    skip_osm_ids=None,
+    osm_ferry_fallback=None,
+    rack_fallback=None,
+):
+    """Return (osm_feat, mode) for the best OSM relation matching a GTFS canonical candidate.
+
+    stop_pts: list of (lon, lat, stop_id)
+
+    Two-phase matching:
+    Phase 1 — Score all OSM candidates by fraction of GTFS stops inside the OSM route bbox.
+              Candidates below 0.3 are discarded.  Results sorted best-first.
+    Phase 2 — Validate top-50 survivors with _osm_matches_gtfs (the three sanity checks).
+              Return first that passes.
+    Last resort — if no candidate passes sanity but the top scorer has >= 0.5 overlap,
+                  accept it (high bbox overlap is strong geometric evidence).
+    """
+    skip_osm_ids = skip_osm_ids or set()
+    ref_norm = ref.replace(" ", "")
+
+    # Build ref variants to try (same cascade as find_best_gtfs_candidate)
+    ref_variants: list = list(dict.fromkeys([
+        ref, ref_norm, ref.upper(), ref.lower(), ref_norm.upper(),
+    ]))
+    # S-prefix variant: GTFS ref "18" should find OSM ref "S18" (e.g. Forchbahn)
+    if ref.isdigit() or ref_norm.isdigit():
+        ref_variants.append("S" + ref)
+
+    seen_oids: set = set()
+    scored: list = []   # (score, feat, osm_mode, osm_pts)
+
+    for try_ref in ref_variants:
+        for feat, osm_mode, _ in osm_by_ref.get(try_ref, []):
+            oid = str(feat["properties"].get("osm_id", ""))
+            if oid in skip_osm_ids or oid in seen_oids:
+                continue
+            seen_oids.add(oid)
+            geom = feat["geometry"]
+            pts = ([c for seg in geom["coordinates"] for c in seg]
+                   if geom["type"] == "MultiLineString" else geom["coordinates"])
+            bbox = line_bbox(pts)
+            n_inside = sum(1 for lon, lat, _ in stop_pts
+                           if stop_near_bbox(lon, lat, bbox, margin=0.05))
+            score = n_inside / len(stop_pts)
+            if score >= 0.3:
+                scored.append((score, feat, osm_mode, pts))
+
+    # Rack railway geo fallback: mountain rack railways (GTFS short_name="CC") have OSM refs
+    # like "311", "312", "R48", "475", etc. that don't match "CC".  When the ref lookup
+    # yields nothing, search a pre-built pool of OSM train routes with mountain operators.
+    if not scored and rack_fallback:
+        for feat, osm_mode in rack_fallback:
+            oid = str(feat["properties"].get("osm_id", ""))
+            if oid in skip_osm_ids or oid in seen_oids:
+                continue
+            seen_oids.add(oid)
+            geom = feat["geometry"]
+            pts = ([c for seg in geom["coordinates"] for c in seg]
+                   if geom["type"] == "MultiLineString" else geom["coordinates"])
+            bbox = line_bbox(pts)
+            n_inside = sum(1 for lon, lat, _ in stop_pts
+                           if stop_near_bbox(lon, lat, bbox, margin=0.05))
+            score = n_inside / len(stop_pts)
+            if score >= 0.3:
+                scored.append((score, feat, osm_mode, pts))
+
+    # Ferry geo fallback: when ref lookup yields nothing, try all OSM ferry relations
+    if not scored and osm_ferry_fallback:
+        for feat, osm_mode in osm_ferry_fallback:
+            oid = str(feat["properties"].get("osm_id", ""))
+            if oid in skip_osm_ids or oid in seen_oids:
+                continue
+            seen_oids.add(oid)
+            geom = feat["geometry"]
+            pts = ([c for seg in geom["coordinates"] for c in seg]
+                   if geom["type"] == "MultiLineString" else geom["coordinates"])
+            bbox = line_bbox(pts)
+            n_inside = sum(1 for lon, lat, _ in stop_pts
+                           if stop_near_bbox(lon, lat, bbox, margin=0.05))
+            score = n_inside / len(stop_pts)
+            if score >= 0.3:
+                scored.append((score, feat, osm_mode, pts))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: -x[0])
+
+    # Phase 2: validate with geo sanity checks (same three checks, inverted perspective)
+    ccoords_for_sanity = [[lon, lat, sid] for lon, lat, sid in stop_pts]
+    for _score, feat, osm_mode, osm_pts in scored[:50]:
+        props = feat["properties"]
+        if _osm_matches_gtfs(
+            osm_pts, ccoords_for_sanity, stop_meta,
+            props.get("from", ""), props.get("to", ""),
+            props.get("stop_nodes", []), props.get("line_km", 0.0),
+        ):
+            return feat, osm_mode
+
+    # Last resort: strong bbox overlap is usually sufficient even without name/proximity match
+    if scored[0][0] >= 0.5:
+        return scored[0][1], scored[0][2]
+    return None
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1298,260 +1442,220 @@ def main():
             continue
         ferry_geo_index.append((gtfs_entry, canon["stops"]))
 
-    print("\nMatching and scoring...")
+    MOUNTAIN_RAIL_OPERATORS = {
+        "WAB",                    # Wengernalpbahn — Lauterbrunnen/Grindelwald→Kleine Scheidegg
+        "JB",                     # Jungfraubahn — Kleine Scheidegg→Jungfraujoch
+        "BRB",                    # Brienz Rothorn Bahn
+        "Berner Oberland-Bahnen", # Schynige Platte Bahn (BOB valley trains use "BOB")
+        "Gornergratbahn",         # GGB — Zermatt→Gornergrat (shows as train without this)
+        "PILATUS-BAHNEN AG",      # Pilatusbahn — Alpnachstad→Pilatus Kulm
+        "RB",                     # Rigi Bahnen — Arth-Rigi-Bahn / Vitznau-Rigi-Bahn
+        "MG",                     # Ferrovia Monte Generoso
+        "Dampfbahn Furka-Bergstrecke",  # DFB — Realp→Oberwald (seasonal steam)
+    }
+
+    # Geo fallback pool for GTFS short_name="CC" (mountain rack railways).
+    # These are GTFS type=2 (train bucket) but their OSM routes carry refs like
+    # "311", "312", "R48", "475", etc. — not "CC" — so ref-based lookup fails.
+    # We collect all OSM train routes with mountain operators for bbox-based fallback.
+    osm_rack_pool: list = []
+    for _rf in osm_routes:
+        _rp = _rf["properties"]
+        if (_rp.get("operator", "") in MOUNTAIN_RAIL_OPERATORS and
+                _rp.get("route", "") in ("train", "rail", "light_rail")):
+            osm_rack_pool.append((_rf, "train"))
+    print(f"  {len(osm_rack_pool)} rack/cog railway OSM routes for CC geo-fallback")
+
+    # Build reverse ref→OSM index for all non-mountain transit.
+    # GTFS candidates will search for matching OSM geometry; OSM routes
+    # with no matching GTFS entry are simply not drawn.
+    osm_by_ref: dict = defaultdict(list)   # ref → [(feat, mode, n_pts), ...]
+    osm_ferry_relations: list = []         # [(feat, mode), ...] for ferry bbox fallback
+
+    for _feat in osm_routes:
+        _props     = _feat["properties"]
+        _route_tag = _props.get("route", "")
+        _ref       = _props.get("ref", "").strip()
+        _operator  = _props.get("operator", "")
+        _network   = _props.get("network", "")
+        _length_km = _props.get("length_km", 0)
+
+        if _route_tag in ("fitness_trail", "hiking", "cycling", "foot"):
+            continue
+        _mode = osm_to_mode(_route_tag, _ref, _operator, _length_km, _network)
+        if _mode is None:
+            continue
+        if _mode == "mountain":
+            continue
+        if _mode == "train" and _ref in osm_train_refs_in_mountain_gtfs:
+            continue
+        if _ref.upper().startswith("TER"):
+            continue
+
+        _geom = _feat["geometry"]
+        _pts  = ([c for seg in _geom["coordinates"] for c in seg]
+                 if _geom["type"] == "MultiLineString" else _geom["coordinates"])
+        osm_by_ref[_ref].append((_feat, _mode, len(_pts)))
+        if _mode == "ferry":
+            osm_ferry_relations.append((_feat, _mode))
+
+    # Also index by space-stripped variant for ref mismatch tolerance
+    for _ref in list(osm_by_ref.keys()):
+        _ref_norm = _ref.replace(" ", "")
+        if _ref_norm != _ref:
+            osm_by_ref[_ref_norm].extend(osm_by_ref[_ref])
+
+    print(f"  {sum(len(v) for v in osm_by_ref.values()):,} OSM route entries indexed "
+          f"({len(osm_ferry_relations)} ferry relations)")
+
+    print("\nMatching and scoring (GTFS-first)...")
     features = []
     stats = defaultdict(int)
 
-    MODE_TO_BUCKET = {
-        "train": "train",
-        "tram": "tram", "metro": "metro",
-        "bus": "bus", "regional_bus": "bus",
-        "ferry": "ferry", "mountain": "mountain",
+    line_stops_out: dict = {}
+    gtfs_no_osm_details: list = []
+
+    BUCKET_TO_MODE = {
+        "train": "train", "tram": "tram", "metro": "metro",
+        "bus": "bus", "ferry": "ferry",
     }
 
-    for feat in osm_routes:
-        props = feat["properties"]
-        route_tag = props.get("route", "")
-        ref       = props.get("ref", "").strip()
-        operator  = props.get("operator", "")
-        network   = props.get("network", "")
-        length_km = props.get("length_km", 0)
-
-        # Skip non-transit
-        if route_tag in ("fitness_trail", "hiking", "cycling", "foot"):
+    for (ref, bucket), candidates in _line_canonical_export.items():
+        if bucket == "mountain":
             continue
 
-        mode = osm_to_mode(route_tag, ref, operator, length_km, network)
-        if mode is None:
-            stats["excluded"] += 1
+        mode_base = BUCKET_TO_MODE.get(bucket)
+        if mode_base is None:
             continue
 
-        # Forchbahn (FB): OSM ref="S18", GTFS short_name="18" (type=0, tram).
-        # Remap ref so all GTFS lookups and stop assignment find the right entry.
-        if operator.lower() == "fb":
-            ref = ref.lstrip("S") or ref
-
-        # Mountain lines (funicular, gondola, cable car, aerialway) are processed
-        # GTFS-first after this loop. Skip them here so OSM geometry alone never
-        # draws a line — the timetable is the authority for what runs.
-        # Also skip train-tagged rack/cog railways whose ref is in the mountain GTFS
-        # bucket (e.g. Niesenbahn tagged route=train but GTFS type=5/6/7): the
-        # GTFS-first loop will draw them using the OSM geometry we collected above.
-        if mode == "mountain":
-            continue
-        if mode == "train" and ref in osm_train_refs_in_mountain_gtfs:
-            continue
-
-        # Exclude TER (French/Swiss regional rail-replacement buses).
-        # These are cross-border or French-domestic services, not relevant for this map.
+        # TER = French/cross-border regional trains — no Swiss OSM routes, intentionally skipped
         if ref.upper().startswith("TER"):
-            stats["excluded"] += 1
             continue
 
-        bucket = MODE_TO_BUCKET.get(mode, "bus")
         ref_norm = ref.replace(" ", "")
 
-        # OSM route bbox
-        geom = feat["geometry"]
-        osm_pts = ([c for seg in geom["coordinates"] for c in seg]
-                   if geom["type"] == "MultiLineString" else geom["coordinates"])
-        osm_bbox = line_bbox(osm_pts)
-        osm_line_km = sum(
-            haversine_km(osm_pts[i][0], osm_pts[i][1], osm_pts[i+1][0], osm_pts[i+1][1])
-            for i in range(len(osm_pts) - 1)
-        ) if len(osm_pts) >= 2 else 0.0
+        # GTFS freq/speed lookup — same cascade as the old OSM loop
+        gtfs_entry = gtfs_index.get((bucket, ref))
+        if gtfs_entry is None:
+            for k in [(bucket, ref_norm), (bucket, ref.upper()), (bucket, ref.lower())]:
+                gtfs_entry = gtfs_index.get(k)
+                if gtfs_entry:
+                    break
+        if gtfs_entry is None:
+            gtfs_entry = (gtfs_long_index.get((bucket, ref_norm)) or
+                          gtfs_long_index.get((bucket, ref_norm.upper())))
+        if gtfs_entry is None:
+            continue
 
-        # Primary match: geo-scored candidate selection (all modes).
-        # Picks the specific GTFS line whose canonical stops best overlap this OSM route.
-        # Geo is a tiebreaker — a single candidate wins even with score=0.
-        gtfs = None
-        matched_line_key = None
-        matched_canon_stops = None
-        gtfs_match = find_best_gtfs_candidate(
-            ref, bucket, osm_bbox, stop_coords, line_freq, line_speed,
-            osm_name=props.get("name", ""))
-        if gtfs_match:
-            matched_line_key, gtfs_raw_freq, gtfs_speed, matched_canon_stops = gtfs_match
-            if sum(gtfs_raw_freq.values()) > 0:
-                gtfs = {"raw_freq": gtfs_raw_freq, "speed_kmh": gtfs_speed}
+        raw_freq_base  = gtfs_entry["raw_freq"]
+        speed_kmh_base = gtfs_entry["speed_kmh"]
 
-        if gtfs is None:
-            # No candidates in _line_canonical_export, OR geo match had zero service on
-            # sample dates (wrong line_key picked) — fall back to aggregated index.
-            # Preserves old behaviour for lines whose canonical trips have no resolvable
-            # stop coordinates (geo_bucket could not be determined during streaming).
-            gtfs = gtfs_index.get((bucket, ref))
-            if gtfs is None:
-                for k in [(bucket, ref_norm), (bucket, ref.upper()), (bucket, ref.lower())]:
-                    gtfs = gtfs_index.get(k)
-                    if gtfs: break
-            if gtfs is None:
-                gtfs = (gtfs_long_index.get((bucket, ref_norm)) or
-                        gtfs_long_index.get((bucket, ref_norm.upper())))
-            if gtfs is None:
-                osm_name_prefix = props.get("name", "").split(":")[0].strip()
-                for token in osm_name_prefix.split():
-                    if token != ref and len(token) <= 6:
-                        gtfs = gtfs_index.get((bucket, token)) or gtfs_index.get((bucket, token.upper()))
-                        if gtfs: break
-            if gtfs is None:
-                m = re.match(r'^([A-Za-z ]+)\d', ref)
-                if m:
-                    alpha = m.group(1).strip()
-                    if alpha and alpha != ref:
-                        gtfs = gtfs_index.get((bucket, alpha)) or gtfs_index.get((bucket, alpha.upper()))
+        claimed_osm_ids: set = set()
 
-        # Geo-based ferry fallback: OSM ferry ref may differ from GTFS short_name entirely
-        # (e.g. BLS Thuner-/Brienzersee: OSM ref=3310/3470, GTFS short=59-68).
-        # Find the GTFS ferry line whose canonical stops best overlap the OSM bbox.
-        if gtfs is None and mode == "ferry":
-            best_n = 1   # require at least 2 stops inside
-            for gtfs_entry, cand_stops in ferry_geo_index:
-                n_inside = sum(1 for sid, arr, dep in cand_stops
-                               if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))
-                               and stop_near_bbox(c[0], c[1], osm_bbox, margin=0.05))
-                if n_inside > best_n:
-                    best_n = n_inside
-                    gtfs = gtfs_entry
+        for candidate_idx, (line_key, stops, dir_aware) in enumerate(candidates):
+            # Resolve GTFS stop coordinates for this candidate
+            stop_pts = []
+            for stop_id, _arr, _dep in stops:
+                c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
+                if c:
+                    stop_pts.append((c[0], c[1], stop_id))
+            if len(stop_pts) < 2:
+                continue
 
-        # Operator-based override for rack/cog railways that are type=2 (rail) in GTFS
-        # but are tourist mountain railways in reality. Keyed by OSM operator string.
-        # WAB and JB are rack railways to Kleine Scheidegg / Jungfraujoch.
-        # BRB (Brienz Rothorn Bahn) is a steam rack railway, also type=2 in GTFS.
-        # SPB (Schynige Platte Bahn) uses the full name in OSM; "BOB" (valley train) does not.
-        MOUNTAIN_RAIL_OPERATORS = {
-            "WAB",                    # Wengernalpbahn — Lauterbrunnen/Grindelwald→Kleine Scheidegg
-            "JB",                     # Jungfraubahn — Kleine Scheidegg→Jungfraujoch
-            "BRB",                    # Brienz Rothorn Bahn
-            "Berner Oberland-Bahnen", # Schynige Platte Bahn (BOB valley trains use "BOB")
-            "Gornergratbahn",         # GGB — Zermatt→Gornergrat (shows as train without this)
-            "PILATUS-BAHNEN AG",      # Pilatusbahn — Alpnachstad→Pilatus Kulm
-            "RB",                     # Rigi Bahnen — Arth-Rigi-Bahn / Vitznau-Rigi-Bahn
-            "MG",                     # Ferrovia Monte Generoso
-            "Dampfbahn Furka-Bergstrecke",  # DFB — Realp→Oberwald (seasonal steam)
-        }
-        if mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS:
-            mode = "mountain"
-            bucket = "mountain"
-
-        speed_kmh = gtfs["speed_kmh"] if gtfs else None
-
-        # Refine bus → regional_bus using ref structure + STI/EV exceptions.
-        #
-        # For refs that contain at least one digit: strip all letters/symbols and
-        # evaluate the numeric remainder.  E.g. "X33" → "33" (2 digits → city),
-        # "200 (Höribus)" → "200" (3 digits → regional).
-        #
-        # Special cases:
-        #   • "EV" ref → always regional (Ersatzverkehr train-replacement bus).
-        #   • STI operator + 2-digit numeric part → regional (Thun mountain buses).
-        #   • PAG / PostAuto AG: regional operator across all CH; 2-digit refs are
-        #     inter-village/inter-town lines, never city bus circulators.
-        #
-        # Pure-letter refs (A, G, TEL, Rot …) use a 10 km length fallback:
-        # short city circulator vs. long regional connector.
-        if mode == "bus":
-            ref_upper = ref.strip().upper()
-            digits_only = "".join(c for c in ref if c.isdigit())
-            n_digits = len(digits_only)
-            op_lower = operator.lower()
-            net_lower = props.get("network", "").lower()
-            # Operators/networks where 2-digit line numbers are regional, not city
-            is_regional_2digit_net = (
-                "sti" in op_lower                  # STI Thun area mountain buses
-                or "chur" in op_lower              # ChurBus city-regional network
-                or "transreno" in net_lower        # TransReno network (Chur/PostAuto)
-                or "pag" in op_lower               # PostAuto Graubünden abbreviation
-                or "postauto" in op_lower          # PostAuto AG full name
+            # Find best unclaimed OSM relation for this candidate
+            ferry_fb = osm_ferry_relations if bucket == "ferry" else None
+            rack_fb  = osm_rack_pool if ref == "CC" else None
+            result = find_best_osm_for_gtfs(
+                ref, bucket, stop_pts, stop_meta,
+                osm_by_ref, claimed_osm_ids, ferry_fb,
+                rack_fallback=rack_fb,
             )
+            if result is None:
+                if stop_pts:
+                    clon = sum(p[0] for p in stop_pts) / len(stop_pts)
+                    clat = sum(p[1] for p in stop_pts) / len(stop_pts)
+                else:
+                    clon = clat = None
+                gtfs_no_osm_details.append({
+                    "ref": ref, "bucket": bucket, "candidate_idx": candidate_idx,
+                    "stop_count": len(stop_pts),
+                    "lon": round(clon, 3) if clon is not None else None,
+                    "lat": round(clat, 3) if clat is not None else None,
+                })
+                stats["no_osm"] += 1
+                continue
 
-            if ref_upper == "EV":
-                # Ersatzverkehr train-replacement bus — always regional
-                mode = "regional_bus"
-            elif digits_only:
-                # Ref contains a numeric component — classify by digit count
-                if n_digits >= 3:
-                    mode = "regional_bus"
-                elif is_regional_2digit_net and n_digits == 2:
-                    mode = "regional_bus"
-                # else: 0-2 digit numeric part → keep as city bus
-            else:
-                # Pure letter ref (A, G, TEL, Rot, …) → 10 km length rule
-                line_length_km = props.get("raw_length_km", props.get("length_km", 0))
-                if line_length_km >= 10.0:
-                    mode = "regional_bus"
+            osm_feat, osm_mode = result
+            osm_props = osm_feat["properties"]
+            osm_id    = osm_props.get("osm_id")
+            claimed_osm_ids.add(str(osm_id))
 
-        # Compute frequency score with the final mode
-        # Use corridor-level frequency (all lines sharing any stop pair on this route)
-        # rather than this line's own frequency alone, so that shared corridors
-        # like Bern–Spiez or Arth-Goldau–Bellinzona reflect their true combined service.
-        if gtfs:
-            own_raw = gtfs["raw_freq"]
-            # Use the geo-matched canonical stops when available; otherwise fall back
-            # to the first candidate for this ref (any stop sequence will do for corridor).
-            if matched_canon_stops:
-                corr_canon = matched_canon_stops
-            else:
-                corr_canon = None
-                for lk in [(ref, bucket), (ref_norm, bucket),
-                           (ref_norm.upper(), bucket), (ref.lower(), bucket)]:
-                    candidates = _line_canonical_export.get(lk)
-                    if candidates:
-                        corr_canon = candidates[0][1]   # (line_key, stops, dir_aware) → stops
-                        break
-            corr_raw = corridor_freq(corr_canon, pair_freq) if corr_canon else None
-            # Only boost via corridor if the line itself has some own service on sample dates.
-            # Night-only lines (own_raw core_wd == 0) must NOT inherit frequency from daytime
-            # buses sharing the same stops (e.g. M82 Moonliner ← bus 82 daytime service).
+            # Operator override: rack railways in train GTFS bucket → mountain
+            mode = osm_mode
+            if mode == "train" and osm_props.get("operator") in MOUNTAIN_RAIL_OPERATORS:
+                mode = "mountain"
+
+            # Refine bus → regional_bus
+            if mode == "bus":
+                mode = _refine_bus_mode(ref, osm_props)
+
+            # Corridor freq boost
+            corr_raw = corridor_freq(stops, pair_freq)
+            own_raw  = raw_freq_base
             if corr_raw and own_raw["core_wd"] > 0 and corr_raw["core_wd"] > own_raw["core_wd"]:
                 raw_freq = corr_raw
             else:
                 raw_freq = own_raw
+
             freq_score = compute_freq_score(raw_freq, mode)
+            if freq_score == 0.0 and mode != "mountain":
+                continue
+            if mode == "mountain" and freq_score < 0.4:
+                freq_score = 0.4
+
+            color      = speed_to_color(mode, speed_kmh_base)
+            width_base = freq_to_width_base(freq_score, mode)
+
+            feature_id   = f"gtfs:{ref}:{bucket}:{candidate_idx}"
+
+            osm_geom     = osm_feat["geometry"]
+            osm_geom_pts = ([c for seg in osm_geom["coordinates"] for c in seg]
+                            if osm_geom["type"] == "MultiLineString"
+                            else osm_geom["coordinates"])
+            line_km = sum(
+                haversine_km(osm_geom_pts[i][0], osm_geom_pts[i][1],
+                             osm_geom_pts[i+1][0], osm_geom_pts[i+1][1])
+                for i in range(len(osm_geom_pts) - 1)
+            ) if len(osm_geom_pts) >= 2 else 0.0
+
+            features.append({
+                "type": "Feature",
+                "geometry": osm_feat["geometry"],
+                "properties": {
+                    "feature_id":   feature_id,
+                    "osm_id":       osm_id,
+                    "ref":          ref,
+                    "name":         osm_props.get("name", ""),
+                    "operator":     osm_props.get("operator", ""),
+                    "mode":         mode,
+                    "freq_score":   freq_score,
+                    "speed_kmh":    speed_kmh_base,
+                    "color":        color,
+                    "width_base":   width_base,
+                    "line_km":      round(line_km, 1),
+                    "gtfs_matched": True,
+                    "from":         osm_props.get("from", ""),
+                    "to":           osm_props.get("to", ""),
+                    "stop_nodes":   osm_props.get("stop_nodes", []),
+                },
+            })
+            line_stops_out[feature_id] = {
+                "gtfs_ref": ref,
+                "stops":    [[lon, lat, sid] for lon, lat, sid in stop_pts],
+            }
             stats["matched"] += 1
-        elif mode == "mountain":
-            # Reached only for OSM train routes overridden to mountain via
-            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB, SPB, GGB, PB, RB, MG, DFB).
-            # No GTFS mountain bucket match exists for these type=2 rack railways.
-            freq_score = 0.6
-            stats["matched"] += 1
-        else:
-            freq_score = None   # unmatched → skip (don't draw)
-            stats["unmatched"] += 1
 
-        # Skip routes with no service on sample dates (freq_score == 0.0).
-        # Mountain mode is exempt: seasonal railways may not run on our specific
-        # sample date but are still worth showing (they get clamped to 0.4 below).
-        if freq_score is None or (freq_score == 0.0 and mode != "mountain"):
-            continue
-
-        # Mountain railways are always worth showing; clamp to a visible minimum
-        if mode == "mountain" and freq_score < 0.4:
-            freq_score = 0.4
-
-        color      = speed_to_color(mode, speed_kmh)
-        width_base = freq_to_width_base(freq_score, mode)
-
-        features.append({
-            "type": "Feature",
-            "geometry": feat["geometry"],
-            "properties": {
-                "osm_id":     props.get("osm_id"),
-                "ref":        ref,
-                "name":       props.get("name", ""),
-                "operator":   operator,
-                "mode":       mode,
-                "freq_score": freq_score,
-                "speed_kmh":  speed_kmh,
-                "color":      color,
-                "width_base": width_base,
-                "line_km":    round(osm_line_km, 1),
-                "gtfs_matched": True,
-                "from":       props.get("from", ""),
-                "to":         props.get("to", ""),
-                "stop_nodes": props.get("stop_nodes", []),
-            },
-        })
+    print(f"  {stats['matched']:,} matched, {stats.get('no_osm', 0):,} GTFS candidates with no OSM geometry")
 
     # ── GTFS-first mountain processing ──────────────────────────────────────────
     # Every cable car / gondola / funicular in the timetable (GTFS route type 5/6/7)
@@ -1586,13 +1690,15 @@ def main():
 
         # Each entry in stop_list_candidates is one geographic location for this ref.
         # Produce one map feature per location.
-        for (_, stop_list, _da) in stop_list_candidates:
-            # Resolve stop coordinates
+        for candidate_idx, (_, stop_list, _da) in enumerate(stop_list_candidates):
+            # Resolve stop coordinates (keep stop_id for line_stops_out)
             stop_pts = []
+            stop_pts_with_ids = []
             for stop_id, _arr, _dep in stop_list:
                 c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                 if c:
                     stop_pts.append(list(c))
+                    stop_pts_with_ids.append((c[0], c[1], stop_id))
             if len(stop_pts) < 2:
                 continue
 
@@ -1621,17 +1727,23 @@ def main():
                         best_n_pts = n_pts
                         best_osm_feat = osm_feat
 
+            feature_id = f"mountain:{ref}:{candidate_idx}"
+
             if best_osm_feat:
                 geometry   = best_osm_feat["geometry"]
                 osm_id     = best_osm_feat["properties"].get("osm_id")
                 feat_name  = best_osm_feat["properties"].get("name", "") or ref
                 operator   = best_osm_feat["properties"].get("operator", "")
-                gtfs_stops = None   # OSM-shaped: existing line_stops.json mechanism handles stops
+                gtfs_stops = None
                 n_osm_shape += 1
+                line_stops_out[feature_id] = {
+                    "gtfs_ref": ref,
+                    "stops":    [[lon, lat, sid] for lon, lat, sid in stop_pts_with_ids],
+                }
             else:
                 # No OSM relation → straight line through GTFS stop coordinates.
                 # Embed stop coords directly so 07_extract_stops.py can render them
-                # without needing an osm_id key.
+                # without needing a line_stops entry.
                 geometry   = {"type": "LineString", "coordinates": stop_pts}
                 osm_id     = None
                 feat_name  = ref
@@ -1643,6 +1755,7 @@ def main():
             width_base = freq_to_width_base(freq_score, "mountain")
 
             props = {
+                "feature_id":  feature_id,
                 "osm_id":      osm_id,
                 "ref":         ref,
                 "name":        feat_name,
@@ -1670,221 +1783,18 @@ def main():
 
     OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
 
-    # Save stop coordinates per line (osm_id → [[lon,lat], ...]) for stop dot rendering
-    line_stops_out = {}
-    excluded_osm_ids: set = set()   # osm_ids where geo sanity check rejected all candidates
-    excluded_details: list = []     # metadata for sanity_excluded.json sidecar
-    for feat in features:
-        osm_id = str(feat["properties"]["osm_id"])
-        ref    = feat["properties"]["ref"]
-        mode   = feat["properties"]["mode"]
-        bucket = MODE_TO_BUCKET.get(mode, "bus")
-        ref_norm = ref.replace(" ", "")
-
-        # GTFS lookup — mirror the same fallback cascade used in the main OSM loop
-        # so that lines drawn via a fallback there also get stop coordinates here.
-        matched_gtfs_ref: str | None = None
-
-        gtfs = gtfs_index.get((bucket, ref))
-        if gtfs: matched_gtfs_ref = ref
-        if gtfs is None:
-            for k_ref in [ref_norm, ref.upper(), ref.lower(), ref_norm.upper()]:
-                cand = gtfs_index.get((bucket, k_ref))
-                if cand:
-                    gtfs = cand
-                    matched_gtfs_ref = k_ref
-                    break
-        if gtfs is None:
-            for lk in [(bucket, ref_norm), (bucket, ref_norm.upper())]:
-                cand = gtfs_long_index.get(lk)
-                if cand:
-                    gtfs = cand
-                    matched_gtfs_ref = ref_norm
-                    break
-        # First-word-of-name fallback: "R 311: Interlaken…" → try "R", "311"
-        if gtfs is None:
-            osm_name_prefix = feat["properties"].get("name", "").split(":")[0].strip()
-            for token in osm_name_prefix.split():
-                if token != ref and len(token) <= 6:
-                    cand = gtfs_index.get((bucket, token)) or \
-                           gtfs_index.get((bucket, token.upper()))
-                    if cand:
-                        gtfs = cand
-                        matched_gtfs_ref = token if gtfs_index.get((bucket, token)) else token.upper()
-                        break
-        # Alpha-prefix fallback: "R43" → "R", "R44" → "R", etc.
-        if gtfs is None:
-            m = re.match(r'^([A-Za-z ]+)\d', ref)
-            if m:
-                alpha = m.group(1).strip()
-                if alpha and alpha != ref:
-                    cand = gtfs_index.get((bucket, alpha)) or \
-                           gtfs_index.get((bucket, alpha.upper()))
-                    if cand:
-                        gtfs = cand
-                        matched_gtfs_ref = alpha if gtfs_index.get((bucket, alpha)) else alpha.upper()
-
-        if gtfs is None:
-            if mode == "ferry":
-                # No direct ref match (OSM ref=3310 ≠ GTFS short_name=7–22).
-                # Collect all ferry pier stops from any GTFS ferry route whose stops
-                # fall within this OSM route's bbox.
-                geom = feat["geometry"]
-                osm_pts = ([c for seg in geom["coordinates"] for c in seg]
-                           if geom["type"] == "MultiLineString" else geom["coordinates"])
-                bbox = line_bbox(osm_pts)
-                seen_pos: set = set()
-                pier_coords: list = []
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket != "ferry":
-                        continue
-                    for (_, cand, _da) in lk_candidates:
-                        for stop_id, _a, _d in cand:
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
-                                key = (round(c[0], 4), round(c[1], 4))
-                                if key not in seen_pos:
-                                    seen_pos.add(key)
-                                    pier_coords.append([c[0], c[1], stop_id])
-                if pier_coords:
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "stops": pier_coords}
-                continue
-            elif mode != "mountain":
-                continue
-            # Mountain rack railways (WAB, JB, BRB) have no GTFS mountain-bucket entry
-            # (they are type=2 rail in GTFS). Fall through to the geo-based fallback
-            # below, which already searches the "train" bucket for mountain-mode lines.
-
-        # Compute OSM line bbox (needed for stop filtering and geo fallback)
-        geom = feat["geometry"]
-        if geom["type"] == "MultiLineString":
-            osm_pts = [c for seg in geom["coordinates"] for c in seg]
-        else:
-            osm_pts = geom["coordinates"]
-        bbox = line_bbox(osm_pts)
-        sub_bboxes = build_sub_bboxes(osm_pts)   # corridor-aware stop filter
-
-        # Precompute OSM direction for direction-aware candidate filtering.
-        # Only meaningful when start and end are well-separated (non-circular routes).
-        osm_start = osm_pts[0]
-        osm_end   = osm_pts[-1]
-        osm_span_km = haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
-
-        # Extract OSM terminal tags and stop nodes — needed for sanity checks below.
-        osm_from       = feat["properties"].get("from", "")
-        osm_to         = feat["properties"].get("to", "")
-        osm_stop_nodes = feat["properties"].get("stop_nodes", [])
-        osm_line_km    = feat["properties"].get("line_km", 0.0)
-
-        # Reconstruct stop coords from canonical trip, with name-fallback sanity check.
-        # Logic is in _lookup_canonical_stops() so the diagnostic script can share it.
-        best_coords, used_name_fallback = _lookup_canonical_stops(
-            ref, ref_norm, matched_gtfs_ref, bucket,
-            osm_pts, osm_span_km, osm_from, osm_to,
-            stop_coords, stop_meta, sub_bboxes, osm_stop_nodes, osm_line_km,
-        )
-        geo_best_ref: Optional[str] = None
-
-        # Geo-based fallback: triggers when (a) no canon found at all, (b) canon found
-        # but its stops don't overlap this OSM feature's bbox, or (c) canonical stops
-        # fail endpoint coverage — indicating the ref matched the wrong GTFS service
-        # (e.g. SBB 'RE' for MGB 'RE41', or MGB 'R' for Gornergrat 'R48 (CC)').
-        # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
-        # is carried as GTFS train type=2 routes under short_name "R".
-        if not best_coords or not _covers_endpoints(osm_pts, best_coords):
-            if mode == "ferry":
-                # Ferry: collect ALL pier stops from any GTFS ferry route within the bbox,
-                # deduped by position. OSM ref ≠ GTFS short_name so we can't ref-match.
-                seen_pos: set = set()
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket != "ferry":
-                        continue
-                    for (_, cand, _da) in lk_candidates:
-                        for stop_id, _a, _d in cand:
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
-                                key = (round(c[0], 4), round(c[1], 4))
-                                if key not in seen_pos:
-                                    seen_pos.add(key)
-                                    best_coords.append([c[0], c[1], stop_id])
-            else:
-                search_buckets = {bucket}
-                if bucket == "mountain":
-                    search_buckets.add("train")
-                # Collect all scored candidates, then pick the highest-scoring one
-                # that passes the geo sanity checks.  Sorting first means we check
-                # the most-likely-correct candidates first and exit early.
-                geo_candidates: list = []  # (score, ccoords, lk_ref)
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket not in search_buckets:
-                        continue
-                    for (_, cand, _da) in lk_candidates:
-                        if not cand:
-                            continue
-                        ccoords = []
-                        for stop_id, _arr, _dep in cand:
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
-                                ccoords.append([c[0], c[1], stop_id])
-                        if len(ccoords) < 2:
-                            continue
-                        score = len(ccoords) / len(cand)
-                        if score < 0.5:
-                            continue
-                        geo_candidates.append((score, ccoords, lk_ref))
-
-                # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
-                # then absolute stop count. Equal-score full-corridor routes beat partial ones.
-                geo_candidates.sort(
-                    key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1]), -len(x[1]))
-                )
-                geo_best: list = []
-                for _score, _ccoords, _lk_ref in geo_candidates[:50]:
-                    if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
-                        geo_best = _ccoords
-                        geo_best_ref = _lk_ref
-                        break
-                if geo_best:
-                    best_coords = geo_best
-                else:
-                    # No geo candidate passed sanity. The geo-fallback only triggers when
-                    # best_coords is already suspect (empty or failed endpoint coverage).
-                    # If geo finds nothing valid either, discard rather than keep wrong stops.
-                    best_coords = []
-                    excluded_osm_ids.add(osm_id)
-                    excluded_details.append({
-                        "osm_id": osm_id,
-                        "ref":    feat["properties"]["ref"],
-                        "mode":   feat["properties"]["mode"],
-                        "name":   feat["properties"].get("name", ""),
-                    })
-
-        if best_coords:
-            gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "stops": best_coords}
-
-    line_canonical_export = None  # free reference
-
     OUT_STOPS.write_text(json.dumps(line_stops_out))
-    print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
+    print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops "
+          f"across {len(line_stops_out):,} lines → {OUT_STOPS}")
 
-    OUT_EXCLUDED.write_text(json.dumps(excluded_details, ensure_ascii=False))
-    print(f"  Sanity log:  {len(excluded_details)} excluded lines → {OUT_EXCLUDED}")
+    OUT_NO_OSM.write_text(json.dumps(gtfs_no_osm_details, indent=2))
+    print(f"  {len(gtfs_no_osm_details):,} GTFS candidates with no OSM match → {OUT_NO_OSM}")
 
-    # Remove lines whose geo sanity check rejected all candidates — they have no valid
-    # GTFS-backed stops and must not be drawn.
-    if excluded_osm_ids:
-        before = len(features)
-        features = [f for f in features
-                    if str(f["properties"]["osm_id"]) not in excluded_osm_ids]
-        n_sanity_excluded = before - len(features)
-        OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
-        print(f"  Sanity-excluded:  {n_sanity_excluded} lines removed from output")
+    OUT_EXCLUDED.write_text(json.dumps([]))   # backward compat with check_geo_sanity_rejects.py
 
     print(f"\nResults:")
     print(f"  Drawn (matched):  {stats['matched']:,}")
-    print(f"  Hidden (no GTFS): {stats['unmatched']:,}")
-    print(f"  Excluded (coach): {stats['excluded']:,}")
+    print(f"  No OSM geometry:  {stats.get('no_osm', 0):,}")
     print(f"  Output:           {OUT}")
 
     mode_counts: dict = defaultdict(int)

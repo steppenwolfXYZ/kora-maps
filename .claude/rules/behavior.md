@@ -28,5 +28,11 @@ Mountain line color is fixed light yellow `#ffe566` — no frequency-based varia
 ## Bridge deck
 Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` transportation. Do NOT split into per-class deck layers — they produce hollow "donut" artifacts. This has been tried and reverted multiple times; do not attempt again.
 
+## Python version
+The project runs Python 3.9.6. Do NOT use syntax that requires 3.10+:
+- No `X | Y` union type annotations (use `Optional[X]` from `typing`, or drop the annotation)
+- No `match`/`case` statements
+- No `dict | dict` merge operator (use `{**a, **b}`)
+
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.

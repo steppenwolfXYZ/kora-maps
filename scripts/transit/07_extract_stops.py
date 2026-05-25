@@ -556,9 +556,9 @@ def main():
     gtfs_stop_features = []
     for feat in lines_data["features"]:
         p   = feat["properties"]
-        oid = str(p.get("osm_id", ""))
-        if oid:
-            line_lookup[oid] = {
+        fid = str(p.get("feature_id", ""))
+        if fid:
+            line_lookup[fid] = {
                 "color":      p["color"],
                 "mode":       p["mode"],
                 "width_base": p.get("width_base", 3.0),
@@ -602,14 +602,14 @@ def main():
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
-    for osm_id, ls_entry in line_stops.items():
+    for feature_id, ls_entry in line_stops.items():
         if isinstance(ls_entry, dict):
             stop_coords = ls_entry.get("stops", [])
             if ls_entry.get("gtfs_ref"):
-                line_lookup.setdefault(osm_id, {})["gtfs_ref"] = ls_entry["gtfs_ref"]
+                line_lookup.setdefault(feature_id, {})["gtfs_ref"] = ls_entry["gtfs_ref"]
         else:
             stop_coords = ls_entry
-        line = line_lookup.get(osm_id)
+        line = line_lookup.get(feature_id)
         if not line:
             continue
 
@@ -629,8 +629,6 @@ def main():
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
                 snap_d = haversine_km(lon, lat, slon, slat)
-                if snap_d > 0.300:
-                    continue  # stop misassigned to this line — GTFS bbox margin too generous
                 if snap_d > 0.050:
                     osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
                     if osm_pos:
@@ -640,7 +638,7 @@ def main():
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
-                    "osm_id":         osm_id,
+                    "osm_id":         feature_id,
                     "mode":           mode,
                     "color":          color,
                     "width_base":     width_base,
@@ -679,8 +677,6 @@ def main():
                 parent_sta = meta.get("parent", "")
                 cx, cy     = snap_to_line(lon, lat, flat)
                 gtfs_snap_d = haversine_km(lon, lat, cx, cy)
-                if gtfs_snap_d > 0.150:
-                    continue  # stop misassigned to this line — GTFS bbox margin too generous
                 if gtfs_snap_d > 0.050:
                     osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
                     if osm_pos:
@@ -691,7 +687,7 @@ def main():
                 all_nonrail_pills.append({
                     "lon":            cx,
                     "lat":            cy,
-                    "osm_id":         osm_id,
+                    "osm_id":         feature_id,
                     "mode":           mode,
                     "color":          color,
                     "width_base":     width_base,
@@ -707,8 +703,6 @@ def main():
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 slon, slat = snap_to_line(lon, lat, flat)
-                if haversine_km(lon, lat, slon, slat) > 0.150:
-                    continue  # stop misassigned to this line — GTFS bbox margin too generous
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},
