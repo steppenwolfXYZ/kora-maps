@@ -301,6 +301,16 @@ class TransitExtractor(osmium.SimpleHandler):
                                    "platform_exit_only", "stop",
                                    "stop_entry_only", "stop_exit_only")
             ]
+            stop_node_ids = [
+                m.ref for m in r.members
+                if m.type == "n"
+                and m.role in ("stop", "stop_entry_only", "stop_exit_only", "")
+            ]
+            stop_nodes = [
+                list(self.node_coords[nid])
+                for nid in stop_node_ids
+                if nid in self.node_coords
+            ]
             # Also compute total way length before gap-splitting, for regional_bus classification.
             # gap-split chunks may be shorter if OSM ways have gaps, so we need the raw total.
             all_way_coords = [self._way_coords(wid) for wid in way_ids]
@@ -342,6 +352,7 @@ class TransitExtractor(osmium.SimpleHandler):
                     "raw_length_km": round(raw_total_km, 2),
                     "way_count": len(way_ids),
                     "urban_fraction": urban_frac,
+                    "stop_nodes": stop_nodes,
                 },
             })
 

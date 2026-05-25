@@ -12,6 +12,11 @@
 ### Key data structure
 `_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware)` tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops), or (c) the frequency-weighted canonical differs from the longest-trip canonical.
 
+### Low-service filter on `_line_canonical_export`
+Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from all three source dicts (`line_canonical_geo_stops`, `line_canonical_geo`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
+
+Filter uses `compute_freq_score(freq, mode_approx)` where `mode_approx` is derived from the GTFS bucket. The "bus" bucket is approximated as `regional_bus` (lower maluses) rather than `bus` — this is intentionally conservative: a city bus with very sparse service might survive the filter here even though it would be dropped at draw time. Mountain bucket is exempt entirely.
+
 ### Primary matching: `find_best_gtfs_candidate()`
 For freq/speed selection ONLY — does NOT drive stop assignment.
 1. Builds ref variants (exact, normalised, upper/lower, name-prefix, alpha-prefix)
@@ -55,10 +60,10 @@ This prevents a long line from passing just because one of its stops happens to 
 **Check 2 — GTFS stops → OSM geometry proximity**
 Sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
 
-**Check 3 — OSM geometry → GTFS stops proximity**
-Sample 5 evenly-spaced points from the OSM geometry (`osm_pts`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m.
+**Check 3 — OSM stops → GTFS stops proximity**
+Sample 5 evenly-spaced OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
 
-Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 is a nearest-neighbour search over all GTFS stops in the candidate. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
+Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
 
 ### Known remaining issues with the sanity check
 - `_norm_stop_name` strips `hb`/`hbf`/`bahnhof` — short generic city tokens can still pass Check 1 (e.g. `bern` from `Bern HB`)

@@ -628,11 +628,14 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
-                if haversine_km(lon, lat, slon, slat) > 0.050:
+                snap_d = haversine_km(lon, lat, slon, slat)
+                if snap_d > 0.300:
+                    continue  # stop misassigned to this line — GTFS bbox margin too generous
+                if snap_d > 0.050:
                     osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
                     if osm_pos:
                         osm_slon, osm_slat = snap_to_line(osm_pos[0], osm_pos[1], flat)
-                        if haversine_km(osm_pos[0], osm_pos[1], osm_slon, osm_slat) < haversine_km(lon, lat, slon, slat):
+                        if haversine_km(osm_pos[0], osm_pos[1], osm_slon, osm_slat) < snap_d:
                             slon, slat = osm_slon, osm_slat
                 rail_pill_raw.append({
                     "lon":            slon,
