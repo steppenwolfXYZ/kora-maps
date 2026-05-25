@@ -43,6 +43,7 @@ GTFS = ROOT / "data" / "gtfs"
 OSM_ROUTES = ROOT / "data" / "osm" / "routes.geojson"
 OUT = ROOT / "data" / "transit" / "transit_lines.geojson"
 OUT_STOPS = ROOT / "data" / "transit" / "line_stops.json"
+OUT_EXCLUDED = ROOT / "data" / "transit" / "sanity_excluded.json"
 
 # ── Representative dates ─────────────────────────────────────────────────────
 WEEKDAY_DATE = "20260407"   # Tuesday 7 Apr 2026
@@ -104,7 +105,7 @@ BEST_HEADWAY = {
 # Checked against both the OSM `operator` tag and the `network` tag (lowercase).
 # Flixbus subcontractors use their own company name in `operator` but "Flixbus" in `network`.
 EXCLUDED_OPERATORS = {"flixbus", "flixcoach", "eurolines", "deinbus", "megabus", "ic bus",
-                      "blablacar bus", "ouibus"}
+                      "blablacar bus", "blablabus", "ouibus"}
 
 # OSM route length threshold for bus → regional_bus classification.
 # Using OSM line length (already computed, per-route, no GTFS cross-city confusion):
@@ -130,6 +131,9 @@ def osm_to_mode(route_tag: str, ref: str, operator: str, length_km: float,
 
     if r == "railway":
         return None   # OSM infrastructure track sections, not passenger services
+    # Forchbahn (FB) is tagged light_rail in OSM but is a tram in GTFS (type=0, short_name="18")
+    if r == "light_rail" and op == "fb":
+        return "tram"
     if r in ("train", "rail", "light_rail"):
         return "train"
     if r == "tram":
@@ -478,6 +482,20 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         process_trip(current_trip_id, current_stops)
     print(f"  Done. {row_count:,} rows processed.")
 
+    # Remove rare stop sets (< 10% of trips) from both source dicts so that garage runs
+    # and other infrequent variants never surface as stop candidates in section 1 or 2.
+    for geo_key, variant_counts in list(line_variant_counts.items()):
+        total = sum(variant_counts.values())
+        threshold = max(1, total * 0.10)
+        line_variant_counts[geo_key] = {v: c for v, c in variant_counts.items() if c >= threshold}
+
+    for geo_key, canons in line_canonical_geo_stops.items():
+        variant_counts = line_variant_counts.get(geo_key, {})
+        line_canonical_geo_stops[geo_key] = [
+            c for c in canons
+            if frozenset(s[0] for s in c["stops"]) in variant_counts
+        ]
+
     # Build canonical export: all unique stop sets per geographic cell per line_key.
     # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
     # share the same GTFS line_key = ("S6", "S 6", "train").  It also preserves minority
@@ -520,9 +538,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # maximals exist, the routes genuinely fork → per-variant with direction filter.
     for (line_key, geo_bucket), variant_counts in line_variant_counts.items():
         short_name, long_name, bucket = line_key
-        total = sum(variant_counts.values())
-        threshold = max(1, total * 0.10)
-        qualifying = [(v, c) for v, c in variant_counts.items() if c >= threshold]
+        qualifying = list(variant_counts.items())
         if not qualifying:
             continue
         long_norm = long_name.replace(" ", "")
@@ -797,6 +813,19 @@ def _covers_endpoints(osm_pts: list, stops: list) -> bool:
     return near_start and near_end
 
 
+GEO_SORT_ENDPOINT_KM = 0.5  # tighter threshold for geo-fallback candidate ranking only
+
+def _count_endpoints_covered(osm_pts: list, stops: list) -> int:
+    """Return how many OSM endpoints (0, 1, or 2) have a stop within GEO_SORT_ENDPOINT_KM.
+    Used to rank geo-fallback candidates: full-corridor routes float above partial ones."""
+    if not stops or len(osm_pts) < 2:
+        return 2  # can't determine — don't penalise
+    start, end = osm_pts[0], osm_pts[-1]
+    near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= GEO_SORT_ENDPOINT_KM for s in stops)
+    near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= GEO_SORT_ENDPOINT_KM for s in stops)
+    return int(near_start) + int(near_end)
+
+
 def _norm_stop_name(name: str) -> str:
     """Normalise a stop name for loose terminal matching (lowercase, strip station suffixes)."""
     name = name.lower().strip()
@@ -819,8 +848,8 @@ def _passes_geo_sanity(
     later (slower) checks are skipped as soon as one piece of evidence is found.
 
     Check 1 — terminal name matching: does the OSM from/to name appear inside a GTFS stop name?
-    Check 2 — endpoint coverage: do stops reach both OSM geometry endpoints?
-    Check 3 — sampled proximity: are a majority of sampled stops within 500 m of the OSM polyline?
+    Check 2 — GTFS stops → OSM geometry: are 3/5 evenly-spaced GTFS stops within 200 m of the OSM line?
+    Check 3 — OSM geometry → GTFS stops: are 3/5 evenly-spaced OSM points within 200 m of any GTFS stop?
     """
     if len(ccoords) < 2 or len(osm_pts) < 2:
         return False
@@ -849,19 +878,26 @@ def _passes_geo_sanity(
         if matches >= threshold:
             return True
 
-    # Check 2: endpoint coverage — ~O(N_stops) haversine calls
-    if _covers_endpoints(osm_pts, ccoords):
+    # Check 2: GTFS stops → OSM geometry — O(5 × N_osm_vertices)
+    # Sample 5 evenly-spaced GTFS stops; require 3/5 within 200 m of OSM line.
+    step2 = max(1, len(ccoords) // 5)
+    sampled_gtfs = ccoords[::step2][:5]
+    close2 = sum(
+        1 for s in sampled_gtfs
+        if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.2
+    )
+    if close2 * 5 >= len(sampled_gtfs) * 3:  # ≥ 3/5
         return True
 
-    # Check 3: sampled stop-to-geometry proximity — O(N_sample × N_osm_pts)
-    # Sample up to 5 stops evenly and check their distance to the OSM polyline.
-    step = max(1, len(ccoords) // 5)
-    sampled = ccoords[::step][:5]
-    close = sum(
-        1 for s in sampled
-        if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.5
+    # Check 3: OSM geometry → GTFS stops — O(5 × N_gtfs_stops)
+    # Sample 5 evenly-spaced OSM points; require 3/5 within 200 m of any GTFS stop.
+    step3 = max(1, len(osm_pts) // 5)
+    sampled_osm = osm_pts[::step3][:5]
+    close3 = sum(
+        1 for p in sampled_osm
+        if any(haversine_km(p[0], p[1], s[0], s[1]) <= 0.2 for s in ccoords)
     )
-    if close * 2 >= len(sampled):  # majority (≥ 50%) within 500 m
+    if close3 * 5 >= len(sampled_osm) * 3:  # ≥ 3/5
         return True
 
     return False
@@ -882,8 +918,10 @@ def _lookup_canonical_stops(
 ) -> tuple[list, bool]:
     """Look up canonical stops for an OSM line and apply the name-fallback sanity check.
 
-    Returns (best_coords, used_name_fallback).  best_coords is empty if no canonical
-    was found or if a name-fallback canonical failed the geo sanity check (Trigger 1).
+    Returns (best_coords, used_name_fallback, canon_gtfs_ref).  best_coords is empty if
+    no canonical was found or if a name-fallback canonical failed the geo sanity check
+    (Trigger 1).  canon_gtfs_ref is the GTFS short_name key that produced the result
+    (None if nothing was found).
     Used by both the main pipeline and the diagnostic script so they share identical logic.
     """
     osm_start = osm_pts[0]
@@ -896,10 +934,12 @@ def _lookup_canonical_stops(
 
     used_name_fallback = False
     canon = None
+    canon_gtfs_ref: Optional[str] = None
     for i, lk_ref in enumerate(exact_ref_keys + fallback_ref_keys):
         if (lk_ref, bucket) in _line_canonical_export:
             canon = _line_canonical_export[(lk_ref, bucket)]
             used_name_fallback = (i >= len(exact_ref_keys))
+            canon_gtfs_ref = lk_ref
             break
 
     best_coords: list = []
@@ -1241,6 +1281,11 @@ def main():
             stats["excluded"] += 1
             continue
 
+        # Forchbahn (FB): OSM ref="S18", GTFS short_name="18" (type=0, tram).
+        # Remap ref so all GTFS lookups and stop assignment find the right entry.
+        if operator.lower() == "fb":
+            ref = ref.lstrip("S") or ref
+
         # Mountain lines (funicular, gondola, cable car, aerialway) are processed
         # GTFS-first after this loop. Skip them here so OSM geometry alone never
         # draws a line — the timetable is the authority for what runs.
@@ -1325,7 +1370,17 @@ def main():
         # WAB and JB are rack railways to Kleine Scheidegg / Jungfraujoch.
         # BRB (Brienz Rothorn Bahn) is a steam rack railway, also type=2 in GTFS.
         # SPB (Schynige Platte Bahn) uses the full name in OSM; "BOB" (valley train) does not.
-        MOUNTAIN_RAIL_OPERATORS = {"WAB", "JB", "BRB", "Berner Oberland-Bahnen"}
+        MOUNTAIN_RAIL_OPERATORS = {
+            "WAB",                    # Wengernalpbahn — Lauterbrunnen/Grindelwald→Kleine Scheidegg
+            "JB",                     # Jungfraubahn — Kleine Scheidegg→Jungfraujoch
+            "BRB",                    # Brienz Rothorn Bahn
+            "Berner Oberland-Bahnen", # Schynige Platte Bahn (BOB valley trains use "BOB")
+            "Gornergratbahn",         # GGB — Zermatt→Gornergrat (shows as train without this)
+            "PILATUS-BAHNEN AG",      # Pilatusbahn — Alpnachstad→Pilatus Kulm
+            "RB",                     # Rigi Bahnen — Arth-Rigi-Bahn / Vitznau-Rigi-Bahn
+            "MG",                     # Ferrovia Monte Generoso
+            "Dampfbahn Furka-Bergstrecke",  # DFB — Realp→Oberwald (seasonal steam)
+        }
         if mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS:
             mode = "mountain"
             bucket = "mountain"
@@ -1407,7 +1462,8 @@ def main():
             stats["matched"] += 1
         elif mode == "mountain":
             # Reached only for OSM train routes overridden to mountain via
-            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB, SPB). No GTFS mountain bucket match exists.
+            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB, SPB, GGB, PB, RB, MG, DFB).
+            # No GTFS mountain bucket match exists for these type=2 rack railways.
             freq_score = 0.6
             stats["matched"] += 1
         else:
@@ -1563,6 +1619,8 @@ def main():
 
     # Save stop coordinates per line (osm_id → [[lon,lat], ...]) for stop dot rendering
     line_stops_out = {}
+    excluded_osm_ids: set = set()   # osm_ids where geo sanity check rejected all candidates
+    excluded_details: list = []     # metadata for sanity_excluded.json sidecar
     for feat in features:
         osm_id = str(feat["properties"]["osm_id"])
         ref    = feat["properties"]["ref"]
@@ -1636,7 +1694,7 @@ def main():
                                     seen_pos.add(key)
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
-                    line_stops_out[osm_id] = pier_coords
+                    line_stops_out[osm_id] = {"gtfs_ref": ref, "stops": pier_coords}
                 continue
             elif mode != "mountain":
                 continue
@@ -1670,6 +1728,7 @@ def main():
             osm_pts, osm_span_km, osm_from, osm_to,
             stop_coords, stop_meta, sub_bboxes,
         )
+        geo_best_ref: Optional[str] = None
 
         # Geo-based fallback: triggers when (a) no canon found at all, (b) canon found
         # but its stops don't overlap this OSM feature's bbox, or (c) canonical stops
@@ -1700,7 +1759,7 @@ def main():
                 # Collect all scored candidates, then pick the highest-scoring one
                 # that passes the geo sanity checks.  Sorting first means we check
                 # the most-likely-correct candidates first and exit early.
-                geo_candidates: list = []  # (score, ccoords)
+                geo_candidates: list = []  # (score, ccoords, lk_ref)
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
@@ -1717,16 +1776,18 @@ def main():
                         score = len(ccoords) / len(cand)
                         if score < 0.5:
                             continue
-                        geo_candidates.append((score, ccoords))
+                        geo_candidates.append((score, ccoords, lk_ref))
 
-                # Sort by score desc, then by absolute stop count desc as tiebreaker.
-                # Equal-score candidates (e.g. many 5-stop routes all scoring 1.0) are
-                # ranked by how many stops they contribute — longer routes beat short noise.
-                geo_candidates.sort(key=lambda x: (-x[0], -len(x[1])))
+                # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
+                # then absolute stop count. Equal-score full-corridor routes beat partial ones.
+                geo_candidates.sort(
+                    key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1]), -len(x[1]))
+                )
                 geo_best: list = []
-                for _score, _ccoords in geo_candidates[:50]:
+                for _score, _ccoords, _lk_ref in geo_candidates[:50]:
                     if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to):
                         geo_best = _ccoords
+                        geo_best_ref = _lk_ref
                         break
                 if geo_best:
                     best_coords = geo_best
@@ -1735,14 +1796,35 @@ def main():
                     # best_coords is already suspect (empty or failed endpoint coverage).
                     # If geo finds nothing valid either, discard rather than keep wrong stops.
                     best_coords = []
+                    excluded_osm_ids.add(osm_id)
+                    excluded_details.append({
+                        "osm_id": osm_id,
+                        "ref":    feat["properties"]["ref"],
+                        "mode":   feat["properties"]["mode"],
+                        "name":   feat["properties"].get("name", ""),
+                    })
 
         if best_coords:
-            line_stops_out[osm_id] = best_coords
+            gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
+            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "stops": best_coords}
 
     line_canonical_export = None  # free reference
 
     OUT_STOPS.write_text(json.dumps(line_stops_out))
-    print(f"  Stop coords: {sum(len(v) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
+    print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
+
+    OUT_EXCLUDED.write_text(json.dumps(excluded_details, ensure_ascii=False))
+    print(f"  Sanity log:  {len(excluded_details)} excluded lines → {OUT_EXCLUDED}")
+
+    # Remove lines whose geo sanity check rejected all candidates — they have no valid
+    # GTFS-backed stops and must not be drawn.
+    if excluded_osm_ids:
+        before = len(features)
+        features = [f for f in features
+                    if str(f["properties"]["osm_id"]) not in excluded_osm_ids]
+        n_sanity_excluded = before - len(features)
+        OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
+        print(f"  Sanity-excluded:  {n_sanity_excluded} lines removed from output")
 
     print(f"\nResults:")
     print(f"  Drawn (matched):  {stats['matched']:,}")
