@@ -5,6 +5,11 @@
 - `07_extract_stops.py` — builds pill/connector GeoJSON from `line_stops.json`
 - Rebuild command: `./scripts/rebuild_transit.sh --skip-osm`
 
+## Transit pipeline config
+`scripts/transit/config.yaml` — pipeline-specific settings (separate from the map style `scripts/config.yaml`).
+
+Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables the snap-distance gates that suppress stops too far from their OSM line geometry (rail: 300 m, non-rail: 150 m). Use to debug missing connectors. Requires a pipeline rebuild to take effect.
+
 ---
 
 ## OSM→GTFS Matching Architecture
@@ -31,6 +36,18 @@ When the geo match returns a line_key with zero total freq, `gtfs` is NOT set fr
 Scans all ref variants in `_line_canonical_export` and iterates every candidate entry per variant (there can be multiple stop sets per geo_bucket since the fix for Bus 14). Keeps whichever candidate yields the most stops inside the OSM route bbox. Then geo fallback if endpoint coverage fails.
 
 **Critical:** do NOT feed `find_best_gtfs_candidate`'s canonical stops into stop assignment. Geo-cell-bounded candidates (~40km) cause `_covers_endpoints` to fail more often, triggering the broad geo fallback which pulls in wrong stops. One session: 2 fixes, ~50 regressions.
+
+---
+
+## Post-matching Deduplication
+
+After all OSM→GTFS matching is complete, `05_score_and_match.py` runs a dedup pass over `line_stops_out` before writing `line_stops.json` and `transit_lines.geojson`.
+
+**Rule:** For each `gtfs_ref`, if any OSM line matched it with a **direct ref** (OSM `ref` ≈ GTFS `short_name` after stripping spaces and lowercasing), all **fallback-matched** entries for the same `gtfs_ref` (OSM `ref` ≠ GTFS `short_name`) are removed from both outputs. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
+
+Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set merged into `excluded_osm_ids` before the existing GeoJSON rewrite. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
+
+Do not tighten this logic to remove fallback matches unconditionally — they are still valid and needed when no direct-ref match exists for the same `gtfs_ref`.
 
 ---
 
