@@ -30,11 +30,16 @@ Pill rules:
 
 import csv
 import json
+import yaml
 from math import radians, cos, sin, sqrt, atan2, degrees, floor
 from pathlib import Path
 from collections import defaultdict
 
 ROOT       = Path(__file__).resolve().parents[2]
+
+_transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").read_text())
+SNAP_GATE_DISABLED = _transit_cfg.get("debug", {}).get("disable_snap_gate", False)
+
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 GTFS_STOPS   = ROOT / "data" / "gtfs" / "stops.txt"
@@ -629,7 +634,7 @@ def main():
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
                 snap_d = haversine_km(lon, lat, slon, slat)
-                if snap_d > 0.300:
+                if not SNAP_GATE_DISABLED and snap_d > 0.300:
                     continue  # stop misassigned to this line — GTFS bbox margin too generous
                 if snap_d > 0.050:
                     osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
@@ -679,7 +684,7 @@ def main():
                 parent_sta = meta.get("parent", "")
                 cx, cy     = snap_to_line(lon, lat, flat)
                 gtfs_snap_d = haversine_km(lon, lat, cx, cy)
-                if gtfs_snap_d > 0.150:
+                if not SNAP_GATE_DISABLED and gtfs_snap_d > 0.150:
                     continue  # stop misassigned to this line — GTFS bbox margin too generous
                 if gtfs_snap_d > 0.050:
                     osm_pos = find_osm_stop_override(lon, lat, stop_name, osm_stop_index, flat)
@@ -707,7 +712,7 @@ def main():
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 slon, slat = snap_to_line(lon, lat, flat)
-                if haversine_km(lon, lat, slon, slat) > 0.150:
+                if not SNAP_GATE_DISABLED and haversine_km(lon, lat, slon, slat) > 0.150:
                     continue  # stop misassigned to this line — GTFS bbox margin too generous
                 other_features.append({
                     "type": "Feature",
