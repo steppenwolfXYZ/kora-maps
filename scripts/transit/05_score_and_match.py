@@ -509,6 +509,10 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     zero_service_keys = {
         geo_key[0] for geo_key in line_canonical_geo_stops
         if geo_key[0][2] != "mountain"
+        # CC short_name = rack/cog railway (WAB, JB, SPB, BRB, GGB, PB, RB…).
+        # These are seasonal (June–Oct) and will have zero service on April sample dates.
+        # Keep them in the pool so mountain-mode geo fallback can find their stop sequences.
+        and not (geo_key[0][0] == "CC" and geo_key[0][2] == "train")
         and compute_freq_score(
             line_freq.get(geo_key[0], _zero_freq),
             _BUCKET_MODE_APPROX.get(geo_key[0][2], "regional_bus"),
@@ -850,6 +854,12 @@ def _count_endpoints_covered(osm_pts: list, stops: list) -> int:
     return int(near_start) + int(near_end)
 
 
+def _re_to_r_ref(ref_norm: str) -> Optional[str]:
+    """RE{n} ↔ R{n}: MGB trains use 'R 41' as GTFS long_name but 'RE41' in OSM."""
+    m = re.match(r'^RE(\d+)$', ref_norm, re.IGNORECASE)
+    return ('R' + m.group(1)) if m else None
+
+
 def _norm_stop_name(name: str) -> str:
     """Normalise a stop name for loose terminal matching (lowercase, strip station suffixes)."""
     name = name.lower().strip()
@@ -920,13 +930,13 @@ def _passes_geo_sanity(
             ratio = cand_density / osm_density if osm_density > 0 else 1.0
             density_ok = 0.5 <= ratio <= 2.0
 
-    # Proximity check: 3/5 evenly-spaced GTFS stops within 200 m of OSM polyline.
+    # Proximity check: 3/5 evenly-spaced GTFS stops within 100 m of OSM polyline.
     if density_ok:
         step2 = max(1, len(ccoords) // 5)
         sampled_gtfs = ccoords[::step2][:5]
         close2 = sum(
             1 for s in sampled_gtfs
-            if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.2
+            if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.1
         )
         if close2 * 5 >= len(sampled_gtfs) * 3:  # ≥ 3/5
             return True
@@ -1164,6 +1174,11 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
             ref_variants[token] = None
             ref_variants[token.upper()] = None
 
+    # RE{n} ↔ R{n}: MGB trains appear as 'R 41'/'R 42' in GTFS long_name but 'RE41'/'RE42' in OSM
+    r_ref = _re_to_r_ref(ref_norm)
+    if r_ref:
+        ref_variants[r_ref] = None
+
     # Alpha-prefix fallback: "R43" → "R"
     m = re.match(r'^([A-Za-z ]+)\d', ref)
     if m:
@@ -1199,6 +1214,66 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
     raw_freq = dict(line_freq.get(best_line_key, {"core_wd": 0, "eve_wd": 0, "we": 0}))
     speed_kmh = line_speed.get(best_line_key)
     return best_line_key, raw_freq, speed_kmh, best_stops
+
+
+def _group_reassign_stops(
+    group_osm_ids: list,
+    gtfs_r: str,
+    bucket: str,
+    geom_by_id: dict,
+    stop_coords: dict,
+) -> dict:
+    """Reassign stops for a group of OSM relations sharing the same gtfs_ref.
+
+    Inclusion: a GTFS stop qualifies if it is near ANY relation in the group
+    (uses each relation's sub-bboxes). Placement: the stop is assigned to the
+    closest relation by polyline distance, plus any relation within
+    max(d_min + 50 m, d_min * 1.1) — so shared stations appear on all routes
+    that genuinely pass through them.
+    Returns {osm_id: [[lon, lat, stop_id], ...]} only for relations that
+    receive at least one stop.
+    """
+    id_geom_pairs = [
+        (oid, geom_by_id[oid])
+        for oid in group_osm_ids
+        if oid in geom_by_id and len(geom_by_id[oid]) >= 2
+    ]
+    if not id_geom_pairs:
+        return {}
+
+    sub_bboxes_by_id = {oid: build_sub_bboxes(geom) for oid, geom in id_geom_pairs}
+
+    all_stops: list = []  # [(stop_id, lon, lat)]
+    seen_sids: set = set()
+    for ref_variant in [gtfs_r, gtfs_r.upper(), gtfs_r.lower()]:
+        for (_, cand, _da) in _line_canonical_export.get((ref_variant, bucket), []):
+            for stop_id, _arr, _dep in cand:
+                if stop_id in seen_sids:
+                    continue
+                seen_sids.add(stop_id)
+                c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
+                if c:
+                    all_stops.append((stop_id, c[0], c[1]))
+
+    if not all_stops:
+        return {}
+
+    result: dict = defaultdict(list)
+    for stop_id, lon, lat in all_stops:
+        near_rels = [
+            (oid, geom) for oid, geom in id_geom_pairs
+            if any(stop_near_bbox(lon, lat, sb) for sb in sub_bboxes_by_id[oid])
+        ]
+        if not near_rels:
+            continue
+        dists = [(oid, _min_dist_to_polyline_km(lon, lat, geom)) for oid, geom in near_rels]
+        d_min = min(d for _, d in dists)
+        threshold = max(d_min + 0.05, d_min * 1.1)
+        for oid, d in dists:
+            if d <= threshold:
+                result[oid].append([lon, lat, stop_id])
+
+    return dict(result)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -1388,6 +1463,11 @@ def main():
             if gtfs is None:
                 gtfs = (gtfs_long_index.get((bucket, ref_norm)) or
                         gtfs_long_index.get((bucket, ref_norm.upper())))
+            if gtfs is None:
+                r_norm = _re_to_r_ref(ref_norm)
+                if r_norm:
+                    gtfs = (gtfs_long_index.get((bucket, r_norm)) or
+                            gtfs_long_index.get((bucket, r_norm.upper())))
             if gtfs is None:
                 osm_name_prefix = props.get("name", "").split(":")[0].strip()
                 for token in osm_name_prefix.split():
@@ -1701,6 +1781,14 @@ def main():
                     gtfs = cand
                     matched_gtfs_ref = ref_norm
                     break
+        if gtfs is None:
+            r_norm = _re_to_r_ref(ref_norm)
+            if r_norm:
+                cand = (gtfs_long_index.get((bucket, r_norm)) or
+                        gtfs_long_index.get((bucket, r_norm.upper())))
+                if cand:
+                    gtfs = cand
+                    matched_gtfs_ref = r_norm
         # First-word-of-name fallback: "R 311: Interlaken…" → try "R", "311"
         if gtfs is None:
             osm_name_prefix = feat["properties"].get("name", "").split(":")[0].strip()
@@ -1747,7 +1835,7 @@ def main():
                                     seen_pos.add(key)
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords}
+                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry"}
                 continue
             elif mode != "mountain":
                 continue
@@ -1900,7 +1988,7 @@ def main():
 
         if best_coords:
             gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords}
+            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket}
 
     line_canonical_export = None  # free reference
 
@@ -1928,6 +2016,45 @@ def main():
 
     if dedup_removed:
         print(f"  Dedup-removed:  {len(dedup_removed)} fallback-matched lines superseded by direct-ref match")
+
+    # Group-level stop reassignment: use combined geometry of all OSM relations for a
+    # gtfs_ref so stops are included if near ANY relation in the group, then placed on
+    # the closest one. Fixes variant bleeding (e.g. Glattbrugg leaking into Hardbrücke).
+    geom_by_id_grp: dict = {}
+    for feat in features:
+        oid = str(feat["properties"]["osm_id"])
+        geom = feat["geometry"]
+        geom_by_id_grp[oid] = (
+            [c for seg in geom["coordinates"] for c in seg]
+            if geom["type"] == "MultiLineString"
+            else geom["coordinates"]
+        )
+
+    by_ref_bucket: dict = defaultdict(list)
+    for osm_id, entry in line_stops_out.items():
+        gtfs_r = entry.get("gtfs_ref")
+        bkt = entry.get("_bucket")
+        if gtfs_r and bkt:
+            by_ref_bucket[(gtfs_r, bkt)].append(osm_id)
+
+    n_grp = 0
+    for (gtfs_r, bkt), osm_ids in by_ref_bucket.items():
+        if len(osm_ids) < 2:
+            continue
+        if not any((v, bkt) in _line_canonical_export for v in [gtfs_r, gtfs_r.upper(), gtfs_r.lower()]):
+            continue
+        new_asgn = _group_reassign_stops(osm_ids, gtfs_r, bkt, geom_by_id_grp, stop_coords)
+        for oid in osm_ids:
+            new_stops = new_asgn.get(oid, [])
+            if new_stops:
+                line_stops_out[oid]["stops"] = new_stops
+        n_grp += 1
+
+    if n_grp:
+        print(f"  Group reassignment: {n_grp} groups processed")
+
+    for entry in line_stops_out.values():
+        entry.pop("_bucket", None)
 
     OUT_STOPS.write_text(json.dumps(line_stops_out))
     print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
