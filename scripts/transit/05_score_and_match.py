@@ -1265,7 +1265,7 @@ def _group_reassign_stops(
     if not all_stops:
         return {}
 
-    result: dict = defaultdict(list)
+    result: dict = defaultdict(dict)  # {oid: {stop_id: [lon, lat, stop_id]}}
     for stop_id, lon, lat in all_stops:
         near_rels = [
             (oid, geom) for oid, geom in id_geom_pairs
@@ -1273,14 +1273,14 @@ def _group_reassign_stops(
         ]
         if not near_rels:
             continue
-        dists = [(oid, _min_dist_to_polyline_km(lon, lat, geom)) for oid, geom in near_rels]
+        dists = [(oid, min(haversine_km(lon, lat, p[0], p[1]) for p in geom)) for oid, geom in near_rels]
         d_min = min(d for _, d in dists)
         threshold = max(d_min + 0.05, d_min * 1.1)
         for oid, d in dists:
             if d <= threshold:
-                result[oid].append([lon, lat, stop_id])
+                result[oid][stop_id] = [lon, lat, stop_id]
 
-    return dict(result)
+    return {oid: list(stops.values()) for oid, stops in result.items()}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
