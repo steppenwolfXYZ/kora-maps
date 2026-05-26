@@ -37,6 +37,20 @@ Scans all ref variants in `_line_canonical_export` and iterates every candidate 
 
 **Critical:** do NOT feed `find_best_gtfs_candidate`'s canonical stops into stop assignment. Geo-cell-bounded candidates (~40km) cause `_covers_endpoints` to fail more often, triggering the broad geo fallback which pulls in wrong stops. One session: 2 fixes, ~50 regressions.
 
+### Known architectural limitation — union candidate / variant bleeding
+
+**Problem:** A GTFS line often has multiple trip variants: a full-extent route and shorter partial/branch variants. When one variant's stop set is a subset of another's, `is_truly_divergent=False` and all stops are collapsed into a single union candidate (`dir_aware=False`). Multiple OSM relations for the same line (different directions, short-turns, branches) all compete against this same union. The winning candidate's stops are then filtered by the OSM relation's sub-bbox — but this is a geographic proxy for variant membership, not a structural one. Stops from the wrong branch or extension can leak through if their position falls inside the bbox.
+
+**Root cause:** Stop inclusion is decided per-OSM-relation using bbox filtering, but the GTFS stop pool is line-level (the union). The bbox filter cannot reliably distinguish "stop belongs to this OSM variant" from "stop happens to be geographically close."
+
+**Planned fix — group-level stop assignment:**
+1. After the per-OSM-relation matching pass, group all OSM relations by their matched `gtfs_ref`.
+2. For each group, collect the combined geometry of all OSM relations in the group.
+3. A GTFS stop qualifies for the line if it is near **any** OSM relation in the group (not just the one currently being processed).
+4. For placement (connector drawing in `07_extract_stops.py`), each stop snaps to whichever individual OSM relation geometry it is closest to.
+
+This separates the two questions: **inclusion** (does this stop belong to this GTFS line?) uses the full group geometry; **placement** (which OSM relation does this stop connect to?) uses per-relation proximity. Geographic band-aids (threshold filters in `_lookup_canonical_stops`) should NOT be used as a substitute for this structural fix.
+
 ---
 
 ## Post-matching Deduplication
