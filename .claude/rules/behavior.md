@@ -1,5 +1,8 @@
 # Behavioral Rules
 
+## Issue investigation
+When asked to investigate an issue (e.g. "why is X wrong?", "look into Y"), deliver a diagnostic report only — root cause, relevant data, and options. Do NOT implement any changes. Never write or propose code until the concept has been explicitly discussed and agreed upon.
+
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
