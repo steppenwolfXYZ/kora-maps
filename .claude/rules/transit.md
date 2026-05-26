@@ -5,6 +5,20 @@
 - `07_extract_stops.py` — builds pill/connector GeoJSON from `line_stops.json`
 - Rebuild command: `./scripts/rebuild_transit.sh --skip-osm`
 
+## Diagnostic output files (written by `05_score_and_match.py` on every run)
+
+| File | Contents |
+|------|----------|
+| `data/transit/sanity_excluded.json` | OSM routes excluded by the geo sanity check (no valid GTFS candidate passed). Array of objects with `osm_id`, `ref`, `name`, `mode`, and check results. |
+| `data/transit/main_loop_dropped.json` | OSM routes that were processed but not drawn. Each entry: `osm_id`, `ref`, `name`, `mode`, `operator`, `matched_line_key` (geo-matched GTFS tuple or null), `freq_score` (null or 0.0), `reason` (`"no_gtfs"` / `"zero_freq"` / `"dedup"`). Dedup entries also have `gtfs_ref`. |
+| `data/transit/gtfs_unmatched.json` | GTFS line_keys with non-zero service that were never matched to any drawn OSM feature. Each entry: `short_name`, `long_name`, `bucket`, `freq_score`, `total_trips`. Sorted by `(bucket, short_name, long_name)`. Useful for finding GTFS lines that have no OSM counterpart. |
+
+Use these files to diagnose missing lines without adding one-off debug prints:
+- Line absent from map AND absent from `sanity_excluded.json` AND absent from `main_loop_dropped.json` → dropped before the main loop (mountain/TER skip, `osm_to_mode` returns None, etc.)
+- Line in `main_loop_dropped.json` with `reason="no_gtfs"` → no GTFS match found at all
+- Line in `main_loop_dropped.json` with `reason="zero_freq"` → GTFS match found but service score is 0.0
+- GTFS entry present but no OSM route drawn → check `gtfs_unmatched.json` for the line_key
+
 ## Transit pipeline config
 `scripts/transit/config.yaml` — pipeline-specific settings (separate from the map style `scripts/config.yaml`).
 
