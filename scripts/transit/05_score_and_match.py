@@ -44,6 +44,8 @@ OSM_ROUTES = ROOT / "data" / "osm" / "routes.geojson"
 OUT = ROOT / "data" / "transit" / "transit_lines.geojson"
 OUT_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 OUT_EXCLUDED = ROOT / "data" / "transit" / "sanity_excluded.json"
+OUT_DROPPED = ROOT / "data" / "transit" / "main_loop_dropped.json"
+OUT_GTFS_UNMATCHED = ROOT / "data" / "transit" / "gtfs_unmatched.json"
 
 # ── Representative dates ─────────────────────────────────────────────────────
 WEEKDAY_DATE = "20260407"   # Tuesday 7 Apr 2026
@@ -348,6 +350,15 @@ _line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucke
 # Coarse geo-grid for canonical trip bucketing: ~0.5° ≈ 40 km per cell
 GEO_BUCKET_DEG = 0.5
 
+# Maps GTFS bucket name to mode approximation used in compute_freq_score.
+# "bus" bucket is approximated as "regional_bus" (lower maluses) — intentionally
+# conservative; a city bus with sparse service might survive the filter here even
+# though it would be dropped at draw time. Mountain bucket is exempt.
+_BUCKET_MODE_APPROX = {
+    "train": "train", "tram": "tram", "metro": "metro",
+    "ferry": "ferry", "bus": "regional_bus", "regional_bus": "regional_bus",
+}
+
 
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     """One streaming pass → raw trip counts + speed per line."""
@@ -501,10 +512,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # zero/near-zero-service lines (e.g. EXT Extrazug) from entering the geo-fallback pool
     # and contaminating stop assignment for other lines.  "bus" bucket uses "regional_bus"
     # as mode approximation — intentionally conservative; see transit.md for the known edge case.
-    _BUCKET_MODE_APPROX = {
-        "train": "train", "tram": "tram", "metro": "metro",
-        "ferry": "ferry", "bus": "regional_bus", "regional_bus": "regional_bus",
-    }
     _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
     zero_service_keys = {
         geo_key[0] for geo_key in line_canonical_geo_stops
@@ -1376,6 +1383,8 @@ def main():
     print("\nMatching and scoring...")
     features = []
     stats = defaultdict(int)
+    dropped_details: list = []       # routes dropped in main loop (no_gtfs / zero_freq)
+    matched_gtfs_line_keys: set = set()  # line_keys successfully matched to a drawn feature
 
     MODE_TO_BUCKET = {
         "train": "train",
@@ -1603,6 +1612,16 @@ def main():
         # Mountain mode is exempt: seasonal railways may not run on our specific
         # sample date but are still worth showing (they get clamped to 0.4 below).
         if freq_score is None or (freq_score == 0.0 and mode != "mountain"):
+            dropped_details.append({
+                "osm_id":           str(props.get("osm_id", "")),
+                "ref":              ref,
+                "name":             props.get("name", ""),
+                "mode":             mode,
+                "operator":         operator,
+                "matched_line_key": list(matched_line_key) if matched_line_key else None,
+                "freq_score":       freq_score,
+                "reason":           "no_gtfs" if freq_score is None else "zero_freq",
+            })
             continue
 
         # Mountain railways are always worth showing; clamp to a visible minimum
@@ -1632,6 +1651,8 @@ def main():
                 "stop_nodes": props.get("stop_nodes", []),
             },
         })
+        if matched_line_key:
+            matched_gtfs_line_keys.add(matched_line_key)
 
     # ── GTFS-first mountain processing ──────────────────────────────────────────
     # Every cable car / gondola / funicular in the timetable (GTFS route type 5/6/7)
@@ -1666,7 +1687,7 @@ def main():
 
         # Each entry in stop_list_candidates is one geographic location for this ref.
         # Produce one map feature per location.
-        for (_, stop_list, _da) in stop_list_candidates:
+        for (mtn_line_key, stop_list, _da) in stop_list_candidates:
             # Resolve stop coordinates
             stop_pts = []
             for stop_id, _arr, _dep in stop_list:
@@ -1742,6 +1763,7 @@ def main():
                 "geometry": geometry,
                 "properties": props,
             })
+            matched_gtfs_line_keys.add(mtn_line_key)
             n_gtfs_mountain += 1
             stats["matched"] += 1
 
@@ -2004,6 +2026,12 @@ def main():
         if entry.get("gtfs_ref"):
             by_gtfs_ref[entry["gtfs_ref"]].append(osm_id)
 
+    # Quick lookup for dedup logging: osm_id → {ref, name, mode, operator}
+    feat_props_by_id = {
+        str(f["properties"]["osm_id"]): f["properties"]
+        for f in features if f["properties"].get("osm_id")
+    }
+
     dedup_removed: set = set()
     for gtfs_r, osm_ids in by_gtfs_ref.items():
         direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
@@ -2012,6 +2040,18 @@ def main():
             dedup_removed.update(fallback)
 
     for oid in dedup_removed:
+        fp = feat_props_by_id.get(oid, {})
+        dropped_details.append({
+            "osm_id":           oid,
+            "ref":              fp.get("ref", line_stops_out[oid].get("osm_ref", "")),
+            "name":             fp.get("name", ""),
+            "mode":             fp.get("mode", ""),
+            "operator":         fp.get("operator", ""),
+            "matched_line_key": None,
+            "freq_score":       fp.get("freq_score"),
+            "reason":           "dedup",
+            "gtfs_ref":         line_stops_out[oid].get("gtfs_ref", ""),
+        })
         del line_stops_out[oid]
 
     if dedup_removed:
@@ -2061,6 +2101,34 @@ def main():
 
     OUT_EXCLUDED.write_text(json.dumps(excluded_details, ensure_ascii=False))
     print(f"  Sanity log:  {len(excluded_details)} excluded lines → {OUT_EXCLUDED}")
+
+    # Dropped routes log (no_gtfs, zero_freq, dedup)
+    OUT_DROPPED.write_text(json.dumps(dropped_details, ensure_ascii=False))
+    print(f"  Dropped log: {len(dropped_details)} dropped lines → {OUT_DROPPED}")
+
+    # GTFS lines never matched to any drawn OSM route
+    all_gtfs_line_keys: set = set()
+    for candidates in _line_canonical_export.values():
+        for (lk, _stops, _da) in candidates:
+            all_gtfs_line_keys.add(lk)
+    unmatched_lks = all_gtfs_line_keys - matched_gtfs_line_keys
+    gtfs_unmatched_out = []
+    for lk in sorted(unmatched_lks, key=lambda x: (x[2], x[0], x[1])):
+        short_name, long_name, bucket = lk
+        freq = line_freq.get(lk, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
+        fs = compute_freq_score(freq, mode_approx)
+        if fs == 0.0:
+            continue   # zero-service lines: not interesting for unmatched review
+        gtfs_unmatched_out.append({
+            "short_name":  short_name,
+            "long_name":   long_name,
+            "bucket":      bucket,
+            "freq_score":  round(fs, 3),
+            "total_trips": sum(freq.values()),
+        })
+    OUT_GTFS_UNMATCHED.write_text(json.dumps(gtfs_unmatched_out, ensure_ascii=False))
+    print(f"  GTFS unmatched: {len(gtfs_unmatched_out)} lines with service but no OSM match → {OUT_GTFS_UNMATCHED}")
 
     # Remove lines whose geo sanity check rejected all candidates — they have no valid
     # GTFS-backed stops and must not be drawn.  Also remove dedup-eliminated lines.
