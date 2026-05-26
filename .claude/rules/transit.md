@@ -29,7 +29,7 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 ## OSM→GTFS Matching Architecture
 
 ### Key data structure
-`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware)` tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops), or (c) the frequency-weighted canonical differs from the longest-trip canonical.
+`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware)` tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), or (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops).
 
 ### Low-service filter on `_line_canonical_export`
 Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from both source dicts (`line_canonical_geo_stops`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
@@ -97,7 +97,7 @@ Applied in two situations in `05_score_and_match.py` — function `_passes_geo_s
 If the canonical lookup matched via `matched_gtfs_ref` (not the exact OSM ref), the result is sanity-checked. Tracked via `used_name_fallback = True`. If it fails, `best_coords` is cleared and geo-fallback runs.
 
 ### Trigger 2 — geo-fallback
-When canonical stops are empty or fail endpoint coverage, all GTFS lines in the bucket are scored as candidates. Scoring: `score = n_stops_in_bbox / n_total_stops`. Candidates with `score < 0.5` are discarded. Remaining candidates are sorted by `(-score, -len(ccoords))` — highest bbox overlap first, absolute stop count as tiebreaker. The top 50 candidates are run through `_passes_geo_sanity` in order; the first that passes is used. If nothing passes, `best_coords` is cleared — the line has no stops assigned (appears as EXCLUDED in `check_geo_sanity_rejects.py`). The line is still drawn as a colored line; the sanity check controls stop assignment, not line drawing.
+When canonical stops are empty or fail endpoint coverage, all GTFS lines in the bucket are scored as candidates. Scoring: `score = n_stops_in_bbox / n_total_stops`. Candidates with `score < 0.5` are discarded. Remaining candidates are sorted by `(-score, -endpoint_coverage, -len(ccoords))` — highest bbox overlap first, then endpoint coverage (0/1/2 endpoints within 500 m), then absolute stop count. The top 50 candidates are run through `_passes_geo_sanity` in order; the first that passes is used. If nothing passes, `best_coords` is cleared — the line has no stops assigned (appears as EXCLUDED in `check_geo_sanity_rejects.py`). The line is still drawn as a colored line; the sanity check controls stop assignment, not line drawing.
 
 ### What the sanity check affects
 - It selects which geo-fallback candidate's stops are assigned to the line
@@ -121,11 +121,16 @@ Algorithm:
 
 No outer gate — Check 1 always runs. Missing OSM stop names (< 2 chars after normalisation) are silently skipped; if too many are missing, the threshold is not met and Check 1 fails, which is correct.
 
-**Check 2 — GTFS stops → OSM geometry proximity**
-Sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
+**Check 2 — density gate + GTFS stops → OSM geometry proximity**
+
+Density gate (runs first, cheap): if the OSM route has ≥ 2 stop nodes and `osm_line_km > 0`, compare stop densities (stops/km). Gate fails if `ratio = cand_density / osm_density` is outside `[0.5, 2.0]` — prevents a sparse intercity train from matching a dense regional/mountain route.
+
+Candidate density uses `_canonical_density[line_key]` — precomputed from the **largest ordered GTFS variant** (max across geo_buckets), stored in `stream_stop_times` after the zero-service filter. This is critical: using the bbox-filtered `ccoords` span instead inflates the in-corridor density of long-distance trains (e.g. IC6 Basel–Brig scored as dense as RE1 when only the shared Brig–Bern section was measured). Falls back to bbox-filtered span only for union candidates that have no precomputed density.
+
+Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
 
 **Check 3 — OSM stops → GTFS stops proximity**
-Sample 5 evenly-spaced OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
+Sample 5 random OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
 
 Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
 
@@ -149,8 +154,6 @@ GTFS is the authority for mountain lines (type 5/6/7: funicular, gondola, aerial
 WAB and JB are GTFS type=2 (train bucket), short_name="CC". Processed in main OSM loop, overridden to mountain via `MOUNTAIN_PLACE_KEYWORDS`. BOB is type=2 train, short_name="R", drawn as regular train mode.
 
 FUN 311 (Stanserhornbahn) and FUN 312 (VerticAlp) share refs "311"/"312" with BOB/WAB/JB — `osm_train_refs_in_mountain_gtfs` includes a geographic guard to prevent false flagging.
-
----
 
 ---
 
