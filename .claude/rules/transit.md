@@ -22,7 +22,7 @@ Use these files to diagnose missing lines without adding one-off debug prints:
 ## Transit pipeline config
 `scripts/transit/config.yaml` — pipeline-specific settings (separate from the map style `scripts/config.yaml`).
 
-Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables the snap-distance gates that suppress stops too far from their OSM line geometry (rail: 300 m, non-rail: 150 m). Use to debug missing connectors. Requires a pipeline rebuild to take effect.
+Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables the snap-distance gates that suppress stops too far from their OSM line geometry (rail: 300 m, non-rail: 150 m). **Currently set to `true` intentionally.** The gate is disabled so that misassigned stops (long connectors) are visible on the map and can be diagnosed and fixed at the root (in `05_score_and_match.py`), rather than silently hidden. Do not re-enable it until all known long-connector bugs are fixed in the assignment logic.
 
 ---
 
@@ -51,19 +51,29 @@ Scans all ref variants in `_line_canonical_export` and iterates every candidate 
 
 **Critical:** do NOT feed `find_best_gtfs_candidate`'s canonical stops into stop assignment. Geo-cell-bounded candidates (~40km) cause `_covers_endpoints` to fail more often, triggering the broad geo fallback which pulls in wrong stops. One session: 2 fixes, ~50 regressions.
 
-### Known architectural limitation — union candidate / variant bleeding
+### Group-level stop assignment (implemented)
 
-**Problem:** A GTFS line often has multiple trip variants: a full-extent route and shorter partial/branch variants. When one variant's stop set is a subset of another's, `is_truly_divergent=False` and all stops are collapsed into a single union candidate (`dir_aware=False`). Multiple OSM relations for the same line (different directions, short-turns, branches) all compete against this same union. The winning candidate's stops are then filtered by the OSM relation's sub-bbox — but this is a geographic proxy for variant membership, not a structural one. Stops from the wrong branch or extension can leak through if their position falls inside the bbox.
+**Problem it solved:** A GTFS line often has multiple trip variants. When variants are subsets of each other, all stops collapse into a single union candidate (`dir_aware=False`). Multiple OSM relations for the same line (different directions, short-turns, branches) all competed against this union, with the winning candidate's stops filtered by the OSM relation's sub-bbox — a geographic proxy that cannot distinguish "stop belongs to this OSM variant" from "stop happens to be geographically close." Classic symptom: Glattbrugg (S3-Flughafen branch stop) leaking into S3-Hardbrücke with a 4.5 km connector.
 
-**Root cause:** Stop inclusion is decided per-OSM-relation using bbox filtering, but the GTFS stop pool is line-level (the union). The bbox filter cannot reliably distinguish "stop belongs to this OSM variant" from "stop happens to be geographically close."
+**Implementation — `_group_reassign_stops()` (runs after dedup, before JSON write):**
+1. Group all surviving `line_stops_out` entries by `(gtfs_ref, bucket)`.
+2. Skip groups with fewer than 2 OSM relations.
+3. For each group, pool all canonical GTFS stops from `_line_canonical_export` for that ref.
+4. For each stop, filter to relations whose sub-bboxes contain it (coarse geographic gate, margin=0.02°).
+5. Compute **full vertex scan** distance (no early exit) from the stop to each nearby relation's polyline.
+6. Assign the stop to all relations within `max(d_min + 0.05 km, d_min * 1.1)` of the closest relation — shared stations (both routes within metres) appear on all; branch-specific stops (one route much closer) are pinned to the right branch.
+7. Use a dict keyed by `stop_id` to deduplicate stops that appear in multiple canonical entries.
 
-**Planned fix — group-level stop assignment:**
-1. After the per-OSM-relation matching pass, group all OSM relations by their matched `gtfs_ref`.
-2. For each group, collect the combined geometry of all OSM relations in the group.
-3. A GTFS stop qualifies for the line if it is near **any** OSM relation in the group (not just the one currently being processed).
-4. For placement (connector drawing in `07_extract_stops.py`), each stop snaps to whichever individual OSM relation geometry it is closest to.
+**Critical implementation note — full vertex scan:**
+`_min_dist_to_polyline_km` has an early exit at 100 m: it breaks as soon as it finds *any* vertex within 100 m, which may not be the closest vertex. In the group pass this produces wrong d_min values (e.g. a 75 m vertex found before the true 11 m vertex → d_min inflates to 75 m → threshold inflates to 125 m → wrong stops pass). The group pass therefore uses `min(haversine_km(...) for p in geom)` — a full scan with no early exit. Do NOT replace this with `_min_dist_to_polyline_km`.
 
-This separates the two questions: **inclusion** (does this stop belong to this GTFS line?) uses the full group geometry; **placement** (which OSM relation does this stop connect to?) uses per-relation proximity. Geographic band-aids (threshold filters in `_lookup_canonical_stops`) should NOT be used as a substitute for this structural fix.
+**Direction filter in `_lookup_canonical_stops`:**
+`dir_aware=True` means the two directions of a line have genuinely different stop sets (e.g. Bus 17 Bern: westbound on Effingerstrasse, eastbound on Schwarztorstrasse). The direction filter in `_lookup_canonical_stops` (skips candidates whose first stop is >2× closer to the OSM end than start) is **redundant for multi-relation groups** — the group pass overwrites the per-relation assignment anyway. It is still **load-bearing for single-relation lines** with `dir_aware=True`: without it, the wrong-direction canonical could win and there is no group pass to correct it. Leave it in place.
+
+**What does NOT change:**
+- `_lookup_canonical_stops` — still runs per-relation as the initial assignment; group pass overwrites it for multi-relation groups
+- `07_extract_stops.py` — connectors snap to the assigned relation's geometry; no changes needed there
+- Single-relation groups — group pass skips them (`len(osm_ids) < 2`); direction filter protects them
 
 ---
 
@@ -97,10 +107,19 @@ When canonical stops are empty or fail endpoint coverage, all GTFS lines in the 
 
 ### The three checks (cheapest first, returns True on first pass)
 
-**Check 1 — Terminal name match (string only)**
-Counts stops whose normalised name contains the normalised OSM `from` or `to` tag. Requires at least **1/3 of the candidate's stops** to match, with a minimum of **2 stops** (so small lines must have both terminals present). Minimum terminal name length: ≥ 4 chars.
+**Check 1 — OSM stop name match against GTFS candidate stops**
 
-This prevents a long line from passing just because one of its stops happens to share a terminal name — e.g. a 15-stop east-shore line with one stop at Stadelhofen should not pass for a route `from=Zürich Stadelhofen`.
+Input sources:
+- OSM side: `stop_nodes` — actual stop member nodes of the OSM route relation, each with `[lon, lat, name]`. Names are extracted from the node's OSM `name` tag by `04_extract_osm.py`.
+- GTFS side: the candidate's `ccoords` list (`[lon, lat, stop_id]`), with names looked up via `stop_meta`.
+
+Algorithm:
+1. Build a set of normalised GTFS stop names from the candidate's `ccoords` + `stop_meta`.
+2. For each OSM stop node, normalise its name. Skip if < 2 chars.
+3. Count OSM stops whose normalised name is present in the GTFS name set (whole-token equality, not substring).
+4. Pass if `matches >= max(2, len(osm_stop_nodes) // 3)`.
+
+No outer gate — Check 1 always runs. Missing OSM stop names (< 2 chars after normalisation) are silently skipped; if too many are missing, the threshold is not met and Check 1 fails, which is correct.
 
 **Check 2 — GTFS stops → OSM geometry proximity**
 Sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
@@ -111,7 +130,6 @@ Sample 5 evenly-spaced OSM stop nodes (from the route relation's stop members, s
 Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
 
 ### Known remaining issues with the sanity check
-- `_norm_stop_name` strips `hb`/`hbf`/`bahnhof` — short generic city tokens can still pass Check 1 (e.g. `bern` from `Bern HB`)
 - Exact OSM ref matches (where `used_name_fallback=False`) with good endpoint coverage bypass all sanity checks
 - `merge_clusters_by_parent_station` in `07_extract_stops.py` can pull in far-away points via shared parent_station — downstream issue, independent of the sanity check
 
@@ -131,6 +149,40 @@ GTFS is the authority for mountain lines (type 5/6/7: funicular, gondola, aerial
 WAB and JB are GTFS type=2 (train bucket), short_name="CC". Processed in main OSM loop, overridden to mountain via `MOUNTAIN_PLACE_KEYWORDS`. BOB is type=2 train, short_name="R", drawn as regular train mode.
 
 FUN 311 (Stanserhornbahn) and FUN 312 (VerticAlp) share refs "311"/"312" with BOB/WAB/JB — `osm_train_refs_in_mountain_gtfs` includes a geographic guard to prevent false flagging.
+
+---
+
+## Known Bug — freq_canon bypasses 10% variant gate
+
+### Root cause (fully diagnosed, fix pending)
+
+`line_canonical_geo` (frequency-weighted canonical, one entry per `(line_key, geo_bucket)`) is **not** filtered by the 10% variant gate. This lets rare mountain-route variants leak into `_line_canonical_export` and from there into stop assignment.
+
+**Concrete example — S10 Ticino (Como→Biasca) showing Rivera-Bironico:**
+1. S10 has both tunnel trips (dominant, ~97%) and mountain-route trips (~3%). The 10% gate correctly removes mountain variants from `line_variant_counts` and `line_canonical_geo_stops`.
+2. In geo_bucket **(18, 92)** (trips starting from Giubiasco/Bellinzona), mountain partial trips have **more stops** (13: south through Rivera → Mezzovico → Taverne → Lamone → Lugano…) than short tunnel trips (4: north to Biasca). `canon_score = n × len(active_dates)`: 13×1 > 4×2 → **mountain trip wins `line_canonical_geo` for this bucket**.
+3. The 10% gate removes ALL mountain canonicals from `line_canonical_geo_stops[(S10, (18,92))]` → `seen_sid_sets` is empty.
+4. Lines 554–559: `freq_canon` (mountain trip) passes `not in seen_sid_sets` (empty set) unconditionally → leaks into `_line_canonical_export[('S10', 'train')]`.
+5. `_group_reassign_stops` picks up Rivera-Bironico (8505216:4) from `all_stops`, the stop barely passes the sub-bbox margin check (0.02°), and its 4.19 km distance to the S10 tunnel geometry passes the too-loose threshold `max(d_min+0.05, d_min*1.1) = 4.61 km`.
+
+### Planned fix
+
+**In `stream_stop_times`, around line 555**, add a 10%-gate check before adding `freq_canon` as an extra entry:
+
+```python
+freq_canon = line_canonical_geo.get((line_key, gb))
+if freq_canon:
+    fc_sids = frozenset(s[0] for s in freq_canon["stops"])
+    qualifying_variants = line_variant_counts.get((line_key, gb), {})
+    if fc_sids not in seen_sid_sets and fc_sids in qualifying_variants:
+        _line_canonical_export[...].append(...)
+```
+
+**Key observation:** If `freq_canon`'s frozenset **passes** the 10% gate, it is already in `line_canonical_geo_stops` and thus already in `seen_sid_sets` — the existing `not in seen_sid_sets` check would block it anyway. This means the freq_canon extra-entry path **only ever fires for variants that fail the 10% gate** — exactly the bug case. After the fix, the freq_canon path is always a no-op and the entire `line_canonical_geo` dict + its associated code can be **removed** as dead code.
+
+**Before removing**, verify no regression for the original motivating cases:
+- GoldenPass express (more stops, less frequent) vs regular train (fewer stops, more frequent) — both stop sets are in `line_canonical_geo_stops` as separate unique-stop-set entries; freq_canon was redundant.
+- Jungfraubahn / seasonal mountain railways with 0 sample-date active_days — covered by the zero-service exemption in `line_canonical_geo_stops`, not by freq_canon.
 
 ---
 

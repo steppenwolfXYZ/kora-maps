@@ -70,12 +70,16 @@ class GeometryCollector(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
         self.node_coords: dict[int, tuple[float, float]] = {}  # id → (lon, lat)
+        self.node_names: dict[int, str] = {}                   # id → name tag
         self.way_nodes: dict[int, list[int]] = {}              # id → [node_ids]
         self.urban_way_ids: set = set()                        # urban landuse ways
 
     def node(self, n):
         if n.location.valid():
             self.node_coords[n.id] = (n.location.lon, n.location.lat)
+            name = n.tags.get("name")
+            if name:
+                self.node_names[n.id] = name
 
     def way(self, w):
         self.way_nodes[w.id] = [n.ref for n in w.nodes]
@@ -148,9 +152,10 @@ def route_urban_fraction(chunks: list, urban_cells: set, sample_km: float = 0.25
 
 class TransitExtractor(osmium.SimpleHandler):
 
-    def __init__(self, node_coords, way_nodes, urban_cells: set):
+    def __init__(self, node_coords, node_names, way_nodes, urban_cells: set):
         super().__init__()
         self.node_coords = node_coords
+        self.node_names = node_names
         self.way_nodes = way_nodes
         self.urban_cells = urban_cells
         self.route_features: list[dict] = []
@@ -307,7 +312,7 @@ class TransitExtractor(osmium.SimpleHandler):
                 and m.role in ("stop", "stop_entry_only", "stop_exit_only", "")
             ]
             stop_nodes = [
-                list(self.node_coords[nid])
+                [self.node_coords[nid][0], self.node_coords[nid][1], self.node_names.get(nid, "")]
                 for nid in stop_node_ids
                 if nid in self.node_coords
             ]
@@ -401,7 +406,7 @@ def main():
     print(f"  → {len(urban_cells):,} urban grid cells at {URBAN_GRID_DEG}° resolution")
 
     print("Pass 2: extracting transit routes and stations...")
-    extractor = TransitExtractor(geo.node_coords, geo.way_nodes, urban_cells)
+    extractor = TransitExtractor(geo.node_coords, geo.node_names, geo.way_nodes, urban_cells)
     extractor.apply_file(str(PBF))
 
     routes = extractor.route_features

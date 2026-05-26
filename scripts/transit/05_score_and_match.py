@@ -868,7 +868,7 @@ def _re_to_r_ref(ref_norm: str) -> Optional[str]:
 
 
 def _norm_stop_name(name: str) -> str:
-    """Normalise a stop name for loose terminal matching (lowercase, strip station suffixes)."""
+    """Normalise a stop name for name comparison (lowercase, strip station suffixes)."""
     name = name.lower().strip()
     name = re.sub(r',\s*(bahnhof|bhf|hbf|hb|bf|gare|station)\s*$', '', name)
     name = re.sub(r'\s+(bahnhof|hbf|hb|bhf|bf|gare|station)\s*$', '', name)
@@ -890,36 +890,36 @@ def _passes_geo_sanity(
     Checks are ordered cheapest-first; returns True on the first passing check so
     later (slower) checks are skipped as soon as one piece of evidence is found.
 
-    Check 1 — terminal name matching: does the OSM from/to name appear inside a GTFS stop name?
+    Check 1 — OSM stop names vs GTFS stop names: do enough OSM stop node names appear in the GTFS candidate?
     Check 2 — GTFS stops → OSM geometry: are 3/5 evenly-spaced GTFS stops within 200 m of the OSM line?
     Check 3 — OSM stops → GTFS stops: are 3/5 evenly-spaced OSM stop nodes within 200 m of any GTFS stop?
     """
     if len(ccoords) < 2 or len(osm_pts) < 2:
         return False
 
-    # Check 1: terminal name matching — O(N_stops × name_len), pure string ops
-    # Counts stops whose name contains the normalised OSM from/to tag, then requires
-    # at least 1/3 of the candidate's stops to match (minimum 2).  A single matching
-    # stop is not enough — prevents a 15-stop east-shore line from passing just because
-    # one stop happens to share a terminal city name with the OSM from/to tag.
-    norm_from = _norm_stop_name(osm_from)
-    norm_to   = _norm_stop_name(osm_to)
-    if (norm_from and len(norm_from) >= 4) or (norm_to and len(norm_to) >= 4):
-        threshold = max(2, len(ccoords) // 3)
-        matches = 0
-        for s in ccoords:
-            sid = s[2] if len(s) > 2 else None
-            if not sid:
-                continue
-            sname = _norm_stop_name(stop_meta.get(sid, ("", ""))[0])
-            if not sname:
-                continue
-            if norm_from and len(norm_from) >= 4 and sname == norm_from:
-                matches += 1
-            elif norm_to and len(norm_to) >= 4 and sname == norm_to:
-                matches += 1
-        if matches >= threshold:
-            return True
+    # Check 1: OSM stop names vs GTFS candidate stop names — O(N_osm + N_gtfs), pure string ops
+    # For each OSM stop node (name extracted by 04_extract_osm.py), checks whether that
+    # normalised name appears in the GTFS candidate's stop name set (whole-token equality,
+    # not substring). Requires at least 1/3 of OSM stop nodes (minimum 2) to match.
+    # Individual comparisons are skipped when either side is < 2 chars after normalisation.
+    gtfs_names = set()
+    for s in ccoords:
+        sid = s[2] if len(s) > 2 else None
+        if not sid:
+            continue
+        sname = _norm_stop_name(stop_meta.get(sid, ("", ""))[0])
+        if sname and len(sname) >= 2:
+            gtfs_names.add(sname)
+    threshold = max(2, len(osm_stop_nodes) // 3)
+    matches = 0
+    for node in osm_stop_nodes:
+        nname = _norm_stop_name(node[2] if len(node) > 2 else "")
+        if not nname or len(nname) < 2:
+            continue
+        if nname in gtfs_names:
+            matches += 1
+    if matches >= threshold:
+        return True
 
     # Check 2: density gate + GTFS stops → OSM geometry proximity
     # Density gate (cheap, runs first): if OSM has stop nodes, compare stops/km.
