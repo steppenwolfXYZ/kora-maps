@@ -371,14 +371,9 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # Canonical trip (most stops) per line for speed/pair-freq computation
     line_canonical: dict = {}
 
-    # Best (longest) trip per (line_key, geo_bucket): captures geographic variants
-    # that share the same line_key (e.g., S6 Bern vs S6 Zürich share ("S6","S 6","train"))
-    line_canonical_geo: dict = {}   # (line_key, geo_bucket) → {"stop_count", "stops"}
-
-    # Separate canonical for stop display: selects by max n_stops (not n × active_dates).
-    # Prevents short high-frequency trips from hiding stops of the full-length route.
-    # E.g. BOB "Grindelwald Terminal Express" (4 stops, 192 active days) would win over
-    # full Grindelwald service (9 stops, 0 active days on sample dates) in line_canonical_geo.
+    # All unique stop sets per (line_key, geo_bucket), sorted by stop count desc.
+    # Preserves minority stop sets (e.g. BOB full Grindelwald service with 0 active
+    # sample days alongside the frequent short Terminal Express variant).
     line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → [{"stop_count", "stops"}, …] sorted desc
     line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # (line_key, geo_bucket) → {frozenset(stop_ids) → trip_count}
     line_variant_sequences: dict = {}  # (geo_key, frozenset) → ordered [(sid, arr, dep), ...] for one representative trip
@@ -446,13 +441,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         line_variant_counts[geo_key][variant] += max(1, len(active_dates))
         if (geo_key, variant) not in line_variant_sequences:
             line_variant_sequences[(geo_key, variant)] = [(s[1], s[2], s[3]) for s in stops]
-        existing = line_canonical_geo.get(geo_key)
-        if existing is None or canon_score > existing.get("canon_score", 0):
-            line_canonical_geo[geo_key] = {
-                "stop_count": n,
-                "canon_score": canon_score,
-                "stops": [(s[1], s[2], s[3]) for s in stops],
-            }
 
         # Stop-display canonicals: keep all unique stop sets per cell, sorted by stop count desc.
         # Multiple stop sets arise when different services share a line_key + geo_bucket
@@ -495,10 +483,16 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
 
     # Remove rare stop sets (< 10% of trips) from both source dicts so that garage runs
     # and other infrequent variants never surface as stop candidates in section 1 or 2.
+    # If no variant clears 10% (many roughly-equal stopping patterns), fall back to 5%.
+    # If still nothing clears 5%, keep all variants rather than discarding everything.
     for geo_key, variant_counts in list(line_variant_counts.items()):
         total = sum(variant_counts.values())
-        threshold = max(1, total * 0.10)
-        line_variant_counts[geo_key] = {v: c for v, c in variant_counts.items() if c >= threshold}
+        for pct in (0.10, 0.05):
+            threshold = max(1, total * pct)
+            filtered = {v: c for v, c in variant_counts.items() if c >= threshold}
+            if filtered:
+                line_variant_counts[geo_key] = filtered
+                break
 
     for geo_key, canons in line_canonical_geo_stops.items():
         variant_counts = line_variant_counts.get(geo_key, {})
@@ -529,7 +523,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         if geo_key[0] in zero_service_keys:
             del line_canonical_geo_stops[geo_key]
             line_variant_counts.pop(geo_key, None)
-            line_canonical_geo.pop(geo_key, None)
 
     # Build canonical export: all unique stop sets per geographic cell per line_key.
     # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
@@ -537,26 +530,14 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # services that share a line_key+cell with a larger route (e.g. Maienfeld Bus 14 with
     # 5 stops alongside Feldkirch Bus 14 with 30 stops in the same 0.5° cell) so the
     # stop-assignment sanity check can iterate all candidates and pick the right one.
-    # Also adds the frequency-weighted canonical (line_canonical_geo) as an extra candidate
-    # when it has a different stop set. This handles cases like GoldenPass where an express
-    # tourist train has more total stops but skips intermediate stations, while the frequent
-    # regular train (wins line_canonical_geo by n×active_days) stops everywhere.
     _line_canonical_export.clear()
-    for (line_key, gb), canons in line_canonical_geo_stops.items():
+    for (line_key, _gb), canons in line_canonical_geo_stops.items():
         short_name, long_name, bucket = line_key
         long_norm = long_name.replace(" ", "")
-        seen_sid_sets: set = set()
         for canon in canons:
             _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"], False))
             if long_norm and long_norm != short_name:
                 _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"], False))
-            seen_sid_sets.add(frozenset(s[0] for s in canon["stops"]))
-        # Add frequency-weighted canonical as an extra candidate if it differs from all above
-        freq_canon = line_canonical_geo.get((line_key, gb))
-        if freq_canon and frozenset(s[0] for s in freq_canon["stops"]) not in seen_sid_sets:
-            _line_canonical_export[(short_name, bucket)].append((line_key, freq_canon["stops"], False))
-            if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, freq_canon["stops"], False))
 
     # Filtered union candidate: union of stops from variants that represent ≥10% of trips
     # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
@@ -830,34 +811,17 @@ def build_sub_bboxes(pts: list, segment_km: float = 40.0) -> list:
 
 
 ENDPOINT_THRESHOLD_KM = 5.0
-
-def _covers_endpoints(osm_pts: list, stops: list) -> bool:
-    """True if stops include a point within ENDPOINT_THRESHOLD_KM of both
-    the first and last OSM coordinate.  A canonical GTFS match that fails
-    this check has likely resolved to the wrong GTFS service (e.g. SBB RE
-    for an MGB RE41 ref) and should be superseded by the geo fallback."""
-    if not stops or len(osm_pts) < 2:
-        return True   # can't determine — don't force fallback
-    start, end = osm_pts[0], osm_pts[-1]
-    near_start = any(
-        haversine_km(s[0], s[1], start[0], start[1]) <= ENDPOINT_THRESHOLD_KM
-        for s in stops)
-    near_end = any(
-        haversine_km(s[0], s[1], end[0], end[1]) <= ENDPOINT_THRESHOLD_KM
-        for s in stops)
-    return near_start and near_end
-
-
 GEO_SORT_ENDPOINT_KM = 0.5  # tighter threshold for geo-fallback candidate ranking only
 
-def _count_endpoints_covered(osm_pts: list, stops: list) -> int:
-    """Return how many OSM endpoints (0, 1, or 2) have a stop within GEO_SORT_ENDPOINT_KM.
-    Used to rank geo-fallback candidates: full-corridor routes float above partial ones."""
+def _count_endpoints_covered(osm_pts: list, stops: list, threshold_km: float = GEO_SORT_ENDPOINT_KM) -> int:
+    """Return how many OSM endpoints (0, 1, or 2) have a stop within threshold_km.
+    Default (0.5 km) is used to rank geo-fallback candidates.
+    Called with ENDPOINT_THRESHOLD_KM (5 km) as the canonical-stop gate."""
     if not stops or len(osm_pts) < 2:
         return 2  # can't determine — don't penalise
     start, end = osm_pts[0], osm_pts[-1]
-    near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= GEO_SORT_ENDPOINT_KM for s in stops)
-    near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= GEO_SORT_ENDPOINT_KM for s in stops)
+    near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= threshold_km for s in stops)
+    near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= threshold_km for s in stops)
     return int(near_start) + int(near_end)
 
 
@@ -1895,13 +1859,17 @@ def main():
         )
         geo_best_ref: Optional[str] = None
 
-        # Geo-based fallback: triggers when (a) no canon found at all, (b) canon found
-        # but its stops don't overlap this OSM feature's bbox, or (c) canonical stops
-        # fail endpoint coverage — indicating the ref matched the wrong GTFS service
-        # (e.g. SBB 'RE' for MGB 'RE41', or MGB 'R' for Gornergrat 'R48 (CC)').
+        # Geo-based fallback: triggers when (a) no canon found at all, (b) 0 of 2 endpoints
+        # covered at 5 km — canonical resolved to wrong GTFS service (e.g. SBB 'RE' for MGB
+        # 'RE41'), or (c) 1 of 2 endpoints covered and sanity check fails — partial match.
         # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
         # is carried as GTFS train type=2 routes under short_name "R".
-        if not best_coords or not _covers_endpoints(osm_pts, best_coords):
+        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM) if best_coords else 0
+        needs_fallback = not best_coords or ep_count == 0
+        if not needs_fallback and ep_count == 1:
+            if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km):
+                needs_fallback = True
+        if needs_fallback:
             if mode == "ferry":
                 # Ferry: collect ALL pier stops from any GTFS ferry route within the bbox,
                 # deduped by position. OSM ref ≠ GTFS short_name so we can't ref-match.

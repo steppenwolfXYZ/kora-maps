@@ -32,7 +32,7 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 `_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware)` tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops), or (c) the frequency-weighted canonical differs from the longest-trip canonical.
 
 ### Low-service filter on `_line_canonical_export`
-Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from all three source dicts (`line_canonical_geo_stops`, `line_canonical_geo`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
+Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from both source dicts (`line_canonical_geo_stops`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
 
 Filter uses `compute_freq_score(freq, mode_approx)` where `mode_approx` is derived from the GTFS bucket. The "bus" bucket is approximated as `regional_bus` (lower maluses) rather than `bus` — this is intentionally conservative: a city bus with very sparse service might survive the filter here even though it would be dropped at draw time. Mountain bucket is exempt entirely.
 
@@ -151,38 +151,6 @@ WAB and JB are GTFS type=2 (train bucket), short_name="CC". Processed in main OS
 FUN 311 (Stanserhornbahn) and FUN 312 (VerticAlp) share refs "311"/"312" with BOB/WAB/JB — `osm_train_refs_in_mountain_gtfs` includes a geographic guard to prevent false flagging.
 
 ---
-
-## Known Bug — freq_canon bypasses 10% variant gate
-
-### Root cause (fully diagnosed, fix pending)
-
-`line_canonical_geo` (frequency-weighted canonical, one entry per `(line_key, geo_bucket)`) is **not** filtered by the 10% variant gate. This lets rare mountain-route variants leak into `_line_canonical_export` and from there into stop assignment.
-
-**Concrete example — S10 Ticino (Como→Biasca) showing Rivera-Bironico:**
-1. S10 has both tunnel trips (dominant, ~97%) and mountain-route trips (~3%). The 10% gate correctly removes mountain variants from `line_variant_counts` and `line_canonical_geo_stops`.
-2. In geo_bucket **(18, 92)** (trips starting from Giubiasco/Bellinzona), mountain partial trips have **more stops** (13: south through Rivera → Mezzovico → Taverne → Lamone → Lugano…) than short tunnel trips (4: north to Biasca). `canon_score = n × len(active_dates)`: 13×1 > 4×2 → **mountain trip wins `line_canonical_geo` for this bucket**.
-3. The 10% gate removes ALL mountain canonicals from `line_canonical_geo_stops[(S10, (18,92))]` → `seen_sid_sets` is empty.
-4. Lines 554–559: `freq_canon` (mountain trip) passes `not in seen_sid_sets` (empty set) unconditionally → leaks into `_line_canonical_export[('S10', 'train')]`.
-5. `_group_reassign_stops` picks up Rivera-Bironico (8505216:4) from `all_stops`, the stop barely passes the sub-bbox margin check (0.02°), and its 4.19 km distance to the S10 tunnel geometry passes the too-loose threshold `max(d_min+0.05, d_min*1.1) = 4.61 km`.
-
-### Planned fix
-
-**In `stream_stop_times`, around line 555**, add a 10%-gate check before adding `freq_canon` as an extra entry:
-
-```python
-freq_canon = line_canonical_geo.get((line_key, gb))
-if freq_canon:
-    fc_sids = frozenset(s[0] for s in freq_canon["stops"])
-    qualifying_variants = line_variant_counts.get((line_key, gb), {})
-    if fc_sids not in seen_sid_sets and fc_sids in qualifying_variants:
-        _line_canonical_export[...].append(...)
-```
-
-**Key observation:** If `freq_canon`'s frozenset **passes** the 10% gate, it is already in `line_canonical_geo_stops` and thus already in `seen_sid_sets` — the existing `not in seen_sid_sets` check would block it anyway. This means the freq_canon extra-entry path **only ever fires for variants that fail the 10% gate** — exactly the bug case. After the fix, the freq_canon path is always a no-op and the entire `line_canonical_geo` dict + its associated code can be **removed** as dead code.
-
-**Before removing**, verify no regression for the original motivating cases:
-- GoldenPass express (more stops, less frequent) vs regular train (fewer stops, more frequent) — both stop sets are in `line_canonical_geo_stops` as separate unique-stop-set entries; freq_canon was redundant.
-- Jungfraubahn / seasonal mountain railways with 0 sample-date active_days — covered by the zero-service exemption in `line_canonical_geo_stops`, not by freq_canon.
 
 ---
 
