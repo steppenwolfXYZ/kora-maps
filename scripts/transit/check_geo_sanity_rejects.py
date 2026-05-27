@@ -293,7 +293,8 @@ def main():
                 stop_coords, stop_meta, sub_bboxes,
             )
 
-            if best_coords and _m._covers_endpoints(osm_pts, best_coords):
+            ep = _m._count_endpoints_covered(osm_pts, best_coords, _m.ENDPOINT_THRESHOLD_KM)
+            if best_coords and ep >= 2:
                 n_skip += 1; continue   # direct match, didn't need geo fallback
 
             geo_candidates = _collect_geo_candidates(osm_pts, bucket, stop_coords)

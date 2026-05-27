@@ -1,6 +1,6 @@
 # Cross-Border Endpoint Fix
 
-**Status:** Planned — not yet implemented
+**Status:** Implemented
 
 ## Problem
 
@@ -28,23 +28,37 @@ Rationale: OSM route geometry often extends past the last passenger stop (into t
 
 The ep_count call in the main matching loop must pass `osm_stop_nodes` to `_count_endpoints_covered`.
 
-### Part 2: Filter GTFS stops to Switzerland
+### Part 2: Filter GTFS stops to the service area
 
-Both GTFS `ccoords` (used for ep_count and stop assignment) and the full-candidate stop list used for inline density must be filtered to stops geographically within Switzerland.
+Both GTFS `ccoords` (used for ep_count and stop assignment) and the full-candidate stop list used for inline density must be filtered to stops within the pipeline's service area before use.
 
-**Why a geographic filter, not a UIC prefix filter:**
-The Swiss GTFS assigns UIC prefix `85` to Iselle di Trasquera, Varzo, and Preglia — three Italian stations on the Simplon south ramp operated by SBB. A prefix-`85` filter would incorrectly keep them. Geographic containment is the correct test.
+**Service area definition:** UIC prefix `85` (Swiss and Liechtenstein) plus an explicit inclusion list of non-85 stops that Swiss operators serve across the border. Liechtenstein uses prefix `85` throughout; it is treated as part of the service area. The filter is implemented as `is_in_service_area(stop_id) -> bool`.
 
-**Implementation:**
-- Load a Switzerland border polygon (GeoJSON) at pipeline startup.
-- Implement `is_in_switzerland(lon, lat) -> bool` using `shapely.geometry.Point.within(polygon)`.
-- Apply the filter in four places in `05_score_and_match.py`:
-  1. `_lookup_canonical_stops` — when building `ccoords` from each GTFS candidate
-  2. `_lookup_canonical_stops` Trigger 1 — when building `_cand_coords` for density (name-fallback sanity check)
-  3. Geo fallback — when building `ccoords` from each GTFS candidate
-  4. Geo fallback — when building `_fc` (the full candidate list used for inline density)
+**Why prefix-based, not geographic:**
+A polygon approach was investigated but found impractical: the Natural Earth 10m Switzerland polygon misses hundreds of genuine Swiss municipalities in southern Ticino (Chiasso, Pedrinate, Muggio, Arogno, Gandria, etc.) and in the Canton Geneva suburbs (Veyrier, Thônex, etc.). A stop-ID-based filter is more reliable.
 
-**New dependency:** `shapely` library. Check if already present; if not, add to project requirements.
+**Why prefix `85` is not sufficient alone:**
+The Swiss GTFS assigns prefix `85` to stations physically in Italy that SBB or jointly-operated lines serve: Iselle di Trasquera (8501952), Varzo (8501951), Preglia (8501950) on the Simplon south ramp; Tirano (8509369) and Campocologno Li Geri (8581990) on the Bernina line; and the Val Vigezzo/Ossola valley stops on the Centovalli/SSIF line (Colmegna, Maccagno, Pino-Tronzano, and the full Domodossola valley cluster). These must be explicitly excluded.
+
+**Explicit exclude set** (prefix-85 stops physically in Italy or Germany):
+- Simplon south ramp (Italy): 8501952, 8501951, 8501950
+- Bernina line Italy end: 8509369, 8581990
+- Lago Maggiore Italian shore: 8505874, 8505861, 8505862
+- Val Vigezzo / Ossola valley (SSIF/Centovalli Italy section): 8505599, 8505597, 8505588, 8505580, 8505590, 8505584, 8505578, 8505593, 8505594, 8505585, 8505589, 8505581
+- German enclaves surrounded by Swiss territory: 8503420 (Lottstetten), 8503421 (Jestetten)
+
+**Explicit include set** (non-85 stops Swiss operators serve, within the service area for density purposes):
+- Konstanz and surrounds (Thurbo/SBB, DB prefix): 8014586, 8014587, 8014481, 8014491
+- Pougny-Chancy (Geneva area, French prefix): 8774538
+- Delle (Jura border, French prefix): 8718444
+
+**Apply the filter in four places in `05_score_and_match.py`:**
+1. `_lookup_canonical_stops` — when building `ccoords` from each GTFS candidate
+2. `_lookup_canonical_stops` Trigger 1 — when building `_cand_coords` for density (name-fallback sanity check)
+3. Geo fallback — when building `ccoords` from each GTFS candidate
+4. Geo fallback — when building `_fc` (the full candidate list used for inline density)
+
+No new library dependencies. The exception lists were derived by cross-referencing GTFS stop coordinates against OpenStreetMap stop coverage (100 m proximity check) and manual geographic review.
 
 ## Why together
 

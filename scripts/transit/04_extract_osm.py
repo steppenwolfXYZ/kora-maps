@@ -18,9 +18,13 @@ from pathlib import Path
 from collections import defaultdict
 
 ROOT = Path(__file__).resolve().parents[2]
-PBF = ROOT / "data" / "osm" / "switzerland-latest.osm.pbf"
-OUT_ROUTES = ROOT / "data" / "osm" / "routes.geojson"
-OUT_STATIONS = ROOT / "data" / "osm" / "stations.geojson"
+OSM_DIR = ROOT / "data" / "osm"
+PBFS = [
+    OSM_DIR / "switzerland-latest.osm.pbf",
+    OSM_DIR / "liechtenstein-latest.osm.pbf",
+]
+OUT_ROUTES = OSM_DIR / "routes.geojson"
+OUT_STATIONS = OSM_DIR / "stations.geojson"
 
 # Landuse values considered "urban" for bus route classification.
 # Routes where >50% of sampled points fall in urban cells → city bus, else regional_bus.
@@ -396,9 +400,17 @@ class TransitExtractor(osmium.SimpleHandler):
 # ---------------------------------------------------------------------------
 
 def main():
+    pbfs = [str(p) for p in PBFS if p.exists()]
+    if not pbfs:
+        raise FileNotFoundError(f"No OSM PBF files found in {OSM_DIR}")
+    if len(pbfs) < len(PBFS):
+        missing = [p for p in PBFS if not p.exists()]
+        print(f"  Warning: missing PBF(s): {[p.name for p in missing]} — skipping")
+
     print("Pass 1: collecting node coordinates and way geometries...")
     geo = GeometryCollector()
-    geo.apply_file(str(PBF), locations=True)
+    for pbf in pbfs:
+        geo.apply_file(pbf, locations=True)
     print(f"  {len(geo.node_coords):,} nodes, {len(geo.way_nodes):,} ways collected")
 
     print(f"  Building urban grid from {len(geo.urban_way_ids):,} landuse polygons...")
@@ -407,7 +419,8 @@ def main():
 
     print("Pass 2: extracting transit routes and stations...")
     extractor = TransitExtractor(geo.node_coords, geo.node_names, geo.way_nodes, urban_cells)
-    extractor.apply_file(str(PBF))
+    for pbf in pbfs:
+        extractor.apply_file(pbf)
 
     routes = extractor.route_features
     stations = extractor.station_features

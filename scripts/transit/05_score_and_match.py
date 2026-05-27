@@ -208,6 +208,41 @@ def speed_to_color(mode: str, speed_kmh) -> str:
     return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
 
 
+# ── Service area filter ───────────────────────────────────────────────────────
+# Prefix-85 covers Switzerland + Liechtenstein. Some prefix-85 IDs are
+# physically in Italy/Germany (SBB-operated border stations) — exclude them.
+# A small set of non-85 IDs are foreign stations Swiss operators serve — include them.
+_SERVICE_AREA_EXCLUDE: frozenset = frozenset({
+    # Simplon south ramp (Italy)
+    "8501952", "8501951", "8501950",
+    # Bernina line Italy end
+    "8509369", "8581990",
+    # Lago Maggiore Italian shore
+    "8505874", "8505861", "8505862",
+    # Val Vigezzo / Ossola valley (SSIF/Centovalli Italy section)
+    "8505599", "8505597", "8505588", "8505580", "8505590", "8505584",
+    "8505578", "8505593", "8505594", "8505585", "8505589", "8505581",
+    # German enclaves surrounded by Swiss territory
+    "8503420", "8503421",
+})
+_SERVICE_AREA_INCLUDE: frozenset = frozenset({
+    # Konstanz and surrounds (Thurbo/SBB cross-border DE)
+    "8014586", "8014587", "8014481", "8014491",
+    # Pougny-Chancy (Geneva area, French prefix)
+    "8774538",
+    # Delle (Jura border, French prefix)
+    "8718444",
+})
+
+def is_in_service_area(stop_id: str) -> bool:
+    sid = stop_id.split(":")[0]
+    if sid in _SERVICE_AREA_INCLUDE:
+        return True
+    if sid in _SERVICE_AREA_EXCLUDE:
+        return False
+    return sid.startswith("85")
+
+
 # ── Geometry helpers ──────────────────────────────────────────────────────────
 def haversine_km(lon1, lat1, lon2, lat2) -> float:
     R = 6371
@@ -824,13 +859,21 @@ def build_sub_bboxes(pts: list, segment_km: float = 40.0) -> list:
 ENDPOINT_THRESHOLD_KM = 5.0
 GEO_SORT_ENDPOINT_KM = 0.5  # tighter threshold for geo-fallback candidate ranking only
 
-def _count_endpoints_covered(osm_pts: list, stops: list, threshold_km: float = GEO_SORT_ENDPOINT_KM) -> int:
+def _count_endpoints_covered(osm_pts: list, stops: list, threshold_km: float = GEO_SORT_ENDPOINT_KM,
+                              osm_stop_nodes: list = []) -> int:
     """Return how many OSM endpoints (0, 1, or 2) have a stop within threshold_km.
     Default (0.5 km) is used to rank geo-fallback candidates.
-    Called with ENDPOINT_THRESHOLD_KM (5 km) as the canonical-stop gate."""
+    Called with ENDPOINT_THRESHOLD_KM (5 km) as the canonical-stop gate.
+    Uses osm_stop_nodes[0]/[-1] as reference points when available — these are the
+    actual passenger stop positions, not raw geometry endpoints which may extend into
+    tunnels or across borders past the last station (e.g. RE1 Simplon tunnel)."""
     if not stops or len(osm_pts) < 2:
         return 2  # can't determine — don't penalise
-    start, end = osm_pts[0], osm_pts[-1]
+    if len(osm_stop_nodes) >= 2:
+        start = osm_stop_nodes[0][:2]
+        end   = osm_stop_nodes[-1][:2]
+    else:
+        start, end = osm_pts[0], osm_pts[-1]
     near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= threshold_km for s in stops)
     near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= threshold_km for s in stops)
     return int(near_start) + int(near_end)
@@ -1008,6 +1051,8 @@ def _lookup_canonical_stops(
                         continue  # candidate runs reverse of this OSM line
             ccoords = []
             for stop_id, _arr, _dep in candidate:
+                if not is_in_service_area(stop_id):
+                    continue
                 c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                 if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
                     ccoords.append([c[0], c[1], stop_id])
@@ -1019,7 +1064,8 @@ def _lookup_canonical_stops(
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
         _cand_coords = [c for sid, *_ in best_candidate
-                        if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+                        if is_in_service_area(sid)
+                        and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
         _span = sum(haversine_km(_cand_coords[i][0], _cand_coords[i][1],
                                   _cand_coords[i+1][0], _cand_coords[i+1][1])
                     for i in range(len(_cand_coords) - 1))
@@ -1909,7 +1955,7 @@ def main():
         # 'RE41'), or (c) 1 of 2 endpoints covered and sanity check fails — partial match.
         # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
         # is carried as GTFS train type=2 routes under short_name "R".
-        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM) if best_coords else 0
+        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes) if best_coords else 0
         needs_fallback = not best_coords or ep_count == 0
         if not needs_fallback and ep_count == 1:
             if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
@@ -1947,6 +1993,8 @@ def main():
                             continue
                         ccoords = []
                         for stop_id, _arr, _dep in cand:
+                            if not is_in_service_area(stop_id):
+                                continue
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
                                 ccoords.append([c[0], c[1], stop_id])
@@ -1959,7 +2007,8 @@ def main():
                         # ccoords) so long-distance trains aren't artificially inflated by the
                         # shared corridor section alone.
                         _fc = [c for sid, *_ in cand
-                               if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+                               if is_in_service_area(sid)
+                               and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
                         _sp = sum(haversine_km(_fc[i][0], _fc[i][1], _fc[i+1][0], _fc[i+1][1])
                                   for i in range(len(_fc) - 1))
                         full_density = len(_fc) / _sp if _sp > 0 else 0.0
