@@ -49,6 +49,10 @@ When the geo match returns a line_key with zero total freq, `gtfs` is NOT set fr
 ### Stop assignment
 Scans all ref variants in `_line_canonical_export` and iterates every candidate entry per variant (there can be multiple stop sets per geo_bucket since the fix for Bus 14). Keeps whichever candidate yields the most stops inside the OSM route bbox. Then geo fallback if endpoint coverage fails.
 
+**Endpoint coverage gate:** `_count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes)` returns 0/1/2 — how many OSM terminal stations have a GTFS stop within 5 km. Uses **`osm_stop_nodes[0]` and `osm_stop_nodes[-1]`** as the comparison points (falling back to `osm_pts[0]`/`osm_pts[-1]` when stop_nodes is empty). Raw geometry endpoints must not be used — they may extend into tunnels or across borders well past the last passenger stop (e.g. RE1 Bern→Brig: OSM geometry starts inside the Simplon tunnel 10 km past Brig, but `osm_stop_nodes[0]` = Brig correctly). With 0 endpoints covered: geo fallback fires. With 1: geo sanity check runs; fails → geo fallback. With 2: no fallback.
+
+**Switzerland geographic filter (`is_in_switzerland`):** Both GTFS `ccoords` and the inline density candidate list are filtered to stops within Switzerland before use — `is_in_switzerland(lon, lat)` checks a loaded Switzerland border polygon (shapely `Point.within(polygon)`). This prevents Italian/German/French terminal stops from skewing density and endpoint coverage. The polygon is loaded from a Switzerland GeoJSON at pipeline startup. A UIC prefix-`85` filter is insufficient: Iselle di Trasquera (8501952), Varzo (8501951), and Preglia (8501950) are geographically in Italy but carry Swiss UIC IDs because SBB operates trains there.
+
 **Critical:** do NOT feed `find_best_gtfs_candidate`'s canonical stops into stop assignment. Geo-cell-bounded candidates (~40km) cause `_covers_endpoints` to fail more often, triggering the broad geo fallback which pulls in wrong stops. One session: 2 fixes, ~50 regressions.
 
 ### Group-level stop assignment (implemented)
@@ -85,7 +89,9 @@ After all OSM→GTFS matching is complete, `05_score_and_match.py` runs a dedup 
 
 **`gtfs_ref` key:** When a match is made via the geo-fallback and the winning GTFS line has a long_name that adds information beyond the short_name (e.g. `short_name="R"`, `long_name="R 4"`), `gtfs_ref` is set to `long_norm` (`"R4"`) rather than the short_name (`"R"`). This scopes the dedup to the specific line rather than the generic prefix, preventing unrelated lines that share a short_name (e.g. `"R"` used by RhB, SBB, and a French tourist train) from interfering with each other. When long_name adds no information (e.g. `short_name="S8"`, `long_name="S 8"`), the short_name is used as-is.
 
-Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
+**Geo-cell scoping:** Each `line_stops_out` entry stores a `_dedup_cell` — the 0.5° grid cell of the matched GTFS stops' centroid (same grid as `GEO_BUCKET_DEG`). Dedup groups by `(gtfs_ref, _dedup_cell)` rather than `gtfs_ref` alone. This prevents unrelated lines that share a name string but serve different geographic regions (e.g. SBB R2 Lausanne–Bex vs RhB R2 Landquart–Davos) from colliding in the same dedup group and incorrectly removing each other.
+
+Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` and `_dedup_cell` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
 
 Do not tighten this logic to remove fallback matches unconditionally — they are still valid and needed when no direct-ref match exists for the same `gtfs_ref`.
 
@@ -131,7 +137,7 @@ Density gate (runs first, cheap): if the OSM route has ≥ 2 stop nodes and `osm
 
 **Exception — `regional_bus`:** only the lower bound (`ratio >= 0.5`) is enforced; the upper bound is dropped (`skip_upper_density=True`). GTFS maps every village stop for regional buses, while OSM often only maps major interchange stops — a 5:1 ratio is normal (e.g. Julierpass Bus 182: 59 GTFS stops vs 12 OSM stop nodes). The upper bound would incorrectly reject the correct candidate.
 
-Candidate density uses `_canonical_density[(line_key, geo_bucket)]` — precomputed from the **largest ordered GTFS variant per geo-cell**, stored in `stream_stop_times` after the zero-service filter. Keyed by `(line_key, geo_bucket)` rather than `line_key` alone so that unrelated lines sharing the same short_name (e.g. Fribourg Bus 182 vs Julierpass Bus 182) are never collapsed. This is critical: using the bbox-filtered `ccoords` span instead inflates the in-corridor density of long-distance trains (e.g. IC6 Basel–Brig scored as dense as RE1 when only the shared Brig–Bern section was measured). Falls back to bbox-filtered span only for union candidates that have no precomputed density.
+Candidate density is computed inline from the **full unfiltered candidate stop list** (not bbox-filtered `ccoords`) — this is critical: using the bbox-filtered span instead inflated the in-corridor density of long-distance trains (e.g. IC6 Basel–Brig scored as dense as RE1 when only the shared Brig–Bern section was measured). Both the inline density candidate stops and `ccoords` are filtered to Switzerland-only stops via `is_in_switzerland()` (see below).
 
 Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate (always including first and last, using index formula `round(i*(n-1)/4)`). Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 4/5 to be within 100 m.
 
@@ -200,5 +206,6 @@ S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as 
 
 ---
 
-#### Still excluded — legitimate lines needing a fix
+#### Still excluded / missing — legitimate lines needing a fix
+- **Train RE1 (Bern↔Brig/Domodossola, BLS Lötschberg)** — deduped against IC6 (reason="dedup", gtfs_ref="IC6"). Root cause: `_count_endpoints_covered` uses raw geometry endpoints; OSM RE1 geometry starts inside the Simplon tunnel (~10 km past Brig), so ep_count=0 → geo fallback → IC6 partial trip wins → dedup removes RE1. Fix requires two changes: (1) use `osm_stop_nodes` as effective endpoints in `_count_endpoints_covered`; (2) implement `is_in_switzerland()` polygon check and filter GTFS ccoords + density to Swiss stops. Needs `shapely` dependency and a Switzerland border GeoJSON added to the project.
 - **Regional Bus 171 (Chur→Bellinzona)** — PostBus express (EXB 171). Canonical lookup picks a Bellinzona-local B 171 (44 stops, higher count) over the full-corridor EXB 171 (25 stops). Endpoint check fails → geo fallback runs. Geo fallback also ranks Bellinzona-local variants first (more stops, same score=1.0). EXB 171 is buried past the cap of 50. Fix: use 3-level endpoint coverage `(0/1/2 endpoints covered)` as primary geo fallback sort key, so full-corridor candidates float above partial ones.

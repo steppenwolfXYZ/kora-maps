@@ -1848,7 +1848,9 @@ def main():
                                     seen_pos.add(key)
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry"}
+                    _fcx = sum(s[0] for s in pier_coords) / len(pier_coords)
+                    _fcy = sum(s[1] for s in pier_coords) / len(pier_coords)
+                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry", "_dedup_cell": (int(_fcx / GEO_BUCKET_DEG), int(_fcy / GEO_BUCKET_DEG))}
                 continue
             elif mode != "mountain":
                 continue
@@ -2021,7 +2023,10 @@ def main():
 
         if best_coords:
             gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket}
+            _cx = sum(s[0] for s in best_coords) / len(best_coords)
+            _cy = sum(s[1] for s in best_coords) / len(best_coords)
+            _dedup_cell = (int(_cx / GEO_BUCKET_DEG), int(_cy / GEO_BUCKET_DEG))
+            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket, "_dedup_cell": _dedup_cell}
 
     line_canonical_export = None  # free reference
 
@@ -2032,10 +2037,15 @@ def main():
         norm = lambda s: s.replace(" ", "").lower()
         return norm(osm_ref) == norm(gtfs_ref)
 
+    # Group by (gtfs_ref, geo_cell) — the geo_cell (0.5° grid square of the matched GTFS
+    # stops' centroid) scopes dedup to the same physical transit line.  Without it, two
+    # unrelated lines that share a short_name string (e.g. SBB R2 Lausanne–Bex and RhB R2
+    # Landquart–Davos) would be conflated and the fallback entry incorrectly removed.
     by_gtfs_ref: dict = defaultdict(list)
     for osm_id, entry in line_stops_out.items():
         if entry.get("gtfs_ref"):
-            by_gtfs_ref[entry["gtfs_ref"]].append(osm_id)
+            key = (entry["gtfs_ref"], entry.get("_dedup_cell"))
+            by_gtfs_ref[key].append(osm_id)
 
     # Quick lookup for dedup logging: osm_id → {ref, name, mode, operator}
     feat_props_by_id = {
@@ -2044,7 +2054,7 @@ def main():
     }
 
     dedup_removed: set = set()
-    for gtfs_r, osm_ids in by_gtfs_ref.items():
+    for (gtfs_r, _cell), osm_ids in by_gtfs_ref.items():
         direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
         if direct:
             fallback = [oid for oid in osm_ids if not _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
