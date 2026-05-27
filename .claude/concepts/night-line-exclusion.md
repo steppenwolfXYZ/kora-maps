@@ -1,6 +1,6 @@
 # Night Line Exclusion
 
-**Status:** Planned
+**Status:** Implemented
 
 ## Problem
 

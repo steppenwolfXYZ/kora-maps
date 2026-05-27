@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Download the Switzerland OSM PBF from Geofabrik.
-Output: data/osm/switzerland-latest.osm.pbf  (~350 MB)
+Download OSM PBFs from Geofabrik.
+Outputs:
+  data/osm/switzerland-latest.osm.pbf  (~350 MB)
+  data/osm/liechtenstein-latest.osm.pbf  (~1 MB)
 Updated daily by Geofabrik.
 """
 
@@ -9,10 +11,15 @@ import urllib.request
 from pathlib import Path
 import sys
 
-OSM_URL = "https://download.geofabrik.de/europe/switzerland-latest.osm.pbf"
+SOURCES = [
+    ("https://download.geofabrik.de/europe/switzerland-latest.osm.pbf",
+     "switzerland-latest.osm.pbf"),
+    ("https://download.geofabrik.de/europe/liechtenstein-latest.osm.pbf",
+     "liechtenstein-latest.osm.pbf"),
+]
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "data" / "osm" / "switzerland-latest.osm.pbf"
+OUT_DIR = ROOT / "data" / "osm"
 
 
 def download(url: str, dest: Path) -> None:
@@ -34,9 +41,12 @@ def download(url: str, dest: Path) -> None:
 
 
 if __name__ == "__main__":
-    if OUT.exists() and "--force" not in sys.argv:
-        size_mb = OUT.stat().st_size / 1_000_000
-        print(f"Already downloaded ({size_mb:.0f} MB): {OUT}")
-        print("Pass --force to re-download.")
-    else:
-        download(OSM_URL, OUT)
+    force = "--force" in sys.argv
+    for url, filename in SOURCES:
+        dest = OUT_DIR / filename
+        if dest.exists() and not force:
+            size_mb = dest.stat().st_size / 1_000_000
+            print(f"Already downloaded ({size_mb:.0f} MB): {dest}")
+            print("Pass --force to re-download.")
+        else:
+            download(url, dest)

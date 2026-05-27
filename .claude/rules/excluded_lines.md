@@ -90,8 +90,8 @@ The GTFS match is correct but the OSM route geometry is outdated/wrong, so proxi
 | 🔍 | regional_bus | 181 | Bus 181: Dornbirn → Koblach | 3340286 | Vorarlberg; 2/5 on both checks, borderline |
 | 🔍 | regional_bus | 212 | Bus 212: Wolhusen → Malters | 11836009 | OSM geometry and GTFS route differ strongly |
 | 🔍 | regional_bus | 212 | Bus 212: Malters → Wolhusen | 11836010 | Same |
-| 🔍 | regional_bus | 624 | Bus 624: St. Gallenkappel → Walde SG | 12043585 | Wrong GTFS candidate entirely |
-| 🔍 | regional_bus | 624 | Bus 624: Walde SG → St. Gallenkappel | 12043586 | Same |
+| ✅ | regional_bus | 624 | Bus 624: St. Gallenkappel → Walde SG | 12043585 | Now draws correctly after cross-border fix |
+| ✅ | regional_bus | 624 | Bus 624: Walde SG → St. Gallenkappel | 12043586 | Same |
 | 🔍 | regional_bus | 625 | Bus 625: Mauborget → Couvet | 12664155 | Regression: was resolved; check1 passes in diagnostic but pipeline excludes |
 | 🔍 | regional_bus | 625 | Bus 625: Couvet → Mauborget | 12664222 | Same |
 | 🔍 | regional_bus | 661 | Bus 661: Finstersee → Menzingen | 2016170 | Wrong GTFS candidate |
