@@ -881,8 +881,8 @@ def _passes_geo_sanity(
     later (slower) checks are skipped as soon as one piece of evidence is found.
 
     Check 1 — OSM stop names vs GTFS stop names: do enough OSM stop node names appear in the GTFS candidate?
-    Check 2 — GTFS stops → OSM geometry: are 3/5 evenly-spaced GTFS stops within 200 m of the OSM line?
-    Check 3 — OSM stops → GTFS stops: are 3/5 evenly-spaced OSM stop nodes within 200 m of any GTFS stop?
+    Check 2 — GTFS stops → OSM geometry: are 4/5 evenly-spaced GTFS stops within 200 m of the OSM line?
+    Check 3 — OSM stops → GTFS stops: are 4/5 evenly-spaced OSM stop nodes within 200 m of any GTFS stop?
     """
     if len(ccoords) < 2 or len(osm_pts) < 2:
         return False
@@ -935,7 +935,7 @@ def _passes_geo_sanity(
         # bound would incorrectly reject a dense PostAuto route against a sparse OSM relation.
         density_ok = (ratio >= 0.5) if skip_upper_density else (0.5 <= ratio <= 2.0)
 
-    # Proximity check: 3/5 evenly-spaced GTFS stops within 100 m of OSM polyline.
+    # Proximity check: 4/5 evenly-spaced GTFS stops within 100 m of OSM polyline.
     if density_ok:
         step2 = max(1, len(ccoords) // 5)
         sampled_gtfs = ccoords[::step2][:5]
@@ -943,11 +943,11 @@ def _passes_geo_sanity(
             1 for s in sampled_gtfs
             if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.1
         )
-        if close2 * 5 >= len(sampled_gtfs) * 3:  # ≥ 3/5
+        if close2 * 5 >= len(sampled_gtfs) * 4:  # ≥ 4/5
             return True
 
     # Check 3: OSM stops → GTFS stops — O(5 × N_gtfs_stops)
-    # Sample 5 evenly-spaced OSM stop nodes; require 3/5 within 200 m of any GTFS stop.
+    # Sample 5 evenly-spaced OSM stop nodes; require 4/5 within 200 m of any GTFS stop.
     if osm_stop_nodes and len(osm_stop_nodes) >= 2:
         step3 = max(1, len(osm_stop_nodes) // 5)
         sampled_osm = osm_stop_nodes[::step3][:5]
@@ -955,7 +955,7 @@ def _passes_geo_sanity(
             1 for p in sampled_osm
             if any(haversine_km(p[0], p[1], s[0], s[1]) <= 0.2 for s in ccoords)
         )
-        if close3 * 5 >= len(sampled_osm) * 3:  # ≥ 3/5
+        if close3 * 5 >= len(sampled_osm) * 4:  # ≥ 4/5
             return True
 
     return False

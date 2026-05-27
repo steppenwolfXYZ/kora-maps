@@ -131,10 +131,10 @@ Density gate (runs first, cheap): if the OSM route has ≥ 2 stop nodes and `osm
 
 Candidate density uses `_canonical_density[(line_key, geo_bucket)]` — precomputed from the **largest ordered GTFS variant per geo-cell**, stored in `stream_stop_times` after the zero-service filter. Keyed by `(line_key, geo_bucket)` rather than `line_key` alone so that unrelated lines sharing the same short_name (e.g. Fribourg Bus 182 vs Julierpass Bus 182) are never collapsed. This is critical: using the bbox-filtered `ccoords` span instead inflates the in-corridor density of long-distance trains (e.g. IC6 Basel–Brig scored as dense as RE1 when only the shared Brig–Bern section was measured). Falls back to bbox-filtered span only for union candidates that have no precomputed density.
 
-Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 3/5 to be within 200 m.
+Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 4/5 to be within 200 m.
 
 **Check 3 — OSM stops → GTFS stops proximity**
-Sample 5 random OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 3/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
+Sample 5 random OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 4/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
 
 Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
 
