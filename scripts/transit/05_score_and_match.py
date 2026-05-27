@@ -256,6 +256,8 @@ def load_stops() -> dict:
     with open(GTFS / "stops.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             sid = row["stop_id"]
+            if sid.startswith("0000"):  # pseudo-stops (tunnel/track-section markers, not passenger stops)
+                continue
             try:
                 lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
                 coords[sid] = (lon, lat)
@@ -273,6 +275,8 @@ def load_stop_meta() -> dict:
     with open(GTFS / "stops.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             sid = row["stop_id"]
+            if sid.startswith("0000"):  # pseudo-stops (tunnel/track-section markers, not passenger stops)
+                continue
             meta[sid] = (row.get("stop_name", ""), row.get("parent_station", ""))
             base = sid.split(":")[0]
             if base not in meta:
@@ -346,7 +350,6 @@ def load_trips(route_lookup: dict) -> dict:
 
 
 _line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [(line_key, stop_list, direction_aware), ...]
-_canonical_density: dict = {}  # (line_key, geo_bucket) → stops/km from largest ordered variant for that cell
 
 # Coarse geo-grid for canonical trip bucketing: ~0.5° ≈ 40 km per cell
 GEO_BUCKET_DEG = 0.5
@@ -524,29 +527,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         if geo_key[0] in zero_service_keys:
             del line_canonical_geo_stops[geo_key]
             line_variant_counts.pop(geo_key, None)
-
-    # Precompute true stop density (stops/km) for each (line_key, geo_bucket) from its
-    # largest ordered variant. Keyed by (line_key, geo_bucket) so that different routes
-    # sharing the same short_name but in different cities (e.g. Fribourg 182 vs Julierpass 182)
-    # keep their own density and don't contaminate each other.
-    _canonical_density.clear()
-    for (lk, gb), canons in line_canonical_geo_stops.items():
-        stops = canons[0]["stops"]  # largest ordered variant (sorted desc by stop_count)
-        if len(stops) < 2:
-            continue
-        coords = []
-        for sid, _a, _d in stops:
-            c = stop_coords.get(sid) or stop_coords.get(sid.split(":")[0])
-            if c:
-                coords.append(c)
-        if len(coords) < 2:
-            continue
-        span = sum(
-            haversine_km(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1])
-            for i in range(len(coords) - 1)
-        )
-        if span > 0:
-            _canonical_density[(lk, gb)] = len(coords) / span
 
     # Build canonical export: all unique stop sets per geographic cell per line_key.
     # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
@@ -890,7 +870,9 @@ def _passes_geo_sanity(
     # Check 1: OSM stop names vs GTFS candidate stop names — O(N_osm + N_gtfs), pure string ops
     # For each OSM stop node (name extracted by 04_extract_osm.py), checks whether that
     # normalised name appears in the GTFS candidate's stop name set (whole-token equality,
-    # not substring). Requires at least 1/3 of OSM stop nodes (minimum 2) to match.
+    # not substring). Requires 90% of OSM stop nodes (minimum 2) to match — a partial
+    # corridor match (e.g. R2 Landquart–Davos matching RE4 Landquart–Scuol) scores ~70%
+    # and is rejected, while a correct full-route match typically scores 100%.
     # Individual comparisons are skipped when either side is < 2 chars after normalisation.
     gtfs_names = set()
     for s in ccoords:
@@ -900,7 +882,7 @@ def _passes_geo_sanity(
         sname = _norm_stop_name(stop_meta.get(sid, ("", ""))[0])
         if sname and len(sname) >= 2:
             gtfs_names.add(sname)
-    threshold = max(2, len(osm_stop_nodes) // 3)
+    threshold = max(2, round(len(osm_stop_nodes) * 0.9))
     matches = 0
     for node in osm_stop_nodes:
         nname = _norm_stop_name(node[2] if len(node) > 2 else "")
@@ -937,8 +919,8 @@ def _passes_geo_sanity(
 
     # Proximity check: 4/5 evenly-spaced GTFS stops within 100 m of OSM polyline.
     if density_ok:
-        step2 = max(1, len(ccoords) // 5)
-        sampled_gtfs = ccoords[::step2][:5]
+        _k2 = min(5, len(ccoords))
+        sampled_gtfs = [ccoords[round(i * (len(ccoords) - 1) / max(1, _k2 - 1))] for i in range(_k2)]
         close2 = sum(
             1 for s in sampled_gtfs
             if _min_dist_to_polyline_km(s[0], s[1], osm_pts) <= 0.1
@@ -946,16 +928,17 @@ def _passes_geo_sanity(
         if close2 * 5 >= len(sampled_gtfs) * 4:  # ≥ 4/5
             return True
 
-    # Check 3: OSM stops → GTFS stops — O(5 × N_gtfs_stops)
-    # Sample 5 evenly-spaced OSM stop nodes; require 4/5 within 200 m of any GTFS stop.
+    # Check 3: OSM stops → GTFS stops — O(6 × N_gtfs_stops)
+    # Sample 6 evenly-spaced OSM stop nodes (always including first and last);
+    # require 5/6 within 200 m of any GTFS stop.
     if osm_stop_nodes and len(osm_stop_nodes) >= 2:
-        step3 = max(1, len(osm_stop_nodes) // 5)
-        sampled_osm = osm_stop_nodes[::step3][:5]
+        _k3 = min(6, len(osm_stop_nodes))
+        sampled_osm = [osm_stop_nodes[round(i * (len(osm_stop_nodes) - 1) / max(1, _k3 - 1))] for i in range(_k3)]
         close3 = sum(
             1 for p in sampled_osm
             if any(haversine_km(p[0], p[1], s[0], s[1]) <= 0.2 for s in ccoords)
         )
-        if close3 * 5 >= len(sampled_osm) * 4:  # ≥ 4/5
+        if close3 * 6 >= len(sampled_osm) * 5:  # ≥ 5/6
             return True
 
     return False
@@ -1004,7 +987,7 @@ def _lookup_canonical_stops(
             break
 
     best_coords: list = []
-    best_line_key = None
+    best_candidate: list = []
     if canon:
         for (canon_line_key, candidate, dir_aware) in canon:
             if dir_aware and osm_span_km >= 1.0 and candidate:
@@ -1022,15 +1005,16 @@ def _lookup_canonical_stops(
                     ccoords.append([c[0], c[1], stop_id])
             if len(ccoords) > len(best_coords):
                 best_coords = ccoords
-                best_line_key = canon_line_key
+                best_candidate = candidate
 
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
-        if best_line_key and best_coords:
-            _best_gb = (int(best_coords[0][0] / GEO_BUCKET_DEG), int(best_coords[0][1] / GEO_BUCKET_DEG))
-            _full_density = _canonical_density.get((best_line_key, _best_gb), 0.0)
-        else:
-            _full_density = 0.0
+        _cand_coords = [c for sid, *_ in best_candidate
+                        if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+        _span = sum(haversine_km(_cand_coords[i][0], _cand_coords[i][1],
+                                  _cand_coords[i+1][0], _cand_coords[i+1][1])
+                    for i in range(len(_cand_coords) - 1))
+        _full_density = len(_cand_coords) / _span if _span > 0 else 0.0
         if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
                                    cand_full_density=_full_density, skip_upper_density=skip_upper_density):
             best_coords = []
@@ -1954,8 +1938,14 @@ def main():
                         score = len(ccoords) / len(cand)
                         if score < 0.5:
                             continue
-                        _gb = (int(ccoords[0][0] / GEO_BUCKET_DEG), int(ccoords[0][1] / GEO_BUCKET_DEG))
-                        full_density = _canonical_density.get((line_key, _gb), 0.0)
+                        # Compute density from the full unfiltered candidate (not bbox-filtered
+                        # ccoords) so long-distance trains aren't artificially inflated by the
+                        # shared corridor section alone.
+                        _fc = [c for sid, *_ in cand
+                               if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+                        _sp = sum(haversine_km(_fc[i][0], _fc[i][1], _fc[i+1][0], _fc[i+1][1])
+                                  for i in range(len(_fc) - 1))
+                        full_density = len(_fc) / _sp if _sp > 0 else 0.0
                         geo_candidates.append((score, ccoords, lk_ref, full_density, line_key))
 
                 # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),

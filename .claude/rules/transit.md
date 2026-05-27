@@ -119,7 +119,9 @@ Algorithm:
 1. Build a set of normalised GTFS stop names from the candidate's `ccoords` + `stop_meta`.
 2. For each OSM stop node, normalise its name. Skip if < 2 chars.
 3. Count OSM stops whose normalised name is present in the GTFS name set (whole-token equality, not substring).
-4. Pass if `matches >= max(2, len(osm_stop_nodes) // 3)`.
+4. Pass if `matches >= max(2, round(len(osm_stop_nodes) * 0.9))` — requires ~90% of OSM stops to match.
+
+The 90% threshold rejects partial-corridor matches: e.g. R2 (Landquart–Davos) shares 5/7 stops with RE4 (Landquart–Scuol), scoring 71% → fails. A correct full-route match typically scores 100%. If Check 1 fails due to name format differences, Checks 2/3 still run as fallback.
 
 No outer gate — Check 1 always runs. Missing OSM stop names (< 2 chars after normalisation) are silently skipped; if too many are missing, the threshold is not met and Check 1 fails, which is correct.
 
@@ -131,12 +133,14 @@ Density gate (runs first, cheap): if the OSM route has ≥ 2 stop nodes and `osm
 
 Candidate density uses `_canonical_density[(line_key, geo_bucket)]` — precomputed from the **largest ordered GTFS variant per geo-cell**, stored in `stream_stop_times` after the zero-service filter. Keyed by `(line_key, geo_bucket)` rather than `line_key` alone so that unrelated lines sharing the same short_name (e.g. Fribourg Bus 182 vs Julierpass Bus 182) are never collapsed. This is critical: using the bbox-filtered `ccoords` span instead inflates the in-corridor density of long-distance trains (e.g. IC6 Basel–Brig scored as dense as RE1 when only the shared Brig–Bern section was measured). Falls back to bbox-filtered span only for union candidates that have no precomputed density.
 
-Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate. Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 4/5 to be within 200 m.
+Proximity check (only runs if `density_ok`): sample 5 evenly-spaced GTFS stops from the candidate (always including first and last, using index formula `round(i*(n-1)/4)`). Find the distance from each to the nearest point on the OSM polyline (vertex-based). Require at least 4/5 to be within 100 m.
 
 **Check 3 — OSM stops → GTFS stops proximity**
-Sample 5 random OSM stop nodes (from the route relation's stop members, stored as `stop_nodes` in route feature properties by `04_extract_osm.py`). For each, find the nearest GTFS stop in the candidate. Require at least 4/5 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
+Sample 6 evenly-spaced OSM stop nodes (always including first and last, using index formula `round(i*(n-1)/5)`). For each, find the nearest GTFS stop in the candidate. Require at least 5/6 to be within 200 m. If the OSM route has fewer than 2 stop nodes, this check is skipped.
 
-Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use 200 m threshold — real stops sit within meters of their line, so 200 m is already generous.
+The 5/6 threshold and always-include-last sampling close a former gap: with 5 samples and step-based indexing (`[::step][:5]`), routes with < 10 OSM stops would only sample the first 5, missing endpoint stops that expose partial-corridor mismatches (e.g. Scuol-Tarasp on RE4 was never tested against R2).
+
+Note: Check 2 is cheaper (polyline lookup) so it runs first. Check 3 uses OSM stop nodes — actual stop positions on the route — not geometry vertices. Both use distance thresholds generous enough for real stops (which sit within metres of their line).
 
 ### Known remaining issues with the sanity check
 - Exact OSM ref matches (where `used_name_fallback=False`) with good endpoint coverage bypass all sanity checks
