@@ -1937,7 +1937,7 @@ def main():
                 # Collect all scored candidates, then pick the highest-scoring one
                 # that passes the geo sanity checks.  Sorting first means we check
                 # the most-likely-correct candidates first and exit early.
-                geo_candidates: list = []  # (score, ccoords, lk_ref, full_density)
+                geo_candidates: list = []  # (score, ccoords, lk_ref, full_density, line_key)
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
@@ -1956,7 +1956,7 @@ def main():
                             continue
                         _gb = (int(ccoords[0][0] / GEO_BUCKET_DEG), int(ccoords[0][1] / GEO_BUCKET_DEG))
                         full_density = _canonical_density.get((line_key, _gb), 0.0)
-                        geo_candidates.append((score, ccoords, lk_ref, full_density))
+                        geo_candidates.append((score, ccoords, lk_ref, full_density, line_key))
 
                 # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
                 # then absolute stop count. Equal-score full-corridor routes beat partial ones.
@@ -1964,11 +1964,16 @@ def main():
                     key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1]), -len(x[1]))
                 )
                 geo_best: list = []
-                for _score, _ccoords, _lk_ref, _full_density in geo_candidates[:50]:
+                for _score, _ccoords, _lk_ref, _full_density, _line_key in geo_candidates[:50]:
                     if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
                                           cand_full_density=_full_density, skip_upper_density=(mode == "regional_bus")):
                         geo_best = _ccoords
-                        geo_best_ref = _lk_ref
+                        # Use long_norm as dedup key when it's more specific than short_name
+                        # (e.g. "R4" instead of "R", "RE4" instead of "RE").
+                        _sn, _ln, _bkt = _line_key
+                        _long_norm = _ln.replace(" ", "")
+                        _short_norm = _sn.replace(" ", "")
+                        geo_best_ref = _long_norm if _long_norm and _long_norm != _short_norm else _lk_ref
                         break
                 if geo_best:
                     best_coords = geo_best
