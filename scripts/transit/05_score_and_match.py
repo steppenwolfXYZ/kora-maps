@@ -828,7 +828,7 @@ def stop_near_bbox(lon, lat, bbox, margin=0.02):
             bbox[1] - margin <= lat <= bbox[3] + margin)
 
 
-def build_sub_bboxes(pts: list, segment_km: float = 40.0) -> list:
+def build_sub_bboxes(pts: list, segment_km: float = 20.0) -> list:
     """
     Split a polyline into sub-bboxes of at most segment_km each.
     Returns a list of (min_lon, min_lat, max_lon, max_lat) tuples.
