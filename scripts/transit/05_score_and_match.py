@@ -1188,10 +1188,13 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
         ref_variants[r_ref] = None
 
     # Alpha-prefix fallback: "R43" → "R"
+    # Suppressed for N-prefixed refs in bus buckets: "N18" → "N" would match unrelated
+    # daytime GTFS lines named "N", giving night-only routes a spurious freq score.
     m = re.match(r'^([A-Za-z ]+)\d', ref)
     if m:
         alpha = m.group(1).strip()
-        if alpha and alpha != ref:
+        night_line = (alpha.upper() == "N" and bucket in ("bus", "regional_bus"))
+        if alpha and alpha != ref and not night_line:
             ref_variants[alpha] = None
             ref_variants[alpha.upper()] = None
 
@@ -1488,7 +1491,10 @@ def main():
                 m = re.match(r'^([A-Za-z ]+)\d', ref)
                 if m:
                     alpha = m.group(1).strip()
-                    if alpha and alpha != ref:
+                    # N-prefixed refs (night lines) must not fall back to the bare "N" prefix,
+                    # which matches unrelated daytime GTFS lines and gives night routes a fake freq.
+                    night_line = (alpha.upper() == "N" and bucket in ("bus", "regional_bus"))
+                    if alpha and alpha != ref and not night_line:
                         gtfs = gtfs_index.get((bucket, alpha)) or gtfs_index.get((bucket, alpha.upper()))
 
         # Geo-based ferry fallback: OSM ferry ref may differ from GTFS short_name entirely
