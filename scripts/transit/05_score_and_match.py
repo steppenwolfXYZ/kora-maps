@@ -846,22 +846,32 @@ ENDPOINT_THRESHOLD_KM = 5.0
 GEO_SORT_ENDPOINT_KM = 0.5  # tighter threshold for geo-fallback candidate ranking only
 
 def _count_endpoints_covered(osm_pts: list, stops: list, threshold_km: float = GEO_SORT_ENDPOINT_KM,
-                              osm_stop_nodes: list = []) -> int:
+                              osm_stop_nodes: list = [], osm_segs: list = None) -> int:
     """Return how many OSM endpoints (0, 1, or 2) have a stop within threshold_km.
     Default (0.5 km) is used to rank geo-fallback candidates.
     Called with ENDPOINT_THRESHOLD_KM (5 km) as the canonical-stop gate.
-    Uses osm_stop_nodes[0]/[-1] as reference points when available — these are the
-    actual passenger stop positions, not raw geometry endpoints which may extend into
-    tunnels or across borders past the last station (e.g. RE1 Simplon tunnel)."""
+    Priority: (1) osm_stop_nodes[0]/[-1] — actual passenger stop positions, most
+    accurate; (2) all segment start/end points for MultiLineString geometries —
+    correct for Y-shapes and avoids relying on flattened-array order; (3) osm_pts[0]
+    and osm_pts[-1] as final fallback."""
     if not stops or len(osm_pts) < 2:
         return 2  # can't determine — don't penalise
     if len(osm_stop_nodes) >= 2:
         start = osm_stop_nodes[0][:2]
         end   = osm_stop_nodes[-1][:2]
+        near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= threshold_km for s in stops)
+        near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= threshold_km for s in stops)
+    elif osm_segs and len(osm_segs) > 1:
+        # MultiLineString: check GTFS first/last stop against all segment endpoints.
+        all_eps = [ep for seg in osm_segs for ep in (seg[0], seg[-1])]
+        near_start = any(haversine_km(stops[0][0], stops[0][1], ep[0], ep[1]) <= threshold_km
+                         for ep in all_eps)
+        near_end   = any(haversine_km(stops[-1][0], stops[-1][1], ep[0], ep[1]) <= threshold_km
+                         for ep in all_eps)
     else:
         start, end = osm_pts[0], osm_pts[-1]
-    near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= threshold_km for s in stops)
-    near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= threshold_km for s in stops)
+        near_start = any(haversine_km(s[0], s[1], start[0], start[1]) <= threshold_km for s in stops)
+        near_end   = any(haversine_km(s[0], s[1], end[0],   end[1])   <= threshold_km for s in stops)
     return int(near_start) + int(near_end)
 
 
@@ -1476,10 +1486,9 @@ def main():
         osm_pts = ([c for seg in geom["coordinates"] for c in seg]
                    if geom["type"] == "MultiLineString" else geom["coordinates"])
         osm_bbox = line_bbox(osm_pts)
-        osm_line_km = sum(
-            haversine_km(osm_pts[i][0], osm_pts[i][1], osm_pts[i+1][0], osm_pts[i+1][1])
-            for i in range(len(osm_pts) - 1)
-        ) if len(osm_pts) >= 2 else 0.0
+        # Read pre-computed per-segment sum from the GeoJSON property — avoids
+        # inflating the length from inter-segment jumps in disordered MultiLineStrings.
+        osm_line_km = float(props.get("raw_length_km") or props.get("length_km") or 0.0)
 
         # Primary match: geo-scored candidate selection (all modes).
         # Picks the specific GTFS line whose canonical stops best overlap this OSM route.
@@ -1941,7 +1950,8 @@ def main():
         # 'RE41'), or (c) 1 of 2 endpoints covered and sanity check fails — partial match.
         # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
         # is carried as GTFS train type=2 routes under short_name "R".
-        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes) if best_coords else 0
+        _osm_segs = geom["coordinates"] if geom["type"] == "MultiLineString" else None
+        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes, _osm_segs) if best_coords else 0
         needs_fallback = not best_coords or ep_count == 0
         if not needs_fallback and ep_count == 1:
             if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
@@ -2003,7 +2013,7 @@ def main():
                 # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
                 # then absolute stop count. Equal-score full-corridor routes beat partial ones.
                 geo_candidates.sort(
-                    key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1]), -len(x[1]))
+                    key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1], GEO_SORT_ENDPOINT_KM, osm_stop_nodes, _osm_segs), -len(x[1]))
                 )
                 geo_best: list = []
                 for _score, _ccoords, _lk_ref, _full_density, _line_key, _agency_id in geo_candidates[:50]:

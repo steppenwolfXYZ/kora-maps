@@ -10,13 +10,13 @@
 | File | Contents |
 |------|----------|
 | `data/transit/sanity_excluded.json` | OSM routes excluded by the geo sanity check (no valid GTFS candidate passed). Array of objects with `osm_id`, `ref`, `name`, `mode`, and check results. |
-| `data/transit/main_loop_dropped.json` | OSM routes that were processed but not drawn. Each entry: `osm_id`, `ref`, `name`, `mode`, `operator`, `matched_line_key` (geo-matched GTFS tuple or null), `freq_score` (null or 0.0), `reason` (`"no_gtfs"` / `"zero_freq"` / `"dedup"`). Dedup entries also have `gtfs_ref`. |
+| `data/transit/main_loop_dropped.json` | OSM routes that were processed but not drawn. Each entry: `osm_id`, `ref`, `name`, `mode`, `operator`, `matched_line_key` (geo-matched GTFS tuple or null), `freq_score` (null or below threshold), `reason` (`"no_gtfs"` / `"zero_freq"` / `"dedup"`). Dedup entries also have `gtfs_ref`. |
 | `data/transit/gtfs_unmatched.json` | GTFS line_keys with non-zero service that were never matched to any drawn OSM feature. Each entry: `short_name`, `long_name`, `bucket`, `freq_score`, `total_trips`. Sorted by `(bucket, short_name, long_name)`. Useful for finding GTFS lines that have no OSM counterpart. |
 
 Use these files to diagnose missing lines without adding one-off debug prints:
 - Line absent from map AND absent from `sanity_excluded.json` AND absent from `main_loop_dropped.json` → dropped before the main loop (mountain/TER skip, `osm_to_mode` returns None, etc.)
 - Line in `main_loop_dropped.json` with `reason="no_gtfs"` → no GTFS match found at all
-- Line in `main_loop_dropped.json` with `reason="zero_freq"` → GTFS match found but service score is 0.0
+- Line in `main_loop_dropped.json` with `reason="zero_freq"` → GTFS match found but service score is below `MIN_FREQ_SCORE` (0.075)
 - GTFS entry present but no OSM route drawn → check `gtfs_unmatched.json` for the line_key
 
 ## Transit pipeline config
@@ -32,9 +32,9 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 `_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware, agency_id)` 4-tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), or (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops).
 
 ### Low-service filter on `_line_canonical_export`
-Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from both source dicts (`line_canonical_geo_stops`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
+Lines below `MIN_FREQ_SCORE` (0.075) are excluded from both source dicts (`line_canonical_geo_stops`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents low/zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
 
-Filter uses `compute_freq_score(freq, mode_approx)` where `mode_approx` is derived from the GTFS bucket. The "bus" bucket is approximated as `regional_bus` (lower maluses) rather than `bus` — this is intentionally conservative: a city bus with very sparse service might survive the filter here even though it would be dropped at draw time. Mountain bucket is exempt entirely.
+Filter uses `compute_freq_score(freq, mode_approx)` where `mode_approx` is derived from the GTFS bucket. The "bus" bucket is approximated as `regional_bus` (higher `BEST_HEADWAY` → higher score) rather than `bus` — intentionally conservative: a city bus with sparse service is less likely to be filtered from the pool here, even if it would be dropped at draw time. Mountain bucket is exempt entirely.
 
 ### Primary matching: `find_best_gtfs_candidate()`
 For freq/speed selection ONLY — does NOT drive stop assignment.
@@ -43,13 +43,13 @@ For freq/speed selection ONLY — does NOT drive stop assignment.
 3. Returns highest-scoring candidate — geo is a tiebreaker, not a gate
 4. Returns `None` only if no candidates exist at all
 
-### Zero-freq fallback
-When the geo match returns a line_key with zero total freq, `gtfs` is NOT set from it — falls through to `gtfs_index` cascade to prevent routes disappearing due to a wrong zero-service match.
+### Low-freq geo-match fallback
+When `find_best_gtfs_candidate` returns a line_key whose `compute_freq_score` is below `MIN_FREQ_SCORE`, `gtfs` is NOT set from it — falls through to `gtfs_index` cascade to prevent routes disappearing due to a wrong low/zero-service match.
 
 ### Stop assignment
 Scans all ref variants in `_line_canonical_export` and iterates every candidate entry per variant (there can be multiple stop sets per geo_bucket since the fix for Bus 14). Keeps whichever candidate yields the most stops inside the OSM route bbox. Then geo fallback if endpoint coverage fails.
 
-**Endpoint coverage gate:** `_count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes)` returns 0/1/2 — how many OSM terminal stations have a GTFS stop within 5 km. Uses **`osm_stop_nodes[0]` and `osm_stop_nodes[-1]`** as the comparison points (falling back to `osm_pts[0]`/`osm_pts[-1]` when stop_nodes is empty). Raw geometry endpoints must not be used — they may extend into tunnels or across borders well past the last passenger stop (e.g. RE1 Bern→Brig: OSM geometry starts inside the Simplon tunnel 10 km past Brig, but `osm_stop_nodes[0]` = Brig correctly). With 0 endpoints covered: geo fallback fires. With 1: geo sanity check runs; fails → geo fallback. With 2: no fallback.
+**Endpoint coverage gate:** `_count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes, osm_segs)` returns 0/1/2 — how many OSM terminal stations have a GTFS stop within 5 km. Priority for reference points: (1) `osm_stop_nodes[0]`/`[-1]` — actual passenger stop positions, most accurate (e.g. RE1: OSM geometry starts inside the Simplon tunnel, but `osm_stop_nodes[0]` = Brig correctly); (2) all segment start/end points from MultiLineString geometry (`osm_segs`) — correct for Y-shapes when no stop nodes are available; (3) `osm_pts[0]`/`osm_pts[-1]` as final fallback. With 0 endpoints covered: geo fallback fires. With 1: geo sanity check runs; fails → geo fallback. With 2: no fallback.
 
 **Service area filter (`is_in_service_area`):** Both GTFS `ccoords` and the inline density candidate list are filtered to stops within the service area before use. This prevents foreign terminal stops from skewing density and endpoint coverage. The filter is stop-ID-based: prefix `85` (Swiss + Liechtenstein) is the base rule, overridden by hardcoded `_SERVICE_AREA_EXCLUDE` and `_SERVICE_AREA_INCLUDE` sets in `05_score_and_match.py` for edge cases at the border.
 
@@ -198,6 +198,7 @@ S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as 
 - **Train PE (Glacier Express St. Moritz↔Zermatt)** — now KEPT after geo fallback improvements (score ≥ 0.5 filter + better sort). No longer excluded.
 - **Train RE42 (Zermatt→Fiesch)** — now KEPT after same geo fallback improvements. No longer excluded.
 - **Train RE1 (Bern↔Brig/Domodossola, BLS Lötschberg)** — fixed by cross-border endpoint fix: `_count_endpoints_covered` now uses `osm_stop_nodes[0]`/`[-1]` instead of raw geometry endpoints (OSM geometry starts inside the Simplon tunnel), and `is_in_service_area` filters out non-Swiss GTFS stops. RE1 (OSM IDs 11612242, 11612421) now draws correctly via the mountain route.
+- **Train RE4 (RhB, Landquart→Scuol-Tarasp)** — fixed by the MultiLineString segment ordering fix (see `.claude/concepts/multilinestring-segment-ordering.md`). OSM relation 89792 has 6 disordered segments; `04_extract_osm.py` now chains them into one continuous polyline and drops noise sidings. `05_score_and_match.py` now reads `osm_line_km` from the `raw_length_km` GeoJSON property instead of recomputing from flattened geometry. This corrects `osm_line_km` from 205 km (inflated by inter-segment teleportation jumps) to 75 km, allowing the density gate in Check 2 to pass.
 
 #### Long_name matching — prefer specific line identity over generic short_name
 
@@ -206,6 +207,8 @@ S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as 
 **Context:** GTFS long_names follow two patterns: (1) `short_name` + number suffix — e.g. `short_name="RE"` → `long_name="RE 4"` (~22k routes, useful for matching); (2) type prefix + `short_name` — e.g. `short_name="1"` → `long_name="B 1"` (~529k routes, not useful since OSM ref is `"1"` not `"B1"`). Pattern (1) is exactly where long_name matching helps. Pattern (2) naturally falls through since the long_norm (`"B1"`) won't match the OSM ref_norm (`"1"`).
 
 **Fix:** In the `gtfs_index` cascade (stop assignment loop), try `gtfs_long_index` for `ref_norm` **before** falling through to the alpha-prefix `gtfs_index` lookup. This ensures `ref="RE 4"` → `ref_norm="RE4"` matches `gtfs_long_index[("train", "RE4")]` (→ `matched_gtfs_ref="RE4"`), so `_lookup_canonical_stops` finds the right canonical stops without needing the geo-fallback.
+
+Note: RE4 (Landquart→Scuol-Tarasp) was previously cited as a motivating case here, but it was fixed via the geometry fix instead. Long_name matching still benefits other routes with generic `short_name` prefixes.
 
 ---
 

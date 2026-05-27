@@ -64,6 +64,10 @@ def haversine_km(lon1, lat1, lon2, lat2) -> float:
     return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
 
+# < 1 m tolerance for chaining segment endpoints (handles rare float discrepancies)
+SEG_CONN_TOL_KM = 0.001
+
+
 # ---------------------------------------------------------------------------
 # Pass 1: collect all node coordinates and way geometries
 # ---------------------------------------------------------------------------
@@ -234,6 +238,128 @@ class TransitExtractor(osmium.SimpleHandler):
             for i in range(len(coords) - 1)
         )
 
+    def _count_stops_near(self, coords: list, stop_nodes: list, radius_km: float) -> int:
+        """Count stop nodes within radius_km of any vertex in coords."""
+        count = 0
+        for stop in stop_nodes:
+            slon, slat = stop[0], stop[1]
+            if any(haversine_km(slon, slat, pt[0], pt[1]) <= radius_km for pt in coords):
+                count += 1
+        return count
+
+    def _merge_and_denoise(self, chunks: list, stop_nodes: list) -> list:
+        """Chain connected segments into merged polylines; drop noise disconnected segments.
+
+        Step 1 — Chain assembly: repeatedly find chain starts (segments with no
+        predecessor) and greedily extend by following endpoint connections within
+        SEG_CONN_TOL_KM.  Connected segments are always merged into a single polyline;
+        the shared junction point is deduplicated.  Multiple chains are built for
+        Y-shapes and genuinely separate route sections.
+
+        Step 2 — Noise reduction: drop fully disconnected segments (those never
+        merged into any chain) matching Rule 1 (< 5 km) or Rule 2 (shorter than the
+        longest chain, ≥ 3 stop nodes in the relation, fewer than 2 stop nodes within
+        50 m of the segment).
+        """
+        if len(chunks) <= 1:
+            return list(chunks)
+
+        n = len(chunks)
+
+        def close(p, q):
+            return haversine_km(p[0], p[1], q[0], q[1]) <= SEG_CONN_TOL_KM
+
+        # Mark segments that share at least one endpoint with another segment.
+        shared = [False] * n
+        for i in range(n):
+            si = chunks[i]
+            for j in range(n):
+                if i == j:
+                    continue
+                sj = chunks[j]
+                if (close(si[0], sj[0]) or close(si[0], sj[-1]) or
+                        close(si[-1], sj[0]) or close(si[-1], sj[-1])):
+                    shared[i] = True
+                    break
+
+        placed = [False] * n
+        result = []  # list of (merged_coords, orig_indices)
+
+        while not all(placed):
+            # Find a chain start: an unplaced segment whose start has no predecessor
+            # (no other unplaced segment has an endpoint matching its start point).
+            start_idx = None
+            for i in range(n):
+                if placed[i]:
+                    continue
+                si = chunks[i]
+                has_pred = any(
+                    (not placed[j]) and j != i and
+                    (close(si[0], chunks[j][0]) or close(si[0], chunks[j][-1]))
+                    for j in range(n)
+                )
+                if not has_pred:
+                    start_idx = i
+                    break
+
+            if start_idx is None:
+                # All remaining form a cycle — pick longest as arbitrary start.
+                start_idx = max(
+                    (i for i in range(n) if not placed[i]),
+                    key=lambda i: self._route_length_km(chunks[i]),
+                )
+
+            placed[start_idx] = True
+            chain = list(chunks[start_idx])
+            orig_indices = [start_idx]
+
+            # Greedily extend the chain by following endpoint connections.
+            extended = True
+            while extended:
+                extended = False
+                tip = chain[-1]
+                for i in range(n):
+                    if placed[i]:
+                        continue
+                    si = chunks[i]
+                    if close(tip, si[0]):
+                        chain.extend(si[1:])          # forward — skip shared junction
+                        placed[i] = True
+                        orig_indices.append(i)
+                        extended = True
+                        break
+                    elif close(tip, si[-1]):
+                        chain.extend(list(reversed(si))[1:])  # reversed — skip junction
+                        placed[i] = True
+                        orig_indices.append(i)
+                        extended = True
+                        break
+
+            result.append((chain, orig_indices))
+
+        # Noise reduction — only applies to fully disconnected segments.
+        longest_km = max(self._route_length_km(c) for c, _ in result) if result else 0.0
+        n_stop_nodes = len(stop_nodes)
+
+        kept = []
+        for chain, orig_indices in result:
+            is_disconnected = (
+                len(orig_indices) == 1 and not shared[orig_indices[0]]
+            )
+            if is_disconnected:
+                chain_km = self._route_length_km(chain)
+                # Rule 1: short disconnected segment → drop
+                if chain_km < 5.0:
+                    continue
+                # Rule 2: longer disconnected, no nearby stops, shorter than main route
+                if (chain_km < longest_km and
+                        n_stop_nodes >= 3 and
+                        self._count_stops_near(chain, stop_nodes, 0.05) < 2):
+                    continue
+            kept.append(chain)
+
+        return kept
+
     def _is_transit_station(self, tags) -> bool:
         for key, values in STATION_TAGS.items():
             v = tags.get(key)
@@ -320,17 +446,16 @@ class TransitExtractor(osmium.SimpleHandler):
                 for nid in stop_node_ids
                 if nid in self.node_coords
             ]
-            # Also compute total way length before gap-splitting, for regional_bus classification.
-            # gap-split chunks may be shorter if OSM ways have gaps, so we need the raw total.
-            all_way_coords = [self._way_coords(wid) for wid in way_ids]
-            raw_total_km = sum(self._route_length_km(c) for c in all_way_coords if len(c) >= 2)
-
             chunks = self._stitch_ways(way_ids, route)
+            if not chunks:
+                return
+            chunks = self._merge_and_denoise(chunks, stop_nodes)
             if not chunks:
                 return
             total_length_km = sum(self._route_length_km(c) for c in chunks)
             if total_length_km < 0.05:
                 return
+            raw_total_km = total_length_km
 
             # Emit MultiLineString when multiple disjoint segments exist,
             # LineString for a single continuous segment.
