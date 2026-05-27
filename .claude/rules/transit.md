@@ -81,9 +81,11 @@ Scans all ref variants in `_line_canonical_export` and iterates every candidate 
 
 After all OSM→GTFS matching is complete, `05_score_and_match.py` runs a dedup pass over `line_stops_out` before writing `line_stops.json` and `transit_lines.geojson`.
 
-**Rule:** For each `gtfs_ref`, if any OSM line matched it with a **direct ref** (OSM `ref` ≈ GTFS `short_name` after stripping spaces and lowercasing), all **fallback-matched** entries for the same `gtfs_ref` (OSM `ref` ≠ GTFS `short_name`) are removed from both outputs. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
+**Rule:** For each `gtfs_ref`, if any OSM line matched it with a **direct ref** (OSM `ref` ≈ `gtfs_ref` after stripping spaces and lowercasing), all **fallback-matched** entries for the same `gtfs_ref` are removed from both outputs. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
 
-Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set merged into `excluded_osm_ids` before the existing GeoJSON rewrite. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
+**`gtfs_ref` key:** When a match is made via the geo-fallback and the winning GTFS line has a long_name that adds information beyond the short_name (e.g. `short_name="R"`, `long_name="R 4"`), `gtfs_ref` is set to `long_norm` (`"R4"`) rather than the short_name (`"R"`). This scopes the dedup to the specific line rather than the generic prefix, preventing unrelated lines that share a short_name (e.g. `"R"` used by RhB, SBB, and a French tourist train) from interfering with each other. When long_name adds no information (e.g. `short_name="S8"`, `long_name="S 8"`), the short_name is used as-is.
+
+Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
 
 Do not tighten this logic to remove fallback matches unconditionally — they are still valid and needed when no direct-ref match exists for the same `gtfs_ref`.
 
@@ -183,6 +185,16 @@ S18 is actually a **tram** (Forchbahn, operated by FB). It currently appears as 
 #### Resolved
 - **Train PE (Glacier Express St. Moritz↔Zermatt)** — now KEPT after geo fallback improvements (score ≥ 0.5 filter + better sort). No longer excluded.
 - **Train RE42 (Zermatt→Fiesch)** — now KEPT after same geo fallback improvements. No longer excluded.
+
+#### Long_name matching — prefer specific line identity over generic short_name
+
+**Problem:** The `gtfs_index` cascade matches OSM `ref` against GTFS `short_name` only. When short_name is a generic prefix (`"R"`, `"RE"`, `"IC"`), the cascade never sets `matched_gtfs_ref` to a specific value — it either finds nothing or falls through to the alpha-prefix fallback (e.g. `"RE"`). `_lookup_canonical_stops` then has no specific key to use and the geo-fallback fires.
+
+**Context:** GTFS long_names follow two patterns: (1) `short_name` + number suffix — e.g. `short_name="RE"` → `long_name="RE 4"` (~22k routes, useful for matching); (2) type prefix + `short_name` — e.g. `short_name="1"` → `long_name="B 1"` (~529k routes, not useful since OSM ref is `"1"` not `"B1"`). Pattern (1) is exactly where long_name matching helps. Pattern (2) naturally falls through since the long_norm (`"B1"`) won't match the OSM ref_norm (`"1"`).
+
+**Fix:** In the `gtfs_index` cascade (stop assignment loop), try `gtfs_long_index` for `ref_norm` **before** falling through to the alpha-prefix `gtfs_index` lookup. This ensures `ref="RE 4"` → `ref_norm="RE4"` matches `gtfs_long_index[("train", "RE4")]` (→ `matched_gtfs_ref="RE4"`), so `_lookup_canonical_stops` finds the right canonical stops without needing the geo-fallback.
+
+---
 
 #### Still excluded — legitimate lines needing a fix
 - **Regional Bus 171 (Chur→Bellinzona)** — PostBus express (EXB 171). Canonical lookup picks a Bellinzona-local B 171 (44 stops, higher count) over the full-corridor EXB 171 (25 stops). Endpoint check fails → geo fallback runs. Geo fallback also ranks Bellinzona-local variants first (more stops, same score=1.0). EXB 171 is buried past the cap of 50. Fix: use 3-level endpoint coverage `(0/1/2 endpoints covered)` as primary geo fallback sort key, so full-corridor candidates float above partial ones.
