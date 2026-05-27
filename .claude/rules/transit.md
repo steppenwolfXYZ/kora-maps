@@ -29,7 +29,7 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 ## OSM→GTFS Matching Architecture
 
 ### Key data structure
-`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware)` tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), or (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops).
+`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `(line_key, [(stop_id, arr, dep), ...], direction_aware, agency_id)` 4-tuples. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), or (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops).
 
 ### Low-service filter on `_line_canonical_export`
 Lines that would not be drawn (i.e. `compute_freq_score == 0.0`) are excluded from both source dicts (`line_canonical_geo_stops`, `line_variant_counts`) before sections 1 and 2 build the export, right after the 10% variant filter. This prevents zero/near-zero-service lines (e.g. EXT Extrazug) from contaminating the geo-fallback pool.
@@ -85,15 +85,17 @@ Scans all ref variants in `_line_canonical_export` and iterates every candidate 
 
 After all OSM→GTFS matching is complete, `05_score_and_match.py` runs a dedup pass over `line_stops_out` before writing `line_stops.json` and `transit_lines.geojson`.
 
-**Rule:** For each `gtfs_ref`, if any OSM line matched it with a **direct ref** (OSM `ref` ≈ `gtfs_ref` after stripping spaces and lowercasing), all **fallback-matched** entries for the same `gtfs_ref` are removed from both outputs. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
+**Rule:** Within each `_line_key_full` group, if any OSM entry has a **direct ref** match (OSM `ref` ≈ `gtfs_ref` after stripping spaces and lowercasing), all **fallback-matched** entries in the same group are removed. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
 
-**`gtfs_ref` key:** When a match is made via the geo-fallback and the winning GTFS line has a long_name that adds information beyond the short_name (e.g. `short_name="R"`, `long_name="R 4"`), `gtfs_ref` is set to `long_norm` (`"R4"`) rather than the short_name (`"R"`). This scopes the dedup to the specific line rather than the generic prefix, preventing unrelated lines that share a short_name (e.g. `"R"` used by RhB, SBB, and a French tourist train) from interfering with each other. When long_name adds no information (e.g. `short_name="S8"`, `long_name="S 8"`), the short_name is used as-is.
+**`_line_key_full` grouping key:** Each `line_stops_out` entry stores `_line_key_full = (short_name, long_name, bucket, agency_id)` — the full identity of the matched GTFS line including the operator. Dedup groups by `_line_key_full`. Two lines that share a name string but belong to different operators (e.g. SBB R2 Lausanne–Bex and RhB R2 Landquart–Davos) get different `agency_id` values and are never in the same group.
 
-**Geo-cell scoping:** Each `line_stops_out` entry stores a `_dedup_cell` — the 0.5° grid cell of the matched GTFS stops' centroid (same grid as `GEO_BUCKET_DEG`). Dedup groups by `(gtfs_ref, _dedup_cell)` rather than `gtfs_ref` alone. This prevents unrelated lines that share a name string but serve different geographic regions (e.g. SBB R2 Lausanne–Bex vs RhB R2 Landquart–Davos) from colliding in the same dedup group and incorrectly removing each other.
+**`gtfs_ref` string:** When the geo-fallback wins and the GTFS long_name is more specific than the short_name (e.g. `short_name="R"`, `long_name="R 4"`), `gtfs_ref` is set to `long_norm` (`"R4"`) rather than `"R"`. This makes the `_refs_match` check more precise (an OSM route with `ref="R4"` matches `gtfs_ref="R4"` directly, not just as alpha-prefix fallback). When long_name adds no information (e.g. `short_name="S8"`, `long_name="S 8"`), the short_name is used as-is.
 
-Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set. Each `line_stops_out` entry stores `osm_ref` (the raw OSM `ref` tag) alongside `gtfs_ref` and `_dedup_cell` to enable the comparison. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
+**`agency_id` provenance:** Comes from GTFS `routes.txt` via `load_routes()`. Propagated through `load_trips()` → `stream_stop_times()` into `_line_canonical_export` 4-tuples. The first-seen agency_id for each `(line_key, geo_bucket)` is stored. `_lookup_canonical_stops()` returns the winning entry's `_line_key_full`; the geo-fallback builds it inline from the winning `_line_canonical_export` entry.
 
-Do not tighten this logic to remove fallback matches unconditionally — they are still valid and needed when no direct-ref match exists for the same `gtfs_ref`.
+Implementation: `_refs_match(osm_ref, gtfs_ref)` helper + `dedup_removed` set. Each entry stores `osm_ref` and `gtfs_ref` alongside `_line_key_full`. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
+
+Do not tighten this logic to remove fallback matches unconditionally — they are still valid and needed when no direct-ref match exists for the same `_line_key_full` group.
 
 ---
 

@@ -110,7 +110,7 @@ def _collect_geo_candidates(osm_pts, bucket, stop_coords):
     for (lk_ref, lk_bucket), lk_candidates in _m._line_canonical_export.items():
         if lk_bucket not in search_buckets:
             continue
-        for (_, cand, _da) in lk_candidates:
+        for (_, cand, _da, _aid) in lk_candidates:
             if not cand:
                 continue
             ccoords = []
@@ -287,7 +287,7 @@ def main():
             osm_span_km = _m.haversine_km(osm_pts[0][0], osm_pts[0][1],
                                            osm_pts[-1][0], osm_pts[-1][1])
 
-            best_coords, _ = _m._lookup_canonical_stops(
+            best_coords, _, _lkf = _m._lookup_canonical_stops(
                 ref, ref_norm, matched_gtfs_ref, bucket,
                 osm_pts, osm_span_km, osm_from, osm_to,
                 stop_coords, stop_meta, sub_bboxes,

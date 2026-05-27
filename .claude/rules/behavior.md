@@ -31,5 +31,16 @@ Mountain line color is fixed light yellow `#ffe566` — no frequency-based varia
 ## Bridge deck
 Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` transportation. Do NOT split into per-class deck layers — they produce hollow "donut" artifacts. This has been tried and reverted multiple times; do not attempt again.
 
+## Concepts
+When asked to "write a concept" or before implementing a non-trivial change, create a file in `.claude/concepts/<topic-name>.md`. Name files by topic, not date.
+
+The document is a **requirement definition**, not an implementation guide. It should read at the technical depth of the surrounding codebase discussion. Structure:
+- **Problem** — what is wrong and why it matters
+- **Current workaround (if any)** — what exists today and why it is insufficient
+- **Requirements** — what the solution must do, including any new identifiers or keys introduced (named explicitly)
+- **Constraints** — edge cases, things that must not change, known exceptions
+
+Do NOT include implementation steps, code snippets, or file/line references. Those belong in the code, not the concept doc. After implementation, the file stays as the original requirements record.
+
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.

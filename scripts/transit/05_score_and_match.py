@@ -329,6 +329,7 @@ def load_routes() -> dict:
                 "short_name": row["route_short_name"],
                 "long_name":  row.get("route_long_name", ""),
                 "type": row["route_type"],
+                "agency_id": row.get("agency_id", ""),
             }
     return routes
 
@@ -345,6 +346,7 @@ def load_trips(route_lookup: dict) -> dict:
             trips[row["trip_id"]] = {
                 "line_key": line_key,
                 "service_id": row["service_id"],
+                "agency_id": r.get("agency_id", ""),
             }
     return trips
 
@@ -381,6 +383,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → [{"stop_count", "stops"}, …] sorted desc
     line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # (line_key, geo_bucket) → {frozenset(stop_ids) → trip_count}
     line_variant_sequences: dict = {}  # (geo_key, frozenset) → ordered [(sid, arr, dep), ...] for one representative trip
+    line_canonical_agency: dict = {}   # (line_key, geo_bucket) → agency_id (first seen wins)
 
     current_trip_id = None
     current_stops: list = []
@@ -441,6 +444,8 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             return
 
         geo_key = (line_key, gb)
+        if geo_key not in line_canonical_agency:
+            line_canonical_agency[geo_key] = trip.get("agency_id", "")
         variant = frozenset(s[1] for s in stops)
         line_variant_counts[geo_key][variant] += max(1, len(active_dates))
         if (geo_key, variant) not in line_variant_sequences:
@@ -538,10 +543,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     for (line_key, _gb), canons in line_canonical_geo_stops.items():
         short_name, long_name, bucket = line_key
         long_norm = long_name.replace(" ", "")
+        agency_id = line_canonical_agency.get((line_key, _gb), "")
         for canon in canons:
-            _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"], False))
+            _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"], False, agency_id))
             if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"], False))
+                _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"], False, agency_id))
 
     # Filtered union candidate: union of stops from variants that represent ≥10% of trips
     # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
@@ -562,6 +568,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         if not qualifying:
             continue
         long_norm = long_name.replace(" ", "")
+        agency_id = line_canonical_agency.get((line_key, geo_bucket), "")
         unique_stop_sets = {v for v, _ in qualifying}
         union_sids: set = set()
         for v in unique_stop_sets:
@@ -574,9 +581,9 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         is_truly_divergent = len(maximal_variants) > 1
         if not is_truly_divergent:
             # All qualifying variants nest under one master route → safe union
-            _line_canonical_export[(short_name, bucket)].append((line_key, union_cand, False))
+            _line_canonical_export[(short_name, bucket)].append((line_key, union_cand, False, agency_id))
             if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand, False))
+                _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand, False, agency_id))
         else:
             # Genuinely different stops per direction — emit each qualifying variant as its own
             # direction-aware ordered candidate so the assignment loop picks the matching one.
@@ -585,9 +592,9 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
                 var_stops = line_variant_sequences.get((geo_key, v))
                 if not var_stops:
                     continue
-                _line_canonical_export[(short_name, bucket)].append((line_key, var_stops, True))
+                _line_canonical_export[(short_name, bucket)].append((line_key, var_stops, True, agency_id))
                 if long_norm and long_norm != short_name:
-                    _line_canonical_export[(long_norm, bucket)].append((line_key, var_stops, True))
+                    _line_canonical_export[(long_norm, bucket)].append((line_key, var_stops, True, agency_id))
 
     # Compute speed from canonical trips
     line_speed: dict = {}
@@ -959,13 +966,13 @@ def _lookup_canonical_stops(
     osm_stop_nodes: list = [],
     osm_line_km: float = 0.0,
     skip_upper_density: bool = False,
-) -> tuple[list, bool]:
+) -> tuple[list, bool, Optional[tuple]]:
     """Look up canonical stops for an OSM line and apply the name-fallback sanity check.
 
-    Returns (best_coords, used_name_fallback, canon_gtfs_ref).  best_coords is empty if
+    Returns (best_coords, used_name_fallback, best_line_key_full).  best_coords is empty if
     no canonical was found or if a name-fallback canonical failed the geo sanity check
-    (Trigger 1).  canon_gtfs_ref is the GTFS short_name key that produced the result
-    (None if nothing was found).
+    (Trigger 1).  best_line_key_full is (short_name, long_name, bucket, agency_id) of the
+    winning candidate (None if nothing was found).
     Used by both the main pipeline and the diagnostic script so they share identical logic.
     """
     osm_start = osm_pts[0]
@@ -988,8 +995,9 @@ def _lookup_canonical_stops(
 
     best_coords: list = []
     best_candidate: list = []
+    best_line_key_full: Optional[tuple] = None
     if canon:
-        for (canon_line_key, candidate, dir_aware) in canon:
+        for (canon_line_key, candidate, dir_aware, agency_id) in canon:
             if dir_aware and osm_span_km >= 1.0 and candidate:
                 first_sid = candidate[0][0]
                 first_c = stop_coords.get(first_sid) or stop_coords.get(first_sid.split(":")[0])
@@ -1006,6 +1014,7 @@ def _lookup_canonical_stops(
             if len(ccoords) > len(best_coords):
                 best_coords = ccoords
                 best_candidate = candidate
+                best_line_key_full = (*canon_line_key, agency_id)
 
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
@@ -1018,8 +1027,9 @@ def _lookup_canonical_stops(
         if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
                                    cand_full_density=_full_density, skip_upper_density=skip_upper_density):
             best_coords = []
+            best_line_key_full = None
 
-    return best_coords, used_name_fallback
+    return best_coords, used_name_fallback, best_line_key_full
 
 
 def freq_to_width_base(freq_score, mode) -> float:
@@ -1191,7 +1201,7 @@ def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line
     best_stops = None
 
     for rv in ref_variants:
-        for line_key, stops, _da in _line_canonical_export.get((rv, bucket), []):
+        for line_key, stops, _da, _aid in _line_canonical_export.get((rv, bucket), []):
             if line_key in seen_line_keys:
                 continue
             seen_line_keys.add(line_key)
@@ -1244,7 +1254,7 @@ def _group_reassign_stops(
     all_stops: list = []  # [(stop_id, lon, lat)]
     seen_sids: set = set()
     for ref_variant in [gtfs_r, gtfs_r.upper(), gtfs_r.lower()]:
-        for (_, cand, _da) in _line_canonical_export.get((ref_variant, bucket), []):
+        for (_, cand, _da, _aid) in _line_canonical_export.get((ref_variant, bucket), []):
             for stop_id, _arr, _dep in cand:
                 if stop_id in seen_sids:
                     continue
@@ -1337,7 +1347,7 @@ def main():
                             if _mfeat["geometry"]["type"] == "MultiLineString"
                             else _mfeat["geometry"]["coordinates"])
             _osm_bbox_chk = line_bbox(_osm_pts_chk)
-            for (_, _cand_stops, _da) in _line_canonical_export.get((_ref, "mountain"), []):
+            for (_, _cand_stops, _da, _aid) in _line_canonical_export.get((_ref, "mountain"), []):
                 if any(
                     (_sc := stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0]))
                     and stop_near_bbox(_sc[0], _sc[1], _osm_bbox_chk)
@@ -1678,7 +1688,7 @@ def main():
 
         # Each entry in stop_list_candidates is one geographic location for this ref.
         # Produce one map feature per location.
-        for (mtn_line_key, stop_list, _da) in stop_list_candidates:
+        for (mtn_line_key, stop_list, _da, _aid) in stop_list_candidates:
             # Resolve stop coordinates
             stop_pts = []
             for stop_id, _arr, _dep in stop_list:
@@ -1839,7 +1849,7 @@ def main():
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket != "ferry":
                         continue
-                    for (_, cand, _da) in lk_candidates:
+                    for (_, cand, _da, _aid) in lk_candidates:
                         for stop_id, _a, _d in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
@@ -1848,9 +1858,7 @@ def main():
                                     seen_pos.add(key)
                                     pier_coords.append([c[0], c[1], stop_id])
                 if pier_coords:
-                    _fcx = sum(s[0] for s in pier_coords) / len(pier_coords)
-                    _fcy = sum(s[1] for s in pier_coords) / len(pier_coords)
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry", "_dedup_cell": (int(_fcx / GEO_BUCKET_DEG), int(_fcy / GEO_BUCKET_DEG))}
+                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry", "_line_key_full": (ref, ref, "ferry", "")}
                 continue
             elif mode != "mountain":
                 continue
@@ -1881,13 +1889,14 @@ def main():
 
         # Reconstruct stop coords from canonical trip, with name-fallback sanity check.
         # Logic is in _lookup_canonical_stops() so the diagnostic script can share it.
-        best_coords, used_name_fallback = _lookup_canonical_stops(
+        best_coords, used_name_fallback, canon_line_key_full = _lookup_canonical_stops(
             ref, ref_norm, matched_gtfs_ref, bucket,
             osm_pts, osm_span_km, osm_from, osm_to,
             stop_coords, stop_meta, sub_bboxes, osm_stop_nodes, osm_line_km,
             skip_upper_density=(mode == "regional_bus"),
         )
         geo_best_ref: Optional[str] = None
+        geo_best_line_key_full: Optional[tuple] = None
 
         # Geo-based fallback: triggers when (a) no canon found at all, (b) 0 of 2 endpoints
         # covered at 5 km — canonical resolved to wrong GTFS service (e.g. SBB 'RE' for MGB
@@ -1908,7 +1917,7 @@ def main():
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket != "ferry":
                         continue
-                    for (_, cand, _da) in lk_candidates:
+                    for (_, cand, _da, _aid) in lk_candidates:
                         for stop_id, _a, _d in cand:
                             c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
                             if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
@@ -1923,11 +1932,11 @@ def main():
                 # Collect all scored candidates, then pick the highest-scoring one
                 # that passes the geo sanity checks.  Sorting first means we check
                 # the most-likely-correct candidates first and exit early.
-                geo_candidates: list = []  # (score, ccoords, lk_ref, full_density, line_key)
+                geo_candidates: list = []  # (score, ccoords, lk_ref, full_density, line_key, agency_id)
                 for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
                     if lk_bucket not in search_buckets:
                         continue
-                    for (line_key, cand, _da) in lk_candidates:
+                    for (line_key, cand, _da, agency_id) in lk_candidates:
                         if not cand:
                             continue
                         ccoords = []
@@ -1948,7 +1957,7 @@ def main():
                         _sp = sum(haversine_km(_fc[i][0], _fc[i][1], _fc[i+1][0], _fc[i+1][1])
                                   for i in range(len(_fc) - 1))
                         full_density = len(_fc) / _sp if _sp > 0 else 0.0
-                        geo_candidates.append((score, ccoords, lk_ref, full_density, line_key))
+                        geo_candidates.append((score, ccoords, lk_ref, full_density, line_key, agency_id))
 
                 # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
                 # then absolute stop count. Equal-score full-corridor routes beat partial ones.
@@ -1956,16 +1965,17 @@ def main():
                     key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1]), -len(x[1]))
                 )
                 geo_best: list = []
-                for _score, _ccoords, _lk_ref, _full_density, _line_key in geo_candidates[:50]:
+                for _score, _ccoords, _lk_ref, _full_density, _line_key, _agency_id in geo_candidates[:50]:
                     if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
                                           cand_full_density=_full_density, skip_upper_density=(mode == "regional_bus")):
                         geo_best = _ccoords
-                        # Use long_norm as dedup key when it's more specific than short_name
+                        # Use long_norm as gtfs_ref key when it's more specific than short_name
                         # (e.g. "R4" instead of "R", "RE4" instead of "RE").
                         _sn, _ln, _bkt = _line_key
                         _long_norm = _ln.replace(" ", "")
                         _short_norm = _sn.replace(" ", "")
                         geo_best_ref = _long_norm if _long_norm and _long_norm != _short_norm else _lk_ref
+                        geo_best_line_key_full = (_sn, _ln, _bkt, _agency_id)
                         break
                 if geo_best:
                     best_coords = geo_best
@@ -2023,29 +2033,26 @@ def main():
 
         if best_coords:
             gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            _cx = sum(s[0] for s in best_coords) / len(best_coords)
-            _cy = sum(s[1] for s in best_coords) / len(best_coords)
-            _dedup_cell = (int(_cx / GEO_BUCKET_DEG), int(_cy / GEO_BUCKET_DEG))
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket, "_dedup_cell": _dedup_cell}
+            lkf = geo_best_line_key_full or canon_line_key_full or (ref, ref, bucket, "")
+            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket, "_line_key_full": lkf}
 
     line_canonical_export = None  # free reference
 
-    # Dedup: if a gtfs_ref group has any direct-ref match (osm_ref ≈ gtfs_ref after
-    # normalization), remove all fallback-matched entries (osm_ref ≠ gtfs_ref) so the
-    # same GTFS line doesn't appear twice under different OSM route refs.
+    # Dedup: within each _line_key_full group (same GTFS line = same operator + name + bucket),
+    # if any OSM entry matched via direct ref (osm_ref ≈ gtfs_ref), remove all fallback-matched
+    # entries so the same GTFS line doesn't appear twice under different OSM route refs.
+    # Grouping by _line_key_full = (short_name, long_name, bucket, agency_id) ensures that two
+    # unrelated lines sharing a name string but belonging to different operators (e.g. SBB R2
+    # Lausanne–Bex and RhB R2 Landquart–Davos) are never in the same dedup group.
     def _refs_match(osm_ref: str, gtfs_ref: str) -> bool:
         norm = lambda s: s.replace(" ", "").lower()
         return norm(osm_ref) == norm(gtfs_ref)
 
-    # Group by (gtfs_ref, geo_cell) — the geo_cell (0.5° grid square of the matched GTFS
-    # stops' centroid) scopes dedup to the same physical transit line.  Without it, two
-    # unrelated lines that share a short_name string (e.g. SBB R2 Lausanne–Bex and RhB R2
-    # Landquart–Davos) would be conflated and the fallback entry incorrectly removed.
-    by_gtfs_ref: dict = defaultdict(list)
+    by_line_key_full: dict = defaultdict(list)
     for osm_id, entry in line_stops_out.items():
-        if entry.get("gtfs_ref"):
-            key = (entry["gtfs_ref"], entry.get("_dedup_cell"))
-            by_gtfs_ref[key].append(osm_id)
+        lkf = entry.get("_line_key_full")
+        if lkf:
+            by_line_key_full[lkf].append(osm_id)
 
     # Quick lookup for dedup logging: osm_id → {ref, name, mode, operator}
     feat_props_by_id = {
@@ -2054,10 +2061,10 @@ def main():
     }
 
     dedup_removed: set = set()
-    for (gtfs_r, _cell), osm_ids in by_gtfs_ref.items():
-        direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
+    for lkf, osm_ids in by_line_key_full.items():
+        direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], line_stops_out[oid]["gtfs_ref"])]
         if direct:
-            fallback = [oid for oid in osm_ids if not _refs_match(line_stops_out[oid]["osm_ref"], gtfs_r)]
+            fallback = [oid for oid in osm_ids if not _refs_match(line_stops_out[oid]["osm_ref"], line_stops_out[oid]["gtfs_ref"])]
             dedup_removed.update(fallback)
 
     for oid in dedup_removed:
@@ -2116,6 +2123,7 @@ def main():
 
     for entry in line_stops_out.values():
         entry.pop("_bucket", None)
+        entry.pop("_line_key_full", None)
 
     OUT_STOPS.write_text(json.dumps(line_stops_out))
     print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
@@ -2130,7 +2138,7 @@ def main():
     # GTFS lines never matched to any drawn OSM route
     all_gtfs_line_keys: set = set()
     for candidates in _line_canonical_export.values():
-        for (lk, _stops, _da) in candidates:
+        for (lk, _stops, _da, _aid) in candidates:
             all_gtfs_line_keys.add(lk)
     unmatched_lks = all_gtfs_line_keys - matched_gtfs_line_keys
     gtfs_unmatched_out = []
