@@ -62,25 +62,12 @@ CORE_MINUTES    = (CORE_END - CORE_START) / 60        # 660 min
 EVENING_MINUTES = (EVENING_END - EVENING_START) / 60  # 240 min
 WEEKEND_MINUTES = (WEEKEND_END - WEEKEND_START) / 60  # 780 min
 
-# Malus for sparse off-peak service (subtracted from core score)
-MALUS_LOW_EVENING = 0.08   # sparse (but present) evening service — shared across modes
-MALUS_LOW_WEEKEND = 0.06   # sparse (but present) weekend service — shared across modes
+# Off-peak malus factors (multiplicative): low service = 10%, no service = 20% reduction.
+MALUS_LOW = 0.10
+MALUS_NO  = 0.20
 
-# No evening/weekend malus per mode.
-# Lower for modes where off-peak absence is structurally normal (ferries don't run at night,
-# rural trains don't run evenings in remote valleys).  Higher for city modes where it signals
-# a real gap in service.  Values calibrated so that 3 core trips/day with no off-peak service
-# produces a small but positive freq_score (= visible pale colour, not dropped).
-MALUS_NO_EVENING = {
-    "train":        0.03,
-    "regional_bus": 0.07, "ferry":        0.10, "mountain": 0.00,
-    "bus":          0.18, "tram":         0.18, "metro":    0.18,
-}
-MALUS_NO_WEEKEND = {
-    "train":        0.02,
-    "regional_bus": 0.05, "ferry":        0.08, "mountain": 0.00,
-    "bus":          0.14, "tram":         0.14, "metro":    0.14,
-}
+# Minimum freq_score required to draw a line (all modes; mountain exempt).
+MIN_FREQ_SCORE = 0.075
 
 # "Low service" evening/weekend headway thresholds per mode
 LOW_EVE_HEADWAY = {
@@ -545,11 +532,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             if frozenset(s[0] for s in c["stops"]) in variant_counts
         ]
 
-    # Exclude line_keys that would not be drawn (freq_score == 0.0) from all three
-    # source dicts before sections 1 and 2 build _line_canonical_export.  This prevents
-    # zero/near-zero-service lines (e.g. EXT Extrazug) from entering the geo-fallback pool
-    # and contaminating stop assignment for other lines.  "bus" bucket uses "regional_bus"
-    # as mode approximation — intentionally conservative; see transit.md for the known edge case.
+    # Exclude line_keys below MIN_FREQ_SCORE from all three source dicts before sections 1
+    # and 2 build _line_canonical_export.  This prevents low/zero-service lines (e.g. EXT
+    # Extrazug) from entering the geo-fallback pool and contaminating stop assignment.
+    # "bus" bucket uses "regional_bus" as mode approximation — intentionally conservative;
+    # see transit.md for the known edge case.
     _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
     zero_service_keys = {
         geo_key[0] for geo_key in line_canonical_geo_stops
@@ -561,7 +548,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         and compute_freq_score(
             line_freq.get(geo_key[0], _zero_freq),
             _BUCKET_MODE_APPROX.get(geo_key[0][2], "regional_bus"),
-        ) == 0.0
+        ) < MIN_FREQ_SCORE
     }
     for geo_key in list(line_canonical_geo_stops.keys()):
         if geo_key[0] in zero_service_keys:
@@ -777,7 +764,7 @@ def compute_freq_score(raw_freq: dict, mode: str) -> float:
     """
     Mode-aware frequency score.
     Core: score = min(1.0, best_headway / actual_headway)
-    Off-peak malus applied for sparse evening/weekend service.
+    Off-peak malus applied multiplicatively: low service −10%, no service −20% per dimension.
     """
     best_hw = BEST_HEADWAY.get(mode, 15)
     core_trips = raw_freq.get("core_wd", 0)
@@ -794,25 +781,24 @@ def compute_freq_score(raw_freq: dict, mode: str) -> float:
 
     # Evening malus
     low_eve = LOW_EVE_HEADWAY.get(mode, 30)
-    no_eve  = MALUS_NO_EVENING.get(mode, 0.18)
     if eve_trips >= 2:
-        eve_hw = EVENING_MINUTES / eve_trips
-        if eve_hw > low_eve:
-            core_score -= MALUS_LOW_EVENING
+        eve_factor = MALUS_LOW if EVENING_MINUTES / eve_trips > low_eve else 0.0
     elif eve_trips == 0:
-        core_score -= no_eve
+        eve_factor = MALUS_NO
+    else:
+        eve_factor = 0.0
 
     # Weekend malus
     low_we = LOW_WE_HEADWAY.get(mode, 60)
-    no_we  = MALUS_NO_WEEKEND.get(mode, 0.14)
     if we_trips >= 2:
-        we_hw = WEEKEND_MINUTES / we_trips
-        if we_hw > low_we:
-            core_score -= MALUS_LOW_WEEKEND
+        we_factor = MALUS_LOW if WEEKEND_MINUTES / we_trips > low_we else 0.0
     elif we_trips == 0:
-        core_score -= no_we
+        we_factor = MALUS_NO
+    else:
+        we_factor = 0.0
 
-    return round(max(0.0, min(1.0, core_score)), 3)
+    final = core_score * (1 - eve_factor) * (1 - we_factor)
+    return round(max(0.0, min(1.0, final)), 3)
 
 
 def line_bbox(coords):
@@ -1661,10 +1647,10 @@ def main():
             freq_score = None   # unmatched → skip (don't draw)
             stats["unmatched"] += 1
 
-        # Skip routes with no service on sample dates (freq_score == 0.0).
+        # Skip routes below the minimum frequency threshold.
         # Mountain mode is exempt: seasonal railways may not run on our specific
         # sample date but are still worth showing (they get clamped to 0.4 below).
-        if freq_score is None or (freq_score == 0.0 and mode != "mountain"):
+        if freq_score is None or (freq_score < MIN_FREQ_SCORE and mode != "mountain"):
             dropped_details.append({
                 "osm_id":           str(props.get("osm_id", "")),
                 "ref":              ref,
@@ -2202,8 +2188,8 @@ def main():
         freq = line_freq.get(lk, {"core_wd": 0, "eve_wd": 0, "we": 0})
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fs = compute_freq_score(freq, mode_approx)
-        if fs == 0.0:
-            continue   # zero-service lines: not interesting for unmatched review
+        if fs < MIN_FREQ_SCORE:
+            continue   # below draw threshold: not interesting for unmatched review
         gtfs_unmatched_out.append({
             "short_name":  short_name,
             "long_name":   long_name,
