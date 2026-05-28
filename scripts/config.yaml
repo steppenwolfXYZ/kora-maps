@@ -172,7 +172,7 @@ labels:
   size_scale: 1.0
   halo_width: 1.5
   country_min_zoom: 2
-  country_max_zoom: 9
+  country_max_zoom: 6
   state_min_zoom: 4
   state_max_zoom: 9
   city_min_zoom: 4

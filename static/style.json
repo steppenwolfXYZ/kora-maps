@@ -6070,7 +6070,7 @@
       "source": "openmaptiles",
       "source-layer": "place",
       "minzoom": 2,
-      "maxzoom": 9,
+      "maxzoom": 6,
       "filter": [
         "==",
         [
