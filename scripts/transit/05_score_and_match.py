@@ -36,7 +36,7 @@ import math
 from collections import defaultdict
 from math import radians, cos, sin, sqrt, atan2
 from pathlib import Path
-from typing import Optional
+from typing import Optional, NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
 GTFS = ROOT / "data" / "gtfs"
@@ -373,7 +373,14 @@ def load_trips(route_lookup: dict) -> dict:
     return trips
 
 
-_line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [(line_key, stop_list, direction_aware), ...]
+class CanonEntry(NamedTuple):
+    line_key: tuple        # (short_name, long_name, bucket)
+    stops: list            # [(stop_id, arr, dep), ...]
+    dir_aware: bool        # True when variants have genuinely different stop sets
+    agency_id: str
+    no_draw: Optional[str] # None = drawable; "low_frequency" = freq < MIN_FREQ_SCORE
+
+_line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [CanonEntry, ...]
 
 # Coarse geo-grid for canonical trip bucketing: ~0.5° ≈ 40 km per cell
 GEO_BUCKET_DEG = 0.5
@@ -532,28 +539,22 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             if frozenset(s[0] for s in c["stops"]) in variant_counts
         ]
 
-    # Exclude line_keys below MIN_FREQ_SCORE from all three source dicts before sections 1
-    # and 2 build _line_canonical_export.  This prevents low/zero-service lines (e.g. EXT
-    # Extrazug) from entering the geo-fallback pool and contaminating stop assignment.
-    # "bus" bucket uses "regional_bus" as mode approximation — intentionally conservative;
-    # see transit.md for the known edge case.
+    # Compute the set of line_keys whose frequency is below MIN_FREQ_SCORE.
+    # These are flagged no_draw="low_frequency" on their CanonEntry objects rather than
+    # excluded from the pool entirely — the 4-loop can still settle on them and the draw
+    # gate decides after matching rather than before.
+    # "bus" bucket approximated as "regional_bus" — intentionally conservative (see transit.md).
+    # Mountain bucket and CC/train (seasonal rack railways) are exempt.
     _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
-    zero_service_keys = {
+    low_freq_keys: set = {
         geo_key[0] for geo_key in line_canonical_geo_stops
         if geo_key[0][2] != "mountain"
-        # CC short_name = rack/cog railway (WAB, JB, SPB, BRB, GGB, PB, RB…).
-        # These are seasonal (June–Oct) and will have zero service on April sample dates.
-        # Keep them in the pool so mountain-mode geo fallback can find their stop sequences.
         and not (geo_key[0][0] == "CC" and geo_key[0][2] == "train")
         and compute_freq_score(
             line_freq.get(geo_key[0], _zero_freq),
             _BUCKET_MODE_APPROX.get(geo_key[0][2], "regional_bus"),
         ) < MIN_FREQ_SCORE
     }
-    for geo_key in list(line_canonical_geo_stops.keys()):
-        if geo_key[0] in zero_service_keys:
-            del line_canonical_geo_stops[geo_key]
-            line_variant_counts.pop(geo_key, None)
 
     # Build canonical export: all unique stop sets per geographic cell per line_key.
     # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
@@ -566,10 +567,13 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         short_name, long_name, bucket = line_key
         long_norm = long_name.replace(" ", "")
         agency_id = line_canonical_agency.get((line_key, _gb), "")
+        no_draw = "low_frequency" if line_key in low_freq_keys else None
         for canon in canons:
-            _line_canonical_export[(short_name, bucket)].append((line_key, canon["stops"], False, agency_id))
+            _line_canonical_export[(short_name, bucket)].append(
+                CanonEntry(line_key, canon["stops"], False, agency_id, no_draw))
             if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, canon["stops"], False, agency_id))
+                _line_canonical_export[(long_norm, bucket)].append(
+                    CanonEntry(line_key, canon["stops"], False, agency_id, no_draw))
 
     # Filtered union candidate: union of stops from variants that represent ≥10% of trips
     # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
@@ -591,6 +595,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
             continue
         long_norm = long_name.replace(" ", "")
         agency_id = line_canonical_agency.get((line_key, geo_bucket), "")
+        no_draw = "low_frequency" if line_key in low_freq_keys else None
         unique_stop_sets = {v for v, _ in qualifying}
         union_sids: set = set()
         for v in unique_stop_sets:
@@ -602,21 +607,22 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         ]
         is_truly_divergent = len(maximal_variants) > 1
         if not is_truly_divergent:
-            # All qualifying variants nest under one master route → safe union
-            _line_canonical_export[(short_name, bucket)].append((line_key, union_cand, False, agency_id))
+            _line_canonical_export[(short_name, bucket)].append(
+                CanonEntry(line_key, union_cand, False, agency_id, no_draw))
             if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append((line_key, union_cand, False, agency_id))
+                _line_canonical_export[(long_norm, bucket)].append(
+                    CanonEntry(line_key, union_cand, False, agency_id, no_draw))
         else:
-            # Genuinely different stops per direction — emit each qualifying variant as its own
-            # direction-aware ordered candidate so the assignment loop picks the matching one.
             for v, _ in qualifying:
                 geo_key = (line_key, geo_bucket)
                 var_stops = line_variant_sequences.get((geo_key, v))
                 if not var_stops:
                     continue
-                _line_canonical_export[(short_name, bucket)].append((line_key, var_stops, True, agency_id))
+                _line_canonical_export[(short_name, bucket)].append(
+                    CanonEntry(line_key, var_stops, True, agency_id, no_draw))
                 if long_norm and long_norm != short_name:
-                    _line_canonical_export[(long_norm, bucket)].append((line_key, var_stops, True, agency_id))
+                    _line_canonical_export[(long_norm, bucket)].append(
+                        CanonEntry(line_key, var_stops, True, agency_id, no_draw))
 
     # Compute speed from canonical trips
     line_speed: dict = {}
@@ -845,6 +851,11 @@ def build_sub_bboxes(pts: list, segment_km: float = 20.0) -> list:
 ENDPOINT_THRESHOLD_KM = 5.0
 GEO_SORT_ENDPOINT_KM = 0.5  # tighter threshold for geo-fallback candidate ranking only
 
+GENERIC_GTFS_PREFIXES = frozenset({
+    "S", "R", "RE", "IR", "IC", "EC", "ICE", "TGV", "RB",
+    "N", "SN", "NJ", "RJX", "TER", "EV", "EXT", "PE",
+})
+
 def _count_endpoints_covered(osm_pts: list, stops: list, threshold_km: float = GEO_SORT_ENDPOINT_KM,
                               osm_stop_nodes: list = [], osm_segs: list = None) -> int:
     """Return how many OSM endpoints (0, 1, or 2) have a stop within threshold_km.
@@ -1036,7 +1047,8 @@ def _lookup_canonical_stops(
     best_candidate: list = []
     best_line_key_full: Optional[tuple] = None
     if canon:
-        for (canon_line_key, candidate, dir_aware, agency_id) in canon:
+        for entry in canon:
+            canon_line_key, candidate, dir_aware, agency_id = entry.line_key, entry.stops, entry.dir_aware, entry.agency_id
             if dir_aware and osm_span_km >= 1.0 and candidate:
                 first_sid = candidate[0][0]
                 first_c = stop_coords.get(first_sid) or stop_coords.get(first_sid.split(":")[0])
@@ -1072,6 +1084,336 @@ def _lookup_canonical_stops(
             best_line_key_full = None
 
     return best_coords, used_name_fallback, best_line_key_full
+
+
+def _loop_keys(loop_level: int, ref: str, ref_norm: str, osm_name: str) -> list:
+    """Return _line_canonical_export key list for loops 1, 2, or 3 (loop 4 uses all)."""
+    is_gen = lambda k: k.upper() in GENERIC_GTFS_PREFIXES
+
+    if loop_level == 1:
+        # Long_norm first (= ref_norm), then case variants. Generics excluded.
+        keys = [ref_norm, ref_norm.upper(), ref, ref.upper(), ref.lower()]
+        return [k for k in dict.fromkeys(keys) if not is_gen(k)]
+
+    if loop_level == 2:
+        # String tricks (RE↔R, name-prefix, alpha-prefix). Generics excluded.
+        keys = []
+        r_ref = _re_to_r_ref(ref_norm)
+        if r_ref:
+            for k in [r_ref, r_ref.upper()]:
+                if not is_gen(k):
+                    keys.append(k)
+        # Name-prefix: try normalized full segment before ":", then individual tokens.
+        segment = osm_name.split(":")[0].strip()
+        seg_norm = segment.replace(" ", "")
+        if seg_norm and seg_norm != ref_norm and len(seg_norm) <= 12 and not is_gen(seg_norm):
+            keys.extend([seg_norm, seg_norm.upper()])
+        for token in segment.split():
+            if token == ref or len(token) > 6:
+                continue
+            if not is_gen(token):
+                keys.extend([token, token.upper()])
+        # Alpha-prefix (e.g. "RE4" → "RE") — skip if generic; Loop 3 handles those.
+        m = re.match(r'^([A-Za-z ]+)\d', ref)
+        if m:
+            alpha = m.group(1).strip()
+            if alpha and alpha != ref and not is_gen(alpha):
+                keys.extend([alpha, alpha.upper()])
+        return list(dict.fromkeys(keys))
+
+    if loop_level == 3:
+        # Only generic-prefix keys (deferred from loops 1 and 2).
+        keys = []
+        for k in [ref, ref_norm, ref.upper(), ref.lower()]:
+            if is_gen(k):
+                keys.append(k)
+        m = re.match(r'^([A-Za-z ]+)\d', ref)
+        if m:
+            alpha = m.group(1).strip()
+            if alpha and alpha != ref and is_gen(alpha):
+                keys.extend([alpha, alpha.upper()])
+        for token in osm_name.split(":")[0].strip().split():
+            if token == ref or len(token) > 6:
+                continue
+            if is_gen(token):
+                keys.extend([token, token.upper()])
+        return list(dict.fromkeys(keys))
+
+    return []  # loop 4 uses all of _line_canonical_export
+
+
+def _stop_candidates(
+    keys: list,
+    bucket: str,
+    sub_bboxes: list,
+    osm_pts: list,
+    osm_stop_nodes: list,
+    osm_segs,
+    stop_coords: dict,
+    osm_span_km: float,
+) -> list:
+    """Collect scored stop candidates from _line_canonical_export for the given keys.
+
+    Returns list sorted by (-bbox_score, -ep_0.5km, -n_stops).
+    Each element: (bbox_score, ep_0_5km, ccoords, full_density, line_key_full, lk_ref, no_draw)
+    """
+    seen_lk: set = set()
+    result = []
+    osm_start = osm_pts[0]
+    osm_end   = osm_pts[-1]
+    for lk_ref in keys:
+        for entry in _line_canonical_export.get((lk_ref, bucket), []):
+            line_key, cand, dir_aware, agency_id, no_draw = entry.line_key, entry.stops, entry.dir_aware, entry.agency_id, entry.no_draw
+            if line_key in seen_lk or not cand:
+                continue
+            seen_lk.add(line_key)
+            if dir_aware and osm_span_km >= 1.0:
+                fc0 = stop_coords.get(cand[0][0]) or stop_coords.get(cand[0][0].split(":")[0])
+                if fc0:
+                    d_s = haversine_km(fc0[0], fc0[1], osm_start[0], osm_start[1])
+                    d_e = haversine_km(fc0[0], fc0[1], osm_end[0],   osm_end[1])
+                    if d_e < d_s * 0.5:
+                        continue
+            ccoords: list = []
+            for stop_id, _a, _d in cand:
+                if not is_in_service_area(stop_id):
+                    continue
+                c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
+                if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
+                    ccoords.append([c[0], c[1], stop_id])
+            if len(ccoords) < 2:
+                continue
+            fc = [c for sid, *_ in cand
+                  if is_in_service_area(sid)
+                  and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+            if not fc:
+                continue
+            bbox_score = len(ccoords) / len(fc)
+            sp = sum(haversine_km(fc[i][0], fc[i][1], fc[i+1][0], fc[i+1][1])
+                     for i in range(len(fc) - 1))
+            full_density = len(fc) / sp if sp > 0 else 0.0
+            ep_0_5 = _count_endpoints_covered(
+                osm_pts, ccoords, GEO_SORT_ENDPOINT_KM, osm_stop_nodes, osm_segs
+            )
+            sn, ln, bkt = line_key
+            result.append((bbox_score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id), lk_ref, no_draw))
+    result.sort(key=lambda x: (-x[0], -x[1], -len(x[2])))
+    return result
+
+
+def _try_assign(
+    candidates: list,
+    cap: Optional[int],
+    loop_level: int,
+    osm_pts: list,
+    osm_stop_nodes: list,
+    osm_segs,
+    osm_line_km: float,
+    osm_from: str,
+    osm_to: str,
+    stop_meta: dict,
+    skip_upper_density: bool,
+) -> Optional[dict]:
+    """Try candidates in ranking order. Return the first settled entry dict or None.
+
+    Two passes: drawable candidates first, no_draw candidates as fallback.
+    This ensures a drawable GTFS match at any rank beats a no_draw match.
+    """
+    pool = candidates[:cap] if cap else candidates
+    drawable = [c for c in pool if c[6] is None]
+    no_draw_pool = [c for c in pool if c[6] is not None]
+    for subset in (drawable, no_draw_pool):
+        for bbox_score, ep_0_5, ccoords, full_density, line_key_full, lk_ref, no_draw in subset:
+            ep_5 = _count_endpoints_covered(
+                osm_pts, ccoords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes, osm_segs
+            )
+            if ep_5 == 0:
+                continue
+            skip_sanity = (loop_level == 1 and ep_5 == 2) or (loop_level == 2 and ep_0_5 == 2)
+            if not skip_sanity:
+                if not _passes_geo_sanity(
+                    osm_pts, ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
+                    cand_full_density=full_density, skip_upper_density=skip_upper_density,
+                ):
+                    continue
+            sn, ln, bkt, aid = line_key_full
+            return {"stops": ccoords, "_line_key_full": line_key_full, "_bucket": bkt, "_no_draw": no_draw}
+    return None
+
+
+def _run_stop_loop(
+    loop_level: int,
+    osm_ids: list,
+    route_info: dict,
+    stop_coords: dict,
+    stop_meta: dict,
+) -> tuple:
+    """One batch stop-assignment pass (loop_level 1–4).
+
+    Returns (settled, remaining_ids, excl_ids, excl_details):
+      settled       – {osm_id: entry dict}
+      remaining_ids – [osm_id, ...]  returned to pool for the next loop
+      excl_ids      – [osm_id, ...]  loop-4 only: exhausted all candidates
+      excl_details  – [{...}, ...]   metadata for sanity_excluded.json
+    """
+    settled: dict = {}
+    remaining: list = []
+    excl_ids: list = []
+    excl_dets: list = []
+    cap = 50 if loop_level >= 3 else None
+    n_total = len(osm_ids)
+
+    for idx, osm_id in enumerate(osm_ids):
+        if loop_level == 4 and (idx % 50 == 0 or idx == n_total - 1):
+            pct = (idx + 1) * 100 // n_total if n_total else 100
+            print(
+                f"\r  Loop 4 geo-fallback: {idx+1}/{n_total} "
+                f"[settled {len(settled)}, excl {len(excl_ids)}] {pct}%    ",
+                end="", flush=True,
+            )
+        info      = route_info[osm_id]
+        ref       = info["ref"]
+        ref_norm  = info["ref_norm"]
+        bucket    = info["bucket"]
+        mode      = info["mode"]
+        osm_pts   = info["osm_pts"]
+        sub_bboxes= info["sub_bboxes"]
+        osm_sn    = info["osm_stop_nodes"]
+        osm_segs  = info["_osm_segs"]
+        osm_lkm   = info["osm_line_km"]
+        osm_from  = info["osm_from"]
+        osm_to    = info["osm_to"]
+        osm_name  = info["osm_name"]
+        osm_span  = info["osm_span_km"]
+        s_upper   = info["skip_upper_density"]
+        feat      = info["feat"]
+
+        if loop_level <= 3:
+            keys = _loop_keys(loop_level, ref, ref_norm, osm_name)
+            if not keys:
+                remaining.append(osm_id)
+                continue
+            candidates = _stop_candidates(
+                keys, bucket, sub_bboxes, osm_pts, osm_sn, osm_segs, stop_coords, osm_span,
+            )
+        else:
+            # Loop 4: geo-fallback — score all candidates in bucket.
+            # Phase 1: collect by bbox-score only (cheap); cap before computing
+            # ep_0_5 and full_density (both O(n_stops) haversine) to avoid
+            # O(n_routes × n_all_gtfs_candidates × n_stops) blowup.
+            search_buckets = {bucket}
+            if bucket == "mountain":
+                search_buckets.add("train")
+            # Overall OSM bbox expanded by ~100 km for cheap candidate pre-filter.
+            _m = 0.9
+            osm_bbox = (
+                min(p[0] for p in osm_pts) - _m,
+                min(p[1] for p in osm_pts) - _m,
+                max(p[0] for p in osm_pts) + _m,
+                max(p[1] for p in osm_pts) + _m,
+            )
+            raw: list = []
+            for (lk_ref, lk_bucket), lk_cands in _line_canonical_export.items():
+                if lk_bucket not in search_buckets:
+                    continue
+                for entry in lk_cands:
+                    line_key, cand, agency_id = entry.line_key, entry.stops, entry.agency_id
+                    if not cand:
+                        continue
+                    # Coarse pre-filter: skip if first in-service-area stop is outside expanded bbox.
+                    first_c = None
+                    for sid, *_ in cand:
+                        if is_in_service_area(sid):
+                            first_c = stop_coords.get(sid) or stop_coords.get(sid.split(":")[0])
+                            if first_c:
+                                break
+                    if first_c and not (osm_bbox[0] <= first_c[0] <= osm_bbox[2] and
+                                        osm_bbox[1] <= first_c[1] <= osm_bbox[3]):
+                        continue
+                    ccoords: list = []
+                    for stop_id, _a, _d in cand:
+                        if not is_in_service_area(stop_id):
+                            continue
+                        c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
+                        if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
+                            ccoords.append([c[0], c[1], stop_id])
+                    if len(ccoords) < 2:
+                        continue
+                    score = len(ccoords) / len(cand)
+                    if score < 0.5:
+                        continue
+                    raw.append((score, ccoords, cand, line_key, agency_id, lk_ref, entry.no_draw))
+            raw.sort(key=lambda x: (-x[0], -len(x[1])))
+            # Phase 2: compute ep_0_5 and full_density only for the top-cap candidates.
+            candidates = []
+            for score, ccoords, cand, line_key, agency_id, lk_ref, no_draw in raw[:cap]:
+                fc = [c for sid, *_ in cand
+                      if is_in_service_area(sid)
+                      and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
+                sp = sum(haversine_km(fc[i][0], fc[i][1], fc[i+1][0], fc[i+1][1])
+                         for i in range(len(fc) - 1))
+                full_density = len(fc) / sp if sp > 0 else 0.0
+                ep_0_5 = _count_endpoints_covered(
+                    osm_pts, ccoords, GEO_SORT_ENDPOINT_KM, osm_sn, osm_segs
+                )
+                sn, ln, bkt = line_key
+                candidates.append(
+                    (score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id), lk_ref, no_draw)
+                )
+            candidates.sort(key=lambda x: (-x[0], -x[1], -len(x[2])))
+
+        result = _try_assign(
+            candidates, cap, loop_level,
+            osm_pts, osm_sn, osm_segs, osm_lkm, osm_from, osm_to, stop_meta, s_upper,
+        )
+
+        if result:
+            result["osm_ref"] = ref
+            settled[osm_id] = result
+        elif loop_level == 4:
+            # Mountain rack railway terminal-name fallback when geo also fails.
+            if mode == "mountain":
+                norm_from = _norm_stop_name(osm_from)
+                norm_to   = _norm_stop_name(osm_to)
+                bbox = line_bbox(osm_pts)
+                term_stops: list = []
+                seen_tc: set = set()
+                for _sid, (_sname, _parent) in stop_meta.items():
+                    _ns = _norm_stop_name(_sname)
+                    if not _ns:
+                        continue
+                    if not (
+                        (norm_from and len(norm_from) >= 4 and _ns == norm_from) or
+                        (norm_to   and len(norm_to)   >= 4 and _ns == norm_to)
+                    ):
+                        continue
+                    _tc = stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0])
+                    if not _tc or not stop_near_bbox(_tc[0], _tc[1], bbox, margin=0.05):
+                        continue
+                    _key = (round(_tc[0], 3), round(_tc[1], 3))
+                    if _key in seen_tc:
+                        continue
+                    seen_tc.add(_key)
+                    term_stops.append([_tc[0], _tc[1], _sid])
+                if len(term_stops) >= 2:
+                    settled[osm_id] = {
+                        "osm_ref": ref, "stops": term_stops,
+                        "_line_key_full": (ref, ref, bucket, ""), "_bucket": bucket, "_no_draw": None,
+                    }
+                    continue
+            excl_ids.append(osm_id)
+            excl_dets.append({
+                "osm_id": osm_id,
+                "ref":    ref,
+                "mode":   mode,
+                "name":   osm_name,
+            })
+        else:
+            remaining.append(osm_id)
+
+    if loop_level == 4:
+        print("\r" + " " * 72 + "\r", end="", flush=True)  # erase progress line
+    return settled, remaining, excl_ids, excl_dets
 
 
 def freq_to_width_base(freq_score, mode) -> float:
@@ -1199,84 +1541,14 @@ def deduplicate_mountain(features: list) -> list:
     return [f for i, f in enumerate(features) if i in keep]
 
 
-# ── OSM → GTFS matching ───────────────────────────────────────────────────────
-
-def find_best_gtfs_candidate(ref, bucket, osm_bbox, stop_coords, line_freq, line_speed,
-                              osm_name=""):
-    """
-    Match an OSM route to a specific GTFS line using geographic stop overlap as a
-    tiebreaker.  Tries all ref variants (exact, normalised, name-prefix, alpha-prefix)
-    and scores each GTFS candidate by the fraction of its canonical stops that fall
-    inside the OSM route bbox.  The highest-scoring candidate wins; geo is a
-    tiebreaker, NOT a gate — a candidate with score=0 still wins if it is the only
-    one for this ref.
-
-    Returns (line_key, raw_freq, speed_kmh, canon_stops), or None if no candidates
-    exist in _line_canonical_export for any ref variant (caller falls back to gtfs_index).
-    """
-    ref_norm = ref.replace(" ", "")
-
-    ref_variants: dict = dict.fromkeys([ref, ref_norm, ref.upper(), ref.lower(), ref_norm.upper()])
-
-    # Name-prefix fallback: "R 311: Interlaken..." → try "R", "311"
-    for token in osm_name.split(":")[0].strip().split():
-        if token != ref and len(token) <= 6:
-            ref_variants[token] = None
-            ref_variants[token.upper()] = None
-
-    # RE{n} ↔ R{n}: MGB trains appear as 'R 41'/'R 42' in GTFS long_name but 'RE41'/'RE42' in OSM
-    r_ref = _re_to_r_ref(ref_norm)
-    if r_ref:
-        ref_variants[r_ref] = None
-
-    # Alpha-prefix fallback: "R43" → "R"
-    # Suppressed for N-prefixed refs in bus buckets: "N18" → "N" would match unrelated
-    # daytime GTFS lines named "N", giving night-only routes a spurious freq score.
-    m = re.match(r'^([A-Za-z ]+)\d', ref)
-    if m:
-        alpha = m.group(1).strip()
-        night_line = (alpha.upper() == "N" and bucket in ("bus", "regional_bus"))
-        if alpha and alpha != ref and not night_line:
-            ref_variants[alpha] = None
-            ref_variants[alpha.upper()] = None
-
-    seen_line_keys: set = set()
-    best_score = -1
-    best_line_key = None
-    best_stops = None
-
-    for rv in ref_variants:
-        for line_key, stops, _da, _aid in _line_canonical_export.get((rv, bucket), []):
-            if line_key in seen_line_keys:
-                continue
-            seen_line_keys.add(line_key)
-            n_inside = sum(
-                1 for sid, _a, _d in stops
-                if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))
-                and stop_near_bbox(c[0], c[1], osm_bbox, margin=0.05)
-            )
-            score = n_inside / max(len(stops), 1)
-            if score > best_score:
-                best_score = score
-                best_line_key = line_key
-                best_stops = stops
-
-    if best_line_key is None:
-        return None   # no candidates at all — caller falls back to gtfs_index
-
-    raw_freq = dict(line_freq.get(best_line_key, {"core_wd": 0, "eve_wd": 0, "we": 0}))
-    speed_kmh = line_speed.get(best_line_key)
-    return best_line_key, raw_freq, speed_kmh, best_stops
-
-
 def _group_reassign_stops(
     group_osm_ids: list,
-    gtfs_r: str,
+    line_key_full: tuple,
     bucket: str,
     geom_by_id: dict,
     stop_coords: dict,
 ) -> dict:
-    """Reassign stops for a group of OSM relations sharing the same gtfs_ref.
+    """Reassign stops for a group of OSM relations sharing the same _line_key_full.
 
     Inclusion: a GTFS stop qualifies if it is near ANY relation in the group
     (uses each relation's sub-bboxes). Placement: the stop is assigned to the
@@ -1296,11 +1568,16 @@ def _group_reassign_stops(
 
     sub_bboxes_by_id = {oid: build_sub_bboxes(geom) for oid, geom in id_geom_pairs}
 
+    sn, ln, bkt, aid = line_key_full
+    ln_norm = ln.replace(" ", "")
+    target_line_key = (sn, ln, bkt)
     all_stops: list = []  # [(stop_id, lon, lat)]
     seen_sids: set = set()
-    for ref_variant in [gtfs_r, gtfs_r.upper(), gtfs_r.lower()]:
-        for (_, cand, _da, _aid) in _line_canonical_export.get((ref_variant, bucket), []):
-            for stop_id, _arr, _dep in cand:
+    for ref_variant in [sn, ln_norm, sn.upper(), sn.lower()]:
+        for entry in _line_canonical_export.get((ref_variant, bucket), []):
+            if entry.line_key != target_line_key:
+                continue
+            for stop_id, _arr, _dep in entry.stops:
                 if stop_id in seen_sids:
                     continue
                 seen_sids.add(stop_id)
@@ -1347,6 +1624,26 @@ def main():
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries for {len(trip_frequencies):,} trips")
     line_freq, line_speed, line_canonical = stream_stop_times(trip_lookup, stop_coords, svc_dates, trip_frequencies)
 
+    # TEMP: drop no_draw entries from the candidate pool before matching.
+    # The flag-instead-of-remove design (keep low-freq lines in _line_canonical_export
+    # with no_draw="low_frequency") was meant to prevent OSM relations from falling
+    # through to the geo fallback and matching the wrong line. But when a low-freq
+    # entry shares a physical route with a high-freq sibling stored under a different
+    # short_name (e.g. IR-LIX alongside PE-LIX for the Brünig line), the OSM relation
+    # settles on the no_draw sibling in an early loop and never gets to see the
+    # drawable one. To unblock those cases, revert to pre-filter behavior here.
+    # Remove this block (and the no_draw filter logic in stream_stop_times) to restore
+    # the original behavior.
+    _removed_lk = 0
+    for _key in list(_line_canonical_export.keys()):
+        _kept = [e for e in _line_canonical_export[_key] if e.no_draw is None]
+        if not _kept:
+            del _line_canonical_export[_key]
+            _removed_lk += 1
+        elif len(_kept) != len(_line_canonical_export[_key]):
+            _line_canonical_export[_key] = _kept
+    print(f"  TEMP no_draw filter: removed {_removed_lk} empty key(s) from _line_canonical_export")
+
     # Ensure all routes with any trips are indexed, even if they don't run on our sample dates
     # (e.g. summer-only tourist railways like Jungfraubahn, Harder Kulm funicular).
     # MUST happen before build_gtfs_index so these routes are included in the index.
@@ -1392,11 +1689,11 @@ def main():
                             if _mfeat["geometry"]["type"] == "MultiLineString"
                             else _mfeat["geometry"]["coordinates"])
             _osm_bbox_chk = line_bbox(_osm_pts_chk)
-            for (_, _cand_stops, _da, _aid) in _line_canonical_export.get((_ref, "mountain"), []):
+            for _ce in _line_canonical_export.get((_ref, "mountain"), []):
                 if any(
                     (_sc := stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0]))
                     and stop_near_bbox(_sc[0], _sc[1], _osm_bbox_chk)
-                    for _sid, _arr, _dep in _cand_stops
+                    for _sid, _arr, _dep in _ce.stops
                 ):
                     _is_train_in_mountain_gtfs = True
                     break
@@ -1426,11 +1723,11 @@ def main():
             continue
         ferry_geo_index.append((gtfs_entry, canon["stops"]))
 
-    print("\nMatching and scoring...")
-    features = []
+    print("\nPreprocessing OSM routes...")
+    features = []   # mountain features built by GTFS-first loop; non-mountain added after 4-loop
     stats = defaultdict(int)
-    dropped_details: list = []       # routes dropped in main loop (no_gtfs / zero_freq)
-    matched_gtfs_line_keys: set = set()  # line_keys successfully matched to a drawn feature
+    dropped_details: list = []
+    matched_gtfs_line_keys: set = set()
 
     MODE_TO_BUCKET = {
         "train": "train",
@@ -1438,6 +1735,22 @@ def main():
         "bus": "bus", "regional_bus": "bus",
         "ferry": "ferry", "mountain": "mountain",
     }
+
+    # Operator-based override: rack/cog railways type=2 (train) in GTFS but tourist mountain
+    # in reality. Stay in 4-loop pool (bucket=mountain, searched alongside train bucket).
+    MOUNTAIN_RAIL_OPERATORS = {
+        "WAB",                    # Wengernalpbahn
+        "JB",                     # Jungfraubahn
+        "BRB",                    # Brienz Rothorn Bahn
+        "Berner Oberland-Bahnen", # Schynige Platte Bahn
+        "Gornergratbahn",         # GGB
+        "PILATUS-BAHNEN AG",      # Pilatusbahn
+        "RB",                     # Rigi Bahnen
+        "MG",                     # Ferrovia Monte Generoso
+        "Dampfbahn Furka-Bergstrecke",
+    }
+
+    route_info: dict = {}  # osm_id → classification + geometry (no GTFS data yet)
 
     for feat in osm_routes:
         props = feat["properties"]
@@ -1456,269 +1769,93 @@ def main():
             stats["excluded"] += 1
             continue
 
-        # Forchbahn (FB): OSM ref="S18", GTFS short_name="18" (type=0, tram).
-        # Remap ref so all GTFS lookups and stop assignment find the right entry.
+        # Forchbahn ref remap: OSM ref="S18" → GTFS short_name="18"
         if operator.lower() == "fb":
             ref = ref.lstrip("S") or ref
 
-        # Mountain lines (funicular, gondola, cable car, aerialway) are processed
-        # GTFS-first after this loop. Skip them here so OSM geometry alone never
-        # draws a line — the timetable is the authority for what runs.
-        # Also skip train-tagged rack/cog railways whose ref is in the mountain GTFS
-        # bucket (e.g. Niesenbahn tagged route=train but GTFS type=5/6/7): the
-        # GTFS-first loop will draw them using the OSM geometry we collected above.
+        # Mountain routes: diverted to GTFS-first loop, excluded from 4-loop pool
         if mode == "mountain":
             continue
         if mode == "train" and ref in osm_train_refs_in_mountain_gtfs:
             continue
 
-        # Exclude TER (French/Swiss regional rail-replacement buses).
-        # These are cross-border or French-domestic services, not relevant for this map.
+        # TER exclusion: cross-border/French-domestic services
         if ref.upper().startswith("TER"):
             stats["excluded"] += 1
             continue
 
-        bucket = MODE_TO_BUCKET.get(mode, "bus")
-        ref_norm = ref.replace(" ", "")
-
-        # OSM route bbox
-        geom = feat["geometry"]
-        osm_pts = ([c for seg in geom["coordinates"] for c in seg]
-                   if geom["type"] == "MultiLineString" else geom["coordinates"])
-        osm_bbox = line_bbox(osm_pts)
-        # Read pre-computed per-segment sum from the GeoJSON property — avoids
-        # inflating the length from inter-segment jumps in disordered MultiLineStrings.
-        osm_line_km = float(props.get("raw_length_km") or props.get("length_km") or 0.0)
-
-        # Primary match: geo-scored candidate selection (all modes).
-        # Picks the specific GTFS line whose canonical stops best overlap this OSM route.
-        # Geo is a tiebreaker — a single candidate wins even with score=0.
-        gtfs = None
-        matched_line_key = None
-        matched_canon_stops = None
-        gtfs_match = find_best_gtfs_candidate(
-            ref, bucket, osm_bbox, stop_coords, line_freq, line_speed,
-            osm_name=props.get("name", ""))
-        if gtfs_match:
-            matched_line_key, gtfs_raw_freq, gtfs_speed, matched_canon_stops = gtfs_match
-            if sum(gtfs_raw_freq.values()) > 0:
-                gtfs = {"raw_freq": gtfs_raw_freq, "speed_kmh": gtfs_speed}
-
-        if gtfs is None:
-            # No candidates in _line_canonical_export, OR geo match had zero service on
-            # sample dates (wrong line_key picked) — fall back to aggregated index.
-            # Preserves old behaviour for lines whose canonical trips have no resolvable
-            # stop coordinates (geo_bucket could not be determined during streaming).
-            gtfs = gtfs_index.get((bucket, ref))
-            if gtfs is None:
-                for k in [(bucket, ref_norm), (bucket, ref.upper()), (bucket, ref.lower())]:
-                    gtfs = gtfs_index.get(k)
-                    if gtfs: break
-            if gtfs is None:
-                gtfs = (gtfs_long_index.get((bucket, ref_norm)) or
-                        gtfs_long_index.get((bucket, ref_norm.upper())))
-            if gtfs is None:
-                r_norm = _re_to_r_ref(ref_norm)
-                if r_norm:
-                    gtfs = (gtfs_long_index.get((bucket, r_norm)) or
-                            gtfs_long_index.get((bucket, r_norm.upper())))
-            if gtfs is None:
-                osm_name_prefix = props.get("name", "").split(":")[0].strip()
-                for token in osm_name_prefix.split():
-                    if token != ref and len(token) <= 6:
-                        gtfs = gtfs_index.get((bucket, token)) or gtfs_index.get((bucket, token.upper()))
-                        if gtfs: break
-            if gtfs is None:
-                m = re.match(r'^([A-Za-z ]+)\d', ref)
-                if m:
-                    alpha = m.group(1).strip()
-                    # N-prefixed refs (night lines) must not fall back to the bare "N" prefix,
-                    # which matches unrelated daytime GTFS lines and gives night routes a fake freq.
-                    night_line = (alpha.upper() == "N" and bucket in ("bus", "regional_bus"))
-                    if alpha and alpha != ref and not night_line:
-                        gtfs = gtfs_index.get((bucket, alpha)) or gtfs_index.get((bucket, alpha.upper()))
-
-        # Geo-based ferry fallback: OSM ferry ref may differ from GTFS short_name entirely
-        # (e.g. BLS Thuner-/Brienzersee: OSM ref=3310/3470, GTFS short=59-68).
-        # Find the GTFS ferry line whose canonical stops best overlap the OSM bbox.
-        if gtfs is None and mode == "ferry":
-            best_n = 1   # require at least 2 stops inside
-            for gtfs_entry, cand_stops in ferry_geo_index:
-                n_inside = sum(1 for sid, arr, dep in cand_stops
-                               if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))
-                               and stop_near_bbox(c[0], c[1], osm_bbox, margin=0.05))
-                if n_inside > best_n:
-                    best_n = n_inside
-                    gtfs = gtfs_entry
-
-        # Operator-based override for rack/cog railways that are type=2 (rail) in GTFS
-        # but are tourist mountain railways in reality. Keyed by OSM operator string.
-        # WAB and JB are rack railways to Kleine Scheidegg / Jungfraujoch.
-        # BRB (Brienz Rothorn Bahn) is a steam rack railway, also type=2 in GTFS.
-        # SPB (Schynige Platte Bahn) uses the full name in OSM; "BOB" (valley train) does not.
-        MOUNTAIN_RAIL_OPERATORS = {
-            "WAB",                    # Wengernalpbahn — Lauterbrunnen/Grindelwald→Kleine Scheidegg
-            "JB",                     # Jungfraubahn — Kleine Scheidegg→Jungfraujoch
-            "BRB",                    # Brienz Rothorn Bahn
-            "Berner Oberland-Bahnen", # Schynige Platte Bahn (BOB valley trains use "BOB")
-            "Gornergratbahn",         # GGB — Zermatt→Gornergrat (shows as train without this)
-            "PILATUS-BAHNEN AG",      # Pilatusbahn — Alpnachstad→Pilatus Kulm
-            "RB",                     # Rigi Bahnen — Arth-Rigi-Bahn / Vitznau-Rigi-Bahn
-            "MG",                     # Ferrovia Monte Generoso
-            "Dampfbahn Furka-Bergstrecke",  # DFB — Realp→Oberwald (seasonal steam)
-        }
-        if mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS:
+        # Mountain operator override: stays in 4-loop pool as bucket=mountain
+        is_mountain_operator = (mode == "train" and operator in MOUNTAIN_RAIL_OPERATORS)
+        if is_mountain_operator:
             mode = "mountain"
-            bucket = "mountain"
 
-        speed_kmh = gtfs["speed_kmh"] if gtfs else None
-
-        # Refine bus → regional_bus using ref structure + STI/EV exceptions.
-        #
-        # For refs that contain at least one digit: strip all letters/symbols and
-        # evaluate the numeric remainder.  E.g. "X33" → "33" (2 digits → city),
-        # "200 (Höribus)" → "200" (3 digits → regional).
-        #
-        # Special cases:
-        #   • "EV" ref → always regional (Ersatzverkehr train-replacement bus).
-        #   • STI operator + 2-digit numeric part → regional (Thun mountain buses).
-        #   • PAG / PostAuto AG: regional operator across all CH; 2-digit refs are
-        #     inter-village/inter-town lines, never city bus circulators.
-        #
-        # Pure-letter refs (A, G, TEL, Rot …) use a 10 km length fallback:
-        # short city circulator vs. long regional connector.
+        # Bus → regional_bus refinement (pure OSM-tag logic, no GTFS)
         if mode == "bus":
             ref_upper = ref.strip().upper()
             digits_only = "".join(c for c in ref if c.isdigit())
             n_digits = len(digits_only)
             op_lower = operator.lower()
             net_lower = props.get("network", "").lower()
-            # Operators/networks where 2-digit line numbers are regional, not city
             is_regional_2digit_net = (
-                "sti" in op_lower                  # STI Thun area mountain buses
-                or "chur" in op_lower              # ChurBus city-regional network
-                or "transreno" in net_lower        # TransReno network (Chur/PostAuto)
-                or "pag" in op_lower               # PostAuto Graubünden abbreviation
-                or "postauto" in op_lower          # PostAuto AG full name
+                "sti" in op_lower or "chur" in op_lower or "transreno" in net_lower
+                or "pag" in op_lower or "postauto" in op_lower
             )
-
             if ref_upper == "EV":
-                # Ersatzverkehr train-replacement bus — always regional
                 mode = "regional_bus"
             elif digits_only:
-                # Ref contains a numeric component — classify by digit count
                 if n_digits >= 3:
                     mode = "regional_bus"
                 elif is_regional_2digit_net and n_digits == 2:
                     mode = "regional_bus"
-                # else: 0-2 digit numeric part → keep as city bus
             else:
-                # Pure letter ref (A, G, TEL, Rot, …) → 10 km length rule
                 line_length_km = props.get("raw_length_km", props.get("length_km", 0))
                 if line_length_km >= 10.0:
                     mode = "regional_bus"
 
-        # Compute frequency score with the final mode
-        # Use corridor-level frequency (all lines sharing any stop pair on this route)
-        # rather than this line's own frequency alone, so that shared corridors
-        # like Bern–Spiez or Arth-Goldau–Bellinzona reflect their true combined service.
-        if gtfs:
-            own_raw = gtfs["raw_freq"]
-            # Use the geo-matched canonical stops when available; otherwise fall back
-            # to the first candidate for this ref (any stop sequence will do for corridor).
-            if matched_canon_stops:
-                corr_canon = matched_canon_stops
-            else:
-                corr_canon = None
-                for lk in [(ref, bucket), (ref_norm, bucket),
-                           (ref_norm.upper(), bucket), (ref.lower(), bucket)]:
-                    candidates = _line_canonical_export.get(lk)
-                    if candidates:
-                        corr_canon = candidates[0][1]   # (line_key, stops, dir_aware) → stops
-                        break
-            corr_raw = corridor_freq(corr_canon, pair_freq) if corr_canon else None
-            # Only boost via corridor if the line itself has some own service on sample dates.
-            # Night-only lines (own_raw core_wd == 0) must NOT inherit frequency from daytime
-            # buses sharing the same stops (e.g. M82 Moonliner ← bus 82 daytime service).
-            if corr_raw and own_raw["core_wd"] > 0 and corr_raw["core_wd"] > own_raw["core_wd"]:
-                raw_freq = corr_raw
-            else:
-                raw_freq = own_raw
-            freq_score = compute_freq_score(raw_freq, mode)
-            stats["matched"] += 1
-        elif mode == "mountain":
-            # Reached only for OSM train routes overridden to mountain via
-            # MOUNTAIN_RAIL_OPERATORS (WAB, JB, BRB, SPB, GGB, PB, RB, MG, DFB).
-            # No GTFS mountain bucket match exists for these type=2 rack railways.
-            freq_score = 0.6
-            stats["matched"] += 1
+        bucket = MODE_TO_BUCKET.get(mode, "bus")
+        ref_norm = ref.replace(" ", "")
+        geom = feat["geometry"]
+        if geom["type"] == "MultiLineString":
+            osm_pts  = [c for seg in geom["coordinates"] for c in seg]
+            osm_segs = geom["coordinates"]
         else:
-            freq_score = None   # unmatched → skip (don't draw)
-            stats["unmatched"] += 1
-
-        # Skip routes below the minimum frequency threshold.
-        # Mountain mode is exempt: seasonal railways may not run on our specific
-        # sample date but are still worth showing (they get clamped to 0.4 below).
-        if freq_score is None or (freq_score < MIN_FREQ_SCORE and mode != "mountain"):
-            dropped_details.append({
-                "osm_id":           str(props.get("osm_id", "")),
-                "ref":              ref,
-                "name":             props.get("name", ""),
-                "mode":             mode,
-                "operator":         operator,
-                "matched_line_key": list(matched_line_key) if matched_line_key else None,
-                "freq_score":       freq_score,
-                "reason":           "no_gtfs" if freq_score is None else "zero_freq",
-            })
+            osm_pts  = geom["coordinates"]
+            osm_segs = None
+        if not osm_pts:
             continue
+        osm_line_km = float(props.get("raw_length_km") or props.get("length_km") or 0.0)
 
-        # Mountain railways are always worth showing; clamp to a visible minimum
-        if mode == "mountain" and freq_score < 0.4:
-            freq_score = 0.4
+        route_info[str(props.get("osm_id", ""))] = {
+            "feat": feat, "mode": mode, "bucket": bucket,
+            "ref": ref, "ref_norm": ref_norm,
+            "osm_pts": osm_pts, "sub_bboxes": build_sub_bboxes(osm_pts), "_osm_segs": osm_segs,
+            "osm_span_km": haversine_km(
+                osm_pts[0][0], osm_pts[0][1], osm_pts[-1][0], osm_pts[-1][1]
+            ),
+            "osm_from":       props.get("from", ""),
+            "osm_to":         props.get("to", ""),
+            "osm_stop_nodes": props.get("stop_nodes", []),
+            "osm_line_km":    osm_line_km,
+            "skip_upper_density": (mode == "regional_bus"),
+            "osm_name":       props.get("name", ""),
+            "operator":       operator,
+            "is_mountain_operator": is_mountain_operator,
+        }
 
-        color      = speed_to_color(mode, speed_kmh)
-        width_base = freq_to_width_base(freq_score, mode)
-
-        features.append({
-            "type": "Feature",
-            "geometry": feat["geometry"],
-            "properties": {
-                "osm_id":     props.get("osm_id"),
-                "ref":        ref,
-                "name":       props.get("name", ""),
-                "operator":   operator,
-                "mode":       mode,
-                "freq_score": freq_score,
-                "speed_kmh":  speed_kmh,
-                "color":      color,
-                "width_base": width_base,
-                "line_km":    round(osm_line_km, 1),
-                "gtfs_matched": True,
-                "from":       props.get("from", ""),
-                "to":         props.get("to", ""),
-                "stop_nodes": props.get("stop_nodes", []),
-            },
-        })
-        if matched_line_key:
-            matched_gtfs_line_keys.add(matched_line_key)
+    n_ferry = sum(1 for info in route_info.values() if info["mode"] == "ferry")
+    print(f"  {len(route_info):,} routes preprocessed ({n_ferry} ferries, "
+          f"{stats['excluded']:,} hard-excluded)")
 
     # ── GTFS-first mountain processing ──────────────────────────────────────────
     # Every cable car / gondola / funicular in the timetable (GTFS route type 5/6/7)
     # gets a line on the map.  Use OSM route geometry when a matching relation exists
     # (matched by GTFS short_name == OSM ref); otherwise draw a straight-line segment
     # between the canonical GTFS stop coordinates.
-    #
-    # Source: _line_canonical_export[(ref, "mountain")] → list of canonical stop sequences,
-    # one per ~40 km geographic cell.  This naturally deduplicates direction variants
-    # (up/down) of the same gondola while preserving same-named lines in different cities.
     print("\nGTFS-first mountain processing...")
     n_gtfs_mountain = 0
     n_osm_shape = 0
     n_straight_line = 0
-
-    # Track bboxes already committed per ref to suppress direction-variant duplicates.
-    # Same ref, overlapping bbox → same physical cable car in the same place → skip.
-    mountain_added_bboxes: dict = defaultdict(list)  # ref → [bbox, ...]
+    mountain_added_bboxes: dict = defaultdict(list)
 
     for (ref, bucket), stop_list_candidates in _line_canonical_export.items():
         if bucket != "mountain":
@@ -1731,11 +1868,11 @@ def main():
         raw_freq   = gtfs_entry["raw_freq"]
         speed_kmh  = gtfs_entry["speed_kmh"]
         freq_score = compute_freq_score(raw_freq, "mountain")
-        freq_score = max(freq_score, 0.4)  # seasonal railways may not run on sample dates
+        freq_score = max(freq_score, 0.4)
 
-        # Each entry in stop_list_candidates is one geographic location for this ref.
-        # Produce one map feature per location.
-        for (mtn_line_key, stop_list, _da, _aid) in stop_list_candidates:
+        for entry in stop_list_candidates:
+            mtn_line_key = entry.line_key
+            stop_list = entry.stops
             # Resolve stop coordinates
             stop_pts = []
             for stop_id, _arr, _dep in stop_list:
@@ -1818,286 +1955,68 @@ def main():
     print(f"  {n_gtfs_mountain} mountain lines: {n_osm_shape} with OSM shape, "
           f"{n_straight_line} straight-line fallback")
 
-    OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
-
-    # Save stop coordinates per line (osm_id → [[lon,lat], ...]) for stop dot rendering
+    print("Stop assignment (4-loop batch)...")
+    # ── Stop assignment: 4 sequential batch loops ─────────────────────────────
+    # Each loop processes all routes not yet settled. A route is settled once it
+    # receives a match that passes all required checks; it is not revisited.
+    # Loop 1: simple string (long_norm/short_name, no generics, no tricks)
+    # Loop 2: string tricks (RE↔R, name-prefix, alpha-prefix; generics excluded)
+    # Loop 3: generic-prefix keys (S, R, RE, IC, …) with unconditional sanity check
+    # Loop 4: full geo-fallback over all candidates in bucket
     line_stops_out = {}
-    excluded_osm_ids: set = set()   # osm_ids where geo sanity check rejected all candidates
-    excluded_details: list = []     # metadata for sanity_excluded.json sidecar
-    for feat in features:
-        osm_id = str(feat["properties"]["osm_id"])
-        ref    = feat["properties"]["ref"]
-        mode   = feat["properties"]["mode"]
-        bucket = MODE_TO_BUCKET.get(mode, "bus")
-        ref_norm = ref.replace(" ", "")
+    excluded_osm_ids: set = set()
+    excluded_details: list = []
 
-        # GTFS lookup — mirror the same fallback cascade used in the main OSM loop
-        # so that lines drawn via a fallback there also get stop coordinates here.
-        matched_gtfs_ref: str | None = None
-
-        gtfs = gtfs_index.get((bucket, ref))
-        if gtfs: matched_gtfs_ref = ref
-        if gtfs is None:
-            for k_ref in [ref_norm, ref.upper(), ref.lower(), ref_norm.upper()]:
-                cand = gtfs_index.get((bucket, k_ref))
-                if cand:
-                    gtfs = cand
-                    matched_gtfs_ref = k_ref
-                    break
-        if gtfs is None:
-            for lk in [(bucket, ref_norm), (bucket, ref_norm.upper())]:
-                cand = gtfs_long_index.get(lk)
-                if cand:
-                    gtfs = cand
-                    matched_gtfs_ref = ref_norm
-                    break
-        if gtfs is None:
-            r_norm = _re_to_r_ref(ref_norm)
-            if r_norm:
-                cand = (gtfs_long_index.get((bucket, r_norm)) or
-                        gtfs_long_index.get((bucket, r_norm.upper())))
-                if cand:
-                    gtfs = cand
-                    matched_gtfs_ref = r_norm
-        # First-word-of-name fallback: "R 311: Interlaken…" → try "R", "311"
-        if gtfs is None:
-            osm_name_prefix = feat["properties"].get("name", "").split(":")[0].strip()
-            for token in osm_name_prefix.split():
-                if token != ref and len(token) <= 6:
-                    cand = gtfs_index.get((bucket, token)) or \
-                           gtfs_index.get((bucket, token.upper()))
-                    if cand:
-                        gtfs = cand
-                        matched_gtfs_ref = token if gtfs_index.get((bucket, token)) else token.upper()
-                        break
-        # Alpha-prefix fallback: "R43" → "R", "R44" → "R", etc.
-        if gtfs is None:
-            m = re.match(r'^([A-Za-z ]+)\d', ref)
-            if m:
-                alpha = m.group(1).strip()
-                if alpha and alpha != ref:
-                    cand = gtfs_index.get((bucket, alpha)) or \
-                           gtfs_index.get((bucket, alpha.upper()))
-                    if cand:
-                        gtfs = cand
-                        matched_gtfs_ref = alpha if gtfs_index.get((bucket, alpha)) else alpha.upper()
-
-        if gtfs is None:
-            if mode == "ferry":
-                # No direct ref match (OSM ref=3310 ≠ GTFS short_name=7–22).
-                # Collect all ferry pier stops from any GTFS ferry route whose stops
-                # fall within this OSM route's bbox.
-                geom = feat["geometry"]
-                osm_pts = ([c for seg in geom["coordinates"] for c in seg]
-                           if geom["type"] == "MultiLineString" else geom["coordinates"])
-                bbox = line_bbox(osm_pts)
-                seen_pos: set = set()
-                pier_coords: list = []
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket != "ferry":
-                        continue
-                    for (_, cand, _da, _aid) in lk_candidates:
-                        for stop_id, _a, _d in cand:
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
-                                key = (round(c[0], 4), round(c[1], 4))
-                                if key not in seen_pos:
-                                    seen_pos.add(key)
-                                    pier_coords.append([c[0], c[1], stop_id])
-                if pier_coords:
-                    line_stops_out[osm_id] = {"gtfs_ref": ref, "osm_ref": ref, "stops": pier_coords, "_bucket": "ferry", "_line_key_full": (ref, ref, "ferry", "")}
+    # Ferry: collect pier stops from all GTFS ferry routes within the OSM route bbox.
+    # OSM ferry refs rarely match GTFS short_names directly, so geo collection is used.
+    for osm_id, info in route_info.items():
+        if info["mode"] != "ferry":
+            continue
+        ref  = info["ref"]
+        bbox = line_bbox(info["osm_pts"])
+        seen_pos: set = set()
+        pier_coords: list = []
+        for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
+            if lk_bucket != "ferry":
                 continue
-            elif mode != "mountain":
-                continue
-            # Mountain rack railways (WAB, JB, BRB) have no GTFS mountain-bucket entry
-            # (they are type=2 rail in GTFS). Fall through to the geo-based fallback
-            # below, which already searches the "train" bucket for mountain-mode lines.
+            for entry in lk_candidates:
+                for stop_id, _a, _d in entry.stops:
+                    c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
+                    if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
+                        key = (round(c[0], 4), round(c[1], 4))
+                        if key not in seen_pos:
+                            seen_pos.add(key)
+                            pier_coords.append([c[0], c[1], stop_id])
+        if pier_coords:
+            line_stops_out[osm_id] = {
+                "osm_ref": ref, "stops": pier_coords,
+                "_bucket": "ferry", "_line_key_full": (ref, ref, "ferry", ""), "_no_draw": None,
+            }
 
-        # Compute OSM line bbox (needed for stop filtering and geo fallback)
-        geom = feat["geometry"]
-        if geom["type"] == "MultiLineString":
-            osm_pts = [c for seg in geom["coordinates"] for c in seg]
-        else:
-            osm_pts = geom["coordinates"]
-        bbox = line_bbox(osm_pts)
-        sub_bboxes = build_sub_bboxes(osm_pts)   # corridor-aware stop filter
-
-        # Precompute OSM direction for direction-aware candidate filtering.
-        # Only meaningful when start and end are well-separated (non-circular routes).
-        osm_start = osm_pts[0]
-        osm_end   = osm_pts[-1]
-        osm_span_km = haversine_km(osm_start[0], osm_start[1], osm_end[0], osm_end[1])
-
-        # Extract OSM terminal tags and stop nodes — needed for sanity checks below.
-        osm_from       = feat["properties"].get("from", "")
-        osm_to         = feat["properties"].get("to", "")
-        osm_stop_nodes = feat["properties"].get("stop_nodes", [])
-        osm_line_km    = feat["properties"].get("line_km", 0.0)
-
-        # Reconstruct stop coords from canonical trip, with name-fallback sanity check.
-        # Logic is in _lookup_canonical_stops() so the diagnostic script can share it.
-        best_coords, used_name_fallback, canon_line_key_full = _lookup_canonical_stops(
-            ref, ref_norm, matched_gtfs_ref, bucket,
-            osm_pts, osm_span_km, osm_from, osm_to,
-            stop_coords, stop_meta, sub_bboxes, osm_stop_nodes, osm_line_km,
-            skip_upper_density=(mode == "regional_bus"),
+    # 4-loop stop assignment (ferries bypass — already in line_stops_out above)
+    pool = [oid for oid, info in route_info.items() if info["mode"] != "ferry"]
+    for loop_level in (1, 2, 3, 4):
+        settled, pool, excl_ids, excl_dets = _run_stop_loop(
+            loop_level, pool, route_info, stop_coords, stop_meta
         )
-        geo_best_ref: Optional[str] = None
-        geo_best_line_key_full: Optional[tuple] = None
+        for osm_id, entry in settled.items():
+            line_stops_out[osm_id] = entry
+        excluded_osm_ids.update(excl_ids)
+        excluded_details.extend(excl_dets)
+        verb = ("string", "tricks", "generic", "geo-fallback")[loop_level - 1]
+        print(f"  Loop {loop_level} ({verb:12}): settled {len(settled):4}, remaining {len(pool)}")
 
-        # Geo-based fallback: triggers when (a) no canon found at all, (b) 0 of 2 endpoints
-        # covered at 5 km — canonical resolved to wrong GTFS service (e.g. SBB 'RE' for MGB
-        # 'RE41'), or (c) 1 of 2 endpoints covered and sanity check fails — partial match.
-        # For mountain-mode features, also search the "train" bucket since WAB/JB/MGB service
-        # is carried as GTFS train type=2 routes under short_name "R".
-        _osm_segs = geom["coordinates"] if geom["type"] == "MultiLineString" else None
-        ep_count = _count_endpoints_covered(osm_pts, best_coords, ENDPOINT_THRESHOLD_KM, osm_stop_nodes, _osm_segs) if best_coords else 0
-        needs_fallback = not best_coords or ep_count == 0
-        if not needs_fallback and ep_count == 1:
-            if not _passes_geo_sanity(osm_pts, best_coords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
-                                       skip_upper_density=(mode == "regional_bus")):
-                needs_fallback = True
-        if needs_fallback:
-            if mode == "ferry":
-                # Ferry: collect ALL pier stops from any GTFS ferry route within the bbox,
-                # deduped by position. OSM ref ≠ GTFS short_name so we can't ref-match.
-                seen_pos: set = set()
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket != "ferry":
-                        continue
-                    for (_, cand, _da, _aid) in lk_candidates:
-                        for stop_id, _a, _d in cand:
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and stop_near_bbox(c[0], c[1], bbox, margin=0.01):
-                                key = (round(c[0], 4), round(c[1], 4))
-                                if key not in seen_pos:
-                                    seen_pos.add(key)
-                                    best_coords.append([c[0], c[1], stop_id])
-            else:
-                search_buckets = {bucket}
-                if bucket == "mountain":
-                    search_buckets.add("train")
-                # Collect all scored candidates, then pick the highest-scoring one
-                # that passes the geo sanity checks.  Sorting first means we check
-                # the most-likely-correct candidates first and exit early.
-                geo_candidates: list = []  # (score, ccoords, lk_ref, full_density, line_key, agency_id)
-                for (lk_ref, lk_bucket), lk_candidates in _line_canonical_export.items():
-                    if lk_bucket not in search_buckets:
-                        continue
-                    for (line_key, cand, _da, agency_id) in lk_candidates:
-                        if not cand:
-                            continue
-                        ccoords = []
-                        for stop_id, _arr, _dep in cand:
-                            if not is_in_service_area(stop_id):
-                                continue
-                            c = stop_coords.get(stop_id) or stop_coords.get(stop_id.split(":")[0])
-                            if c and any(stop_near_bbox(c[0], c[1], sb) for sb in sub_bboxes):
-                                ccoords.append([c[0], c[1], stop_id])
-                        if len(ccoords) < 2:
-                            continue
-                        score = len(ccoords) / len(cand)
-                        if score < 0.5:
-                            continue
-                        # Compute density from the full unfiltered candidate (not bbox-filtered
-                        # ccoords) so long-distance trains aren't artificially inflated by the
-                        # shared corridor section alone.
-                        _fc = [c for sid, *_ in cand
-                               if is_in_service_area(sid)
-                               and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
-                        _sp = sum(haversine_km(_fc[i][0], _fc[i][1], _fc[i+1][0], _fc[i+1][1])
-                                  for i in range(len(_fc) - 1))
-                        full_density = len(_fc) / _sp if _sp > 0 else 0.0
-                        geo_candidates.append((score, ccoords, lk_ref, full_density, line_key, agency_id))
-
-                # Sort: bbox score first, then endpoint coverage (0/1/2 at 500m threshold),
-                # then absolute stop count. Equal-score full-corridor routes beat partial ones.
-                geo_candidates.sort(
-                    key=lambda x: (-x[0], -_count_endpoints_covered(osm_pts, x[1], GEO_SORT_ENDPOINT_KM, osm_stop_nodes, _osm_segs), -len(x[1]))
-                )
-                geo_best: list = []
-                for _score, _ccoords, _lk_ref, _full_density, _line_key, _agency_id in geo_candidates[:50]:
-                    if _passes_geo_sanity(osm_pts, _ccoords, stop_meta, osm_from, osm_to, osm_stop_nodes, osm_line_km,
-                                          cand_full_density=_full_density, skip_upper_density=(mode == "regional_bus")):
-                        geo_best = _ccoords
-                        # Use long_norm as gtfs_ref key when it's more specific than short_name
-                        # (e.g. "R4" instead of "R", "RE4" instead of "RE").
-                        _sn, _ln, _bkt = _line_key
-                        _long_norm = _ln.replace(" ", "")
-                        _short_norm = _sn.replace(" ", "")
-                        geo_best_ref = _long_norm if _long_norm and _long_norm != _short_norm else _lk_ref
-                        geo_best_line_key_full = (_sn, _ln, _bkt, _agency_id)
-                        break
-                if geo_best:
-                    best_coords = geo_best
-                elif mode == "mountain":
-                    # Mountain rack railways (WAB, JB, BRB, SPB, GGB, PB, RB, MG, DFB) are
-                    # seasonal — their GTFS CC/type=2 entries may be pruned from
-                    # _line_canonical_export by the low-service filter when sample dates fall
-                    # outside the operating season.  Fall back to a terminal-name stop lookup:
-                    # search stop_meta for stops whose normalised name matches the OSM from/to
-                    # tag and whose coordinates are within this route's bbox.
-                    norm_from = _norm_stop_name(osm_from)
-                    norm_to   = _norm_stop_name(osm_to)
-                    term_stops: list = []
-                    seen_term_coords: set = set()
-                    for _sid, (_sname, _parent) in stop_meta.items():
-                        _norm_sname = _norm_stop_name(_sname)
-                        if not _norm_sname:
-                            continue
-                        if not (
-                            (norm_from and len(norm_from) >= 4 and _norm_sname == norm_from) or
-                            (norm_to   and len(norm_to)   >= 4 and _norm_sname == norm_to)
-                        ):
-                            continue
-                        _tc = stop_coords.get(_sid) or stop_coords.get(_sid.split(":")[0])
-                        if not _tc or not stop_near_bbox(_tc[0], _tc[1], bbox, margin=0.05):
-                            continue
-                        _key = (round(_tc[0], 3), round(_tc[1], 3))
-                        if _key in seen_term_coords:
-                            continue
-                        seen_term_coords.add(_key)
-                        term_stops.append([_tc[0], _tc[1], _sid])
-                    if len(term_stops) >= 2:
-                        best_coords = term_stops
-                    else:
-                        best_coords = []
-                        excluded_osm_ids.add(osm_id)
-                        excluded_details.append({
-                            "osm_id": osm_id,
-                            "ref":    feat["properties"]["ref"],
-                            "mode":   feat["properties"]["mode"],
-                            "name":   feat["properties"].get("name", ""),
-                        })
-                else:
-                    # No geo candidate passed sanity. The geo-fallback only triggers when
-                    # best_coords is already suspect (empty or failed endpoint coverage).
-                    # If geo finds nothing valid either, discard rather than keep wrong stops.
-                    best_coords = []
-                    excluded_osm_ids.add(osm_id)
-                    excluded_details.append({
-                        "osm_id": osm_id,
-                        "ref":    feat["properties"]["ref"],
-                        "mode":   feat["properties"]["mode"],
-                        "name":   feat["properties"].get("name", ""),
-                    })
-
-        if best_coords:
-            gtfs_ref = geo_best_ref or matched_gtfs_ref or ref
-            lkf = geo_best_line_key_full or canon_line_key_full or (ref, ref, bucket, "")
-            line_stops_out[osm_id] = {"gtfs_ref": gtfs_ref, "osm_ref": ref, "stops": best_coords, "_bucket": bucket, "_line_key_full": lkf}
-
-    line_canonical_export = None  # free reference
-
-    # Dedup: within each _line_key_full group (same GTFS line = same operator + name + bucket),
-    # if any OSM entry matched via direct ref (osm_ref ≈ gtfs_ref), remove all fallback-matched
-    # entries so the same GTFS line doesn't appear twice under different OSM route refs.
-    # Grouping by _line_key_full = (short_name, long_name, bucket, agency_id) ensures that two
-    # unrelated lines sharing a name string but belonging to different operators (e.g. SBB R2
-    # Lausanne–Bex and RhB R2 Landquart–Davos) are never in the same dedup group.
-    def _refs_match(osm_ref: str, gtfs_ref: str) -> bool:
+    # Dedup: within each _line_key_full group, if any OSM entry has a direct ref match
+    # (norm(osm_ref) == norm(short_name or long_name), not a generic prefix), remove all
+    # fallback-matched entries so the same GTFS line doesn't appear twice under different refs.
+    def _is_direct_match(osm_ref: str, short_name: str, long_name: str) -> bool:
         norm = lambda s: s.replace(" ", "").lower()
-        return norm(osm_ref) == norm(gtfs_ref)
+        rn = norm(osm_ref)
+        if rn == norm(short_name) and short_name.upper() not in GENERIC_GTFS_PREFIXES:
+            return True
+        if rn == norm(long_name) and long_name.upper() not in GENERIC_GTFS_PREFIXES:
+            return True
+        return False
 
     by_line_key_full: dict = defaultdict(list)
     for osm_id, entry in line_stops_out.items():
@@ -2105,31 +2024,26 @@ def main():
         if lkf:
             by_line_key_full[lkf].append(osm_id)
 
-    # Quick lookup for dedup logging: osm_id → {ref, name, mode, operator}
-    feat_props_by_id = {
-        str(f["properties"]["osm_id"]): f["properties"]
-        for f in features if f["properties"].get("osm_id")
-    }
-
     dedup_removed: set = set()
     for lkf, osm_ids in by_line_key_full.items():
-        direct = [oid for oid in osm_ids if _refs_match(line_stops_out[oid]["osm_ref"], line_stops_out[oid]["gtfs_ref"])]
+        sn, ln = lkf[0], lkf[1]
+        direct = [oid for oid in osm_ids
+                  if _is_direct_match(line_stops_out[oid]["osm_ref"], sn, ln)]
         if direct:
-            fallback = [oid for oid in osm_ids if not _refs_match(line_stops_out[oid]["osm_ref"], line_stops_out[oid]["gtfs_ref"])]
+            fallback = [oid for oid in osm_ids
+                        if not _is_direct_match(line_stops_out[oid]["osm_ref"], sn, ln)]
             dedup_removed.update(fallback)
 
     for oid in dedup_removed:
-        fp = feat_props_by_id.get(oid, {})
+        ri = route_info.get(oid, {})
+        fp = ri.get("feat", {}).get("properties", {}) if ri else {}
         dropped_details.append({
-            "osm_id":           oid,
-            "ref":              fp.get("ref", line_stops_out[oid].get("osm_ref", "")),
-            "name":             fp.get("name", ""),
-            "mode":             fp.get("mode", ""),
-            "operator":         fp.get("operator", ""),
-            "matched_line_key": None,
-            "freq_score":       fp.get("freq_score"),
-            "reason":           "dedup",
-            "gtfs_ref":         line_stops_out[oid].get("gtfs_ref", ""),
+            "osm_id":   oid,
+            "ref":      line_stops_out[oid].get("osm_ref", ""),
+            "name":     fp.get("name", ""),
+            "mode":     ri.get("mode", ""),
+            "operator": ri.get("operator", ""),
+            "reason":   "dedup",
         })
         del line_stops_out[oid]
 
@@ -2137,32 +2051,26 @@ def main():
         print(f"  Dedup-removed:  {len(dedup_removed)} fallback-matched lines superseded by direct-ref match")
 
     # Group-level stop reassignment: use combined geometry of all OSM relations for a
-    # gtfs_ref so stops are included if near ANY relation in the group, then placed on
+    # _line_key_full group so stops are included if near ANY relation, then placed on
     # the closest one. Fixes variant bleeding (e.g. Glattbrugg leaking into Hardbrücke).
-    geom_by_id_grp: dict = {}
-    for feat in features:
-        oid = str(feat["properties"]["osm_id"])
-        geom = feat["geometry"]
-        geom_by_id_grp[oid] = (
-            [c for seg in geom["coordinates"] for c in seg]
-            if geom["type"] == "MultiLineString"
-            else geom["coordinates"]
-        )
+    geom_by_id_grp: dict = {oid: info["osm_pts"] for oid, info in route_info.items()}
 
-    by_ref_bucket: dict = defaultdict(list)
+    by_lkf_grp: dict = defaultdict(list)
     for osm_id, entry in line_stops_out.items():
-        gtfs_r = entry.get("gtfs_ref")
+        lkf = entry.get("_line_key_full")
         bkt = entry.get("_bucket")
-        if gtfs_r and bkt:
-            by_ref_bucket[(gtfs_r, bkt)].append(osm_id)
+        if lkf and bkt and bkt != "ferry":
+            by_lkf_grp[lkf].append(osm_id)
 
     n_grp = 0
-    for (gtfs_r, bkt), osm_ids in by_ref_bucket.items():
+    for lkf, osm_ids in by_lkf_grp.items():
         if len(osm_ids) < 2:
             continue
-        if not any((v, bkt) in _line_canonical_export for v in [gtfs_r, gtfs_r.upper(), gtfs_r.lower()]):
+        sn, ln, bkt, aid = lkf
+        ln_norm = ln.replace(" ", "")
+        if not any((v, bkt) in _line_canonical_export for v in [sn, ln_norm, sn.upper(), sn.lower()]):
             continue
-        new_asgn = _group_reassign_stops(osm_ids, gtfs_r, bkt, geom_by_id_grp, stop_coords)
+        new_asgn = _group_reassign_stops(osm_ids, lkf, bkt, geom_by_id_grp, stop_coords)
         for oid in osm_ids:
             new_stops = new_asgn.get(oid, [])
             if new_stops:
@@ -2172,9 +2080,177 @@ def main():
     if n_grp:
         print(f"  Group reassignment: {n_grp} groups processed")
 
+    # ── Post-4-loop draw gate ─────────────────────────────────────────────────
+    # Apply the no_draw flag, look up freq/speed from gtfs_index via _line_key_full,
+    # compute visual properties, and build non-mountain features.
+    print("\nPost-loop draw gate...")
+    no_draw_excluded = 0
+
+    for osm_id in list(line_stops_out.keys()):
+        entry    = line_stops_out[osm_id]
+        no_draw  = entry.get("_no_draw")
+        lkf      = entry.get("_line_key_full")
+        bkt      = entry.get("_bucket")
+        info     = route_info.get(osm_id, {})
+        fp       = info.get("feat", {}).get("properties", {}) if info else {}
+
+        if no_draw:
+            dropped_details.append({
+                "osm_id":           osm_id,
+                "ref":              entry.get("osm_ref", ""),
+                "name":             fp.get("name", ""),
+                "mode":             info.get("mode", ""),
+                "operator":         info.get("operator", ""),
+                "matched_line_key": list(lkf[:3]) if lkf else None,
+                "no_draw_reason":   no_draw,
+                "reason":           "no_draw",
+            })
+            del line_stops_out[osm_id]
+            no_draw_excluded += 1
+            continue
+
+        # Track matched GTFS line_key for gtfs_unmatched.json
+        if lkf:
+            matched_gtfs_line_keys.add(lkf[:3])
+
+        if bkt == "ferry":
+            continue  # ferry features built in the ferry block below
+
+        if not info:
+            continue
+
+        mode     = info["mode"]
+        operator = info["operator"]
+        osm_line_km = info["osm_line_km"]
+        ref      = info["ref"]
+
+        # Mountain operator display override
+        if info.get("is_mountain_operator"):
+            mode = "mountain"
+
+        # Freq/speed lookup via _line_key_full
+        gtfs = None
+        if lkf:
+            sn, ln, lk_bkt, aid = lkf
+            ln_norm = ln.replace(" ", "")
+            gtfs = (gtfs_long_index.get((lk_bkt, ln_norm)) or gtfs_index.get((lk_bkt, sn)))
+
+        if gtfs is None:
+            if mode == "mountain":
+                # MOUNTAIN_RAIL_OPERATORS with no GTFS train match: use visible default
+                freq_score = 0.6
+                speed_kmh  = None
+            else:
+                stats["unmatched"] += 1
+                dropped_details.append({
+                    "osm_id":           osm_id,
+                    "ref":              ref,
+                    "name":             fp.get("name", ""),
+                    "mode":             mode,
+                    "operator":         operator,
+                    "matched_line_key": None,
+                    "reason":           "no_gtfs",
+                })
+                del line_stops_out[osm_id]
+                continue
+        else:
+            own_raw   = gtfs["raw_freq"]
+            speed_kmh = gtfs["speed_kmh"]
+            # Corridor frequency boost using settled stop positions
+            settled_stops = entry.get("stops", [])
+            corr_stops = [(s[2], 0, 0) for s in settled_stops if len(s) > 2]
+            corr_raw = corridor_freq(corr_stops, pair_freq) if corr_stops else None
+            if corr_raw and own_raw["core_wd"] > 0 and corr_raw["core_wd"] > own_raw["core_wd"]:
+                raw_freq = corr_raw
+            else:
+                raw_freq = own_raw
+            freq_score = compute_freq_score(raw_freq, mode)
+            stats["matched"] += 1
+
+        if mode == "mountain" and freq_score < 0.4:
+            freq_score = 0.4
+
+        color      = speed_to_color(mode, speed_kmh)
+        width_base = freq_to_width_base(freq_score, mode)
+
+        features.append({
+            "type": "Feature",
+            "geometry": info["feat"]["geometry"],
+            "properties": {
+                "osm_id":      fp.get("osm_id"),
+                "ref":         ref,
+                "name":        fp.get("name", ""),
+                "operator":    operator,
+                "mode":        mode,
+                "freq_score":  freq_score,
+                "speed_kmh":   speed_kmh,
+                "color":       color,
+                "width_base":  width_base,
+                "line_km":     round(osm_line_km, 1),
+                "gtfs_matched": True,
+                "from":        fp.get("from", ""),
+                "to":          fp.get("to", ""),
+                "stop_nodes":  fp.get("stop_nodes", []),
+            },
+        })
+
+    # Ferry features: freq/speed from gtfs_index via OSM ref + geo fallback
+    for osm_id, info in route_info.items():
+        if info["mode"] != "ferry":
+            continue
+        if osm_id not in line_stops_out:
+            continue  # no pier stops found
+        ref      = info["ref"]
+        ref_norm = ref.replace(" ", "")
+        fp       = info["feat"]["properties"]
+        gtfs = (gtfs_long_index.get(("ferry", ref_norm))
+                or gtfs_index.get(("ferry", ref))
+                or gtfs_index.get(("ferry", ref_norm)))
+        if gtfs is None:
+            osm_bbox = line_bbox(info["osm_pts"])
+            best_n = 1
+            for gtfs_entry, cand_stops in ferry_geo_index:
+                n_inside = sum(1 for sid, _a, _d in cand_stops
+                               if (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))
+                               and stop_near_bbox(c[0], c[1], osm_bbox, margin=0.05))
+                if n_inside > best_n:
+                    best_n = n_inside
+                    gtfs = gtfs_entry
+        raw_freq   = gtfs["raw_freq"]   if gtfs else {"core_wd": 0, "eve_wd": 0, "we": 0}
+        speed_kmh  = gtfs["speed_kmh"]  if gtfs else None
+        freq_score = compute_freq_score(raw_freq, "ferry")
+        stats["matched"] += 1
+        color      = speed_to_color("ferry", speed_kmh)
+        width_base = freq_to_width_base(freq_score, "ferry")
+        features.append({
+            "type": "Feature",
+            "geometry": info["feat"]["geometry"],
+            "properties": {
+                "osm_id":      fp.get("osm_id"),
+                "ref":         ref,
+                "name":        fp.get("name", ""),
+                "operator":    info["operator"],
+                "mode":        "ferry",
+                "freq_score":  freq_score,
+                "speed_kmh":   speed_kmh,
+                "color":       color,
+                "width_base":  width_base,
+                "line_km":     round(info["osm_line_km"], 1),
+                "gtfs_matched": True,
+                "from":        fp.get("from", ""),
+                "to":          fp.get("to", ""),
+                "stop_nodes":  fp.get("stop_nodes", []),
+            },
+        })
+
+    if no_draw_excluded:
+        print(f"  no_draw filtered: {no_draw_excluded} routes excluded (low-frequency GTFS match)")
+
+    # Strip internal fields before writing line_stops.json
     for entry in line_stops_out.values():
         entry.pop("_bucket", None)
         entry.pop("_line_key_full", None)
+        entry.pop("_no_draw", None)
 
     OUT_STOPS.write_text(json.dumps(line_stops_out))
     print(f"  Stop coords: {sum(len(v['stops']) for v in line_stops_out.values()):,} stops across {len(line_stops_out):,} lines → {OUT_STOPS}")
@@ -2182,15 +2258,14 @@ def main():
     OUT_EXCLUDED.write_text(json.dumps(excluded_details, ensure_ascii=False))
     print(f"  Sanity log:  {len(excluded_details)} excluded lines → {OUT_EXCLUDED}")
 
-    # Dropped routes log (no_gtfs, zero_freq, dedup)
     OUT_DROPPED.write_text(json.dumps(dropped_details, ensure_ascii=False))
     print(f"  Dropped log: {len(dropped_details)} dropped lines → {OUT_DROPPED}")
 
     # GTFS lines never matched to any drawn OSM route
     all_gtfs_line_keys: set = set()
     for candidates in _line_canonical_export.values():
-        for (lk, _stops, _da, _aid) in candidates:
-            all_gtfs_line_keys.add(lk)
+        for entry in candidates:
+            all_gtfs_line_keys.add(entry.line_key)
     unmatched_lks = all_gtfs_line_keys - matched_gtfs_line_keys
     gtfs_unmatched_out = []
     for lk in sorted(unmatched_lks, key=lambda x: (x[2], x[0], x[1])):
@@ -2199,7 +2274,7 @@ def main():
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fs = compute_freq_score(freq, mode_approx)
         if fs < MIN_FREQ_SCORE:
-            continue   # below draw threshold: not interesting for unmatched review
+            continue
         gtfs_unmatched_out.append({
             "short_name":  short_name,
             "long_name":   long_name,
@@ -2210,22 +2285,16 @@ def main():
     OUT_GTFS_UNMATCHED.write_text(json.dumps(gtfs_unmatched_out, ensure_ascii=False))
     print(f"  GTFS unmatched: {len(gtfs_unmatched_out)} lines with service but no OSM match → {OUT_GTFS_UNMATCHED}")
 
-    # Remove lines whose geo sanity check rejected all candidates — they have no valid
-    # GTFS-backed stops and must not be drawn.  Also remove dedup-eliminated lines.
-    excluded_osm_ids |= dedup_removed
-    if excluded_osm_ids:
-        before = len(features)
-        features = [f for f in features
-                    if str(f["properties"]["osm_id"]) not in excluded_osm_ids]
-        n_sanity_excluded = before - len(features)
-        OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
-        print(f"  Sanity-excluded:  {n_sanity_excluded} lines removed from output")
+    # Deduplicate mountain features, write final transit_lines.geojson
+    features = deduplicate_mountain(features)
+    OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
 
     print(f"\nResults:")
-    print(f"  Drawn (matched):  {stats['matched']:,}")
-    print(f"  Hidden (no GTFS): {stats['unmatched']:,}")
-    print(f"  Excluded (coach): {stats['excluded']:,}")
-    print(f"  Output:           {OUT}")
+    print(f"  Drawn (matched):      {stats['matched']:,}")
+    print(f"  Hidden (no GTFS):     {stats['unmatched']:,}")
+    print(f"  No draw (low-freq):   {no_draw_excluded:,}")
+    print(f"  Excluded (coach/TER): {stats['excluded']:,}")
+    print(f"  Output:               {OUT}")
 
     mode_counts: dict = defaultdict(int)
     for f in features:
