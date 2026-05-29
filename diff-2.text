@@ -1,0 +1,724 @@
+=== Transit diff vs baseline 2026-05-28 01:26:45 ===
+
+DISAPPEARED (243):
+  [train       ] R       Pied du Barrage → Les Montuires                osm:5475432       (was 2 stops)
+  [train       ] R       Les Montuires → Pied du Barrage                osm:5475433       (was 2 stops)
+  [train       ] R1      Bex → Grandson                                 osm:7819262       (was 55 stops)
+  [train       ] R1      Grandson → Bex                                 osm:402831        (was 55 stops)
+  [train       ] R4      Vallorbe → Le Day                              osm:17954037      (was 5 stops)
+  [train       ] R4      Le Day → Vallorbe                              osm:17954036      (was 5 stops)
+  [train       ] R9      Murten/Morat → Allaman                         osm:7813514       (was 39 stops)
+  [train       ] R9      Allaman → Murten/Morat                         osm:402910        (was 39 stops)
+  [train       ] RB 27   Basel Badischer Bahnhof → Freiburg (Breisgau) Hauptbahnhof  osm:10249736      (was 1 stops)
+  [train       ] RB 27   Freiburg (Breisgau) Hauptbahnhof → Basel Badischer Bahnhof  osm:10249735      (was 2 stops)
+  [train       ] RB 30   Rheinfelden (Baden) → Basel Badischer Bahnhof  osm:20387725      (was 4 stops)
+  [train       ] RB 30   Basel Badischer Bahnhof → Rheinfelden (Baden)  osm:20387726      (was 4 stops)
+  [train       ] RE 3    Basel Bad Bahnhof → Ulm                        osm:10991894      (was 9 stops)
+  [train       ] RE 3    Ulm → Basel Bad Bahnhof                        osm:10991886      (was 4 stops)
+  [train       ] RE 6    Chur → Arosa                                   osm:20688956      (was 7 stops)
+  [train       ] RE 6    Arosa → Chur                                   osm:20688957      (was 7 stops)
+  [train       ] RE 7    Offenburg → Basel Badischer Bahnhof            osm:4573043       (was 7 stops)
+  [train       ] RE2     Bern → Broc-Chocolaterie                       osm:15413941      (was 14 stops)
+  [train       ] RE2     Broc-Chocolaterie → Bern                       osm:15417818      (was 14 stops)
+  [train       ] RE7     Chur → Disentis/Mustér                         osm:89791         (was 21 stops)
+  [train       ] RE7     Disentis/Mustér → Chur                         osm:20690203      (was 21 stops)
+  [train       ] RE9     Tirano → St. Moritz                            osm:20698417      (was 20 stops)
+  [train       ] RE9     Interlaken Ost → Spiez                         osm:19925710      (was 4 stops)
+  [train       ] RE9     Spiez → Interlaken Ost                         osm:2587846       (was 4 stops)
+  [train       ] RE9     St. Moritz → Tirano                            osm:8009425       (was 20 stops)
+  [train       ] S20     Appenzell → Trogen                             osm:13763952      (was 12 stops)
+  [train       ] S20     Trogen → Appenzell                             osm:13763951      (was 12 stops)
+  [train       ] S21     Neuchâtel → Fribourg                           osm:5390654       (was 18 stops)
+  [train       ] S21     Fribourg → Neuchâtel                           osm:5668469       (was 18 stops)
+  [train       ] S3      St. Margrethen → Lindau                        osm:3671005       (was 5 stops)
+  [train       ] S3      Lindau → St. Margrethen                        osm:4615722       (was 5 stops)
+  [train       ] S31     Belp → Biel/Bienne                             osm:15418771      (was 18 stops)
+  [train       ] S31     Biel/Bienne → Belp                             osm:15418851      (was 21 stops)
+  [train       ] S44     Stans → Luzern                                 osm:12231329      (was 8 stops)
+  [train       ] S44     Luzern → Stans                                 osm:3512235       (was 8 stops)
+  [train       ] S44     Konstanz → Weinfelden                          osm:14978073      (was 3 stops)
+  [train       ] S44     Weinfelden → Konstanz                          osm:17295936      (was 3 stops)
+  [train       ] S5      Avenches → Bern                                osm:5661083       (was 18 stops)
+  [train       ] S5      Bern → Neuchâtel                               osm:5661084       (was 23 stops)
+  [train       ] S5      Bern → Avenches                                osm:5661082       (was 18 stops)
+  [train       ] S5      Neuchâtel → Bern                               osm:371335        (was 23 stops)
+  [train       ] S6      Basel Bad Bf → Basel SBB                       osm:15578407      (was 2 stops)
+  [train       ] S6      Zell (Wiesental) → Basel Bad Bf                osm:11519984      (was 1 stops)
+  [train       ] S6      Basel Bad Bf → Zell (Wiesental)                osm:206557        (was 1 stops)
+  [train       ] S6      Wolhusen → Langnau i.E.                        osm:12245978      (was 12 stops)
+  [train       ] S6      Basel SBB → Basel Bad Bf                       osm:15578406      (was 2 stops)
+  [train       ] S6      Langnau i.E. → Wolhusen                        osm:12245977      (was 12 stops)
+  [train       ] S62     Herblingen → Schaffhausen                      osm:17283318      (was 2 stops)
+  [train       ] S62     Schaffhausen → Herblingen                      osm:17283317      (was 2 stops)
+  [train       ] S7      Wolhusen → Langenthal                          osm:11628035      (was 23 stops)
+  [train       ] S7      Langenthal → Wolhusen                          osm:11628036      (was 23 stops)
+  [train       ] S7      Langenthal → Wolhusen                          osm:12133916      (was 23 stops)
+  [bus         ] 1       Chalais téléférique → Ecoparc de Daval         osm:18873990      (was 2 stops)
+  [bus         ] 1       Luzern, Bahnhof → Luzern, Maihof               osm:12083981      (was 13 stops)
+  [bus         ] 1       Ecoparc de Daval → Chalais, téléphérique       osm:18873989      (was 2 stops)
+  [bus         ] 2       Erlinsbach, Oberdorf → Barmelweid              osm:10887780      (was 1 stops)
+  [bus         ] 2       Barmelweid → Erlinsbach, Oberdorf              osm:10887781      (was 1 stops)
+  [bus         ] 3       Lörrach Museum → Riehen Weilstrasse            osm:9492106       (was 16 stops)
+  [bus         ] 3       Riehen Weilstrasse → Lörrach Museum            osm:1853827       (was 17 stops)
+  [bus         ] 6       Delémont, Gare → Ederswiler, Jurastrasse       osm:16200321      (was 2 stops)
+  [bus         ] 6       Soyhières, Place de la Liberté → Delémont, Gare  osm:16200322      (was 1 stops)
+  [bus         ] 6       Lugano, Stazione → Piano Stampa, Capolinea     osm:20271088      (was 10 stops)
+  [bus         ] 6       Piano Stampa, Capolinea → Lugano, Stazione     osm:20271087      (was 12 stops)
+  [bus         ] 6       Delémont, Gare → Soyhières, Place de la Liberté  osm:16200323      (was 1 stops)
+  [bus         ] 6       Ederswiler, Jurastrasse → Delémont, Gare       osm:16200320      (was 2 stops)
+  [bus         ] 7       Lora → Sagnino                                 osm:2656632       (was 13 stops)
+  [bus         ] 8       Brissago, Piodina Paese → Brissago, Posta      osm:20265368      (was 4 stops)
+  [bus         ] 8       Piano Stampa, Capolinea → Lugano, Centro       osm:17058960      (was 6 stops)
+  [bus         ] 10      Publier → Saint-Gingolph                       osm:2622543       (was 3 stops)
+  [bus         ] 10      Saint-Gingolph → Évian-les-Bains               osm:19896471      (was 3 stops)
+  [bus         ] 10      Saint-Gingolph → Publier                       osm:11891779      (was 3 stops)
+  [bus         ] 10      Évian-les-Bains → Saint-Gingolph               osm:19896472      (was 3 stops)
+  [bus         ] 12      Aproz, village → Sion, gare sud                osm:14091919      (was 22 stops)
+  [bus         ] 12      Sion, gare sud → Aproz, village                osm:4307906       (was 22 stops)
+  [bus         ] 14      Vaduz, Post → Feldkirch, Bahnhof               osm:8141251       (was 28 stops)
+  [bus         ] 14      Feldkirch, Bahnhof → Schaan, Bahnhof           osm:8139259       (was 19 stops)
+  [bus         ] 14      Luzern, Brüelstrasse → Luzern, Bahnhof         osm:11820577      (was 16 stops)
+  [bus         ] 14      Schaan, Bahnhof → Feldkirch, Bahnhof           osm:8139236       (was 19 stops)
+  [bus         ] 14      Luzern, Bahnhof → Luzern, Brüelstrasse         osm:11820578      (was 17 stops)
+  [bus         ] 14      Feldkirch, Bahnhof → Vaduz, Post               osm:8142959       (was 28 stops)
+  [bus         ] 16      Brombach/Hauingen Bahnhof → Weil am Rhein Tullastraße  osm:12344735      (was 24 stops)
+  [bus         ] 16      Brombach/Hauingen Bahnhof → Weil am Rhein Tullastraße  osm:12344734      (was 24 stops)
+  [bus         ] 16      Weil am Rhein Tullastraße → Brombach/Hauingen Bahnhof  osm:12344736      (was 24 stops)
+  [bus         ] 16      Weil am Rhein Tullastraße → Brombach Tafelladen  osm:12344737      (was 24 stops)
+  [bus         ] 19      Spiegel, Blinzern → Bern, Bahnhof              osm:11987721      (was 17 stops)
+  [bus         ] 19      Bern, Bahnhof → Spiegel, Blinzern              osm:11987722      (was 17 stops)
+  [bus         ] 21      Schaffhausen, Bahnhof → Siblingen, Am Stei     osm:20158959      (was 11 stops)
+  [bus         ] 21      Siblingen, Am Stei → Schaffhausen, Bahnhof     osm:20158958      (was 11 stops)
+  [bus         ] 22      Bellach, Schulhaus → Selzach, Passionsplatz    osm:20300528      (was 4 stops)
+  [bus         ] 22      Selzach, Passionsplatz → Bellach, Schulhaus    osm:20300527      (was 4 stops)
+  [bus         ] 24      Opfertshofen SH, Reiatstube → Thayngen, Bahnhof  osm:3361680       (was 8 stops)
+  [bus         ] 24      Thayngen, Bahnhof → Opfertshofen SH, Reiatstube  osm:3011505       (was 8 stops)
+  [bus         ] 25      Schaffhausen, Bahnhof → Dörflingen, Kirche     osm:10660725      (was 14 stops)
+  [bus         ] 25      Ramsen, Petersburg → Schaffhausen, Bahnhof     osm:10660722      (was 18 stops)
+  [bus         ] 25      Schaffhausen, Bahnhof → Ramsen, Petersburg     osm:3011492       (was 20 stops)
+  [bus         ] 25      Schaffhausen, Bahnhof → Ramsen, Dorf           osm:10660721      (was 20 stops)
+  [bus         ] 25      Ramsen, Dorf → Schaffhausen, Bahnhof           osm:10660723      (was 20 stops)
+  [bus         ] 25      Dörflingen, Kirche → Schaffhausen, Bahnhof     osm:10660724      (was 15 stops)
+  [bus         ] 38      Basel, Claraplatz → Allschwil, Friedhof        osm:9485079       (was 25 stops)
+  [bus         ] 38      Allschwil, Friedhof → Basel, Claraplatz        osm:9485080       (was 25 stops)
+  [bus         ] 42      Lully-Croisée → Carouge-Rondeau                osm:9480930       (was 2 stops)
+  [bus         ] 42      Carouge-Rondeau → Lully-Croisée                osm:1212970       (was 2 stops)
+  [bus         ] 46      Rothenburg, Bahnhof West → Luzern, Ruopigen Zentrum  osm:1418324       (was 10 stops)
+  [bus         ] 46      Rothenburg, Wahligen Nord → Rothenburg, Bahnhof Ost  osm:17179080      (was 3 stops)
+  [bus         ] 46      Rothenburg, Bahnhof Ost → Rothenburg, Wahligen Nord  osm:17179081      (was 3 stops)
+  [bus         ] 50      Basel EuroAirport, Verwaltung → Basel, Bahnhof SBB  osm:2500857       (was 11 stops)
+  [bus         ] 50      Basel, Bahnhof SBB → Basel EuroAirport, Verwaltung  osm:3467007       (was 11 stops)
+  [bus         ] 55      Kandern Busbahnhof → Basel Claraplatz          osm:3802453       (was 12 stops)
+  [bus         ] 55      Basel Claraplatz → Kandern Busbahnhof          osm:3802452       (was 12 stops)
+  [bus         ] 55      Haltingen Markgräfler Straße/Bahnhof → Basel Claraplatz  osm:10649422      (was 12 stops)
+  [bus         ] 55      Basel Claraplatz → Haltingen Zentrum           osm:10649423      (was 12 stops)
+  [bus         ] 60      Gex-L'Aiglette → Genève, Gare Cornavin         osm:16817281      (was 28 stops)
+  [bus         ] 60      Ferney-Mairie → Genève, Gare Cornavin          osm:12131776      (was 28 stops)
+  [bus         ] 60      Genève, Gare Cornavin → Gex-L'Aiglette         osm:1287595       (was 23 stops)
+  [bus         ] 60      Genève, Gare Cornavin → Ferney-Mairie          osm:12116584      (was 23 stops)
+  [bus         ] 61      Gex-L'Aiglette → Genève, Gare Cornavin         osm:3908125       (was 27 stops)
+  [bus         ] 61      Genève, Gare Cornavin → Gex-L'Aiglette         osm:12189833      (was 23 stops)
+  [bus         ] 64      Meyrin-Gravière → Ferney-Mairie                osm:9131205       (was 24 stops)
+  [bus         ] 64      Ferney-Mairie → Meyrin-Gravière                osm:9131204       (was 22 stops)
+  [bus         ] 68      Blandonnet → Thoiry-Centre commercial          osm:9130751       (was 36 stops)
+  [bus         ] 68      CERN → Thoiry-Centre commercial                osm:11687620      (was 18 stops)
+  [bus         ] 68      Blandonnet → Saint-Genis-Jean Monnet           osm:11700435      (was 36 stops)
+  [bus         ] 68      Saint-Genis-Jean Monnet → CERN                 osm:11703346      (was 18 stops)
+  [bus         ] 68      CERN → Saint-Genis-Jean Monnet                 osm:11703345      (was 18 stops)
+  [bus         ] 68      Thoiry-Centre commercial → Blandonnet          osm:9130750       (was 38 stops)
+  [bus         ] 68      Saint-Genis-Jean Monnet → Blandonnet           osm:11700436      (was 38 stops)
+  [bus         ] 68      Thoiry-Centre commercial → CERN                osm:11695791      (was 18 stops)
+  [bus         ] 69      La Plaine-Gare → Challex-La Halle              osm:1446472       (was 17 stops)
+  [bus         ] 69      Challex-La Halle → La Plaine-Gare              osm:11092655      (was 17 stops)
+  [bus         ] 74      Satigny-Gare → Dardagny, Malval-Centre Nature  osm:12209363      (was 6 stops)
+  [bus         ] 80      Bel-Air → Saint-Julien SNCF                    osm:225734        (was 42 stops)
+  [bus         ] 80      Saint-Julien SNCF → Bel-Air                    osm:225735        (was 41 stops)
+  [regional_bus] 62      Aeschiried → Spiez                             osm:9329202       (was 8 stops)
+  [regional_bus] 62      Spiez → Aeschiried                             osm:9329141       (was 8 stops)
+  [regional_bus] 71      Luzern, Bahnhof → Kriens, Zentrum Pilatus      osm:11835885      (was 7 stops)
+  [regional_bus] 71      Kriens, Busschleife → Luzern, Bahnhof          osm:11835886      (was 9 stops)
+  [regional_bus] 73      Adligenswil, Dorf → Luzern, Bahnhof            osm:12083983      (was 13 stops)
+  [regional_bus] 73      Luzern, Bahnhof → Adligenswil, Dorf            osm:12083984      (was 13 stops)
+  [regional_bus] 81      Laax, posta → Ilanz, Bahnhof/Post              osm:18850008      (was 1 stops)
+  [regional_bus] 81      Ilanz, Bahnhof/Post → Laax, posta              osm:18850007      (was 1 stops)
+  [regional_bus] 101     Bern, Hauptbahnhof → Bern, Güterbahnhof        osm:10483553      (was 7 stops)
+  [regional_bus] 101     Bern, Hauptbahnhof → Bern, Güterbahnhof        osm:10483552      (was 7 stops)
+  [regional_bus] 111     Nunningen, Post → Liestal, Bahnhof             osm:19991868      (was 23 stops)
+  [regional_bus] 120     St. Gallen, Bahnhof → Heiden, Post             osm:12130319      (was 22 stops)
+  [regional_bus] 120     Heiden, Post → St. Gallen, Bahnhof             osm:12130320      (was 22 stops)
+  [regional_bus] 120     Heiden, Post → St. Gallen, Bahnhof             osm:12333748      (was 21 stops)
+  [regional_bus] 120     St. Gallen, Bahnhof → Heiden, Post             osm:12333747      (was 21 stops)
+  [regional_bus] 135     Lago di Luzzone → Ghirone Aquilesco            osm:18459587      (was 1 stops)
+  [regional_bus] 135     Ghirone, Aquilesco → Lago di Luzzone           osm:18459586      (was 1 stops)
+  [regional_bus] 164     Widnau, Viscose-Park → Dornbirn, Bahnhof       osm:1772969       (was 9 stops)
+  [regional_bus] 164     Dornbirn, Bahnhof → Widnau, Viscose-Park       osm:1772970       (was 10 stops)
+  [regional_bus] 191     Eggerstanden, Kirche → Appenzell, Bahnhof      osm:3506190       (was 4 stops)
+  [regional_bus] 191     Appenzell, Bahnhof → Eggerstanden, Kirche      osm:3508521       (was 6 stops)
+  [regional_bus] 191     Eggerstanden, Kirche → Appenzell, Bahnhof      osm:3496174       (was 4 stops)
+  [regional_bus] 191     Appenzell, Bahnhof → Eggerstanden, Kirche      osm:3496175       (was 6 stops)
+  [regional_bus] 222     Pany, Schulhaus → St. Antönien, Bord           osm:12221002      (was 8 stops)
+  [regional_bus] 222     St. Antönien, Bord → Pany, Schulhaus           osm:12220998      (was 8 stops)
+  [regional_bus] 225     Van-d'en-Haut, camping → Salvan, Le Carre      osm:14619754      (was 22 stops)
+  [regional_bus] 225     Salvan, Le Carre → Van-d'en-Haut, camping      osm:14619753      (was 22 stops)
+  [regional_bus] 230     Lac d'Emosson → Finhaut, gare                  osm:5477305       (was 9 stops)
+  [regional_bus] 230     Finhaut, gare → Lac d'Emosson                  osm:5477306       (was 9 stops)
+  [regional_bus] 252     Bruson →                                       osm:3287932       (was 1 stops)
+  [regional_bus] 271     Thonon-les-Bains, Z.I. Vongy → Genève, Rive    osm:11556843      (was 10 stops)
+  [regional_bus] 271     Excenevex Chef-Lieu → Genève, Rive             osm:13857301      (was 10 stops)
+  [regional_bus] 271     Genève, Rive → Thonon-les-Bains, Z.I. Vongy    osm:1523017       (was 10 stops)
+  [regional_bus] 271     Genève, Rive → Excenevex Chef-Lieu             osm:13864135      (was 10 stops)
+  [regional_bus] 272     Lancy-Pont-Rouge, gare/Etoile → Annecy Gare routière  osm:13898864      (was 11 stops)
+  [regional_bus] 272     Annecy Gare routière → Genève-Aéroport, gare routière  osm:13917597      (was 13 stops)
+  [regional_bus] 272     Annecy Gare routière → Lancy-Pont-Rouge-Gare/Etoile  osm:13113289      (was 10 stops)
+  [regional_bus] 272     Genève-Aéroport, gare routière → Annecy, Gare routière  osm:13969476      (was 13 stops)
+  [regional_bus] 311     Lauterbrunnen → Zweilütschinen                 osm:3833688       (was 4 stops)
+  [regional_bus] 311     Zweilütschinen → Lauterbrunnen                 osm:3833689       (was 4 stops)
+  [regional_bus] 322     Stetten AG, Künterstrasse → Baden, Postautostation  osm:11782836      (was 21 stops)
+  [regional_bus] 322     Baden, Postautostation → Stetten AG, Künterstrasse  osm:11782835      (was 20 stops)
+  [regional_bus] 339     Chénens, Gare → Avry-sur-Matran, CO            osm:12663592      (was 7 stops)
+  [regional_bus] 339     Rosé, Gare → Chénens, Gare                     osm:12663597      (was 5 stops)
+  [regional_bus] 339     Chénens, Gare → Rosé, Gare                     osm:12663595      (was 5 stops)
+  [regional_bus] 342     Bus 342: Sion - Anzère, poste                  osm:4460479       (was 12 stops)
+  [regional_bus] 357     Würenlingen, Post → Untersiggenthal, Mühleweg  osm:10842769      (was 6 stops)
+  [regional_bus] 381     Les Tavernes, Collège → Oron-la-Ville, Gare routière  osm:12600065      (was 5 stops)
+  [regional_bus] 381     Les Tavernes, Collège → Palézieux, Gare        osm:12600067      (was 2 stops)
+  [regional_bus] 381     Oron-la-Ville, Gare routière → Les Tavernes, Collège  osm:12600005      (was 5 stops)
+  [regional_bus] 381     Palézieux, Gare → Les Tavernes, Collège        osm:12600006      (was 2 stops)
+  [regional_bus] 392     Lenzburg, Ziegeleiweg → Lenzburg, Bahnhof      osm:12039664      (was 5 stops)
+  [regional_bus] 392     Lenzburg, Bahnhof → Lenzburg, Ziegeleiweg      osm:12039665      (was 10 stops)
+  [regional_bus] 405     Schattdorf, Rossgiessen → Altdorf UR, Bahnhof Ost  osm:7274605       (was 12 stops)
+  [regional_bus] 405     Altdorf UR, Bahnhof Ost → Schattdorf, Rossgiessen  osm:7275006       (was 12 stops)
+  [regional_bus] 411     Schluein, Isla → Ilanz, Bahnhof/Post           osm:12239494      (was 4 stops)
+  [regional_bus] 411     Ilanz, Bahnhof/Post → Falera, posta            osm:12239496      (was 14 stops)
+  [regional_bus] 411     Falera, posta → Ilanz, Bahnhof/Post            osm:12239493      (was 15 stops)
+  [regional_bus] 411     Ilanz, Bahnhof/Post → Falera, posta            osm:12239497      (was 23 stops)
+  [regional_bus] 411     Ilanz, Bahnhof/Post → Schluein, Isla           osm:12239495      (was 3 stops)
+  [regional_bus] 414     Feldkirch Bahnhof → Ruggell Industriering      osm:3339511       (was 11 stops)
+  [regional_bus] 414     Ruggell Industriering → Feldkirch Bahnhof      osm:3358010       (was 11 stops)
+  [regional_bus] 430     Mézery-près-Donneloye, Village → Bercher, Gare  osm:12619392      (was 7 stops)
+  [regional_bus] 431     Crans-Forest - Aminona                         osm:2652909       (was 18 stops)
+  [regional_bus] 453     Campignola Sopra → Bironico Piazza Guidetti    osm:18447454      (was 3 stops)
+  [regional_bus] 453     Taverne Casette → Toricella                    osm:18447508      (was 12 stops)
+  [regional_bus] 453     Taverne Vignascia → Taverne Casette            osm:18447509      (was 1 stops)
+  [regional_bus] 453     Bironico, Piazza Guidetto → Campignolo, Sopra  osm:18447453      (was 3 stops)
+  [regional_bus] 470     Schaan Bahnhof → Klaus Bahnhof                 osm:3342055       (was 23 stops)
+  [regional_bus] 470     Klaus Bahnhof → Schaan Bahnhof                 osm:415931        (was 23 stops)
+  [regional_bus] 491     Disentis/Mustér, staziun/posta → Disentis/Mustér, Faltscharidas  osm:18778289      (was 7 stops)
+  [regional_bus] 491     Disentis/Mustér, Acletta → Disentis/Mustér, Faltscharidas  osm:18778288      (was 6 stops)
+  [regional_bus] 531     Oberurmein, Caziela → Urmein, Dorf             osm:12261474      (was 2 stops)
+  [regional_bus] 531     Urmein, Dorf → Caziela                         osm:12261475      (was 2 stops)
+  [regional_bus] 551     Andeer, posta → Andeer, Pignia                 osm:12269275      (was 3 stops)
+  [regional_bus] 551     Andeer, Pignia → Andeer, posta                 osm:12269272      (was 3 stops)
+  [regional_bus] 560     Mühleberg, Steinriesel → Rosshäusern, Bahnhof  osm:5665720       (was 10 stops)
+  [regional_bus] 560     Rosshäusern, Bahnhof → Mühleberg, Steinriesel  osm:5665721       (was 10 stops)
+  [regional_bus] 571     Alvaschein, Dorf → Tiefencastel, Bahnhof       osm:12270041      (was 6 stops)
+  [regional_bus] 571     Tiefencastel, Bahnhof → Alvaschein, Dorf       osm:12270042      (was 6 stops)
+  [regional_bus] 603     Bâle Schifflände → Village-Neuf Paix           osm:17047155      (was 10 stops)
+  [regional_bus] 603     Yverdon-les-Bains, Blancherie → Yverdon-les-Bains, Gare  osm:12635967      (was 6 stops)
+  [regional_bus] 603     Bâle Schifflände → Village-Neuf Paix           osm:10414061      (was 10 stops)
+  [regional_bus] 603     Village-Neuf Paix → Bâle Schifflände           osm:2592472       (was 9 stops)
+  [regional_bus] 603     Village-Neuf Paix → Bâle Schifflände           osm:17047154      (was 9 stops)
+  [regional_bus] 604     Bâle Schifflände → Saint-Louis Parc Soleil     osm:10473895      (was 14 stops)
+  [regional_bus] 604     Saint-Louis Parc Soleil → Bâle Schifflände     osm:10473894      (was 13 stops)
+  [regional_bus] 604     Bâle Schifflände → Saint-Louis Professeur Coste  osm:10473896      (was 14 stops)
+  [regional_bus] 604     Bâle Schifflände → Saint-Louis Professeur Coste  osm:17047153      (was 14 stops)
+  [regional_bus] 604     Saint-Louis Professeur Coste → Bâle Schifflände  osm:2594945       (was 13 stops)
+  [regional_bus] 604     Saint-Louis Professeur Coste → Bâle Schifflände  osm:17047152      (was 13 stops)
+  [regional_bus] 608     Sierentz Zone Commerciale → Bâle Bachgraben    osm:7029336       (was 14 stops)
+  [regional_bus] 608     Bâle Bachgraben → Sierentz Zone Commerciale    osm:10400328      (was 14 stops)
+  [regional_bus] 611     Chamblon, Casernes → Yverdon-les-Bains, Gare   osm:12639807      (was 18 stops)
+  [regional_bus] 611     Yverdon-les-Bains, Gare → Chamblon, Casernes   osm:12639809      (was 17 stops)
+  [regional_bus] 615     Ste-Croix, Gare → Bullet, Village              osm:12650826      (was 17 stops)
+  [regional_bus] 615     Bullet, Village → Mauborget, Village           osm:12650824      (was 1 stops)
+  [regional_bus] 615     Mauborget, Village → Bullet, Village           osm:12650885      (was 1 stops)
+  [regional_bus] 642     Hagendorn, Rumentikon → Cham, Langacker        osm:10543015      (was 2 stops)
+  [regional_bus] 722     St-Livres, Grande salle → Aubonne, Gare        osm:17971555      (was 3 stops)
+  [regional_bus] 722     Aubonne, Gare → St-Livres, Grande salle        osm:17971554      (was 3 stops)
+  [regional_bus] 726     Wil SG, Bahnhof → Zuzwil SG, Industrie         osm:11891610      (was 15 stops)
+  [regional_bus] 726     Zuzwil SG, Industrie → Wil SG, Bahnhof         osm:11891611      (was 15 stops)
+  [regional_bus] 851     Wetzikon ZH, Bahnhof → Kempten, Talhof         osm:2998775       (was 8 stops)
+  [regional_bus] 851     Kempten, Talhof → Wetzikon ZH, Bahnhof         osm:11739827      (was 9 stops)
+  [regional_bus] 885     Rapperswil SG, Bahnhof → Rüti ZH, Bahnhof      osm:11741009      (was 15 stops)
+  [regional_bus] 885     Rüti ZH, Bahnhof → Rapperswil SG, Bahnhof      osm:11741008      (was 15 stops)
+  [regional_bus] 885     Wald ZH, Bahnhof → Laupen ZH, Schulhaus        osm:11741005      (was 6 stops)
+  [regional_bus] 950     Stäfa, Binz → Stäfa, Bahnhof                   osm:10559985      (was 4 stops)
+  [regional_bus] 200 (Höribus)  Radolfzell ZOB → Stein am Rhein Untertor       osm:5586085       (was 9 stops)
+  [regional_bus] 200 (Höribus)  Stein am Rhein Untertor → Radolfzell ZOB       osm:3400926       (was 8 stops)
+
+ADDED (107):
+  [train       ] S51     Bern Brünnen Westside → Bern                   osm:371336        (5 stops)
+  [train       ] S51     Bern → Bern Brünnen Westside                   osm:9584649       (5 stops)
+  [bus         ] 1       Télésiège → Télésiège                          osm:12471480      (16 stops)
+  [bus         ] 2       Télésiège → Temps de Vivre                     osm:12477718      (5 stops)
+  [bus         ] 2       Temps de Vivre → Télésiège                     osm:12477719      (5 stops)
+  [bus         ] 3       Mayen-Blanc → Télésiège                        osm:12478305      (6 stops)
+  [bus         ] 3       Télésiège → Mayen-Blanc                        osm:12477854      (6 stops)
+  [bus         ] 3       Steffisburg, Alte Bernstrasse → Blumenstein, Gemeindehaus  osm:7527396       (23 stops)
+  [bus         ] 12      Buchs SG, Bahnhof → Triesen, Post              osm:8136394       (8 stops)
+  [bus         ] 12      Triesen, Post → Buchs SG, Bahnhof              osm:8138027       (8 stops)
+  [bus         ] 56      Genève-Aéroport-Terminal → Meyrin, Hôpital de La Tour  osm:9130749       (29 stops)
+  [bus         ] 56      Meyrin, Hôpital de La Tour → Genève-Aéroport-Terminal  osm:9130748       (29 stops)
+  [bus         ] 82      Val-d'Illiez, Gare → Champoussin, Village      osm:14619658      (25 stops)
+  [bus         ] 82      Champoussin, Village → Val-d'Illiez, Gare      osm:14619657      (25 stops)
+  [bus         ] C12     C12 Lugano                                     osm:6398209       (8 stops)
+  [bus         ] M10     Lyss, Bahnhof → Biel/Bienne, Bahnhof/Gare      osm:20367820      (30 stops)
+  [bus         ] M19     Belp → Gurzelen                                osm:9248195       (11 stops)
+  [bus         ] M41     Grindelwald → Interlaken West                  osm:3833532       (11 stops)
+  [bus         ] M41     Interlaken West → Grindelwald                  osm:3833533       (11 stops)
+  [bus         ] M74     Bern, Ostring → Bern, Sonnenhof                osm:20375867      (1 stops)
+  [bus         ] M77     Bern, Elfenau → Bern, Bahnhof                  osm:20407689      (18 stops)
+  [bus         ] M77     Bern, Bahnhof → Bern, Elfenau                  osm:20407690      (16 stops)
+  [bus         ] M80     Köniz, Weiermatt → Bern, Bahnhof               osm:20704338      (20 stops)
+  [bus         ] M80     Bern, Bahnhof → Köniz, Weiermatt               osm:20704343      (18 stops)
+  [bus         ] M88     Bern, Bahnhof → Bern, Länggasse                osm:20378964      (3 stops)
+  [bus         ] M89     Bremgarten BE, Stuckishaus → Bern, Bahnhof     osm:20379341      (14 stops)
+  [bus         ] M89     Bern, Bahnhof → Bremgarten BE, Stuckishaus     osm:20379342      (14 stops)
+  [regional_bus] 21      Perrefitte, Poste → Moutier, Gare              osm:17225371      (4 stops)
+  [regional_bus] 21      Moutier, Gare → Moutier, Aux Laives            osm:17225376      (4 stops)
+  [regional_bus] 21      Moutier, Aux Laives → Moutier, Gare            osm:17225377      (4 stops)
+  [regional_bus] 21      Moutier, Gare → Perrefitte, Poste              osm:17225374      (4 stops)
+  [regional_bus] 70      Porrentruy, Gare → Porrentruy, Gare            osm:10366307      (5 stops)
+  [regional_bus] 79      Bonfol, Gare → Porrentruy, Gare                osm:17061701      (4 stops)
+  [regional_bus] 79      Porrentruy, Gare → Bonfol, Gare                osm:17061702      (4 stops)
+  [regional_bus] 83      Sursee, Bahnhof → Etzelwil                     osm:11656950      (12 stops)
+  [regional_bus] 83      Etzelwil → Sursee, Bahnhof                     osm:11656949      (12 stops)
+  [regional_bus] 83      Etzelwil → Sursee, Bahnhof                     osm:15456499      (11 stops)
+  [regional_bus] 83      Sursee, Bahnhof → Etzelwil                     osm:15456500      (11 stops)
+  [regional_bus] 85      Schöftland, Bahnhof → Sursee, Bahnhof          osm:11656945      (21 stops)
+  [regional_bus] 85      Sursee, Bahnhof → Schöftland, Bahnhof          osm:11656946      (21 stops)
+  [regional_bus] 89      Sempach Station → Gunzwil, Bäch                osm:11660768      (6 stops)
+  [regional_bus] 89      Gunzwil, Bäch → Sempach Station                osm:3567156       (5 stops)
+  [regional_bus] 101     Fidaz, Bargis → Flims Dorf, Post               osm:12210050      (9 stops)
+  [regional_bus] 101     Flims Dorf, Post → Fidaz, Bargis               osm:12210194      (9 stops)
+  [regional_bus] 101     Laax GR, posta → Laax GR, Bergbahnen           osm:12210199      (5 stops)
+  [regional_bus] 101     Laax GR, Bergbahnen → Laax GR, posta           osm:12209911      (5 stops)
+  [regional_bus] 109     Hochdorf, Bahnhof → Schongau, Landi            osm:10732489      (13 stops)
+  [regional_bus] 135     Ghirone, Aquilesco → Pian Geirett              osm:18459589      (2 stops)
+  [regional_bus] 192     Lavey-les-Bains, Et. Thermal → St-Maurice VS, Gare  osm:1976629       (7 stops)
+  [regional_bus] 192     St-Maurice VS, Gare → Lavey-les-Bains, Et. Thermal  osm:14639816      (7 stops)
+  [regional_bus] 201     Seewis Dorf, Bühelstrasse → Landquart, Bahnhof  osm:12217572      (4 stops)
+  [regional_bus] 201     Landquart, Bahnhof → Seewis Dorf, Bühelstrasse  osm:12217525      (4 stops)
+  [regional_bus] 332     Mellingen, Geerig → Baden, Postautostation     osm:9646151       (14 stops)
+  [regional_bus] 332     Baden, Postautostation → Mellingen, Geerig     osm:2270478       (13 stops)
+  [regional_bus] 382     Les Haudères, centre → Arolla, poste           osm:14141142      (12 stops)
+  [regional_bus] 382     Arolla, poste → Les Haudères, centre           osm:14141141      (12 stops)
+  [regional_bus] 410     Buchs SG, Bahnhof → Gams, Zentrum              osm:11998207      (12 stops)
+  [regional_bus] 410     Gams, Zentrum → Buchs SG, Bahnhof              osm:11998208      (12 stops)
+  [regional_bus] 410     Buchs SG, Bahnhof → Grabs, Post                osm:11998206      (8 stops)
+  [regional_bus] 410     Grabs, Post → Buchs SG, Bahnhof                osm:11998205      (8 stops)
+  [regional_bus] 420     Echallens, Gare → Chavornay, Gare              osm:12611993      (3 stops)
+  [regional_bus] 420     Echallens, Gare → Chavornay, Gare              osm:2756229       (3 stops)
+  [regional_bus] 420     Chavornay, Gare → Echallens, Gare              osm:12611992      (3 stops)
+  [regional_bus] 420     Chavornay, Gare → Echallens, Gare              osm:12611991      (3 stops)
+  [regional_bus] 425     Novaggio, Posta → Magliaso, Stazione           osm:5498209       (15 stops)
+  [regional_bus] 502     Chiasso, Stazione → Mendrisio, Cantine di Sotto  osm:5738820       (34 stops)
+  [regional_bus] 502     Mendrisio, Cantine di Sotto → Chiasso, Stazione  osm:5739477       (34 stops)
+  [regional_bus] 504     Mendrisio, Cantine di Sotto → Chiasso, Stazione  osm:5739444       (29 stops)
+  [regional_bus] 504     Chiasso, Stazione → Mendrisio, Cantine di Sotto  osm:4118583       (29 stops)
+  [regional_bus] 507     Morbio Inferiore, Serfontana → Chiasso, Crocione  osm:5738541       (18 stops)
+  [regional_bus] 507     Chiasso, Crocione → Morbio Inferiore, Serfontana  osm:5738540       (17 stops)
+  [regional_bus] 522     Erlach, Stedtli → Ins, Bahnhof                 osm:12442330      (10 stops)
+  [regional_bus] 522     Ins, Bahnhof → Erlach, Stedtli                 osm:12442333      (10 stops)
+  [regional_bus] 524     Ins, Bahnhof → Erlach, Stedtli                 osm:12442331      (15 stops)
+  [regional_bus] 524     Erlach, Stedtli → Ins, Bahnhof                 osm:12442328      (15 stops)
+  [regional_bus] 554     Schwanden GL, Bahnhof → Kies (Niederental)     osm:20399551      (11 stops)
+  [regional_bus] 554     Kies (Niederental) → Schwanden GL, Bahnhof     osm:20399550      (11 stops)
+  [regional_bus] 602     Maloja, Posta → Bernina, Lagalbbahn            osm:12174198      (16 stops)
+  [regional_bus] 602     Bernina, Lagalbbahn → Maloja, Posta            osm:12173963      (17 stops)
+  [regional_bus] 607     Chamues-ch, plaz → S-chanf, Parc Naziunal      osm:12273412      (12 stops)
+  [regional_bus] 632     Soglio, Villaggio → Promontogno, Posta         osm:1656135       (6 stops)
+  [regional_bus] 632     Promontogno, Posta → Soglio, Villaggio         osm:12278858      (6 stops)
+  [regional_bus] 650     Granges-près-Marnand, Gare → Combremont-le-Petit, Village  osm:12666398      (10 stops)
+  [regional_bus] 650     Yvonand, Gare → Démoret, Haut du Village       osm:12666307      (14 stops)
+  [regional_bus] 650     Combremont-le-Petit, Village → Granges-près-Marnand, Gare  osm:12666306      (10 stops)
+  [regional_bus] 706     Poschiavo, Stazione → Livigno, Centro Bus Station  osm:12286083      (8 stops)
+  [regional_bus] 706     Livigno, Centro Bus Station → Poschiavo, Stazione  osm:12286084      (8 stops)
+  [regional_bus] 822     Tschierv, Talstation Minschuns → Müstair, cunfin  osm:12290049      (5 stops)
+  [regional_bus] 822     Müstair, cunfin → Tschierv, Talstation Minschuns  osm:12290050      (5 stops)
+  [regional_bus] 921     Martina, cunfin → Samnaun-Dorf, Post           osm:12293158      (11 stops)
+  [regional_bus] 921     Samnaun-Dorf, Post → Martina, cunfin           osm:12293173      (11 stops)
+  [regional_bus] 20728732  Achseten Skilift → Frutigen Bahnhof            osm:20728732      (18 stops)
+  [regional_bus] 20728733  Frutigen Bahnhof → Elsigbach                   osm:20728733      (18 stops)
+  [regional_bus] 12.180  Saanen, Bahnhof → Gsteig bei Gstaad, Post      osm:17998119      (22 stops)
+  [regional_bus] 12.180  Saanen, Bahnhof → Les Diablerets, Gare         osm:296352        (38 stops)
+  [regional_bus] 12.180  Gstaad, Bahnhof → Saanen, Bahnhof              osm:17998120      (21 stops)
+  [regional_bus] 12.180  Saanen, Bahnhof → Gstaad, Bahnhof              osm:17998121      (21 stops)
+  [regional_bus] 12.180  Les Diablerets, Gare → Saanen, Bahnhof         osm:17998122      (41 stops)
+  [regional_bus] 12.180  Gsteig bei Gstaad, Post → Saanen, Bahnhof      osm:17998118      (22 stops)
+  [regional_bus] 31.141  Lauterbrunnen, Bahnhof → Stechelberg           osm:3091576       (12 stops)
+  [regional_bus] 31.141  Stechelberg → Lauterbrunnen Bahnhof            osm:3091575       (12 stops)
+  [regional_bus] 31.142  Lauterbrunnen Bahnhof → Isenfluh               osm:3091932       (4 stops)
+  [regional_bus] 31.142  Isenfluh → Lauterbrunnen Bahnhof               osm:3091577       (4 stops)
+  [regional_bus] 31.162  Andermatt → Steingletscher                     osm:4482139       (11 stops)
+  [regional_bus] 31.162  Steingletscher → Andermatt                     osm:4482141       (11 stops)
+  [ferry       ] 13333826  Evian-les-Bains (F) (lac) → Lausanne-Ouchy (lac)  osm:13333826      (3 stops)
+  [ferry       ] 18623434  Vitznau → Luzern                               osm:18623434      (6 stops)
+
+STOPS GAINED (134):
+  [train       ] GPX     Zweisimmen → Montreux                          8 → 35  (+27)  ↑
+  [train       ] GPX     Montreux → Zweisimmen                          8 → 35  (+27)  ↑
+  [train       ] R4      Le Day → Le Brassus                            14 → 16  (+2)  ↑
+  [train       ] R4      Le Brassus → Le Day                            14 → 16  (+2)  ↑
+  [train       ] RE 3    Landquart → St. Moritz                         11 → 12  (+1)  ↑
+  [train       ] RE 4    Landquart → Scuol-Tarasp                       8 → 12  (+4)  ↑
+  [tram        ] 17      Zürich, Bucheggplatz → Zürich, Werdhölzli      23 → 33  (+10)  ↑
+  [tram        ] 17      Zürich, Werdhölzli → Zürich, Bucheggplatz      23 → 33  (+10)  ↑
+  [bus         ] 1       Chalais téléférique → Ile Falcon - Sablons     20 → 21  (+1)  ↑
+  [bus         ] 1       St. Gallen, Stephanshorn → St. Gallen, Winkeln  36 → 39  (+3)  ↑
+  [bus         ] 1       Chalais téléférique → Ile Falcon - Sablons     19 → 20  (+1)  ↑
+  [bus         ] 1       St. Gallen, Wolfganghof → St. Gallen, Stephanshorn  33 → 39  (+6)  ↑
+  [bus         ] 2       St. Gallen, Winkeln → St. Gallen, Guggeien     38 → 45  (+7)  ↑
+  [bus         ] 2       St. Gallen, Guggeien → St. Gallen, Wolfganghof  33 → 34  (+1)  ↑
+  [bus         ] 3       St. Gallen, Heiligkreuz → Abtwil SG, St. Josefen  29 → 33  (+4)  ↑
+  [bus         ] 3       Abtwil SG, St. Josefen → St. Gallen, Heiligkreuz  29 → 33  (+4)  ↑
+  [bus         ] 4       Ortsbus Saas-Fee Linie 4 - Gletscherbrücke - Alphitta  10 → 12  (+2)  ↑
+  [bus         ] 8       Lugano, Centro → Piano Stampa, Capolinea       6 → 7  (+1)  ↑
+  [bus         ] 8       Ronco sopra Ascona, Posta → Brissago, Posta    2 → 6  (+4)  ↑
+  [bus         ] 8       Brissago, Posta → Ronco sopra Ascona, Posta    2 → 6  (+4)  ↑
+  [bus         ] 12      Brügg BE, Bahnhof → Biel/Bienne, Bahnhof Bözingenfeld/Gare Champs-de-Boujean  5 → 9  (+4)  ↑
+  [bus         ] 12      Biel/Bienne, Bahnhof Bözingenfeld/Gare Champs-de-Boujean → Brügg BE, Bahnhof  8 → 14  (+6)  ↑
+  [bus         ] 42      Carouge-Rondeau → Bernex-Vuillonnex            6 → 37  (+31)  ↑
+  [bus         ] 44      Epalinges, Croisettes → Epalinges, Ballègue    7 → 8  (+1)  ↑
+  [bus         ] 46      Habstetten, Rössli → Bolligen, Bahnhof         5 → 6  (+1)  ↑
+  [bus         ] 46      Bolligen, Bahnhof → Habstetten, Rössli         8 → 9  (+1)  ↑
+  [bus         ] 48      Confignon-Croisée → Bernex-Guillon             8 → 16  (+8)  ↑
+  [bus         ] M88     Bern, Länggasse → Bern, Bahnhof                4 → 7  (+3)  ↑
+  [regional_bus] 64      Collombey, Les Neyres Chapelle → Monthey, Gare CFF  7 → 21  (+14)  ↑
+  [regional_bus] 64      Monthey, Gare CFF → Collombey, Les Neyres Chapelle  7 → 21  (+14)  ↑
+  [regional_bus] 81      Sursee, Bahnhof → Beromünster, Post            6 → 13  (+7)  ↑
+  [regional_bus] 81      Beromünster, Post → Sursee, Bahnhof            6 → 13  (+7)  ↑
+  [regional_bus] 106     Neuchâtel, Vallon de l'Ermitage → Neuchâtel, Place Pury  9 → 10  (+1)  ↑
+  [regional_bus] 106     Neuchâtel, Place Pury → Neuchâtel, Vallon de l'Ermitage  12 → 13  (+1)  ↑
+  [regional_bus] 108     Interlaken West → Matten b. I.                 7 → 9  (+2)  ↑
+  [regional_bus] 108     Matten b. I. → Interlaken West                 4 → 7  (+3)  ↑
+  [regional_bus] 120     Tafers, Dorf → Tafers, Am Kreuz                1 → 2  (+1)  ↑
+  [regional_bus] 120     Tafers, Am Kreuz → Tafers, Dorf                1 → 2  (+1)  ↑
+  [regional_bus] 121     Villeneuve VD, Gare → Aigle, Gare              4 → 8  (+4)  ↑
+  [regional_bus] 121     Aigle, Gare → Villeneuve VD, Gare              4 → 8  (+4)  ↑
+  [regional_bus] 129     Wädenswil, Bahnhof → Wädenswil, Campus Reidbach  5 → 6  (+1)  ↑
+  [regional_bus] 131     Balsthal, Bahnhof → Herbetswil, Hinterer Brandberg  10 → 15  (+5)  ↑
+  [regional_bus] 132     Waldkirch, Dorf → Engelburg, Dorfplatz         2 → 10  (+8)  ↑
+  [regional_bus] 142     Brig Bahnhof → Fisch Bahnhof                   10 → 16  (+6)  ↑
+  [regional_bus] 142     Fiesch Bahnhof → Brig Bahnhof                  10 → 16  (+6)  ↑
+  [regional_bus] 171     Schwellbrunn, Sommertal → Herisau, Bahnhof     11 → 13  (+2)  ↑
+  [regional_bus] 171     Herisau, Bahnhof → Schwellbrunn, Sommertal     11 → 13  (+2)  ↑
+  [regional_bus] 171     Schwellbrunn, Risi → Herisau, Bahnhof          12 → 13  (+1)  ↑
+  [regional_bus] 171     Herisau, Bahnhof → Schwellbrunn, Risi          12 → 13  (+1)  ↑
+  [regional_bus] 182     Brunnadern-Neckertal, Bahnhof → Herisau, Bahnhof  8 → 10  (+2)  ↑
+  [regional_bus] 182     Herisau, Bahnhof → Brunnadern-Neckertal, Bahnhof  8 → 10  (+2)  ↑
+  [regional_bus] 222     Küblis, Bahnhof → St. Antönien, Platz          14 → 15  (+1)  ↑
+  [regional_bus] 222     St. Antönien, Platz → Küblis, Bahnhof          14 → 15  (+1)  ↑
+  [regional_bus] 301     Engelberg, Titlisbahn → Engelberg, Titlisbahn  4 → 5  (+1)  ↑
+  [regional_bus] 302     Engelberg, Titlisbahn → Engelberg, Eienwäldli  7 → 8  (+1)  ↑
+  [regional_bus] 302     Engelberg, Eienwäldli → Engelberg, Titlisbahn  9 → 10  (+1)  ↑
+  [regional_bus] 302     Engelberg, Titlisbahn → Engelberg, Fürenalpbahn  11 → 14  (+3)  ↑
+  [regional_bus] 311     Stans, Länderpark → Stans, Bahnhof             3 → 4  (+1)  ↑
+  [regional_bus] 311     Stans, Bahnhof → Stans, Länderpark             3 → 4  (+1)  ↑
+  [regional_bus] 323     Schwarzenburg, Bahnhof → Thurnen, Bahnhof      41 → 43  (+2)  ↑
+  [regional_bus] 323     Thurnen, Bahnhof → Schwarzenburg, Bahnhof      41 → 43  (+2)  ↑
+  [regional_bus] 323     Riggisberg, Post → Thurnen, Bahnhof            8 → 9  (+1)  ↑
+  [regional_bus] 353     Endingen, Zentrum → Baden, Postautostation     22 → 24  (+2)  ↑
+  [regional_bus] 353     Baden, Postautostation → Endingen, Zentrum     21 → 23  (+2)  ↑
+  [regional_bus] 353     La Chaux-de-Fonds, Foulets → La Chaux-de-Fonds, Gare  11 → 12  (+1)  ↑
+  [regional_bus] 363     Sion station → Yeysonnaz Station               19 → 30  (+11)  ↑
+  [regional_bus] 363     Veysonnaz Station → Sion Station               19 → 30  (+11)  ↑
+  [regional_bus] 381     Palézieux, Gare → Grandvaux, Pra Grana         13 → 17  (+4)  ↑
+  [regional_bus] 381     Cully, Gare → Palézieux, Gare                  18 → 22  (+4)  ↑
+  [regional_bus] 381     Palézieux, Gare → Cully, Gare                  18 → 22  (+4)  ↑
+  [regional_bus] 381     Grandvaux, Pra Grana → Palézieux, Gare         13 → 17  (+4)  ↑
+  [regional_bus] 392     La Tzoumaz,Télécabine → La Tzoumaz, Maison de la forêt  1 → 5  (+4)  ↑
+  [regional_bus] 392     La Tzoumaz, Maison de la Forêt → La Tzoumaz,Télécabine  1 → 5  (+4)  ↑
+  [regional_bus] 442     Tesserete, Stazione → Lugano, Autosilo Balestra  28 → 31  (+3)  ↑
+  [regional_bus] 442     Lugano, Autosilo Balestra → Tesserete, Stazione  28 → 33  (+5)  ↑
+  [regional_bus] 475     Runcahez Val Sumvitg → Rabius-Surrein, staziun  6 → 10  (+4)  ↑
+  [regional_bus] 494     St. German → Gampel Luftseibahn                6 → 11  (+5)  ↑
+  [regional_bus] 494     Gample Seilbahn → Raron Bahnhof                6 → 11  (+5)  ↑
+  [regional_bus] 502     Schwyz, Zentrum → Küssnacht am Rigi, Bahnhof   50 → 56  (+6)  ↑
+  [regional_bus] 502     Arth-Goldau, Bahnhof → Arth, Tafelstatt        14 → 16  (+2)  ↑
+  [regional_bus] 502     Küssnacht am Rigi, Bahnhof → Schwyz, Zentrum   50 → 56  (+6)  ↑
+  [regional_bus] 502     Arth, Tafelstatt → Arth-Goldau, Bahnhof        14 → 16  (+2)  ↑
+  [regional_bus] 511     Thusis, Bahnhof → Almens                       11 → 14  (+3)  ↑
+  [regional_bus] 511     Almens → Thusis, Bahnhof                       11 → 14  (+3)  ↑
+  [regional_bus] 512     Almens → Thusis, Bahnhof                       5 → 22  (+17)  ↑
+  [regional_bus] 512     Thusis, Bahnhof → Almens                       5 → 22  (+17)  ↑
+  [regional_bus] 513     Saas-Grund, Parkplatz Bergbahn → Mattmark      13 → 22  (+9)  ↑
+  [regional_bus] 513     Mattmark → Saas-Grund, Parkplatz Bergbahn      13 → 22  (+9)  ↑
+  [regional_bus] 517     Chiasso, Stazione → Mendrisio, Stazione        34 → 35  (+1)  ↑
+  [regional_bus] 522     Visp, Bahnhof Süd → Baltschieder, Hofmatte     12 → 21  (+9)  ↑
+  [regional_bus] 522     Baltschieder, Hofmatte → Visp, Bahnhof Süd     12 → 21  (+9)  ↑
+  [regional_bus] 531     Bülach, Bahnhof → Zürich Flughafen, Bahnhof    12 → 16  (+4)  ↑
+  [regional_bus] 531     Zürich Flughafen, Bahnhof → Bülach, Bahnhof    12 → 13  (+1)  ↑
+  [regional_bus] 551     Wergenstein, Dorf → Andeer, posta              15 → 16  (+1)  ↑
+  [regional_bus] 551     Andeer, posta → Wergenstein, Dorf              15 → 16  (+1)  ↑
+  [regional_bus] 552     Stalden-Saas, Bahnhof → Visp, Lonzawerke       2 → 4  (+2)  ↑
+  [regional_bus] 552     Visp, Lonzawerke → Stalden-Saas, Bahnhof       2 → 4  (+2)  ↑
+  [regional_bus] 601     Zug, Bahnhofplatz → Oberägeri, Station         13 → 14  (+1)  ↑
+  [regional_bus] 601     Surlej, Corvatschbahn → Samedan, Bahnhof       25 → 26  (+1)  ↑
+  [regional_bus] 601     Oberägeri, Station → Zug, Bahnhofplatz         14 → 15  (+1)  ↑
+  [regional_bus] 601     Samedan, Bahnhof → Surlej, Corvatschbahn       25 → 26  (+1)  ↑
+  [regional_bus] 606     St. Moritz, Schulhausplatz → Surlej, Corvatschbahn  3 → 13  (+10)  ↑
+  [regional_bus] 606     St. Moritz Bahnhof → Chamues-ch, plaz          23 → 28  (+5)  ↑
+  [regional_bus] 606     Surlej, Corvatschbahn → St. Moritz, Schulhausplatz  3 → 13  (+10)  ↑
+  [regional_bus] 606     Champfér, Guardalej → St. Moritz, Schulhausplatz  3 → 17  (+14)  ↑
+  [regional_bus] 606     St. Moritz, Schulhausplatz → Champfér, Guardalej  3 → 17  (+14)  ↑
+  [regional_bus] 613     Vallorbe, Grottes → Vallorbe, Le Creux         7 → 21  (+14)  ↑
+  [regional_bus] 613     Vallorbe, Le Creux → Vallorbe, Grottes         6 → 19  (+13)  ↑
+  [regional_bus] 631     Baar, Bahnhof → Neuheim, Dorf                  9 → 10  (+1)  ↑
+  [regional_bus] 631     Neuheim, Dorf → Baar, Bahnhof                  9 → 10  (+1)  ↑
+  [regional_bus] 650     Granges-près-Marnand, Gare → Yverdon-les-Bains, Gare  16 → 29  (+13)  ↑
+  [regional_bus] 650     Yverdon-les-Bains, Gare → Granges-près-Marnand, Gare  16 → 29  (+13)  ↑
+  [regional_bus] 650     Granges-près-Marnand, Gare → Yverdon-les-Bains, Gare  16 → 29  (+13)  ↑
+  [regional_bus] 724     Niederbüren, Dorf → Wil SG, Bahnhof            20 → 21  (+1)  ↑
+  [regional_bus] 724     Wil SG, Bahnhof → Niederbüren, Dorf            20 → 21  (+1)  ↑
+  [regional_bus] 766     Kloten, Bahnhof → Bassersdorf, Bahnhof         11 → 12  (+1)  ↑
+  [regional_bus] 803     Frauenfeld, Bahnhof → Frauenfeld, Plättli Zoo  8 → 9  (+1)  ↑
+  [regional_bus] 803     Frauenfeld, Plättli Zoo → Frauenfeld, Bahnhof  9 → 10  (+1)  ↑
+  [ferry       ] 5       Weesen (See) → Unterterzen (See)               5 → 6  (+1)  ↑
+  [ferry       ] 10      Unterterzen (See) → Weesen (See)               4 → 6  (+2)  ↑
+  [mountain    ] 1       Realp DFB → Oberwald                           6 → 7  (+1)  ↑
+  [mountain    ] 1       Oberwald → Realp DFB                           6 → 7  (+1)  ↑
+  [mountain    ] 311     Lauterbrunnen → Kleine Scheidegg               6 → 9  (+3)  ↑
+  [mountain    ] 311     Jungfraujoch → Kleine Scheidegg                3 → 6  (+3)  ↑
+  [mountain    ] 311     Kleine Scheidegg → Jungfraujoch                3 → 6  (+3)  ↑
+  [mountain    ] 311     Kleine Scheidegg → Lauterbrunnen               6 → 9  (+3)  ↑
+  [mountain    ] 312     Jungfraujoch → Kleine Scheidegg                3 → 6  (+3)  ↑
+  [mountain    ] 312     Kleine Scheidegg → Grindelwald                 5 → 10  (+5)  ↑
+  [mountain    ] 312     Grindelwald → Kleine Scheidegg                 5 → 10  (+5)  ↑
+  [mountain    ] 312     Kleine Scheidegg → Jungfraujoch                3 → 6  (+3)  ↑
+  [mountain    ] CC81    Rigi Kulm → Arth-Goldau RB                     8 → 9  (+1)  ↑
+  [mountain    ] CC81    Arth-Goldau RB → Rigi Kulm                     8 → 9  (+1)  ↑
+  [mountain    ] CC82    Rigi Kulm → Vitznau                            9 → 11  (+2)  ↑
+  [mountain    ] CC82    Vitznau → Rigi Kulm                            9 → 11  (+2)  ↑
+
+STOPS LOST (229):
+  [train       ] 311     Interlaken Ost → Lauterbrunnen                 10 → 5  (-5)  ↓
+  [train       ] 311     Lauterbrunnen → Interlaken Ost                 10 → 5  (-5)  ↓
+  [train       ] 312     Grindelwald → Interlaken Ost                   12 → 9  (-3)  ↓
+  [train       ] 312     Interlaken Ost → Grindelwald                   12 → 9  (-3)  ↓
+  [train       ] IR LEX  Luzern → Engelberg                             14 → 9  (-5)  ↓
+  [train       ] IR LEX  Engelberg → Luzern                             13 → 9  (-4)  ↓
+  [tram        ] 8       Zürich, Zoo → Zürich, Hardturm                 57 → 32  (-25)  ↓
+  [tram        ] 8       Zürich, Hardturm → Zürich, Kirche Fluntern     55 → 32  (-23)  ↓
+  [tram        ] 8       Zürich, Hardturm → Zürich, Zoo                 55 → 32  (-23)  ↓
+  [tram        ] 8       Zürich, Kirche Fluntern → Zürich, Hardturm     57 → 32  (-25)  ↓
+  [tram        ] 15      Zürich, Bahnhof Tiefenbrunnen → Zürich, Central  15 → 11  (-4)  ↓
+  [tram        ] 15      Zürich, Bahnhofstrasse/HB → Zürich, Bahnhof Tiefenbrunnen  16 → 12  (-4)  ↓
+  [bus         ] 1       Médran → Carrefour                             19 → 14  (-5)  ↓
+  [bus         ] 1       Luzern, Maihof → Luzern, Bahnhof               13 → 8  (-5)  ↓
+  [bus         ] 3       Abtwil SG, Säntispark → Wittenbach, Bahnhof    29 → 28  (-1)  ↓
+  [bus         ] 3       Wittenbach, Bahnhof → Abtwil SG, St. Josefen   35 → 34  (-1)  ↓
+  [bus         ] 5       Nidau, Bahnhof → Biel/Bienne, Spitalzentrum/Centre hospitalier  24 → 21  (-3)  ↓
+  [bus         ] 7       Solothurn, Brühl → Herzogenbuchsee, Bahnhof    35 → 31  (-4)  ↓
+  [bus         ] 7       Herzogenbuchsee, Bahnhof → Solothurn, Brühl    35 → 31  (-4)  ↓
+  [bus         ] 10      Kriens, Dattenberg → Luzern, Bahnhof           12 → 10  (-2)  ↓
+  [bus         ] 11      Feldkirch, Bahnhof → Sargans, Bahnhof          66 → 57  (-9)  ↓
+  [bus         ] 11      Balzers, Schlossweg → Feldkirch, Bahnhof       61 → 53  (-8)  ↓
+  [bus         ] 11      Trübbach, Dornau → Feldkirch, Bahnhof          64 → 56  (-8)  ↓
+  [bus         ] 11      Schaanwald, Zollamt → Sargans, Bahnhof         60 → 51  (-9)  ↓
+  [bus         ] 11      Feldkirch, Bahnhof → Trübbach, Dornau          64 → 56  (-8)  ↓
+  [bus         ] 11      Luzern, Pilatusplatz → Kriens, Dattenberg      10 → 9  (-1)  ↓
+  [bus         ] 11      Kriens, Dattenberg → Luzern, Bahnhof           15 → 12  (-3)  ↓
+  [bus         ] 11      Sargans, Bahnhof → Feldkirch, Bahnhof          66 → 57  (-9)  ↓
+  [bus         ] 19      Bern, Elfenau → Spiegel, Blinzern              34 → 32  (-2)  ↓
+  [bus         ] 22      Winterthur, Waldegg → Winterthur, Schloss      17 → 16  (-1)  ↓
+  [bus         ] 22      Winterthur, Schloss → Winterthur, Waldegg      17 → 16  (-1)  ↓
+  [bus         ] 25      Grenchen Süd, Bahnhof → Grenchen, Holzerhütte  13 → 5  (-8)  ↓
+  [bus         ] 26      Lengnau BE, Sportplatz → Grenchen Süd, Bahnhof  15 → 10  (-5)  ↓
+  [bus         ] 31      Ruggell, Rathaus → Eschen, Dorfplatz           16 → 10  (-6)  ↓
+  [bus         ] 31      Eschen, Dorfplatz → Ruggell, Rathaus           14 → 8  (-6)  ↓
+  [bus         ] 38      Allschwil, Friedhof → Wyhlen, Siedlung         40 → 10  (-30)  ↓
+  [bus         ] 38      Wyhlen, Siedlung → Basel, Claraplatz           16 → 10  (-6)  ↓
+  [bus         ] 38      Basel, Claraplatz → Wyhlen, Siedlung           16 → 10  (-6)  ↓
+  [bus         ] 38      Wyhlen, Siedlung → Allschwil, Friedhof         40 → 10  (-30)  ↓
+  [bus         ] 44      Epalinges, Ballègue → Epalinges, Croisettes    7 → 6  (-1)  ↓
+  [bus         ] 48      Confignon-Croisée → Confignon-Croisée          36 → 24  (-12)  ↓
+  [bus         ] 54      Versoix-Centre sportif → Genève-Aéroport-Terminal  67 → 25  (-42)  ↓
+  [bus         ] 54      Genève-Aéroport-Terminal → Versoix-Centre sportif  69 → 25  (-44)  ↓
+  [bus         ] 67      Meyrin-Gravière → Crozet, télécabine           29 → 14  (-15)  ↓
+  [bus         ] 67      Crozet, télécabine Fierney → Meyrin-Gravière   29 → 14  (-15)  ↓
+  [bus         ] 81      Basel, Aeschenplatz → Liestal, Bahnhof         26 → 21  (-5)  ↓
+  [bus         ] 81      Val-d'Illiez, Gare → Les Crosets, Télésièges   30 → 23  (-7)  ↓
+  [bus         ] 81      Liestal, Bahnhof → Basel, Aeschenplatz         25 → 20  (-5)  ↓
+  [bus         ] 81      Les Crosets, Télésièges → Val-d'Illiez, Gare   30 → 23  (-7)  ↓
+  [regional_bus] 10      Chur, Bahnhofplatz → Rhäzüns, Luftseilbahn     22 → 11  (-11)  ↓
+  [regional_bus] 23      Igis, Dorfplatz → Landquart, Bahnhof           12 → 11  (-1)  ↓
+  [regional_bus] 63      Aeschi Post → Spiez Bahnhof                    15 → 10  (-5)  ↓
+  [regional_bus] 63      Spiez Bahnhof → Aeschi Post                    16 → 11  (-5)  ↓
+  [regional_bus] 81      Laax GR, posta → Chur, Postautostation         34 → 29  (-5)  ↓
+  [regional_bus] 81      Chur, Postautostation → Falera, center         42 → 34  (-8)  ↓
+  [regional_bus] 81      Chur, Postautostation → Laax GR, posta         34 → 29  (-5)  ↓
+  [regional_bus] 81      Chur, Postautostation → Falera, center         42 → 34  (-8)  ↓
+  [regional_bus] 81      Falera, center → Chur, Postautostation         42 → 34  (-8)  ↓
+  [regional_bus] 81      Falera center → Chur, Postautostation          42 → 34  (-8)  ↓
+  [regional_bus] 102     Gelterkinden, Bahnhof → Rothenfluh, Hirschengasse  9 → 7  (-2)  ↓
+  [regional_bus] 103     Interlaken West → Iseltwald                    15 → 14  (-1)  ↓
+  [regional_bus] 103     Oltingen, Postplatz → Gelterkinden, Bahnhof    13 → 12  (-1)  ↓
+  [regional_bus] 103     Iseltwald → Interlaken West                    15 → 14  (-1)  ↓
+  [regional_bus] 103     Interlaken West → Bönigen, See                 10 → 9  (-1)  ↓
+  [regional_bus] 103     Gelterkinden, Bahnhof → Oltingen, Postplatz    13 → 12  (-1)  ↓
+  [regional_bus] 103     Bönigen, See → Interlaken West                 10 → 9  (-1)  ↓
+  [regional_bus] 109     Schongau, Landi → Hämikon, Berg                19 → 18  (-1)  ↓
+  [regional_bus] 111     Liestal, Bahnhof → Nunningen, Post             23 → 12  (-11)  ↓
+  [regional_bus] 111     Nunningen, Post → Laufen, Bahnhof              20 → 16  (-4)  ↓
+  [regional_bus] 111     Laufen, Bahnhof → Nunningen, Post              20 → 16  (-4)  ↓
+  [regional_bus] 113     Flims Dorf, Caglims → Flims Dorf, Bergbahnen   3 → 2  (-1)  ↓
+  [regional_bus] 113     Flims Dorf, Bergbahnen → Flims Dorf, Caglims   3 → 2  (-1)  ↓
+  [regional_bus] 120     Grindelwald Terminal → Grindelwald Terminal    15 → 11  (-4)  ↓
+  [regional_bus] 120     Grindelwald Terminal → Grindelwald Terminal    15 → 11  (-4)  ↓
+  [regional_bus] 124     Stutz → Bodmi                                  20 → 16  (-4)  ↓
+  [regional_bus] 124     Bodmi → Stutz                                  20 → 16  (-4)  ↓
+  [regional_bus] 144     Aigle, Gare → Villars-sur-Ollon, Gare          38 → 24  (-14)  ↓
+  [regional_bus] 151     Brienz Bahnhof → Hasliberg Reuti               17 → 16  (-1)  ↓
+  [regional_bus] 158     Abtwil SG, Säntispark → Herisau, Bahnhof       15 → 7  (-8)  ↓
+  [regional_bus] 158     Herisau, Bahnhof → Abtwil SG, Säntispark       16 → 7  (-9)  ↓
+  [regional_bus] 171     Bellinzona, Stazione → Chur, Postautostation   34 → 17  (-17)  ↓
+  [regional_bus] 171     Chur, Postautostation → Bellinzona, Stazione   34 → 17  (-17)  ↓
+  [regional_bus] 171     Bellinzona, Stazione → Chur, Postautostation   27 → 12  (-15)  ↓
+  [regional_bus] 171     Chur, Postautostation → Bellinzona, Stazione   27 → 12  (-15)  ↓
+  [regional_bus] 184     Zürich, Bahnhof Wollishofen → Adliswil, Bahnhof  12 → 9  (-3)  ↓
+  [regional_bus] 184     Adliswil, Bahnhof → Zürich, Bahnhof Wollishofen  12 → 9  (-3)  ↓
+  [regional_bus] 210     Arbon, Bahnhof → St. Gallen, Bahnhof           30 → 23  (-7)  ↓
+  [regional_bus] 210     St. Gallen, Bahnhof → Arbon, Bahnhof           28 → 23  (-5)  ↓
+  [regional_bus] 210     St. Gallen, Bahnhof → Arbon, Bahnhof           30 → 23  (-7)  ↓
+  [regional_bus] 210     Arbon, Bahnhof → St. Gallen, Bahnhof           28 → 23  (-5)  ↓
+  [regional_bus] 211     Aosta, Autostazione → Martigny, gare           10 → 7  (-3)  ↓
+  [regional_bus] 211     Martigny, gare → Aosta, Autostazione           10 → 7  (-3)  ↓
+  [regional_bus] 222     Rheineck, Bahnhof → Heiden, Post               16 → 15  (-1)  ↓
+  [regional_bus] 222     Heiden, Post → Rheineck, Bahnhof               16 → 15  (-1)  ↓
+  [regional_bus] 300     Engelberg, Titlisbahn → Engelberg, Brunnibahn  8 → 6  (-2)  ↓
+  [regional_bus] 312     Riddez, gare → Ovronaz, Pein soleil            20 → 4  (-16)  ↓
+  [regional_bus] 312     Ovronaz, Pein soleil → Riddez, gare            21 → 4  (-17)  ↓
+  [regional_bus] 312     Grindelwald → Interlaken Ost                   10 → 9  (-1)  ↓
+  [regional_bus] 312     Ovronaz, Pein soleil → Riddez, gare            20 → 4  (-16)  ↓
+  [regional_bus] 312     Interlaken Ost → Grindelwald                   12 → 9  (-3)  ↓
+  [regional_bus] 312     Riddez, gare → Ovronaz, Pein soleil            21 → 4  (-17)  ↓
+  [regional_bus] 321     Toffen, Bahnhof → Riggisberg, Post             13 → 9  (-4)  ↓
+  [regional_bus] 321     Toffen, Bahnhof → Riggisberg, Post             13 → 9  (-4)  ↓
+  [regional_bus] 321     Riggisberg, Post → Toffen, Bahnhof             13 → 9  (-4)  ↓
+  [regional_bus] 321     Berikon-Widen, Bahnhof → Baden, Postautostation  23 → 22  (-1)  ↓
+  [regional_bus] 321     Baden, Postautostation → Berikon-Widen, Bahnhof  22 → 21  (-1)  ↓
+  [regional_bus] 352     Baden, Postautostation → Endingen, Zentrum     26 → 25  (-1)  ↓
+  [regional_bus] 352     Endingen, Zentrum → Baden, Postautostation     27 → 26  (-1)  ↓
+  [regional_bus] 360     Lausanne, Sallaz → Mézières VD, Station        45 → 29  (-16)  ↓
+  [regional_bus] 360     Mézières VD, Station → Lausanne, Sallaz        45 → 29  (-16)  ↓
+  [regional_bus] 361     Giswil, Bahnhof → Kleinteil, Post              9 → 8  (-1)  ↓
+  [regional_bus] 361     Kleinteil, Post → Giswil, Bahnhof              5 → 4  (-1)  ↓
+  [regional_bus] 361     Kleinteil, Post → Giswil, Bahnhof              8 → 7  (-1)  ↓
+  [regional_bus] 362     Epalinges, Croisettes → Moudon, Gare           27 → 17  (-10)  ↓
+  [regional_bus] 362     Moudon, Gare → Epalinges, Croisettes           28 → 18  (-10)  ↓
+  [regional_bus] 362     Schnottwil, Post → Lyss, Bahnhof               11 → 2  (-9)  ↓
+  [regional_bus] 363     Sion station → Veysonnaz Station               22 → 20  (-2)  ↓
+  [regional_bus] 363     Veysonnaz Station → Sion station               22 → 20  (-2)  ↓
+  [regional_bus] 374     Les Collons, Office Tourisme → Hérémence       20 → 10  (-10)  ↓
+  [regional_bus] 374     Hérémence → Les Collons, Office Tourisme       20 → 10  (-10)  ↓
+  [regional_bus] 380     Lenzburg, Hypiplatz → Wildegg, Bahnhof         23 → 17  (-6)  ↓
+  [regional_bus] 380     Wildegg, Bahnhof → Lenzburg, Hypiplatz         23 → 17  (-6)  ↓
+  [regional_bus] 381     Les Haudères, centre → Sion, poste/gare        41 → 37  (-4)  ↓
+  [regional_bus] 381     Sion, poste/gare → Les Haudères, centre        40 → 37  (-3)  ↓
+  [regional_bus] 390     Bettwil, Oberdorf → Lenzburg, Hypiplatz        53 → 51  (-2)  ↓
+  [regional_bus] 390     Lenzburg, Hypiplatz → Fahrwangen, Bahnhof      50 → 30  (-20)  ↓
+  [regional_bus] 390     Fahrwangen, Bahnhof → Lenzburg, Hypiplatz      49 → 29  (-20)  ↓
+  [regional_bus] 390     Lenzburg, Hypiplatz → Bettwil, Oberdorf        54 → 52  (-2)  ↓
+  [regional_bus] 401     Flüelen, Gruonbach → Schattdorf, Rossgiessen   41 → 27  (-14)  ↓
+  [regional_bus] 401     Schattdorf, Rossgiessen → Flüelen, Gruonbach   41 → 27  (-14)  ↓
+  [regional_bus] 401     Erstfeld, Bahnhof → Flüelen, Gruonbach         50 → 27  (-23)  ↓
+  [regional_bus] 401     Flüelen, Gruonbach → Erstfeld, Bahnhof         50 → 27  (-23)  ↓
+  [regional_bus] 403     Ilanz, Bahnhof/Post → Versam, Post             12 → 10  (-2)  ↓
+  [regional_bus] 403     Versam, Post → Ilanz, Bahnhof/Post             12 → 10  (-2)  ↓
+  [regional_bus] 423     Bus 423: Lamone-Breno-Miglieglia               31 → 25  (-6)  ↓
+  [regional_bus] 423     Andermatt, Bahnhofplatz → Andermatt, The Nordic House  10 → 6  (-4)  ↓
+  [regional_bus] 423     Andermatt, The Nordic House → Andermatt, Bahnhofplatz  10 → 6  (-4)  ↓
+  [regional_bus] 443     Morissen, center communal → Vella, posta       9 → 5  (-4)  ↓
+  [regional_bus] 443     Lugano, Autosilo Balestra → Comano, Chiesa     23 → 12  (-11)  ↓
+  [regional_bus] 443     Comano, Chiesa → Lugano, Autosilo Balestra     24 → 13  (-11)  ↓
+  [regional_bus] 443     Vella, posta → Morissen, center communal       9 → 5  (-4)  ↓
+  [regional_bus] 444     Degen, vitg → Vella, posta                     9 → 5  (-4)  ↓
+  [regional_bus] 444     Vella, posta → Degen, vitg                     9 → 5  (-4)  ↓
+  [regional_bus] 457     Bad Ragaz, Pizolbahn → Bad Ragaz, Bahnhof      9 → 7  (-2)  ↓
+  [regional_bus] 457     Bad Ragaz, Bahnhof → Bad Ragaz, Pizolbahn      9 → 7  (-2)  ↓
+  [regional_bus] 461     Burgdorf, Bahnhof → Burgdorf, Bahnhof          10 → 9  (-1)  ↓
+  [regional_bus] 472     Palézieux, Gare → Romont FR, Gare              18 → 7  (-11)  ↓
+  [regional_bus] 472     Romont FR, Gare → Palézieux, Gare              18 → 7  (-11)  ↓
+  [regional_bus] 501     Feldis/Veulden, Schulhaus → Tumegl/Tomils, Curschiglias  11 → 6  (-5)  ↓
+  [regional_bus] 501     Tumegl/Tomils, Curschiglias → Feldis/Veulden, Schulhaus  11 → 6  (-5)  ↓
+  [regional_bus] 502     Glarus, Bahnhof → Näfels-Mollis, Bahnhof       13 → 11  (-2)  ↓
+  [regional_bus] 502     Näfels-Mollis, Bahnhof → Glarus, Bahnhof       13 → 11  (-2)  ↓
+  [regional_bus] 508     Schwyz, Zentrum → Gersau, Wehri                30 → 28  (-2)  ↓
+  [regional_bus] 508     Vitznau, Station → Küssnacht am Rigi, Bahnhof  26 → 23  (-3)  ↓
+  [regional_bus] 508     Gersau, Wehri → Schwyz, Zentrum                30 → 28  (-2)  ↓
+  [regional_bus] 508     Gersau, Wehri → Seewen SZ, Seewen Markt        35 → 24  (-11)  ↓
+  [regional_bus] 508     Küssnacht am Rigi, Bahnhof → Vitznau, Station  26 → 23  (-3)  ↓
+  [regional_bus] 508     Seewen SZ, Seewen Markt → Gersau, Wehri        35 → 24  (-11)  ↓
+  [regional_bus] 517     Mendrisio, Stazione → Chiasso, Stazione        28 → 7  (-21)  ↓
+  [regional_bus] 521     Erlach, Stedtli → Ins, Bahnhof                 16 → 12  (-4)  ↓
+  [regional_bus] 521     Ins, Bahnhof → Erlach, Stedtli                 16 → 12  (-4)  ↓
+  [regional_bus] 521     Obermutten → Thusis, Bahnhof                   14 → 11  (-3)  ↓
+  [regional_bus] 521     Thusis, Bahnhof → Obermutten                   14 → 11  (-3)  ↓
+  [regional_bus] 522     Ausserberg, Dorf → Visp, Spital                20 → 16  (-4)  ↓
+  [regional_bus] 522     Reichenburg, Bahnhof → Siebnen-Wangen, Bahnhof  20 → 19  (-1)  ↓
+  [regional_bus] 522     Siebnen-Wangen, Bahnhof → Reichenburg, Bahnhof  20 → 19  (-1)  ↓
+  [regional_bus] 522     Visp, Spital → Ausserberg, Dorf                20 → 11  (-9)  ↓
+  [regional_bus] 523     Eggerberg, Finnen → Visp, Bahnhof Süd          19 → 18  (-1)  ↓
+  [regional_bus] 523     Visp, Bahnhof Süd → Eggerberg, Eggen           19 → 18  (-1)  ↓
+  [regional_bus] 523     Visp, Spital → Eggerberg, Finnen               19 → 18  (-1)  ↓
+  [regional_bus] 523     Eggerberg, Finnen → Visp, Spital               19 → 18  (-1)  ↓
+  [regional_bus] 523     Eggerberg, Eggen → Visp, Bahnhof Süd           19 → 18  (-1)  ↓
+  [regional_bus] 523     Visp, Bahnhof Süd → Eggerberg, Finnen          19 → 18  (-1)  ↓
+  [regional_bus] 532     Thusis, Bahnhof → Präz, Dorf                   17 → 15  (-2)  ↓
+  [regional_bus] 532     Präz, Dorf → Thusis, Bahnhof                   17 → 15  (-2)  ↓
+  [regional_bus] 572     Tiefencastel, Bahnhof → Filisur, Bahnhof       20 → 6  (-14)  ↓
+  [regional_bus] 572     Alvaneu Dorf, Dorfplatz → Tiefencastel, Bahnhof  18 → 4  (-14)  ↓
+  [regional_bus] 572     Filisur, Bahnhof → Tiefencastel, Bahnhof       20 → 6  (-14)  ↓
+  [regional_bus] 572     Tiefencastel, Bahnhof → Alvaneu Dorf, Dorfplatz  18 → 4  (-14)  ↓
+  [regional_bus] 602     Silvaplana, Camping → Pontresina, Bahnhof      31 → 19  (-12)  ↓
+  [regional_bus] 602     Maloja, Posta → Pontresina, Bahnhof            31 → 19  (-12)  ↓
+  [regional_bus] 602     Bernina, Lagalbbahn → Silvaplana, Camping      30 → 18  (-12)  ↓
+  [regional_bus] 602     Silvaplana, Camping → Bernina, Lagalbbahn      30 → 11  (-19)  ↓
+  [regional_bus] 602     Pontresina, Bahnhof → Maloja, Posta            31 → 19  (-12)  ↓
+  [regional_bus] 602     Pontresina, Bahnhof → Silvaplana, Camping      31 → 19  (-12)  ↓
+  [regional_bus] 604     Chiavenna, Stazione → St. Moritz, Bahnhof      32 → 15  (-17)  ↓
+  [regional_bus] 604     St. Moritz, Bahnhof → Chiavenna, Stazione      33 → 16  (-17)  ↓
+  [regional_bus] 604     St. Moritz, Bahnhof → Maloja, Posta            12 → 4  (-8)  ↓
+  [regional_bus] 604     Maloja, Posta → St. Moritz, Bahnhof            12 → 4  (-8)  ↓
+  [regional_bus] 606     Zug, Steinhof → Steinhausen, Birkenhalde       17 → 15  (-2)  ↓
+  [regional_bus] 606     Steinhausen, Birkenhalde → Zug, Steinhof       19 → 15  (-4)  ↓
+  [regional_bus] 631     Baar, Bahnhof → Neuheim, Dorf                  9 → 8  (-1)  ↓
+  [regional_bus] 685     Orbe, Gare → Vallorbe, Gare                    61 → 51  (-10)  ↓
+  [regional_bus] 685     Vallorbe, Gare → Orbe, Gare                    59 → 49  (-10)  ↓
+  [regional_bus] 685     Orbe, Gare → Vallorbe, Gare                    62 → 52  (-10)  ↓
+  [regional_bus] 685     Vallorbe, Gare → Orbe, Gare                    59 → 49  (-10)  ↓
+  [regional_bus] 702     Campocologno, Stazione → Percosta, fermata     26 → 25  (-1)  ↓
+  [regional_bus] 702     Percosta, Fermata → Campocologno, Stazione     26 → 25  (-1)  ↓
+  [regional_bus] 724     Zuzwil SG, Industrie → Wil SG, Bahnhof         15 → 7  (-8)  ↓
+  [regional_bus] 724     Wil SG, Bahnhof → Zuzwil SG, Industrie         15 → 7  (-8)  ↓
+  [regional_bus] 734     Egetswil, Dorf → Zürich Flughafen, Bahnhof     11 → 10  (-1)  ↓
+  [regional_bus] 734     Zürich Flughafen, Bahnhof → Egetswil, Dorf     11 → 10  (-1)  ↓
+  [regional_bus] 736     Zürich Flughafen, Bahnhof → Kloten, Buchhalden  10 → 7  (-3)  ↓
+  [regional_bus] 736     Kloten, Buchhalden → Zürich Flughafen, Bahnhof  10 → 7  (-3)  ↓
+  [regional_bus] 752     Zürich, Bahnhof Stettbach → Dübendorf, Bahnhof  8 → 5  (-3)  ↓
+  [regional_bus] 752     Dübendorf, Bahnhof → Zürich, Bahnhof Stettbach  7 → 4  (-3)  ↓
+  [regional_bus] 766     Bassersdorf, Bahnhof → Kloten, Bahnhof         12 → 10  (-2)  ↓
+  [regional_bus] 797     Gams, Zentrum → Buchs SG, Bahnhof              14 → 12  (-2)  ↓
+  [regional_bus] 797     Buchs SG, Bahnhof → Gams, Zentrum              13 → 12  (-1)  ↓
+  [regional_bus] 804     Frauenfeld, Obholz → Frauenfeld, Bahnhof       11 → 9  (-2)  ↓
+  [regional_bus] 804     Frauenfeld, Bahnhof → Frauenfeld, Huben        13 → 12  (-1)  ↓
+  [regional_bus] 811     Frauenfeld, Bahnhof → Frauenfeld, Kantonsspital  8 → 6  (-2)  ↓
+  [regional_bus] 811     Frauenfeld, Kantonsspital → Frauenfeld, Bahnhof  7 → 5  (-2)  ↓
+  [regional_bus] 814     Frauenfeld, Bahnhof → Frauenfeld, Bahnhof      21 → 20  (-1)  ↓
+  [regional_bus] 818     Uster, Sportanlage → Uster, Bahnhof            7 → 5  (-2)  ↓
+  [regional_bus] 818     Uster, Bahnhof → Uster, Sportanlage            8 → 6  (-2)  ↓
+  [regional_bus] 835     Hittnau, Industrie → Pfäffikon ZH, Bahnhof     5 → 4  (-1)  ↓
+  [regional_bus] 951     Uerikon, Bahnhof → Stäfa, Bahnhof              12 → 11  (-1)  ↓
+  [regional_bus] 951     Stäfa, Bahnhof → Uerikon, Bahnhof              12 → 11  (-1)  ↓
+  [regional_bus] 31.151  Brünig-Hasliberg, Bahnhof → Brienz BE, Bahnhof  26 → 22  (-4)  ↓
+  [regional_bus] 31.151  Brienzwiler, Banholzfluh → Brienz BE, Bahnhof  23 → 19  (-4)  ↓
+  [regional_bus] 31.151  Brienzwiler, Bahnhof → Brienz BE, Rössliplatz  24 → 20  (-4)  ↓
+  [regional_bus] 31.151  Hasliberg Reuti, Dorf → Brienz BE, Bahnhof     17 → 16  (-1)  ↓
+  [regional_bus] 31.151  Brienz BE, Bahnhof → Brienzwiler, Bahnhof      25 → 24  (-1)  ↓
+  [regional_bus] 31.151  Brienz BE, Rössliplatz → Brienzwiler, Bahnhof  25 → 24  (-1)  ↓
+  [regional_bus] 31.151  Brienzwiler, Bahnhof → Brienz BE, Bahnhof      24 → 20  (-4)  ↓
+  [regional_bus] 31.151  Brienz BE, Bahnhof → Brünig-Hasliberg, Bahnhof  26 → 22  (-4)  ↓
+  [ferry       ] 3651    Meisterschwanden → Meisterschwanden            6 → 5  (-1)  ↓
+  [mountain    ] 336     336                                            2 → 0  (-2)  ↓
+
+Summary: 6715 → 6579 lines (-136)   115746 → 113173 total stops (-2573)
