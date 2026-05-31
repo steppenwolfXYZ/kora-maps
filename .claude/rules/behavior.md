@@ -34,13 +34,15 @@ Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` trans
 ## Concepts
 When asked to "write a concept" or before implementing a non-trivial change, create a file in `.claude/concepts/<topic-name>.md`. Name files by topic, not date.
 
-The document is a **requirement definition**, not an implementation guide. It should read at the technical depth of the surrounding codebase discussion. Structure:
-- **Problem** — what is wrong and why it matters
-- **Current workaround (if any)** — what exists today and why it is insufficient
-- **Requirements** — what the solution must do, including any new identifiers or keys introduced (named explicitly)
-- **Constraints** — edge cases, things that must not change, known exceptions
+The document is a **requirement definition**, not an implementation guide. Its purpose is to pin down what the change must do before work starts (so requirements don't drift mid-implementation) and to remain as a record of how it was supposed to work once done.
 
-Do NOT include implementation steps, code snippets, or file/line references. Those belong in the code, not the concept doc. After implementation, the file stays as the original requirements record.
+The focus is the requirements. Other sections are short context.
+
+- **Problem** — what is wrong and why it matters. Very short — a few sentences, enough to orient the reader.
+- **Requirements** — what the solution must do, including any new identifiers or keys introduced (named explicitly). This is the bulk of the document.
+- **Constraints** — edge cases, things that must not change, known exceptions.
+
+Do NOT include implementation steps, code snippets, or file/line references. Those belong in the code, not the concept doc. After implementation, move the file to `.claude/concepts/implemented/` only once the user has explicitly confirmed it is implemented — do not move it on your own assessment. It stays there as the original requirements record.
 
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.
