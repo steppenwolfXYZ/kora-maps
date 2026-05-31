@@ -1157,16 +1157,14 @@ def _stop_candidates(
     Returns list sorted by (-bbox_score, -ep_0.5km, -n_stops).
     Each element: (bbox_score, ep_0_5km, ccoords, full_density, line_key_full, lk_ref, no_draw)
     """
-    seen_lk: set = set()
     result = []
     osm_start = osm_pts[0]
     osm_end   = osm_pts[-1]
     for lk_ref in keys:
         for entry in _line_canonical_export.get((lk_ref, bucket), []):
             line_key, cand, dir_aware, agency_id, no_draw = entry.line_key, entry.stops, entry.dir_aware, entry.agency_id, entry.no_draw
-            if line_key in seen_lk or not cand:
+            if not cand:
                 continue
-            seen_lk.add(line_key)
             if dir_aware and osm_span_km >= 1.0:
                 fc0 = stop_coords.get(cand[0][0]) or stop_coords.get(cand[0][0].split(":")[0])
                 if fc0:

@@ -26,6 +26,25 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 
 ---
 
+## Current behaviour: no_draw entries pre-filtered (TEMP)
+
+**State:** Low-frequency GTFS lines (`no_draw="low_frequency"`) are **removed** from `_line_canonical_export` after `stream_stop_times` and before any matching loop runs. The flag-setting code in `stream_stop_times` still runs and still marks entries with `no_draw`, but a separate block in `main()` strips them from the candidate pool immediately afterwards.
+
+**Why this exists:** The "flag-instead-of-remove" design (originally meant to keep low-freq lines visible to the matcher so their OSM relations would settle on them rather than fall through to Loop 4) caused regressions when a low-freq GTFS entry shared a physical route with a higher-freq sibling stored under a different `short_name`. Classic case: IR-LIX (13 sporadic seasonal trips) alongside PE-LIX (159 regular trips) for the Brünig line. OSM relation 2344785 (`ref="IR 470"`) settled on the IR-LIX no_draw candidate in Loop 3 and never saw PE-LIX. Pre-filtering removes IR-LIX from the pool so Loop 3 produces no candidate, Loop 4 (geo) runs, and PE-LIX matches.
+
+**Where the filter lives:**
+- `scripts/transit/05_score_and_match.py:main()` — block tagged `# TEMP: drop no_draw entries…`, immediately after `stream_stop_times()`.
+- `scripts/transit/diagnose_transit_line.py` — mirror block tagged the same way, immediately after the script's `_m.stream_stop_times()` call. Required so the diagnostic replays the same candidate pool the real pipeline sees.
+
+**To restore the flag-based behaviour:** delete both `TEMP` blocks. The flag-setting code in `stream_stop_times`, the two-pass logic in `_try_assign`, and the `no_draw` field on `CanonEntry` are all still present and functional — they're just dormant while the filter is in place. The rest of this document still describes the flag-based design as if it were active; treat sections below that mention `no_draw` candidates surviving into matching as the dormant code path, not the current behaviour.
+
+**Consequences for diagnostics:**
+- `main_loop_dropped.json` no longer receives `reason="no_draw"` entries (the matcher never settles on a `no_draw` candidate because none reach it). `reason="dedup"` still applies.
+- `_try_assign`'s pass-2 (no_draw fallback) iterates an empty list and is effectively a no-op.
+- The pre-filter removes whole keys from `_line_canonical_export` if all their entries were `no_draw` — Loop 3 candidate keys can now be empty where they previously held no_draw-only candidates, sending the route to Loop 4 as intended.
+
+---
+
 ## OSM→GTFS Matching Architecture
 
 ### Key data structure
