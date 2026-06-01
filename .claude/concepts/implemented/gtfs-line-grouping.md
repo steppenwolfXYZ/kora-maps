@@ -24,7 +24,9 @@ Trips are partitioned by `(long_name_norm, agency_id, bucket)` where `long_name_
 
 ### Trip-graph connectivity merge
 
-Within each partition, two trips are connected iff they share at least **2 stops** (using merged stop identities — `parent_station` and existing post-pipeline clustering). Connected components are computed across the partition. Each connected component is one **trip group** representing one physical line.
+Within each partition, two trips are connected iff they share at least **2 stops** using **merged stop identity**. Merged stop identity is: the `parent_station` value from `stops.txt` when non-empty, otherwise the part of `stop_id` before the first colon (the base UIC code). This collapses different platforms of the same station into one identity.
+
+Connected components are computed across the partition. Each connected component is one **trip group** representing one physical line.
 
 This produces:
 - Regional S3 networks (Zürich, Basel, Luzern) become three separate trip groups because they share zero stops.
@@ -40,14 +42,16 @@ A `trip_group_id` is assigned to each connected component, unique within its par
 
 Dedup and group reassignment continue to group by `_line_key_full`. Because that key is now unique per physical line, no further changes to these passes are required — the bugs they have today (cross-network dedup, nationwide stop pool) disappear.
 
-### Pre-implementation research
+### Research validation (Swiss GTFS feed)
 
-Before implementing, an empirical scan of the GTFS feed must validate:
-- The actual distribution of trip-group sizes per partition (catch under-merging and over-merging).
-- The number of partitions where the empty-`long_name` fallback to `short_name` applies and whether those collide with other partitions in ways that need a stricter rule.
-- Whether the threshold of 2 shared stops correctly groups known cases (S3 networks separate, short-turns merge, Y-shapes merge) and whether any real line type requires a different threshold.
+The 2-shared-stops threshold has been validated against the live feed (8,170 partitions, 1.4M trips):
 
-The threshold of 2 is the starting value. If research shows degenerate cases, the rule may become proportional (`share ≥2 stops OR ≥X% of the shorter trip's stops`) or filter out global anchor stops (e.g. Zürich HB) from the shared-stop count.
+- 90% of partitions resolve to a single trip group; the multi-group cases are dominated by 2–4 groups.
+- The SBB S3 case (`agency_id="000011"`) produces 4 groups (sizes 2672 / 488 / 436 / 1) for Zürich, Basel, Luzern, and one outlier singleton that the rare-variant filter removes.
+- The empty-`long_name` fallback path is exercised by **zero** trips in this feed; it is implemented per spec but has no effect on Swiss data.
+- Highest-fragmentation partitions (e.g. SBB Ersatzverkehr `EV1`–`EV6`, 7–69 groups) are genuinely different physical routes sharing only a label, so the fragmentation is correct.
+
+No proportional rule or anchor-stop filter is needed.
 
 ## Constraints
 
@@ -58,3 +62,5 @@ The threshold of 2 is the starting value. If research shows degenerate cases, th
 - This concept does not address corridor-level frequency aggregation (the "peak reinforcement" case where IC + RE + S1 should accumulate). That is the domain of the pair-centric transit model concept. Concept 1 alone fixes disambiguation and short-turn merging; it does not change the line-as-primary-entity rendering contract.
 - This concept does not address express-on-local visualization. Same reason — that is a property of the pair model.
 - The `gtfs_unmatched.json` accounting becomes per-trip-group rather than per-`line_key`. Unmatched groups are surfaced individually.
+- The diagnose script (`diagnose_transit_line.py`) reads `_line_canonical_export` and unpacks `CanonEntry` directly. It must be updated alongside this change so the new `trip_group_id` field does not break it.
+- EV (Ersatzverkehr / rail replacement) exclusion is out of scope here. It is tracked separately.

@@ -256,7 +256,7 @@ def main():
     trip_lookup = _m.load_trips(rt_lookup)
     trip_freq   = _m.load_frequencies()
     line_freq, line_speed, line_canonical = _m.stream_stop_times(
-        trip_lookup, stop_coords, svc_dates, trip_freq
+        trip_lookup, stop_coords, svc_dates, trip_freq, stop_meta
     )
 
     # TEMP: mirror the pre-matching no_draw filter applied in 05_score_and_match.py:main().
@@ -380,12 +380,12 @@ def main():
                     score = len(ccoords) / len(entry.stops)
                     if score < 0.5:
                         continue
-                    raw.append((score, ccoords, entry.stops, entry.line_key, entry.agency_id, lk_ref, entry.no_draw))
+                    raw.append((score, ccoords, entry.stops, entry.line_key, entry.agency_id, entry.trip_group_id, lk_ref, entry.no_draw))
 
             raw.sort(key=lambda x: (-x[0], -len(x[1])))
             print(f"Geo pool: {len(raw)} candidates pass score≥0.5, capped at 50")
             candidates = []
-            for score, ccoords, cand, line_key, agency_id, lk_ref, no_draw in raw[:50]:
+            for score, ccoords, cand, line_key, agency_id, tg_id, lk_ref, no_draw in raw[:50]:
                 fc = [c for sid, *_ in cand
                       if _m.is_in_service_area(sid)
                       and (c := (stop_coords.get(sid)
@@ -400,7 +400,7 @@ def main():
                 )
                 sn, ln, bkt = line_key
                 candidates.append(
-                    (score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id), lk_ref, no_draw)
+                    (score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id, tg_id), lk_ref, no_draw)
                 )
             candidates.sort(key=lambda x: (-x[0], -x[1], -len(x[2])))
 
@@ -425,7 +425,7 @@ def main():
                 print(f"\n  ── no_draw fallback pass ({len(no_draw_cands)}) ──")
             for bbox_score, ep_0_5, ccoords, full_density, lkf, lk_ref, no_draw in subset:
                 shown += 1
-                sn, ln, bkt, aid = lkf
+                sn, ln, bkt, aid, _tg = lkf
                 ep_5 = _m._count_endpoints_covered(
                     osm_pts, ccoords, _m.ENDPOINT_THRESHOLD_KM, osm_sn, osm_segs
                 )

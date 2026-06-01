@@ -379,11 +379,9 @@ class CanonEntry(NamedTuple):
     dir_aware: bool        # True when variants have genuinely different stop sets
     agency_id: str
     no_draw: Optional[str] # None = drawable; "low_frequency" = freq < MIN_FREQ_SCORE
+    trip_group_id: int     # connected-component id within (long_norm, agency_id, bucket) partition
 
 _line_canonical_export: dict = defaultdict(list)  # (short_name|long_norm, bucket) → [CanonEntry, ...]
-
-# Coarse geo-grid for canonical trip bucketing: ~0.5° ≈ 40 km per cell
-GEO_BUCKET_DEG = 0.5
 
 # Maps GTFS bucket name to mode approximation used in compute_freq_score.
 # "bus" bucket is approximated as "regional_bus" (lower maluses) — intentionally
@@ -395,9 +393,23 @@ _BUCKET_MODE_APPROX = {
 }
 
 
-def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
-    """One streaming pass → raw trip counts + speed per line."""
+def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
+    """One streaming pass → raw trip counts + speed per line.
+
+    Partitions trips by (long_name_norm or short_name fallback, agency_id, bucket)
+    and within each partition merges trips that share ≥2 stops (using parent_station
+    or base UIC as merged stop identity) into one connected component. Each component
+    is one physical line (the trip_group). Canonical exports are then keyed by
+    (line_key, trip_group_id) so e.g. SBB S3 in Zürich / Basel / Luzern stay separate.
+    """
     global _line_canonical_export
+
+    # Build stop-merge map: parent_station when non-empty, else the part of stop_id
+    # before the first colon (base UIC). Collapses platforms of the same station.
+    stop_merge: dict = {}
+    for sid, (_name, parent) in stop_meta.items():
+        stop_merge[sid] = parent if parent else sid.split(":")[0]
+
     print("  Streaming stop_times.txt (~1–2 min)...")
 
     # Raw trip counts per line: {line_key: {core_wd, eve_wd, we}}
@@ -406,13 +418,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # Canonical trip (most stops) per line for speed/pair-freq computation
     line_canonical: dict = {}
 
-    # All unique stop sets per (line_key, geo_bucket), sorted by stop count desc.
-    # Preserves minority stop sets (e.g. BOB full Grindelwald service with 0 active
-    # sample days alongside the frequent short Terminal Express variant).
-    line_canonical_geo_stops: dict = {}  # (line_key, geo_bucket) → [{"stop_count", "stops"}, …] sorted desc
-    line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # (line_key, geo_bucket) → {frozenset(stop_ids) → trip_count}
-    line_variant_sequences: dict = {}  # (geo_key, frozenset) → ordered [(sid, arr, dep), ...] for one representative trip
-    line_canonical_agency: dict = {}   # (line_key, geo_bucket) → agency_id (first seen wins)
+    # Per-trip buffer for the post-stream trip-group phase. Carries everything the
+    # grouping and per-group variant accumulators need so we don't re-stream.
+    #   trip_id → (line_key, agency_id, weight, raw_variant_frozenset,
+    #              merged_stop_frozenset, sequence_list)
+    trip_buf: dict = {}
 
     current_trip_id = None
     current_stops: list = []
@@ -462,37 +472,14 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
                 "stops": [(s[1], s[2], s[3]) for s in stops],
             }
 
-        # Find geographic bucket from the first stop with known coordinates
-        gb = None
-        for seq, sid, arr, dep in stops[:5]:
-            c = stop_coords.get(sid) or stop_coords.get(sid.split(":")[0])
-            if c:
-                gb = (int(c[0] / GEO_BUCKET_DEG), int(c[1] / GEO_BUCKET_DEG))
-                break
-        if gb is None:
-            return
-
-        geo_key = (line_key, gb)
-        if geo_key not in line_canonical_agency:
-            line_canonical_agency[geo_key] = trip.get("agency_id", "")
-        variant = frozenset(s[1] for s in stops)
-        line_variant_counts[geo_key][variant] += max(1, len(active_dates))
-        if (geo_key, variant) not in line_variant_sequences:
-            line_variant_sequences[(geo_key, variant)] = [(s[1], s[2], s[3]) for s in stops]
-
-        # Stop-display canonicals: keep all unique stop sets per cell, sorted by stop count desc.
-        # Multiple stop sets arise when different services share a line_key + geo_bucket
-        # (e.g. Maienfeld Bus 14 with 5 stops and Feldkirch Bus 14 with 30 stops both land
-        # in the same 0.5° cell).  The sanity-check loop in stop assignment will iterate them
-        # in order and accept the first one whose stops align with the OSM geometry.
-        new_stops = [(s[1], s[2], s[3]) for s in stops]
-        new_sid_set = frozenset(s[0] for s in new_stops)
-        existing_list = line_canonical_geo_stops.get(geo_key)
-        if existing_list is None:
-            line_canonical_geo_stops[geo_key] = [{"stop_count": n, "stops": new_stops}]
-        elif not any(frozenset(s[0] for s in e["stops"]) == new_sid_set for e in existing_list):
-            existing_list.append({"stop_count": n, "stops": new_stops})
-            existing_list.sort(key=lambda e: -e["stop_count"])
+        raw_variant = frozenset(s[1] for s in stops)
+        merged_set = frozenset(stop_merge.get(s[1]) or s[1].split(":")[0] for s in stops)
+        sequence   = [(s[1], s[2], s[3]) for s in stops]
+        trip_buf[trip_id] = (
+            line_key, trip.get("agency_id", ""),
+            max(1, len(active_dates)),
+            raw_variant, merged_set, sequence,
+        )
 
     with open(GTFS / "stop_times.txt", encoding="utf-8-sig") as f:
         row_count = 0
@@ -517,24 +504,120 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
                 print(f"    {row_count // 1_000_000}M rows...")
 
         process_trip(current_trip_id, current_stops)
-    print(f"  Done. {row_count:,} rows processed.")
+    print(f"  Done. {row_count:,} rows processed, {len(trip_buf):,} trips buffered.")
+
+    # ── Trip-group partitioning ──────────────────────────────────────────────
+    # Partition trips by (long_name_norm or short_name fallback, agency_id, bucket).
+    # Within each partition, run union-find over distinct merged-stop patterns:
+    # two patterns are connected iff they share ≥2 merged stop identities. Each
+    # connected component is one physical line (trip_group).
+    print("  Partitioning trips and computing trip-groups...")
+
+    partition_trips: dict = defaultdict(list)
+    for tid, (lk, aid, _w, _rv, _ms, _seq) in trip_buf.items():
+        sn, ln, bkt = lk
+        ln_norm = ln.replace(" ", "").lower()
+        partition_str = ln_norm if ln_norm else sn.replace(" ", "").lower()
+        partition_trips[(partition_str, aid, bkt)].append(tid)
+
+    trip_group: dict = {}   # trip_id → trip_group_id (unique within its partition)
+    n_groups_total = 0
+    for tids in partition_trips.values():
+        # Deduplicate trips to merged-stop patterns first; union-find runs on patterns,
+        # which is O(P²) with set-intersection — tractable even for big partitions
+        # because trips with the same stop set collapse to one pattern.
+        patterns: dict = defaultdict(list)
+        for tid in tids:
+            patterns[trip_buf[tid][4]].append(tid)
+        pattern_sets = list(patterns.keys())
+        pattern_tids = list(patterns.values())
+        P = len(pattern_sets)
+        if P == 1:
+            for tid in pattern_tids[0]:
+                trip_group[tid] = 0
+            n_groups_total += 1
+            continue
+
+        parent = list(range(P))
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for i in range(P):
+            si = pattern_sets[i]
+            for j in range(i + 1, P):
+                ri, rj = find(i), find(j)
+                if ri == rj:
+                    continue
+                sj = pattern_sets[j]
+                small, big = (si, sj) if len(si) <= len(sj) else (sj, si)
+                count = 0
+                for s in small:
+                    if s in big:
+                        count += 1
+                        if count >= 2:
+                            parent[ri] = rj
+                            break
+
+        cc_ids: dict = {}
+        next_id = 0
+        for i in range(P):
+            root = find(i)
+            if root not in cc_ids:
+                cc_ids[root] = next_id
+                next_id += 1
+            for tid in pattern_tids[i]:
+                trip_group[tid] = cc_ids[root]
+        n_groups_total += next_id
+
+    print(f"  {len(partition_trips):,} partitions → {n_groups_total:,} trip-groups")
+
+    # ── Per-(line_key, trip_group_id) accumulators ───────────────────────────
+    # These replace the (line_key, geo_bucket)-keyed dicts. Same structure, new key.
+    line_canonical_tg_stops: dict = {}   # tg_key → [{"stop_count","stops"}, …] desc
+    line_variant_counts: dict = defaultdict(lambda: defaultdict(int))  # tg_key → {raw_variant → weighted_count}
+    line_variant_sequences: dict = {}    # (tg_key, raw_variant) → representative sequence
+    line_canonical_tg_agency: dict = {}  # tg_key → agency_id (first seen wins)
+
+    for tid, (lk, aid, weight, raw_variant, _ms, sequence) in trip_buf.items():
+        tg = trip_group.get(tid)
+        if tg is None:
+            continue
+        tg_key = (lk, tg)
+        if tg_key not in line_canonical_tg_agency:
+            line_canonical_tg_agency[tg_key] = aid
+        line_variant_counts[tg_key][raw_variant] += weight
+        if (tg_key, raw_variant) not in line_variant_sequences:
+            line_variant_sequences[(tg_key, raw_variant)] = sequence
+        n = len(sequence)
+        new_sid_set = raw_variant
+        existing_list = line_canonical_tg_stops.get(tg_key)
+        if existing_list is None:
+            line_canonical_tg_stops[tg_key] = [{"stop_count": n, "stops": sequence}]
+        elif not any(frozenset(s[0] for s in e["stops"]) == new_sid_set for e in existing_list):
+            existing_list.append({"stop_count": n, "stops": sequence})
+            existing_list.sort(key=lambda e: -e["stop_count"])
+
+    trip_buf.clear()
 
     # Remove rare stop sets (< 10% of trips) from both source dicts so that garage runs
     # and other infrequent variants never surface as stop candidates in section 1 or 2.
     # If no variant clears 10% (many roughly-equal stopping patterns), fall back to 5%.
     # If still nothing clears 5%, keep all variants rather than discarding everything.
-    for geo_key, variant_counts in list(line_variant_counts.items()):
+    for tg_key, variant_counts in list(line_variant_counts.items()):
         total = sum(variant_counts.values())
         for pct in (0.10, 0.05):
             threshold = max(1, total * pct)
             filtered = {v: c for v, c in variant_counts.items() if c >= threshold}
             if filtered:
-                line_variant_counts[geo_key] = filtered
+                line_variant_counts[tg_key] = filtered
                 break
 
-    for geo_key, canons in line_canonical_geo_stops.items():
-        variant_counts = line_variant_counts.get(geo_key, {})
-        line_canonical_geo_stops[geo_key] = [
+    for tg_key, canons in line_canonical_tg_stops.items():
+        variant_counts = line_variant_counts.get(tg_key, {})
+        line_canonical_tg_stops[tg_key] = [
             c for c in canons
             if frozenset(s[0] for s in c["stops"]) in variant_counts
         ]
@@ -547,36 +630,36 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # Mountain bucket and CC/train (seasonal rack railways) are exempt.
     _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
     low_freq_keys: set = {
-        geo_key[0] for geo_key in line_canonical_geo_stops
-        if geo_key[0][2] != "mountain"
-        and not (geo_key[0][0] == "CC" and geo_key[0][2] == "train")
+        tg_key[0] for tg_key in line_canonical_tg_stops
+        if tg_key[0][2] != "mountain"
+        and not (tg_key[0][0] == "CC" and tg_key[0][2] == "train")
         and compute_freq_score(
-            line_freq.get(geo_key[0], _zero_freq),
-            _BUCKET_MODE_APPROX.get(geo_key[0][2], "regional_bus"),
+            line_freq.get(tg_key[0], _zero_freq),
+            _BUCKET_MODE_APPROX.get(tg_key[0][2], "regional_bus"),
         ) < MIN_FREQ_SCORE
     }
 
-    # Build canonical export: all unique stop sets per geographic cell per line_key.
-    # This gives separate candidates for "S6 Bern" and "S6 Zürich" even though they
-    # share the same GTFS line_key = ("S6", "S 6", "train").  It also preserves minority
-    # services that share a line_key+cell with a larger route (e.g. Maienfeld Bus 14 with
-    # 5 stops alongside Feldkirch Bus 14 with 30 stops in the same 0.5° cell) so the
-    # stop-assignment sanity check can iterate all candidates and pick the right one.
+    # Build canonical export: all unique stop sets per (line_key, trip_group_id).
+    # This gives separate candidates for "S3 Zürich", "S3 Basel" and "S3 Luzern" even
+    # though they share the same GTFS line_key = ("S3", "S 3", "train"). It also
+    # preserves minority services within a single trip group (e.g. Maienfeld Bus 14
+    # with 5 stops vs. Feldkirch Bus 14 with 30 stops, if they share a trunk that
+    # connects them — though typically distinct corridors land in distinct groups).
     _line_canonical_export.clear()
-    for (line_key, _gb), canons in line_canonical_geo_stops.items():
+    for (line_key, tg_id), canons in line_canonical_tg_stops.items():
         short_name, long_name, bucket = line_key
         long_norm = long_name.replace(" ", "")
-        agency_id = line_canonical_agency.get((line_key, _gb), "")
+        agency_id = line_canonical_tg_agency.get((line_key, tg_id), "")
         no_draw = "low_frequency" if line_key in low_freq_keys else None
         for canon in canons:
             _line_canonical_export[(short_name, bucket)].append(
-                CanonEntry(line_key, canon["stops"], False, agency_id, no_draw))
+                CanonEntry(line_key, canon["stops"], False, agency_id, no_draw, tg_id))
             if long_norm and long_norm != short_name:
                 _line_canonical_export[(long_norm, bucket)].append(
-                    CanonEntry(line_key, canon["stops"], False, agency_id, no_draw))
+                    CanonEntry(line_key, canon["stops"], False, agency_id, no_draw, tg_id))
 
     # Filtered union candidate: union of stops from variants that represent ≥10% of trips
-    # for this (line, geo_bucket). Prevents rare detour/construction trips from leaking
+    # for this (line, trip_group). Prevents rare detour/construction trips from leaking
     # their stops into the main stop list (e.g. Tram 9 Hasler at 1.8% of trips).
     #
     # When qualifying variants are genuinely divergent (different intermediate stops per
@@ -588,13 +671,13 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
     # of it.  If only one maximal exists, all others are short-turn/partial trips of the same
     # route (e.g. S44 Fribourg→Bern ⊆ full Fribourg→Biel) → safe to union.  If two or more
     # maximals exist, the routes genuinely fork → per-variant with direction filter.
-    for (line_key, geo_bucket), variant_counts in line_variant_counts.items():
+    for (line_key, tg_id), variant_counts in line_variant_counts.items():
         short_name, long_name, bucket = line_key
         qualifying = list(variant_counts.items())
         if not qualifying:
             continue
         long_norm = long_name.replace(" ", "")
-        agency_id = line_canonical_agency.get((line_key, geo_bucket), "")
+        agency_id = line_canonical_tg_agency.get((line_key, tg_id), "")
         no_draw = "low_frequency" if line_key in low_freq_keys else None
         unique_stop_sets = {v for v, _ in qualifying}
         union_sids: set = set()
@@ -608,21 +691,21 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies):
         is_truly_divergent = len(maximal_variants) > 1
         if not is_truly_divergent:
             _line_canonical_export[(short_name, bucket)].append(
-                CanonEntry(line_key, union_cand, False, agency_id, no_draw))
+                CanonEntry(line_key, union_cand, False, agency_id, no_draw, tg_id))
             if long_norm and long_norm != short_name:
                 _line_canonical_export[(long_norm, bucket)].append(
-                    CanonEntry(line_key, union_cand, False, agency_id, no_draw))
+                    CanonEntry(line_key, union_cand, False, agency_id, no_draw, tg_id))
         else:
             for v, _ in qualifying:
-                geo_key = (line_key, geo_bucket)
-                var_stops = line_variant_sequences.get((geo_key, v))
+                tg_key = (line_key, tg_id)
+                var_stops = line_variant_sequences.get((tg_key, v))
                 if not var_stops:
                     continue
                 _line_canonical_export[(short_name, bucket)].append(
-                    CanonEntry(line_key, var_stops, True, agency_id, no_draw))
+                    CanonEntry(line_key, var_stops, True, agency_id, no_draw, tg_id))
                 if long_norm and long_norm != short_name:
                     _line_canonical_export[(long_norm, bucket)].append(
-                        CanonEntry(line_key, var_stops, True, agency_id, no_draw))
+                        CanonEntry(line_key, var_stops, True, agency_id, no_draw, tg_id))
 
     # Compute speed from canonical trips
     line_speed: dict = {}
@@ -1021,8 +1104,8 @@ def _lookup_canonical_stops(
 
     Returns (best_coords, used_name_fallback, best_line_key_full).  best_coords is empty if
     no canonical was found or if a name-fallback canonical failed the geo sanity check
-    (Trigger 1).  best_line_key_full is (short_name, long_name, bucket, agency_id) of the
-    winning candidate (None if nothing was found).
+    (Trigger 1).  best_line_key_full is (short_name, long_name, bucket, agency_id, trip_group_id)
+    of the winning candidate (None if nothing was found).
     Used by both the main pipeline and the diagnostic script so they share identical logic.
     """
     osm_start = osm_pts[0]
@@ -1048,7 +1131,9 @@ def _lookup_canonical_stops(
     best_line_key_full: Optional[tuple] = None
     if canon:
         for entry in canon:
-            canon_line_key, candidate, dir_aware, agency_id = entry.line_key, entry.stops, entry.dir_aware, entry.agency_id
+            canon_line_key, candidate, dir_aware, agency_id, tg_id = (
+                entry.line_key, entry.stops, entry.dir_aware, entry.agency_id, entry.trip_group_id
+            )
             if dir_aware and osm_span_km >= 1.0 and candidate:
                 first_sid = candidate[0][0]
                 first_c = stop_coords.get(first_sid) or stop_coords.get(first_sid.split(":")[0])
@@ -1067,7 +1152,7 @@ def _lookup_canonical_stops(
             if len(ccoords) > len(best_coords):
                 best_coords = ccoords
                 best_candidate = candidate
-                best_line_key_full = (*canon_line_key, agency_id)
+                best_line_key_full = (*canon_line_key, agency_id, tg_id)
 
     # Trigger 1: if canonical came from a name fallback, sanity-check before trusting it.
     if best_coords and used_name_fallback:
@@ -1162,7 +1247,10 @@ def _stop_candidates(
     osm_end   = osm_pts[-1]
     for lk_ref in keys:
         for entry in _line_canonical_export.get((lk_ref, bucket), []):
-            line_key, cand, dir_aware, agency_id, no_draw = entry.line_key, entry.stops, entry.dir_aware, entry.agency_id, entry.no_draw
+            line_key, cand, dir_aware, agency_id, no_draw, tg_id = (
+                entry.line_key, entry.stops, entry.dir_aware,
+                entry.agency_id, entry.no_draw, entry.trip_group_id,
+            )
             if not cand:
                 continue
             if dir_aware and osm_span_km >= 1.0:
@@ -1194,7 +1282,7 @@ def _stop_candidates(
                 osm_pts, ccoords, GEO_SORT_ENDPOINT_KM, osm_stop_nodes, osm_segs
             )
             sn, ln, bkt = line_key
-            result.append((bbox_score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id), lk_ref, no_draw))
+            result.append((bbox_score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id, tg_id), lk_ref, no_draw))
     result.sort(key=lambda x: (-x[0], -x[1], -len(x[2])))
     return result
 
@@ -1234,7 +1322,7 @@ def _try_assign(
                     cand_full_density=full_density, skip_upper_density=skip_upper_density,
                 ):
                     continue
-            sn, ln, bkt, aid = line_key_full
+            sn, ln, bkt, aid, tg_id = line_key_full
             return {"stops": ccoords, "_line_key_full": line_key_full, "_bucket": bkt, "_no_draw": no_draw}
     return None
 
@@ -1315,7 +1403,9 @@ def _run_stop_loop(
                 if lk_bucket not in search_buckets:
                     continue
                 for entry in lk_cands:
-                    line_key, cand, agency_id = entry.line_key, entry.stops, entry.agency_id
+                    line_key, cand, agency_id, tg_id = (
+                        entry.line_key, entry.stops, entry.agency_id, entry.trip_group_id,
+                    )
                     if not cand:
                         continue
                     # Coarse pre-filter: skip if first in-service-area stop is outside expanded bbox.
@@ -1340,11 +1430,11 @@ def _run_stop_loop(
                     score = len(ccoords) / len(cand)
                     if score < 0.5:
                         continue
-                    raw.append((score, ccoords, cand, line_key, agency_id, lk_ref, entry.no_draw))
+                    raw.append((score, ccoords, cand, line_key, agency_id, tg_id, lk_ref, entry.no_draw))
             raw.sort(key=lambda x: (-x[0], -len(x[1])))
             # Phase 2: compute ep_0_5 and full_density only for the top-cap candidates.
             candidates = []
-            for score, ccoords, cand, line_key, agency_id, lk_ref, no_draw in raw[:cap]:
+            for score, ccoords, cand, line_key, agency_id, tg_id, lk_ref, no_draw in raw[:cap]:
                 fc = [c for sid, *_ in cand
                       if is_in_service_area(sid)
                       and (c := stop_coords.get(sid) or stop_coords.get(sid.split(":")[0]))]
@@ -1356,7 +1446,7 @@ def _run_stop_loop(
                 )
                 sn, ln, bkt = line_key
                 candidates.append(
-                    (score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id), lk_ref, no_draw)
+                    (score, ep_0_5, ccoords, full_density, (sn, ln, bkt, agency_id, tg_id), lk_ref, no_draw)
                 )
             candidates.sort(key=lambda x: (-x[0], -x[1], -len(x[2])))
 
@@ -1396,7 +1486,7 @@ def _run_stop_loop(
                 if len(term_stops) >= 2:
                     settled[osm_id] = {
                         "osm_ref": ref, "stops": term_stops,
-                        "_line_key_full": (ref, ref, bucket, ""), "_bucket": bucket, "_no_draw": None,
+                        "_line_key_full": (ref, ref, bucket, "", 0), "_bucket": bucket, "_no_draw": None,
                     }
                     continue
             excl_ids.append(osm_id)
@@ -1566,14 +1656,14 @@ def _group_reassign_stops(
 
     sub_bboxes_by_id = {oid: build_sub_bboxes(geom) for oid, geom in id_geom_pairs}
 
-    sn, ln, bkt, aid = line_key_full
+    sn, ln, bkt, aid, tg_id = line_key_full
     ln_norm = ln.replace(" ", "")
     target_line_key = (sn, ln, bkt)
     all_stops: list = []  # [(stop_id, lon, lat)]
     seen_sids: set = set()
     for ref_variant in [sn, ln_norm, sn.upper(), sn.lower()]:
         for entry in _line_canonical_export.get((ref_variant, bucket), []):
-            if entry.line_key != target_line_key:
+            if entry.line_key != target_line_key or entry.trip_group_id != tg_id:
                 continue
             for stop_id, _arr, _dep in entry.stops:
                 if stop_id in seen_sids:
@@ -1620,7 +1710,7 @@ def main():
 
     trip_frequencies = load_frequencies()
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries for {len(trip_frequencies):,} trips")
-    line_freq, line_speed, line_canonical = stream_stop_times(trip_lookup, stop_coords, svc_dates, trip_frequencies)
+    line_freq, line_speed, line_canonical = stream_stop_times(trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
     # TEMP: drop no_draw entries from the candidate pool before matching.
     # The flag-instead-of-remove design (keep low-freq lines in _line_canonical_export
@@ -1988,7 +2078,7 @@ def main():
         if pier_coords:
             line_stops_out[osm_id] = {
                 "osm_ref": ref, "stops": pier_coords,
-                "_bucket": "ferry", "_line_key_full": (ref, ref, "ferry", ""), "_no_draw": None,
+                "_bucket": "ferry", "_line_key_full": (ref, ref, "ferry", "", 0), "_no_draw": None,
             }
 
     # 4-loop stop assignment (ferries bypass — already in line_stops_out above)
@@ -2064,7 +2154,7 @@ def main():
     for lkf, osm_ids in by_lkf_grp.items():
         if len(osm_ids) < 2:
             continue
-        sn, ln, bkt, aid = lkf
+        sn, ln, bkt, aid, tg_id = lkf
         ln_norm = ln.replace(" ", "")
         if not any((v, bkt) in _line_canonical_export for v in [sn, ln_norm, sn.upper(), sn.lower()]):
             continue
@@ -2129,7 +2219,7 @@ def main():
         # Freq/speed lookup via _line_key_full
         gtfs = None
         if lkf:
-            sn, ln, lk_bkt, aid = lkf
+            sn, ln, lk_bkt, aid, _tg = lkf
             ln_norm = ln.replace(" ", "")
             gtfs = (gtfs_long_index.get((lk_bkt, ln_norm)) or gtfs_index.get((lk_bkt, sn)))
 

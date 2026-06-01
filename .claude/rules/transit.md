@@ -48,9 +48,18 @@ Key: `debug.disable_snap_gate` (bool, default `false`) — when `true`, disables
 ## OSM→GTFS Matching Architecture
 
 ### Key data structure
-`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `CanonEntry` namedtuples with fields `(line_key, stops, dir_aware, agency_id, no_draw)`. Multiple entries per key exist when: (a) the same line_key spans different geo_buckets (e.g. S6 Bern vs S6 Zürich), or (b) the same line_key+geo_bucket has multiple distinct stop sets (e.g. Maienfeld Bus 14 with 5 stops alongside Feldkirch Bus 14 with 30 stops).
+`_line_canonical_export` keyed by `(short_name_or_long_norm, bucket)` → list of `CanonEntry` namedtuples with fields `(line_key, stops, dir_aware, agency_id, no_draw, trip_group_id)`. Multiple entries per key exist when: (a) the same `line_key` spans multiple physical lines (e.g. SBB S3 Zürich vs SBB S3 Basel vs SBB S3 Luzern — same `line_key=("S3","S 3","train")`, different `trip_group_id`), or (b) the same `(line_key, trip_group_id)` has multiple distinct stop sets emitted as direction-aware variants (`dir_aware=True`).
 
 `no_draw` is `None` for drawable lines; `"low_frequency"` for lines below `MIN_FREQ_SCORE` (0.075). Mountain lines are always `no_draw=None`. The flag is set at GTFS build time and propagated through the 4-loop — it does not affect which candidate the loop settles on. The draw/no-draw decision is applied only at the post-4-loop draw gate.
+
+### GTFS line grouping (trip_group_id)
+`trip_group_id` is assigned at GTFS build time inside `stream_stop_times()`. It identifies one physical line within a `(long_name_norm or short_name, agency_id, bucket)` partition. The partition is replaced from the old 0.5° geo-bucket grid; the geo grid is gone.
+
+Algorithm: per partition, deduplicate trips by their **merged stop frozenset** (parent_station from `stops.txt` when non-empty, otherwise the part of `stop_id` before the first colon — collapses platforms). Run union-find over distinct stop patterns: two patterns are connected iff they share ≥2 merged stop identities. Each connected component gets a sequential `trip_group_id` (0, 1, 2, …) unique within the partition.
+
+This separates regional S-Bahn networks (S3 ZH/BS/LU stay apart because they share zero stops), merges short-turn + full-route variants (shared trunk), and groups Y-shapes through the shared trunk. Ersatzverkehr-style numeric labels like SBB `EV1` correctly split into many groups — one per physical replacement route.
+
+`_line_key_full` is now `(short_name, long_name, bucket, agency_id, trip_group_id)` — unique per physical line by construction. Dedup and group-reassignment group by this tuple; the cross-network dedup bug and nationwide stop pool of the geo-bucket era are eliminated by construction.
 
 ### Low-service flagging on `_line_canonical_export`
 Lines below `MIN_FREQ_SCORE` (0.075) are **kept** in `_line_canonical_export` but flagged `no_draw="low_frequency"` on their `CanonEntry`. This replaces the old deletion that prevented these lines from being matched in the 4-loop.
@@ -82,9 +91,9 @@ Stop assignment runs as four global batch passes. All routes go through Loop 1 b
 **Problem it solved:** A GTFS line often has multiple trip variants. When variants are subsets of each other, all stops collapse into a single union candidate (`dir_aware=False`). Multiple OSM relations for the same line (different directions, short-turns, branches) all competed against this union, with the winning candidate's stops filtered by the OSM relation's sub-bbox — a geographic proxy that cannot distinguish "stop belongs to this OSM variant" from "stop happens to be geographically close." Classic symptom: Glattbrugg (S3-Flughafen branch stop) leaking into S3-Hardbrücke with a 4.5 km connector.
 
 **Implementation — `_group_reassign_stops()` (runs after dedup, before JSON write):**
-1. Group all surviving `line_stops_out` entries by `(_line_key_full, bucket)`.
+1. Group all surviving `line_stops_out` entries by `(_line_key_full, bucket)`. Because `_line_key_full` includes `trip_group_id`, each group covers one physical line by construction.
 2. Skip groups with fewer than 2 OSM relations.
-3. For each group, pool all canonical GTFS stops from `_line_canonical_export` filtering by `entry.line_key == target_line_key`.
+3. For each group, pool all canonical GTFS stops from `_line_canonical_export` filtering by `entry.line_key == target_line_key AND entry.trip_group_id == tg_id`. The `trip_group_id` filter scopes the pool to the one physical line in this group; without it, S3 stops from other regional networks would leak in.
 4. For each stop, filter to relations whose sub-bboxes contain it (coarse geographic gate, margin=0.02°).
 5. Compute **full vertex scan** distance (no early exit) from the stop to each nearby relation's polyline.
 6. Assign the stop to all relations within `max(d_min + 0.05 km, d_min * 1.1)` of the closest relation — shared stations (both routes within metres) appear on all; branch-specific stops (one route much closer) are pinned to the right branch.
@@ -109,11 +118,11 @@ After all OSM→GTFS matching is complete, `05_score_and_match.py` runs a dedup 
 
 **Rule:** Within each `_line_key_full` group, if any OSM entry has a **direct ref** match (OSM `ref` matches `short_name` or `long_name` after stripping spaces and lowercasing), all **fallback-matched** entries in the same group are removed. This prevents renamed/legacy OSM routes from appearing alongside their correctly-ref'd successors.
 
-**`_line_key_full` grouping key:** Each `line_stops_out` entry stores `_line_key_full = (short_name, long_name, bucket, agency_id)` — the full identity of the matched GTFS line including the operator. Dedup groups by `_line_key_full`. Two lines that share a name string but belong to different operators (e.g. SBB R2 Lausanne–Bex and RhB R2 Landquart–Davos) get different `agency_id` values and are never in the same group.
+**`_line_key_full` grouping key:** Each `line_stops_out` entry stores `_line_key_full = (short_name, long_name, bucket, agency_id, trip_group_id)` — uniquely identifies one physical line by construction. Dedup groups by `_line_key_full`. Two lines that share a name string but belong to different operators (e.g. SBB R2 Lausanne–Bex and RhB R2 Landquart–Davos) get different `agency_id` values and are never in the same group; two regional S3s under the same agency get different `trip_group_id` values and are also never in the same group.
 
 **`_is_direct_match(osm_ref, short_name, long_name)`:** Replaces the old `gtfs_ref`/`_refs_match` mechanism. Normalises all three inputs (strip spaces, lowercase). A direct match is when `norm(osm_ref)` equals `norm(short_name)` or `norm(long_name)`. Exception: if the matching name is a `GENERIC_GTFS_PREFIXES` term, it is not a direct match (avoids "S" or "R" being treated as direct).
 
-**`agency_id` provenance:** Comes from GTFS `routes.txt` via `load_routes()`. Propagated through `load_trips()` → `stream_stop_times()` into `CanonEntry.agency_id`. The first-seen agency_id for each `(line_key, geo_bucket)` is stored. `_try_assign()` builds `_line_key_full` from the winning candidate's `(sn, ln, bkt, agency_id)` tuple.
+**`agency_id` provenance:** Comes from GTFS `routes.txt` via `load_routes()`. Propagated through `load_trips()` → `stream_stop_times()` into `CanonEntry.agency_id`. The first-seen agency_id for each `(line_key, trip_group_id)` is stored. `_try_assign()` builds `_line_key_full` from the winning candidate's `(sn, ln, bkt, agency_id, trip_group_id)` tuple.
 
 Implementation: `_is_direct_match()` helper + `dedup_removed` set. Each entry stores `osm_ref` alongside `_line_key_full`. `gtfs_ref` is no longer stored or propagated. Console output: `Dedup-removed: N lines superseded by direct-ref match`.
 
@@ -227,6 +236,16 @@ Replaced the old "main loop" (which prematurely dropped routes via inferior GTFS
 - Post-4-loop draw gate: filters `no_draw` entries, looks up freq/speed from `gtfs_index` using `_line_key_full`, computes visual properties, writes `transit_lines.geojson`.
 - `find_best_gtfs_candidate` removed (was used only by the old main loop for freq/speed).
 - `_refs_match`/`gtfs_ref` replaced by `_is_direct_match(osm_ref, short_name, long_name)`.
+
+#### GTFS line grouping — implemented
+
+Replaced the 0.5° geo-bucket partition in `_line_canonical_export` with a trip-graph connectivity merge. See `.claude/concepts/implemented/gtfs-line-grouping.md` for requirements. Key changes:
+
+- `CanonEntry` gains a `trip_group_id` field; `GEO_BUCKET_DEG` removed.
+- Trips are partitioned by `(long_name_norm or short_name, agency_id, bucket)`; per partition, connected components are computed over distinct merged-stop patterns (≥2 shared merged stops = connected). Merged identity = `parent_station` from `stops.txt`, fallback to base UIC.
+- `_line_key_full` is extended to `(short_name, long_name, bucket, agency_id, trip_group_id)`. Now unique per physical line by construction — dedup and `_group_reassign_stops` no longer cross-contaminate between regional networks under the same agency (e.g. SBB S3 in Zürich vs Basel vs Luzern).
+- `_group_reassign_stops` additionally filters canonical pool entries by `entry.trip_group_id == tg_id`.
+- `diagnose_transit_line.py` updated for the new `CanonEntry` shape and 5-tuple `_line_key_full`.
 
 ---
 
