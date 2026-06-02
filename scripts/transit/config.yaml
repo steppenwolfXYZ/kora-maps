@@ -7,3 +7,108 @@ debug:
   # Set true to include stops regardless of snap distance (shows all connectors).
   # Requires ./scripts/rebuild_transit.sh --skip-osm to take effect.
   disable_snap_gate: true
+
+# ── OSM bbox extract for pfaedle ─────────────────────────────────────────────
+# Switzerland bounding box with a small buffer. Pfaedle never routes outside
+# this area; trips with any stop outside it are dropped at GTFS preprocessing.
+osm_bbox:
+  # min_lon, min_lat, max_lon, max_lat (WGS84)
+  # CH proper: ~5.96, 45.82, 10.49, 47.81
+  # + ~2 km buffer at Swiss latitudes (~0.018° lat, ~0.026° lon)
+  min_lon: 5.93
+  min_lat: 45.80
+  max_lon: 10.52
+  max_lat: 47.83
+
+# ── GTFS preprocessing: agency denylists ─────────────────────────────────────
+# Both lists key on substrings of agency_name (case-insensitive) as found in
+# data/gtfs/agency.txt. Matching is "agency_name contains any of these tokens".
+
+# Long-distance / international coach operators that should not be drawn at all.
+# Their trips follow motorways and would visually highlight the road network.
+# Ported from the OSM-tag-based EXCLUDED_OPERATORS set used by the old matcher.
+excluded_agencies:
+  - flixbus
+  - flixcoach
+  - eurolines
+  - deinbus
+  - megabus
+  - blablacar
+  - ouibus
+  - ic bus
+  - alsa
+
+# Rack/cog railway operators whose GTFS route_type=2 (rail) entries should be
+# rendered as mountain mode (yellow, no freq variance) instead of train.
+# Ported from the OSM-tag-based MOUNTAIN_RAIL_OPERATORS set.
+mountain_rack_agencies:
+  - wengernalpbahn
+  - jungfraubahn
+  - brienz rothorn
+  - berner oberland-bahnen
+  - gornergrat
+  - pilatus
+  - rigi bahnen
+  - monte generoso
+  - dampfbahn furka
+
+# ── Frequency sampling ───────────────────────────────────────────────────────
+# Sample dates the low-frequency filter measures trip counts on, generated
+# once by scripts/transit/generate_sample_dates.py (seed + blackouts live in
+# that script, not here — they're only consulted at regeneration time).
+# Re-run the generator when the feed period changes.
+freq_sampling:
+  weekday_dates:
+    - "20251215"
+    - "20251216"
+    - "20260122"
+    - "20260128"
+    - "20260202"
+    - "20260227"
+    - "20260325"
+    - "20260331"
+    - "20260424"
+    - "20260430"
+    - "20260504"
+    - "20260505"
+    - "20260604"
+    - "20260617"
+    - "20260727"
+    - "20260731"
+    - "20260811"
+    - "20260812"
+    - "20260904"
+    - "20260917"
+    - "20261006"
+    - "20261019"
+    - "20261111"
+    - "20261112"
+    - "20261204"
+    - "20261207"
+  weekend_dates:
+    - "20251220"
+    - "20260111"
+    - "20260207"
+    - "20260329"
+    - "20260418"
+    - "20260517"
+    - "20260606"
+    - "20260705"
+    - "20260829"
+    - "20260906"
+    - "20261003"
+    - "20261122"
+    - "20261212"
+
+# ── Pfaedle invocation ───────────────────────────────────────────────────────
+pfaedle:
+  # Docker image tag built from scripts/transit/pfaedle/Dockerfile.
+  image: "carfree-pfaedle:latest"
+  # Modes pfaedle should route. funicular/gondola/aerial are not routable on
+  # the OSM network and bypass pfaedle (straight-line geometry).
+  modes:
+    - tram
+    - subway
+    - rail
+    - bus
+    - ferry
