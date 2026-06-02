@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Step 04b — Preprocess the GTFS feed for pfaedle.
+Step 04 — Preprocess the GTFS feed for pfaedle.
 
 Drops trips that pfaedle should not route:
   • Trips belonging to excluded agencies (long-distance coaches).

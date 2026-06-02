@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """
 Download OSM PBFs from Geofabrik.
-Outputs:
-  data/osm/switzerland-latest.osm.pbf  (~350 MB)
-  data/osm/liechtenstein-latest.osm.pbf  (~1 MB)
-Updated daily by Geofabrik.
+
+Switzerland + Liechtenstein + every neighbouring country. The Swiss bbox in
+config.yaml extends past Swiss soil (Domodossola, Konstanz, Annemasse,
+Lörrach, Bregenz, ...) and step 03 needs OSM data for those areas to give pfaedle
+a complete routing graph inside the bbox. Country extracts at Geofabrik are
+country-clipped, so CH+FL alone leave the foreign sliver of the bbox empty.
+
+Outputs to data/osm/:
+  switzerland-latest.osm.pbf     ~450 MB
+  liechtenstein-latest.osm.pbf   ~1 MB
+  germany-latest.osm.pbf         ~4.5 GB
+  france-latest.osm.pbf          ~4.5 GB
+  italy-latest.osm.pbf           ~2.5 GB
+  austria-latest.osm.pbf         ~0.8 GB
+
+Geofabrik updates these daily. Total one-off download ≈ 12 GB; step 03 cuts them
+to ~400 MB before pfaedle ever sees the data.
 """
 
 import urllib.request
@@ -16,6 +29,14 @@ SOURCES = [
      "switzerland-latest.osm.pbf"),
     ("https://download.geofabrik.de/europe/liechtenstein-latest.osm.pbf",
      "liechtenstein-latest.osm.pbf"),
+    ("https://download.geofabrik.de/europe/germany-latest.osm.pbf",
+     "germany-latest.osm.pbf"),
+    ("https://download.geofabrik.de/europe/france-latest.osm.pbf",
+     "france-latest.osm.pbf"),
+    ("https://download.geofabrik.de/europe/italy-latest.osm.pbf",
+     "italy-latest.osm.pbf"),
+    ("https://download.geofabrik.de/europe/austria-latest.osm.pbf",
+     "austria-latest.osm.pbf"),
 ]
 
 ROOT = Path(__file__).resolve().parents[2]

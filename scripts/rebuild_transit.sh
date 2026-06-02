@@ -3,81 +3,105 @@
 # Run from the project root: ./scripts/rebuild_transit.sh
 #
 # Steps:
-#   04a  Cut Switzerland + buffer from the Geofabrik PBFs           (~30 sec)
-#   04b  Filter GTFS (excluded agencies, foreign-terminus trips)    (~2 min)
-#   04c  Run pfaedle (Docker) — routes trips over OSM               (~5–15 min)
-#   05   Emit transit_lines.geojson from pfaedle shapes             (~3 min)
-#   07   Build stop dots & pills                                    (~10 sec)
-#   gen  Generate MapLibre style JSON                               (~2 sec)
-#   08   Build all tl_*.pmtiles                                     (~1 min)
+#   1  Download GTFS                                      (~30 sec)
+#   2  Download OSM (CH + LI + DE + FR + IT + AT)         (~12 GB; one-off)
+#   3  Cut bbox slice from country PBFs                   (~2 min)
+#   4  Preprocess GTFS (excluded agencies, foreign-terminus)  (~2 min)
+#   5  Run pfaedle (Docker)                               (~5–15 min)
+#   6  Emit transit_lines.geojson from pfaedle shapes     (~3 min)
+#   7  Build stop dots & pills + regenerate style.json    (~10 sec)
+#   8  Build all tl_*.pmtiles                             (~1 min)
 #
-# Skip the heavy OSM bbox extract (step 04a) when the bbox PBF is fresh:
-#   ./scripts/rebuild_transit.sh --skip-osm
+# Use --start N to start from step N (default 3). Steps before N are skipped
+# and their existing outputs reused. Steps cannot be skipped individually —
+# each step's output is the next step's input.
 #
-# Skip pfaedle (when shapes.txt is up-to-date):
-#   ./scripts/rebuild_transit.sh --skip-pfaedle
-#
-# Skip OSM + pfaedle + GTFS preprocessing (iterate only on emission/render):
-#   ./scripts/rebuild_transit.sh --skip-routing
+# Examples:
+#   ./scripts/rebuild_transit.sh                  # default: --start 3
+#   ./scripts/rebuild_transit.sh --start 4        # bbox cut up-to-date, re-route only
+#   ./scripts/rebuild_transit.sh --start 6        # iterate on emission + style + tiles
+#   ./scripts/rebuild_transit.sh --start 2        # refresh OSM and everything after
+#   ./scripts/rebuild_transit.sh --start 8        # rebuild pmtiles only
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SKIP_OSM=0
-SKIP_GTFS=0
-SKIP_PFAEDLE=0
-for arg in "$@"; do
-  case "$arg" in
-    --skip-osm)     SKIP_OSM=1 ;;
-    --skip-gtfs)    SKIP_GTFS=1 ;;
-    --skip-pfaedle) SKIP_PFAEDLE=1 ;;
-    --skip-routing) SKIP_OSM=1; SKIP_GTFS=1; SKIP_PFAEDLE=1 ;;
+START=3
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --start)     shift; START="$1" ;;
+    --start=*)   START="${1#--start=}" ;;
+    -h|--help)
+      sed -n '2,26p' "$0"; exit 0 ;;
+    *)
+      echo "unknown arg: $1" >&2
+      echo "usage: $0 [--start N]   (1 ≤ N ≤ 8, default 3)" >&2
+      exit 2 ;;
   esac
+  shift
 done
+
+if ! [[ "$START" =~ ^[1-8]$ ]]; then
+  echo "--start must be between 1 and 8 (got '$START')" >&2
+  exit 2
+fi
 
 echo "══════════════════════════════════════════"
 echo "  Transit Rebuild Pipeline (pfaedle)"
+echo "  Starting at step $START"
 echo "══════════════════════════════════════════"
 
-if [[ $SKIP_OSM -eq 0 ]]; then
+if [[ $START -le 1 ]]; then
   echo ""
-  echo "▶ Step 04a — Cut Switzerland+buffer OSM PBF"
-  time python3 scripts/transit/04a_bbox_osm.py
-else
-  echo "(skipping 04a — using existing data/osm/ch_pfaedle.osm.pbf)"
+  echo "▶ Step 1 — Download GTFS"
+  time python3 scripts/transit/01_download_gtfs.py
 fi
 
-if [[ $SKIP_GTFS -eq 0 ]]; then
+if [[ $START -le 2 ]]; then
   echo ""
-  echo "▶ Step 04b — Preprocess GTFS (agency + foreign-terminus filters)"
-  time python3 scripts/transit/04b_preprocess_gtfs.py
-else
-  echo "(skipping 04b — using existing data/gtfs_filtered/)"
+  echo "▶ Step 2 — Download OSM (CH + LI + DE + FR + IT + AT)"
+  time python3 scripts/transit/02_download_osm.py
 fi
 
-if [[ $SKIP_PFAEDLE -eq 0 ]]; then
+if [[ $START -le 3 ]]; then
   echo ""
-  echo "▶ Step 04c — Run pfaedle"
-  time python3 scripts/transit/04c_run_pfaedle.py
-else
-  echo "(skipping 04c — using existing data/gtfs_routed/)"
+  echo "▶ Step 3 — Cut bbox slice from country PBFs"
+  time python3 scripts/transit/03_bbox_osm.py
 fi
 
-echo ""
-echo "▶ Step 05 — Emit transit_lines.geojson"
-time python3 scripts/transit/05_score_and_match.py
+if [[ $START -le 4 ]]; then
+  echo ""
+  echo "▶ Step 4 — Preprocess GTFS"
+  time python3 scripts/transit/04_preprocess_gtfs.py
+fi
 
-echo ""
-echo "▶ Step 07 — Build stop dots & pills"
-time python3 scripts/transit/07_extract_stops.py
+if [[ $START -le 5 ]]; then
+  echo ""
+  echo "▶ Step 5 — Run pfaedle"
+  time python3 scripts/transit/05_run_pfaedle.py
+fi
 
-echo ""
-echo "▶ Generate style.json"
-time python3 scripts/generate_style.py
+if [[ $START -le 6 ]]; then
+  echo ""
+  echo "▶ Step 6 — Emit transit_lines.geojson"
+  time python3 scripts/transit/06_score_and_match.py
+fi
 
-echo ""
-echo "▶ Step 08 — Build pmtiles"
-time bash scripts/transit/08_build_pmtiles.sh
+if [[ $START -le 7 ]]; then
+  echo ""
+  echo "▶ Step 7 — Build stop dots & pills"
+  time python3 scripts/transit/07_extract_stops.py
+
+  echo ""
+  echo "▶ Generate style.json"
+  time python3 scripts/generate_style.py
+fi
+
+if [[ $START -le 8 ]]; then
+  echo ""
+  echo "▶ Step 8 — Build pmtiles"
+  time bash scripts/transit/08_build_pmtiles.sh
+fi
 
 echo ""
 echo "══════════════════════════════════════════"

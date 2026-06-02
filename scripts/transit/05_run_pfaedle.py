@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Step 04c — Route the filtered GTFS feed through pfaedle.
+Step 05 — Route the filtered GTFS feed through pfaedle.
 
 Inputs:
-  data/gtfs_filtered/  — written by 04b
-  data/osm/ch_pfaedle.osm.pbf — written by 04a
+  data/gtfs_filtered/  — written by 04
+  data/osm/ch_pfaedle.osm.pbf — written by 03
 
 Output:
   data/gtfs_routed/  — same GTFS schema plus shapes.txt and shape_dist_traveled
@@ -37,9 +37,9 @@ def relpath(p: Path) -> str:
 
 def main() -> None:
     if not GTFS_IN.exists():
-        sys.exit(f"missing {GTFS_IN} — run 04b_preprocess_gtfs.py first")
+        sys.exit(f"missing {GTFS_IN} — run 04_preprocess_gtfs.py first")
     if not OSM_PBF.exists():
-        sys.exit(f"missing {OSM_PBF} — run 04a_bbox_osm.py first")
+        sys.exit(f"missing {OSM_PBF} — run 03_bbox_osm.py first")
 
     cfg = load_cfg().get("pfaedle", {})
     image = cfg.get("image", "carfree-pfaedle:latest")

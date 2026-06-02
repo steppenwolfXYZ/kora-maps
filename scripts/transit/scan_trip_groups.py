@@ -33,8 +33,8 @@ ROOT = HERE.parent.parent
 GTFS = ROOT / "data" / "gtfs"
 OUT  = ROOT / "data" / "transit" / "trip_group_scan.json"
 
-# Reuse loaders from 05_score_and_match.py
-spec = importlib.util.spec_from_file_location("s05", HERE / "05_score_and_match.py")
+# Reuse loaders from 06_score_and_match.py
+spec = importlib.util.spec_from_file_location("s06", HERE / "06_score_and_match.py")
 _m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(_m)
 

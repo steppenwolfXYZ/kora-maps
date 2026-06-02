@@ -1,5 +1,7 @@
 # Representative Trip by Platform Popularity
 
+> **Status:** implemented, not yet verified. Verify once prm-platform-positions is implemented.
+
 ## Problem
 
 Each drawable line (one feature per merged-stop variant within a trip group) is currently rendered from a single representative trip. That representative is chosen as the trip with the most active service days, ignoring which platforms it uses. As a result, lines are frequently drawn at unusual or atypical platforms — a Sunday-only or extended-service trip can outrank the everyday pattern, and several lines through the same station can collapse onto the same platform even when their normal trips depart elsewhere.

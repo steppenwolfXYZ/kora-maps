@@ -13,8 +13,10 @@ Pipeline:
   5. For each (line_key, agency_id, trip_group_id), group trips by merged
      stop set and emit one feature per kept variant. Mode comes from the
      GTFS route_type with an agency-based mountain rack override.
-  6. Mountain bucket and ferry bucket without a pfaedle-usable shape fall
-     back to straight-line geometry between GTFS stops.
+  6. Every variant goes through pfaedle. When pfaedle produces no shape,
+     aerial route_types (5 = cable car, 6 = gondola) fall back to a straight
+     line between consecutive GTFS stops; every other mode is logged as
+     `pfaedle_unrouted` and not emitted.
 
 Outputs:
   data/transit/transit_lines.geojson    one feature per distinct shape
@@ -26,7 +28,7 @@ Outputs:
 Mode categories (unchanged):
   train, tram, metro, bus, regional_bus, ferry, mountain
 
-Long-distance coaches are dropped upstream in 04b (agency denylist).
+Long-distance coaches are dropped upstream in step 04 (agency denylist).
 """
 
 import csv
@@ -117,9 +119,23 @@ BEST_HEADWAY = {
     "mountain":     60,
 }
 
-# Trip-length threshold for bus → regional_bus reclassification (km).
-# Applied to the canonical trip's GTFS stop coordinates.
-REGIONAL_BUS_MIN_LENGTH = 12.0
+# Bus mode classification — see .claude/concepts/bus-mode-classification.md.
+# Agencies that follow the "1-digit ref = city, 2-digit ref = regional"
+# numbering convention. 1-digit refs on these operators are still city buses.
+TWO_DIGIT_REGIONAL_AGENCIES = {
+    "000146",  # STI Bus AG
+    "000605",  # STI Berg
+    "000859",  # STI-gwb
+    "000766",  # BuS/cb (Bus und Service AG, Chur)
+    "000236",  # BCD (Chur-Dreibündenstein)
+    "000801",  # PAG (PostAuto AG)
+    "007088",  # THP (Trägerverein Historische Postautolinie)
+}
+# 000765 (PAG/BCS, PostAuto AG Bus Commune Sion) is deliberately excluded:
+# PostAuto-operated city service whose 2-digit refs are city lines.
+
+# Length fallback for pure-letter refs (km).
+LETTER_REF_REGIONAL_MIN_LENGTH = 10.0
 
 
 # ── Config loading ───────────────────────────────────────────────────────────
@@ -144,33 +160,29 @@ def gtfs_type_to_bucket(route_type: str) -> str:
     return "bus"
 
 
-def mountain_rack_agency_ids(cfg: dict, agency_names: dict) -> set:
-    """Resolve config mountain_rack_agencies tokens (case-insensitive substrings of
-    agency_name) to the set of agency_ids in the loaded feed.
-    """
-    tokens = [t.lower() for t in cfg.get("mountain_rack_agencies", [])]
-    out = set()
-    for aid, name in agency_names.items():
-        n = name.lower()
-        if any(tok in n for tok in tokens):
-            out.add(aid)
-    return out
-
-
 def gtfs_to_mode(bucket: str, agency_id: str,
-                 mountain_rack_aids: set,
+                 short_name: str = "",
                  length_km: Optional[float] = None) -> str:
     """Map a GTFS bucket + agency to one of the rendering modes.
 
-    - bucket == "train" with agency in mountain_rack_aids → mountain
-      (Jungfraubahn, WAB, BVB, etc.: route_type=2 but visually mountain).
-    - bucket == "bus" → bus / regional_bus by trip length.
-    - Other buckets pass through.
+    - bucket == "bus" → bus / regional_bus by ref digit count, agency,
+      and a length fallback for pure-letter refs.
+      See .claude/concepts/bus-mode-classification.md for the full rule.
+    - Other buckets pass through. Mountain classification comes solely from
+      GTFS route_type (5/6/7) at the bucket layer.
     """
-    if bucket == "train" and agency_id in mountain_rack_aids:
-        return "mountain"
     if bucket == "bus":
-        if length_km is not None and length_km >= REGIONAL_BUS_MIN_LENGTH:
+        ref = short_name.strip()
+        if ref.upper() == "EV":
+            return "regional_bus"
+        digits = "".join(c for c in ref if c.isdigit())
+        n = len(digits)
+        if n >= 3:
+            return "regional_bus"
+        if n == 2 and agency_id in TWO_DIGIT_REGIONAL_AGENCIES:
+            return "regional_bus"
+        if n == 0 and length_km is not None \
+                and length_km >= LETTER_REF_REGIONAL_MIN_LENGTH:
             return "regional_bus"
         return "bus"
     return bucket
@@ -483,7 +495,7 @@ def load_shapes() -> dict:
     """
     path = GTFS / "shapes.txt"
     if not path.exists():
-        sys.exit(f"{path} missing — run 04c_run_pfaedle.py first")
+        sys.exit(f"{path} missing — run 05_run_pfaedle.py first")
 
     buf: dict = defaultdict(list)
     with open(path, encoding="utf-8-sig") as f:
@@ -913,17 +925,25 @@ def _n_pts(feat) -> int:
     return len(coords)
 
 
+_AERIAL_ROUTE_TYPES = {"5", "6"}
+
+
 def deduplicate_mountain(features: list) -> list:
-    """Drop overlapping mountain features sharing the same ref. Best (most
-    geometry vertices) wins.
+    """Drop overlapping aerial features (cable cars, gondolas) sharing the same
+    ref. Best (most geometry vertices) wins.
+
+    Restricted to GTFS route_type 5/6 — the historic problem this solved was
+    multiple OSM route relations for the same physical haul cable. Funiculars
+    (route_type 7) and rack rail are not collapsed because there a shared
+    bbox usually means two genuinely different branches off the same stem.
     """
-    mountain_idx = [(i, f) for i, f in enumerate(features)
-                    if f["properties"]["mode"] == "mountain"]
-    keep = set(i for i, f in enumerate(features)
-               if f["properties"]["mode"] != "mountain")
+    aerial_idx = [(i, f) for i, f in enumerate(features)
+                  if f["properties"].get("route_type") in _AERIAL_ROUTE_TYPES]
+    aerial_set = {i for i, _ in aerial_idx}
+    keep = set(i for i in range(len(features)) if i not in aerial_set)
 
     by_ref: dict = defaultdict(list)
-    for i, f in mountain_idx:
+    for i, f in aerial_idx:
         ref = f["properties"]["ref"]
         by_ref[ref].append((i, f, _feat_bbox(f), _n_pts(f)))
 
@@ -946,15 +966,18 @@ def deduplicate_mountain(features: list) -> list:
                 keep.add(i)
                 kept_bboxes.append(b)
     if n_dropped:
-        print(f"  Mountain dedup: removed {n_dropped} duplicate features")
+        print(f"  Aerial dedup: removed {n_dropped} duplicate features")
     return [f for i, f in enumerate(features) if i in keep]
 
 
 # ── Pfaedle shape grouping ───────────────────────────────────────────────────
 
-# Mountain bucket and ferry bucket where pfaedle cannot route — pipeline falls
-# back to straight-line geometry between GTFS stops.
-_NO_PFAEDLE_BUCKETS = {"mountain", "ferry"}
+# Aerial GTFS route_types (5 = cable car, 6 = gondola / aerial lift) where
+# OSM coverage is patchy enough that a missing pfaedle shape is treated as a
+# straight-line fallback rather than a hard `pfaedle_unrouted` failure. All
+# other modes (incl. funicular = 7) drop the feature when pfaedle has no
+# shape, same as rail / bus today.
+_STRAIGHT_LINE_FALLBACK_ROUTE_TYPES = _AERIAL_ROUTE_TYPES
 
 
 def stops_to_polyline(stop_ids: list, stop_coords: dict) -> list:
@@ -1019,26 +1042,6 @@ def main():
     for line_key in line_canonical:
         _ = line_freq[line_key]
 
-    # ── Active-days per line (concept: active-days-filter) ───────────────────
-    # Union of active calendar dates across every trip on the line, taken over
-    # the full feed validity period (not just the freq-sampling window). Used
-    # to drop construction-replacement services that have year-round frequency
-    # on the days they do run but only exist for a few weeks per year.
-    line_service_ids: dict = defaultdict(set)
-    for tid, (lk, _tg_id, _aid) in _trip_group_export.items():
-        t = trip_lookup.get(tid)
-        if t:
-            line_service_ids[lk].add(t["service_id"])
-    line_active_days: dict = {}
-    for lk, sids in line_service_ids.items():
-        union: set = set()
-        for sid in sids:
-            union |= svc_dates_full.get(sid, set())
-        line_active_days[lk] = len(union)
-    # svc_dates_full is the heaviest object in this script after stop_times;
-    # release it once line_active_days is computed.
-    svc_dates_full.clear()
-
     gtfs_index, gtfs_long_index = build_gtfs_index(line_freq, line_speed)
     print(f"  {len(gtfs_index):,} GTFS short-name entries, "
           f"{len(gtfs_long_index):,} long-name entries")
@@ -1046,11 +1049,6 @@ def main():
     print("  Building corridor stop-pair frequency table...")
     pair_freq = build_stop_pair_freq(line_freq, line_canonical)
     print(f"  {len(pair_freq):,} stop pairs indexed")
-
-    # Resolve mountain-rack agency_ids.
-    mountain_rack_aids = mountain_rack_agency_ids(cfg, agency_names)
-    print(f"  {len(mountain_rack_aids)} mountain-rack agencies "
-          f"(treated as mountain mode despite route_type=2)")
 
     print("\nLoading pfaedle shapes...")
     shapes = load_shapes()
@@ -1077,13 +1075,65 @@ def main():
         # in-stream rare-variant filter already uses.
         variant_counts[tg_key][merged_set] += _trip_weight_export.get(tid, 1)
 
-    # Snapshot for the comprehensive diagnostic before the rare-group and
-    # rare-variant filters mutate `groups`. We deep-copy variant→trips so we
-    # still know who was in each dropped variant.
+    # Snapshot for the comprehensive diagnostic before the active-days,
+    # rare-group, and rare-variant filters mutate `groups`. We deep-copy
+    # variant→trips so we still know who was in each dropped variant.
     diag_original = {
         tg_key: {ms: list(tids) for ms, tids in vmap.items()}
         for tg_key, vmap in groups.items()
     }
+
+    # ── Active-days per variant (concept: active-days-filter) ────────────────
+    # For each emitted-feature unit (line_key, agency_id, trip_group_id,
+    # merged_stop_set), compute the union of active calendar dates across
+    # every trip in that variant over the full feed validity period. Variants
+    # below `min_active_days` are dropped before supergroup/rare-variant
+    # filters run, so their weighted trips don't pollute share calculations.
+    # Catches construction-replacement services even when several distinct
+    # constructions share the same ref or the same trip group.
+    # Mountain and ferry buckets are exempt (seasonal services).
+    variant_service_ids: dict = defaultdict(set)
+    for tid, (lk, tg_id_v, aid) in _trip_group_export.items():
+        merged_set = _trip_merged_export.get(tid)
+        if merged_set is None:
+            continue
+        t = trip_lookup.get(tid)
+        if t:
+            variant_service_ids[(lk, aid, tg_id_v, merged_set)].add(t["service_id"])
+    variant_active_days: dict = {}
+    for vkey, sids in variant_service_ids.items():
+        u: set = set()
+        for sid in sids:
+            u |= svc_dates_full.get(sid, set())
+        variant_active_days[vkey] = len(u)
+    # svc_dates_full is the heaviest object after stop_times; release.
+    svc_dates_full.clear()
+    variant_service_ids.clear()
+
+    short_active_variants: dict = defaultdict(set)  # tg_key → {merged_set,...}
+    tg_keys_all_short_active: set = set()
+    for tg_key in list(groups.keys()):
+        line_key, aid, tg_id_v = tg_key
+        bucket = line_key[2]
+        if bucket in {"mountain", "ferry"}:
+            continue
+        vmap = groups[tg_key]
+        to_drop = [ms for ms in vmap
+                   if variant_active_days.get((line_key, aid, tg_id_v, ms), 0)
+                      < min_active_days]
+        if not to_drop:
+            continue
+        short_active_variants[tg_key].update(to_drop)
+        for ms in to_drop:
+            del vmap[ms]
+            variant_counts[tg_key].pop(ms, None)
+        if not vmap:
+            tg_keys_all_short_active.add(tg_key)
+            del groups[tg_key]
+    n_dropped_var = sum(len(s) for s in short_active_variants.values())
+    print(f"  {n_dropped_var:,} variants dropped by min_active_days={min_active_days} "
+          f"(across {len(short_active_variants)} trip groups; "
+          f"{len(tg_keys_all_short_active)} groups fully dropped)")
 
     # ── Supergroup formation + rare-group filter ─────────────────────────────
     # A supergroup is a transient classification used only for the rare-group
@@ -1187,8 +1237,16 @@ def main():
     for tg_key in rare_group_dropped:
         groups.pop(tg_key, None)
 
-    # filter_outcomes[tg_key] = {merged_set: ("kept" | "rare_variant", threshold_pct_used)}
+    # filter_outcomes[tg_key] = {merged_set: (outcome, threshold_pct_used)}
+    # where outcome ∈ {"kept", "rare_variant", "short_active_period"}.
     diag_filter: dict = {}
+
+    # Record variants dropped by the active-days filter. These don't reach
+    # the rare-variant loop below (they're already gone from `groups`).
+    for tg_key, dropped in short_active_variants.items():
+        bucket_entry = diag_filter.setdefault(tg_key, {})
+        for ms in dropped:
+            bucket_entry[ms] = ("short_active_period", None)
 
     # Rare-variant filter: drop merged sets representing <10% of group trips
     # (garage runs, one-off detours). Fall back to 5% if nothing clears 10%.
@@ -1206,42 +1264,34 @@ def main():
                 threshold_used = pct
                 break
         kept_keys = set(groups.get(tg_key, vmap).keys())
-        diag_filter[tg_key] = {
-            ms: ("kept" if ms in kept_keys else "rare_variant", threshold_used)
-            for ms in vmap
-        }
+        bucket_entry = diag_filter.setdefault(tg_key, {})
+        for ms in vmap:
+            bucket_entry[ms] = (
+                "kept" if ms in kept_keys else "rare_variant",
+                threshold_used,
+            )
 
     # Trip groups dropped by the supergroup filter never reached the per-variant
-    # filter loop above; record their variants as "kept" so they round-trip
-    # through the diagnostic loop and the group-level `rare_group_dropped`
-    # reason is what surfaces.
+    # filter loop above; mark any of their variants we haven't already labelled
+    # (i.e. weren't short_active) as "kept" so the group-level reason
+    # `rare_group_dropped` is what surfaces for them.
     for tg_key in rare_group_dropped:
-        diag_filter[tg_key] = {
-            ms: ("kept", None) for ms in diag_original.get(tg_key, {})
-        }
+        bucket_entry = diag_filter.setdefault(tg_key, {})
+        for ms in diag_original.get(tg_key, {}):
+            bucket_entry.setdefault(ms, ("kept", None))
 
-    # Pre-filter low-freq groups out so they don't waste downstream work.
-    # Also apply the active-days gate (concept: active-days-filter): a line
-    # whose service runs on fewer than `min_active_days` distinct calendar
-    # dates across the full feed validity is dropped entirely, except for the
-    # mountain and ferry buckets (which legitimately run short seasonal
-    # windows). Same exemption shape as the freq-score gate.
+    # Pre-filter low-freq groups out so they don't waste downstream work. The
+    # active-days gate has already run upstream at variant granularity.
     drawable_groups = {}
-    short_active_period_lines: set = set()
     for (line_key, aid, tg_id), variant_map in groups.items():
         bucket = line_key[2]
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         raw = line_freq.get(line_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
-        if bucket not in {"mountain", "ferry"} and \
-                line_active_days.get(line_key, 0) < min_active_days:
-            short_active_period_lines.add(line_key)
-            continue
         if bucket == "mountain" or (
             line_key[0] == "CC" and bucket == "train"
         ) or compute_freq_score(raw, mode_approx) >= MIN_FREQ_SCORE:
             drawable_groups[(line_key, aid, tg_id)] = variant_map
     print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries")
-    print(f"  {len(short_active_period_lines):,} lines dropped by min_active_days={min_active_days}")
 
     # ── Emit features ────────────────────────────────────────────────────────
     features: list = []
@@ -1266,27 +1316,55 @@ def main():
 
         tg_key = (line_key, agency_id, tg_id)
         for merged_set, trip_ids in variant_map.items():
-            rep_tid = best_trip_in_shape_group(trip_ids, trip_lookup, svc_dates)
+            # Pick the rep from the most common platform sub-variant so the
+            # drawn line tracks its dominant platform pattern instead of
+            # whichever trip happens to run on the most service days. Ties
+            # resolve by smallest min trip_id for stable output.
+            by_raw: dict = defaultdict(list)
+            for tid in trip_ids:
+                raw = frozenset(_trip_stops_export.get(tid, ()))
+                by_raw[raw].append(tid)
+            popular_raw = sorted(
+                by_raw.keys(),
+                key=lambda r: (
+                    -sum(_trip_weight_export.get(t, 1) for t in by_raw[r]),
+                    min(by_raw[r]),
+                ),
+            )[0]
+            popular_trips = by_raw[popular_raw]
+            rep_tid = best_trip_in_shape_group(popular_trips, trip_lookup, svc_dates)
             rep_trip = trip_lookup.get(rep_tid, {})
             stop_ids = _trip_stops_export.get(rep_tid, [])
 
-            # Find a usable shape for this variant. Trips with the same merged
-            # stop set may have different pfaedle shape_ids due to platform
-            # differences; pick the first one whose shape actually exists.
+            # Shape fallback: prefer the popular sub-variant; fall back across
+            # the rest of the merged-set variant so a variant where pfaedle
+            # routed only an unusual platform isn't silently dropped.
+            popular_set = set(popular_trips)
+            other_trips = [t for t in trip_ids if t not in popular_set]
+            candidates = (
+                [rep_tid]
+                + [t for t in popular_trips if t != rep_tid]
+                + other_trips
+            )
             shape_id = ""
-            for cand_tid in [rep_tid] + [t for t in trip_ids if t != rep_tid][:50]:
+            for cand_tid in candidates[:51]:
                 sid = trip_lookup.get(cand_tid, {}).get("shape_id", "")
                 if sid and sid in shapes:
                     shape_id = sid
                     break
 
+            route_type = (route_lookup.get(rep_trip.get("route_id", ""), {})
+                          .get("type", ""))
+
             polyline = []
+            geometry_source = "pfaedle"
             if shape_id:
                 polyline = [list(p) for p in shapes[shape_id]]
                 length_km = polyline_length_km(polyline)
-            elif bucket in _NO_PFAEDLE_BUCKETS:
+            elif route_type in _STRAIGHT_LINE_FALLBACK_ROUTE_TYPES:
                 polyline = stops_to_polyline(stop_ids, stop_coords)
                 length_km = polyline_length_km(polyline)
+                geometry_source = "straight_line_fallback"
             else:
                 pfaedle_unrouted.append({
                     "trip_id": rep_tid,
@@ -1314,7 +1392,8 @@ def main():
                 continue
 
             # Final mode classification.
-            mode = gtfs_to_mode(bucket, agency_id, mountain_rack_aids, length_km)
+            mode = gtfs_to_mode(bucket, agency_id,
+                                short_name=short_name, length_km=length_km)
 
             # Frequency: try corridor boost (use rep trip's stop pair freq).
             stop_seq = [(sid, 0, 0) for sid in stop_ids]
@@ -1347,6 +1426,7 @@ def main():
                     "operator":     agency_names.get(agency_id, ""),
                     "agency_id":    agency_id,
                     "mode":         mode,
+                    "route_type":   route_type,
                     "freq_score":   freq_score,
                     "speed_kmh":    speed_kmh,
                     "color":        color,
@@ -1356,6 +1436,7 @@ def main():
                     "trip_group_id": tg_id,
                     "shape_id":     shape_id or "",
                     "gtfs_matched": True,
+                    "geometry_source": geometry_source,
                 },
             })
 
@@ -1380,6 +1461,7 @@ def main():
                 "n_coords": len(polyline),
                 "line_km": round(length_km, 2),
                 "feature_id": feat_id,
+                "geometry_source": geometry_source,
             }
 
         # Diagnostic snapshot for this trip group.
@@ -1394,10 +1476,8 @@ def main():
             "variant_count": len(variant_map),
         })
 
-    # ── Mountain bucket fallback for groups pfaedle has no usable shape ──
-    # Already handled inline above (bucket == "mountain" branch). Apply
-    # mountain dedup so multiple shapes for the same physical cable car
-    # collapse to one feature, then drop the now-orphaned line_stops entries.
+    # Aerial dedup: collapse duplicate haul-cable features (route_type 5/6)
+    # that share a ref. Drop now-orphaned line_stops entries.
     features = deduplicate_mountain(features)
     kept_ids = {f["properties"]["osm_id"] for f in features}
     line_stops_out = {oid: v for oid, v in line_stops_out.items() if oid in kept_ids}
@@ -1459,7 +1539,7 @@ def main():
             group_reason = None
         elif tg_key in rare_group_dropped:
             group_reason = "rare_group_dropped"
-        elif line_key in short_active_period_lines:
+        elif tg_key in tg_keys_all_short_active:
             group_reason = "short_active_period"
         elif bucket == "mountain" or (short_name == "CC" and bucket == "train"):
             # These should have been drawable; only here if neither emitted
@@ -1497,13 +1577,14 @@ def main():
 
             em = diag_emission.get((tg_key, ms), {})
             kept_by_filter = (filt_outcome == "kept")
-            # Effective exclusion: if drawable_groups didn't include the group,
-            # the variant wasn't reached for emission, so propagate the group
-            # reason; otherwise use the filter reason or the emission reason.
-            if not drawable:
+            # Variant-level outcomes ("short_active_period", "rare_variant")
+            # surface directly. Otherwise: if the whole group is gone,
+            # propagate the group reason; if the variant survived but never
+            # emitted, take the emission reason.
+            if filt_outcome in ("short_active_period", "rare_variant"):
+                v_reason = filt_outcome
+            elif not drawable:
                 v_reason = group_reason
-            elif not kept_by_filter:
-                v_reason = "rare_variant"
             else:
                 v_reason = em.get("exclusion_reason")
 
@@ -1511,12 +1592,15 @@ def main():
             ms_weight = variant_counts[tg_key].get(ms, 0)
             weighted_share = (ms_weight / variant_weighted_total_for_group
                               if variant_weighted_total_for_group else 0.0)
+            v_active_days = variant_active_days.get(
+                (line_key, aid, tg_id, ms), 0)
 
             v_entry = {
                 "trip_count": len(ms_trips),
                 "trip_share_pct": round(share * 100, 1),
                 "weighted_trip_count": ms_weight,
                 "variant_share_of_group": round(weighted_share, 4),
+                "active_days": v_active_days,
                 "first_terminus": first_terminus,
                 "last_terminus": last_terminus,
                 "kept_by_variant_filter": kept_by_filter,
@@ -1531,6 +1615,7 @@ def main():
                 v_entry["n_coords"] = em.get("n_coords", 0)
                 v_entry["line_km"] = em.get("line_km", 0.0)
                 v_entry["rep_trip_id"] = em.get("rep_trip_id", "")
+                v_entry["geometry_source"] = em.get("geometry_source", "pfaedle")
             elif em:
                 # Reached emission but didn't produce a feature.
                 v_entry["shape_id"] = em.get("shape_id", "")
@@ -1539,7 +1624,6 @@ def main():
                 v_entry["rep_trip_id"] = em.get("rep_trip_id", "")
             variants_out.append(v_entry)
 
-        active_days_val = line_active_days.get(line_key, 0)
         threshold_field = (None if bucket in {"mountain", "ferry"}
                            else min_active_days)
         diag_out.append({
@@ -1557,7 +1641,6 @@ def main():
             "rare_group_share_threshold": sg_threshold,
             "raw_freq": raw_freq,
             "freq_score": round(fscore, 3),
-            "active_days": active_days_val,
             "min_active_days_threshold": threshold_field,
             "drawable": drawable,
             "group_exclusion_reason": group_reason,

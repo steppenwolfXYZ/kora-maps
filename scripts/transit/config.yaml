@@ -5,7 +5,7 @@
 # ── Debug ────────────────────────────────────────────────────────────────────
 debug:
   # Set true to include stops regardless of snap distance (shows all connectors).
-  # Requires ./scripts/rebuild_transit.sh --skip-osm to take effect.
+  # Requires ./scripts/rebuild_transit.sh --start 4 to take effect.
   disable_snap_gate: true
 
 # ── OSM bbox extract for pfaedle ─────────────────────────────────────────────
@@ -37,20 +37,6 @@ excluded_agencies:
   - ouibus
   - ic bus
   - alsa
-
-# Rack/cog railway operators whose GTFS route_type=2 (rail) entries should be
-# rendered as mountain mode (yellow, no freq variance) instead of train.
-# Ported from the OSM-tag-based MOUNTAIN_RAIL_OPERATORS set.
-mountain_rack_agencies:
-  - wengernalpbahn
-  - jungfraubahn
-  - brienz rothorn
-  - berner oberland-bahnen
-  - gornergrat
-  - pilatus
-  - rigi bahnen
-  - monte generoso
-  - dampfbahn furka
 
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates
@@ -113,11 +99,16 @@ freq_sampling:
 pfaedle:
   # Docker image tag built from scripts/transit/pfaedle/Dockerfile.
   image: "carfree-pfaedle:latest"
-  # Modes pfaedle should route. funicular/gondola/aerial are not routable on
-  # the OSM network and bypass pfaedle (straight-line geometry).
+  # Modes pfaedle should route. All transit modes go through pfaedle; the
+  # straight-line fallback in step 06 is reserved for aerial route_types
+  # (cable car / gondola) where OSM coverage is patchier and a missing shape
+  # is acceptable. Tokens are pfaedle's own mode names (`pfaedle --help`).
   modes:
     - tram
     - subway
     - rail
     - bus
     - ferry
+    - funicular
+    - cablecar
+    - gondola
