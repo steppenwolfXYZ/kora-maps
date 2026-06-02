@@ -6,8 +6,9 @@ Pipeline:
   1. Load the filtered + pfaedle-routed GTFS feed at data/gtfs_routed/.
   2. Stream stop_times with trip-grouping (gtfs-line-grouping concept) →
      `_trip_group_export` (trip_id → (line_key, tg_id, agency_id)),
-     `_trip_stops_export` (trip_id → [stop_id, …]), and
-     `_trip_merged_export` (trip_id → frozenset(merged_stop_id)).
+     `_trip_stops_export` (trip_id → [stop_id, …]),
+     `_trip_merged_export` (trip_id → frozenset(merged_stop_id)), and
+     `_trip_direction_export` (trip_id → (first_uic, last_uic)).
   3. Score per-line frequency & speed (GTFS-side, unchanged from before).
   4. Load pfaedle shapes (shapes.txt) and per-trip shape_id from trips.txt.
   5. For each (line_key, agency_id, trip_group_id), group trips by merged
@@ -562,6 +563,7 @@ _trip_group_export: dict = {}        # trip_id → (line_key, trip_group_id, age
 _trip_stops_export: dict = {}        # trip_id → [stop_id, ...]   (sequence)
 _trip_merged_export: dict = {}       # trip_id → frozenset(merged_stop_id)  (variant identity)
 _trip_weight_export: dict = {}       # trip_id → int (≈ trip-runs across calendar)
+_trip_direction_export: dict = {}    # trip_id → (first_merged_uic, last_merged_uic)
 
 _BUCKET_MODE_APPROX = {
     "train": "train", "tram": "tram", "metro": "metro",
@@ -569,12 +571,43 @@ _BUCKET_MODE_APPROX = {
 }
 
 
+def _mountain_origin(bucket: str, route_type: str):
+    """Classify the origin of a mountain-bucket trip group. Returns one of
+    `aerial`, `funicular`, `rebucketed_rail`, or None for non-mountain buckets.
+
+    aerial / funicular are exempt from the freq-score and active-days gates;
+    rebucketed_rail is not (it's rail that got the mountain color via the
+    `mountain_agency_ids` whitelist but otherwise behaves like train).
+    """
+    if bucket != "mountain":
+        return None
+    if route_type == "7":
+        return "funicular"
+    if route_type in ("5", "6"):
+        return "aerial"
+    if route_type == "2":
+        return "rebucketed_rail"
+    return None
+
+
+def _gate_exempt(bucket: str, mountain_origin) -> bool:
+    """True if a trip group is exempt from the freq-score and active-days
+    gates. Per direction-coverage concept: ferry + true mountain (aerial,
+    funicular) only; rebucketed rail is gated like normal train."""
+    if bucket == "ferry":
+        return True
+    if bucket == "mountain" and mountain_origin in ("aerial", "funicular"):
+        return True
+    return False
+
+
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
     """One streaming pass → raw trip counts + speed per line, plus trip-group
     partitioning. Populates module-level exports `_trip_group_export`,
-    `_trip_stops_export`, and `_trip_merged_export`.
+    `_trip_stops_export`, `_trip_merged_export`, `_trip_weight_export`,
+    and `_trip_direction_export`.
     """
-    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export
+    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export
 
     stop_merge: dict = {}
     for sid, (_name, parent) in stop_meta.items():
@@ -749,6 +782,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         _trip_stops_export[tid] = [s[0] for s in sequence]
         _trip_merged_export[tid] = merged_set
         _trip_weight_export[tid] = weight
+        first_sid = sequence[0][0]
+        last_sid = sequence[-1][0]
+        first_uic = stop_merge.get(first_sid) or first_sid.split(":")[0]
+        last_uic = stop_merge.get(last_sid) or last_sid.split(":")[0]
+        _trip_direction_export[tid] = (first_uic, last_uic)
 
         if tg_key not in line_canonical_tg_agency:
             line_canonical_tg_agency[tg_key] = aid
@@ -966,25 +1004,28 @@ _AERIAL_ROUTE_TYPES = {"5", "6"}
 
 def deduplicate_mountain(features: list) -> list:
     """Drop overlapping aerial features (cable cars, gondolas) sharing the same
-    ref. Best (most geometry vertices) wins.
+    ref AND direction. Best (most geometry vertices) wins.
 
-    Restricted to GTFS route_type 5/6 — the historic problem this solved was
-    multiple OSM route relations for the same physical haul cable. Funiculars
-    (route_type 7) and rack rail are not collapsed because there a shared
-    bbox usually means two genuinely different branches off the same stem.
+    Restricted to mountain_origin == "aerial" (GTFS route_type 5/6). The
+    historic problem this solved was multiple OSM route relations for the same
+    physical haul cable. Per direction-coverage concept, opposite directions
+    of the same cable are kept (different direction_key); only same-direction
+    duplicates within a ref collapse. Funiculars, rebucketed mountain rail,
+    and every other mode are not collapsed.
     """
     aerial_idx = [(i, f) for i, f in enumerate(features)
-                  if f["properties"].get("route_type") in _AERIAL_ROUTE_TYPES]
+                  if f["properties"].get("mountain_origin") == "aerial"]
     aerial_set = {i for i, _ in aerial_idx}
     keep = set(i for i in range(len(features)) if i not in aerial_set)
 
-    by_ref: dict = defaultdict(list)
+    by_ref_dir: dict = defaultdict(list)
     for i, f in aerial_idx:
         ref = f["properties"]["ref"]
-        by_ref[ref].append((i, f, _feat_bbox(f), _n_pts(f)))
+        direction_key = f["properties"].get("direction_key", "")
+        by_ref_dir[(ref, direction_key)].append((i, f, _feat_bbox(f), _n_pts(f)))
 
     n_dropped = 0
-    for ref, group in by_ref.items():
+    for (ref, _dir), group in by_ref_dir.items():
         if not ref:
             for i, f, b, n in group:
                 keep.add(i)
@@ -1101,45 +1142,77 @@ def main():
     # Stadtbus Winterthur's bus 10 both end up tg_id=0 in their own pools.
     # The emission key must include agency_id, otherwise the two cities'
     # trips collide and one silently overwrites the other.
+    # Each variant key is (merged_set, direction_key) so opposite directions of
+    # the same merged-stop set form distinct variants. Per direction-coverage
+    # concept: directions are split end-to-end so each gets its own pfaedle
+    # shape, rep trip, stop list, and filter outcome.
     groups: dict = defaultdict(lambda: defaultdict(list))
     variant_counts: dict = defaultdict(lambda: defaultdict(int))
     for tid, (line_key, tg_id, aid) in _trip_group_export.items():
         merged_set = _trip_merged_export.get(tid)
         if merged_set is None:
             continue
+        direction_key = _trip_direction_export.get(tid)
+        if direction_key is None:
+            continue
         tg_key = (line_key, aid, tg_id)
-        groups[tg_key][merged_set].append(tid)
+        var_key = (merged_set, direction_key)
+        groups[tg_key][var_key].append(tid)
         # Weighted by trip's active-date count so a depot run modelled as a few
         # trip_ids active on a single date counts as much smaller service than
         # the same trip_ids active every weekday. Same weight that the
         # in-stream rare-variant filter already uses.
-        variant_counts[tg_key][merged_set] += _trip_weight_export.get(tid, 1)
+        variant_counts[tg_key][var_key] += _trip_weight_export.get(tid, 1)
 
     # Snapshot for the comprehensive diagnostic before the active-days,
-    # rare-group, and rare-variant filters mutate `groups`. We deep-copy
-    # variant→trips so we still know who was in each dropped variant.
+    # rare-group, and rare-variant filters mutate `groups`. Variants are keyed
+    # by (merged_set, direction_key) — the diagnostic preserves the same key
+    # so per-direction outcomes can be reported.
     diag_original = {
-        tg_key: {ms: list(tids) for ms, tids in vmap.items()}
+        tg_key: {var_key: list(tids) for var_key, tids in vmap.items()}
         for tg_key, vmap in groups.items()
     }
 
+    # Per-trip-group origin classification: ferry, mountain (aerial / funicular
+    # / rebucketed_rail) or None. Drives the gate exemption — aerial and
+    # funicular trips skip the freq-score and active-days gates, rebucketed
+    # rail does not. route_type is taken from any trip in the group; trips in
+    # one (line_key, agency_id, tg_id) share the same route_type in practice.
+    tg_mountain_origin: dict = {}
+    for tg_key, vmap in groups.items():
+        line_key, _aid, _tg_id = tg_key
+        bucket = line_key[2]
+        rt = ""
+        for tids in vmap.values():
+            if tids:
+                rt = (route_lookup.get(trip_lookup.get(tids[0], {})
+                                       .get("route_id", ""), {})
+                      .get("type", ""))
+                break
+        tg_mountain_origin[tg_key] = _mountain_origin(bucket, rt)
+
     # ── Active-days per variant (concept: active-days-filter) ────────────────
     # For each emitted-feature unit (line_key, agency_id, trip_group_id,
-    # merged_stop_set), compute the union of active calendar dates across
-    # every trip in that variant over the full feed validity period. Variants
-    # below `min_active_days` are dropped before supergroup/rare-variant
-    # filters run, so their weighted trips don't pollute share calculations.
-    # Catches construction-replacement services even when several distinct
-    # constructions share the same ref or the same trip group.
-    # Mountain and ferry buckets are exempt (seasonal services).
+    # merged_stop_set, direction_key), compute the union of active calendar
+    # dates across every trip in that variant over the full feed validity
+    # period. Variants below `min_active_days` are dropped before
+    # supergroup/rare-variant filters run, so their weighted trips don't
+    # pollute share calculations. Catches construction-replacement services
+    # even when several distinct constructions share the same ref or the same
+    # trip group. Per direction-coverage concept: ferry, aerial, and funicular
+    # are exempt; rebucketed mountain rail is gated like normal train.
     variant_service_ids: dict = defaultdict(set)
     for tid, (lk, tg_id_v, aid) in _trip_group_export.items():
         merged_set = _trip_merged_export.get(tid)
         if merged_set is None:
             continue
+        direction_key = _trip_direction_export.get(tid)
+        if direction_key is None:
+            continue
         t = trip_lookup.get(tid)
         if t:
-            variant_service_ids[(lk, aid, tg_id_v, merged_set)].add(t["service_id"])
+            variant_service_ids[(lk, aid, tg_id_v, merged_set, direction_key)] \
+                .add(t["service_id"])
     variant_active_days: dict = {}
     for vkey, sids in variant_service_ids.items():
         u: set = set()
@@ -1150,23 +1223,26 @@ def main():
     svc_dates_full.clear()
     variant_service_ids.clear()
 
-    short_active_variants: dict = defaultdict(set)  # tg_key → {merged_set,...}
+    short_active_variants: dict = defaultdict(set)  # tg_key → {var_key,...}
     tg_keys_all_short_active: set = set()
     for tg_key in list(groups.keys()):
         line_key, aid, tg_id_v = tg_key
         bucket = line_key[2]
-        if bucket in {"mountain", "ferry"}:
+        if _gate_exempt(bucket, tg_mountain_origin.get(tg_key)):
             continue
         vmap = groups[tg_key]
-        to_drop = [ms for ms in vmap
-                   if variant_active_days.get((line_key, aid, tg_id_v, ms), 0)
-                      < min_active_days]
+        to_drop = [
+            var_key for var_key in vmap
+            if variant_active_days.get(
+                (line_key, aid, tg_id_v, var_key[0], var_key[1]), 0
+            ) < min_active_days
+        ]
         if not to_drop:
             continue
         short_active_variants[tg_key].update(to_drop)
-        for ms in to_drop:
-            del vmap[ms]
-            variant_counts[tg_key].pop(ms, None)
+        for var_key in to_drop:
+            del vmap[var_key]
+            variant_counts[tg_key].pop(var_key, None)
         if not vmap:
             tg_keys_all_short_active.add(tg_key)
             del groups[tg_key]
@@ -1188,8 +1264,9 @@ def main():
     tg_merged_union: dict = {}
     for tg_key, vmap in groups.items():
         u: set = set()
-        for ms in vmap.keys():
-            u |= ms
+        for var_key in vmap.keys():
+            merged_set = var_key[0]
+            u |= merged_set
         tg_merged_union[tg_key] = frozenset(u)
 
     partition_to_tgkeys: dict = defaultdict(list)
@@ -1277,37 +1354,39 @@ def main():
     for tg_key in rare_group_dropped:
         groups.pop(tg_key, None)
 
-    # filter_outcomes[tg_key] = {merged_set: (outcome, threshold_pct_used)}
-    # where outcome ∈ {"kept", "rare_variant", "short_active_period"}.
+    # filter_outcomes[tg_key] = {var_key: (outcome, threshold_pct_used)}
+    # where outcome ∈ {"kept", "rare_variant", "short_active_period"} and
+    # var_key = (merged_set, direction_key).
     diag_filter: dict = {}
 
     # Record variants dropped by the active-days filter. These don't reach
     # the rare-variant loop below (they're already gone from `groups`).
     for tg_key, dropped in short_active_variants.items():
         bucket_entry = diag_filter.setdefault(tg_key, {})
-        for ms in dropped:
-            bucket_entry[ms] = ("short_active_period", None)
+        for var_key in dropped:
+            bucket_entry[var_key] = ("short_active_period", None)
 
-    # Rare-variant filter: drop merged sets representing <10% of group trips
-    # (garage runs, one-off detours). Fall back to 5% if nothing clears 10%.
-    # If nothing clears 5% either, keep all (the group's variants are all rare;
-    # filtering to empty would erase a real but sparse line).
+    # Rare-variant filter: drop (merged_set, direction_key) variants representing
+    # <10% of group trips (garage runs, one-off detours, very weak counter
+    # directions). Fall back to 5% if nothing clears 10%. If nothing clears 5%
+    # either, keep all.
     for tg_key, vmap in list(groups.items()):
         counts = variant_counts[tg_key]
         total = sum(counts.values())
         threshold_used = None
         for pct in (0.10, 0.05):
             threshold = max(1, total * pct)
-            kept = {ms: tids for ms, tids in vmap.items() if counts[ms] >= threshold}
+            kept = {var_key: tids for var_key, tids in vmap.items()
+                    if counts[var_key] >= threshold}
             if kept:
                 groups[tg_key] = kept
                 threshold_used = pct
                 break
         kept_keys = set(groups.get(tg_key, vmap).keys())
         bucket_entry = diag_filter.setdefault(tg_key, {})
-        for ms in vmap:
-            bucket_entry[ms] = (
-                "kept" if ms in kept_keys else "rare_variant",
+        for var_key in vmap:
+            bucket_entry[var_key] = (
+                "kept" if var_key in kept_keys else "rare_variant",
                 threshold_used,
             )
 
@@ -1317,17 +1396,19 @@ def main():
     # `rare_group_dropped` is what surfaces for them.
     for tg_key in rare_group_dropped:
         bucket_entry = diag_filter.setdefault(tg_key, {})
-        for ms in diag_original.get(tg_key, {}):
-            bucket_entry.setdefault(ms, ("kept", None))
+        for var_key in diag_original.get(tg_key, {}):
+            bucket_entry.setdefault(var_key, ("kept", None))
 
     # Pre-filter low-freq groups out so they don't waste downstream work. The
-    # active-days gate has already run upstream at variant granularity.
+    # active-days gate has already run upstream at variant granularity. Per
+    # direction-coverage concept: ferry + true mountain (aerial/funicular)
+    # skip the gate; rebucketed rail does not.
     drawable_groups = {}
     for (line_key, aid, tg_id), variant_map in groups.items():
         bucket = line_key[2]
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         raw = line_freq.get(line_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
-        if bucket == "mountain" or (
+        if _gate_exempt(bucket, tg_mountain_origin.get((line_key, aid, tg_id))) or (
             line_key[0] == "CC" and bucket == "train"
         ) or compute_freq_score(raw, mode_approx) >= MIN_FREQ_SCORE:
             drawable_groups[(line_key, aid, tg_id)] = variant_map
@@ -1340,7 +1421,7 @@ def main():
     trip_groups_diag: list = []
     matched_line_keys: set = set()
     feature_id_counter = 0
-    # Per-(tg_key, merged_set) emission outcome for the comprehensive diagnostic.
+    # Per-(tg_key, var_key) emission outcome for the comprehensive diagnostic.
     diag_emission: dict = {}
 
     for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
@@ -1355,11 +1436,12 @@ def main():
         speed_kmh = (gtfs_meta or {}).get("speed_kmh")
 
         tg_key = (line_key, agency_id, tg_id)
-        for merged_set, trip_ids in variant_map.items():
-            # Pick the rep from the most common platform sub-variant so the
-            # drawn line tracks its dominant platform pattern instead of
-            # whichever trip happens to run on the most service days. Ties
-            # resolve by smallest min trip_id for stable output.
+        for var_key, trip_ids in variant_map.items():
+            merged_set, direction_key = var_key
+            # Pick the rep from the most common platform sub-variant within
+            # this direction so the drawn line tracks the dominant platform
+            # pattern of the direction it represents. Ties resolve by smallest
+            # min trip_id for stable output.
             by_raw: dict = defaultdict(list)
             for tid in trip_ids:
                 raw = frozenset(_trip_stops_export.get(tid, ()))
@@ -1377,8 +1459,8 @@ def main():
             stop_ids = _trip_stops_export.get(rep_tid, [])
 
             # Shape fallback: prefer the popular sub-variant; fall back across
-            # the rest of the merged-set variant so a variant where pfaedle
-            # routed only an unusual platform isn't silently dropped.
+            # the rest of the direction sub-partition so a direction where
+            # pfaedle routed only an unusual platform isn't silently dropped.
             popular_set = set(popular_trips)
             other_trips = [t for t in trip_ids if t not in popular_set]
             candidates = (
@@ -1395,6 +1477,8 @@ def main():
 
             route_type = (route_lookup.get(rep_trip.get("route_id", ""), {})
                           .get("type", ""))
+            mountain_origin = _mountain_origin(bucket, route_type)
+            direction_key_str = f"{direction_key[0]}-{direction_key[1]}"
 
             polyline = []
             geometry_source = "pfaedle"
@@ -1413,8 +1497,9 @@ def main():
                     "long_name": long_name,
                     "bucket": bucket,
                     "trip_group_id": tg_id,
+                    "direction_key": direction_key_str,
                 })
-                diag_emission[(tg_key, merged_set)] = {
+                diag_emission[(tg_key, var_key)] = {
                     "feature_emitted": False,
                     "exclusion_reason": "pfaedle_unrouted",
                     "rep_trip_id": rep_tid, "shape_id": "",
@@ -1423,7 +1508,7 @@ def main():
                 continue
 
             if len(polyline) < 2:
-                diag_emission[(tg_key, merged_set)] = {
+                diag_emission[(tg_key, var_key)] = {
                     "feature_emitted": False,
                     "exclusion_reason": "polyline_too_short",
                     "rep_trip_id": rep_tid, "shape_id": shape_id,
@@ -1456,28 +1541,32 @@ def main():
 
             # Geometry — always LineString for new emission.
             geometry = {"type": "LineString", "coordinates": polyline}
+            props = {
+                "osm_id":       feat_id,
+                "ref":          short_name,
+                "name":         long_name,
+                "operator":     agency_names.get(agency_id, ""),
+                "agency_id":    agency_id,
+                "mode":         mode,
+                "route_type":   route_type,
+                "freq_score":   freq_score,
+                "speed_kmh":    speed_kmh,
+                "color":        color,
+                "width_base":   width_base,
+                "line_km":      round(length_km, 1),
+                "direction_id": rep_trip.get("direction_id", ""),
+                "direction_key": direction_key_str,
+                "trip_group_id": tg_id,
+                "shape_id":     shape_id or "",
+                "gtfs_matched": True,
+                "geometry_source": geometry_source,
+            }
+            if mountain_origin:
+                props["mountain_origin"] = mountain_origin
             features.append({
                 "type": "Feature",
                 "geometry": geometry,
-                "properties": {
-                    "osm_id":       feat_id,
-                    "ref":          short_name,
-                    "name":         long_name,
-                    "operator":     agency_names.get(agency_id, ""),
-                    "agency_id":    agency_id,
-                    "mode":         mode,
-                    "route_type":   route_type,
-                    "freq_score":   freq_score,
-                    "speed_kmh":    speed_kmh,
-                    "color":        color,
-                    "width_base":   width_base,
-                    "line_km":      round(length_km, 1),
-                    "direction_id": rep_trip.get("direction_id", ""),
-                    "trip_group_id": tg_id,
-                    "shape_id":     shape_id or "",
-                    "gtfs_matched": True,
-                    "geometry_source": geometry_source,
-                },
+                "properties": props,
             })
 
             # Per-feature stops.
@@ -1490,10 +1579,11 @@ def main():
                 "osm_ref": short_name,
                 "stops":   stop_entries,
                 "gtfs_ref": short_name,
+                "direction_key": direction_key_str,
             }
 
             matched_line_keys.add(line_key)
-            diag_emission[(tg_key, merged_set)] = {
+            diag_emission[(tg_key, var_key)] = {
                 "feature_emitted": True,
                 "exclusion_reason": None,
                 "rep_trip_id": rep_tid,
@@ -1574,6 +1664,7 @@ def main():
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fscore = compute_freq_score(raw_freq, mode_approx)
 
+        mountain_origin = tg_mountain_origin.get(tg_key)
         drawable = (line_key, aid, tg_id) in drawable_groups
         if drawable:
             group_reason = None
@@ -1581,7 +1672,9 @@ def main():
             group_reason = "rare_group_dropped"
         elif tg_key in tg_keys_all_short_active:
             group_reason = "short_active_period"
-        elif bucket == "mountain" or (short_name == "CC" and bucket == "train"):
+        elif _gate_exempt(bucket, mountain_origin) or (
+            short_name == "CC" and bucket == "train"
+        ):
             # These should have been drawable; only here if neither emitted
             # nor low-freq. Real shouldn't-happen branch — record it.
             group_reason = "unknown_skipped"
@@ -1599,8 +1692,9 @@ def main():
         variant_weighted_total_for_group = sum(variant_counts[tg_key].values())
 
         variants_out = []
-        for ms, (filt_outcome, threshold_pct) in var_outcomes.items():
-            ms_trips = original_vmap.get(ms, [])
+        for var_key, (filt_outcome, threshold_pct) in var_outcomes.items():
+            merged_set, direction_key = var_key
+            ms_trips = original_vmap.get(var_key, [])
             stations: list = []
             first_terminus = "?"
             last_terminus = "?"
@@ -1615,7 +1709,7 @@ def main():
                     first_terminus = stations[0]["name"]
                     last_terminus = stations[-1]["name"]
 
-            em = diag_emission.get((tg_key, ms), {})
+            em = diag_emission.get((tg_key, var_key), {})
             kept_by_filter = (filt_outcome == "kept")
             # Variant-level outcomes ("short_active_period", "rare_variant")
             # surface directly. Otherwise: if the whole group is gone,
@@ -1629,13 +1723,14 @@ def main():
                 v_reason = em.get("exclusion_reason")
 
             share = (len(ms_trips) / group_trip_total) if group_trip_total else 0.0
-            ms_weight = variant_counts[tg_key].get(ms, 0)
+            ms_weight = variant_counts[tg_key].get(var_key, 0)
             weighted_share = (ms_weight / variant_weighted_total_for_group
                               if variant_weighted_total_for_group else 0.0)
             v_active_days = variant_active_days.get(
-                (line_key, aid, tg_id, ms), 0)
+                (line_key, aid, tg_id, merged_set, direction_key), 0)
 
             v_entry = {
+                "direction_key": f"{direction_key[0]}-{direction_key[1]}",
                 "trip_count": len(ms_trips),
                 "trip_share_pct": round(share * 100, 1),
                 "weighted_trip_count": ms_weight,
@@ -1664,12 +1759,13 @@ def main():
                 v_entry["rep_trip_id"] = em.get("rep_trip_id", "")
             variants_out.append(v_entry)
 
-        threshold_field = (None if bucket in {"mountain", "ferry"}
+        threshold_field = (None if _gate_exempt(bucket, mountain_origin)
                            else min_active_days)
         diag_out.append({
             "ref": short_name,
             "long_name": long_name,
             "bucket": bucket,
+            "mountain_origin": mountain_origin,
             "agency_id": aid,
             "agency_name": agency_names.get(aid, ""),
             "trip_group_id": tg_id,
