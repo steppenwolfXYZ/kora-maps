@@ -34,11 +34,9 @@ Rebuild: `./scripts/rebuild_transit.sh` (see `--skip-osm` / `--skip-gtfs` / `--s
 
 ## Identity model
 
-`stream_stop_times` partitions trips by `(long_name_norm or short_name, agency_id, bucket)`, runs union-find on merged stop sets within each partition (≥2 shared merged stops → same group), and assigns a `trip_group_id` unique within its partition. **`trip_group_id` is unique only within a partition**, so the emission key in `main()` is `(line_key, agency_id, trip_group_id)`. The diagnostic at `scan_lines_at_stop.py` keys the same way. Forgetting `agency_id` here causes same-numbered lines in different cities to collide (e.g. Bernmobil bus 10 vs Stadtbus Winterthur bus 10).
+`stream_stop_times` partitions trips by `(long_name_norm or short_name, agency_id, bucket)`, runs union-find on merged stop sets within each partition (≥2 shared merged stops → same group), and assigns a `trip_group_id` unique within its partition. **`trip_group_id` is unique only within a partition**, so the emission key in `main()` is `(line_key, agency_id, trip_group_id)`. Forgetting `agency_id` here causes same-numbered lines in different cities to collide (e.g. Bernmobil bus 10 vs Stadtbus Winterthur bus 10).
 
-`_trip_group_export` (`trip_id → (line_key, tg_id, agency_id)`), `_trip_stops_export` (`trip_id → [stop_id, ...]`), and `_trip_merged_export` (`trip_id → frozenset(merged stop ids)`) expose the per-trip info the emission loop needs. They are populated as side effects of `stream_stop_times` and read by `main()` and by the diagnostic scripts.
-
-`_line_canonical_export` still indexes every CanonEntry twice — once under `(short_name, bucket)` and once under `(long_norm, bucket)`. This is dead weight; the pre-pfaedle matcher relied on it, the pfaedle emission does not. Diagnostic scripts dedupe at the script level. Cleaning up `_line_canonical_export` is part of the future pair-centric work.
+`_trip_group_export` (`trip_id → (line_key, tg_id, agency_id)`), `_trip_stops_export` (`trip_id → [stop_id, ...]`), and `_trip_merged_export` (`trip_id → frozenset(merged stop ids)`) expose the per-trip info the emission loop needs. They are populated as side effects of `stream_stop_times` and read by `main()`. They are the only export surface; there is no separate `_line_canonical_export` or `CanonEntry` table — the legacy short/long-name dual-index that used to live alongside them was removed once the pre-pfaedle OSM matcher (which was its only consumer) went away.
 
 ## Service area filter
 

@@ -33,7 +33,9 @@ Long-distance bus exclusion uses a new **`excluded_agencies`** denylist of GTFS 
 
 ### OSM scope
 
-Pfaedle receives a Switzerland-bounded OSM PBF with a **1–2 km border buffer**. Cross-border traffic is handled by trip filtering, not by routing across the border. Pfaedle never routes outside Swiss territory.
+Pfaedle receives a **bbox-complete** OSM PBF: a rectangle around Switzerland with a 1–2 km margin past CH's outermost tips (Ticino in the south, the Bodensee shore and Schaffhausen in the north, Geneva in the west, Engadin in the east). Inside that rectangle, OSM coverage is complete — including the foreign sliver the rectangle catches (Domodossola, Konstanz, Annemasse, Lörrach, Singen, Bregenz, and so on). The PBF therefore cannot be assembled from country extracts of Switzerland and Liechtenstein alone; OSM data from each neighbouring country within the bbox must be present.
+
+Pfaedle may route through that foreign sliver. Cross-border services whose stops all sit inside the bbox are routed normally. Trips with any stop outside the bbox are dropped (see trip filtering). The 1–2 km margin defines the bbox itself, not a separate routable buffer — the bbox, not the margin, bounds where pfaedle may route.
 
 ### Trip filtering pre-pfaedle
 

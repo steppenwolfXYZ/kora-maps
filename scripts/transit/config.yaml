@@ -52,6 +52,15 @@ mountain_rack_agencies:
   - monte generoso
   - dampfbahn furka
 
+# ── Minimum active days ──────────────────────────────────────────────────────
+# A line whose service runs on fewer than this many distinct calendar dates
+# across the full feed validity period is dropped. Catches construction-
+# replacement bus services (e.g. SVB Bern 3A / 9A) that have year-round
+# frequency on the days they do run but only exist for a few weeks.
+# Mountain and ferry buckets are exempt regardless of this value.
+# Lower this (e.g. 100) to loosen; raise to tighten.
+min_active_days: 150
+
 # ── Frequency sampling ───────────────────────────────────────────────────────
 # Sample dates the low-frequency filter measures trip counts on, generated
 # once by scripts/transit/generate_sample_dates.py (seed + blackouts live in

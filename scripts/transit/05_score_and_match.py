@@ -5,14 +5,14 @@ Build the final transit GeoJSON from a pfaedle-routed GTFS feed.
 Pipeline:
   1. Load the filtered + pfaedle-routed GTFS feed at data/gtfs_routed/.
   2. Stream stop_times with trip-grouping (gtfs-line-grouping concept) →
-     `_line_canonical_export` keyed by (line_key, trip_group_id), plus
-     `_trip_group_export` (trip_id → (line_key, tg_id, agency_id)) and
-     `_trip_stops_export` (trip_id → [stop_id, …]).
+     `_trip_group_export` (trip_id → (line_key, tg_id, agency_id)),
+     `_trip_stops_export` (trip_id → [stop_id, …]), and
+     `_trip_merged_export` (trip_id → frozenset(merged_stop_id)).
   3. Score per-line frequency & speed (GTFS-side, unchanged from before).
   4. Load pfaedle shapes (shapes.txt) and per-trip shape_id from trips.txt.
-  5. For each (line_key, trip_group_id), group trips by shape_id and emit
-     one feature per distinct shape. Mode comes from the GTFS route_type
-     with an agency-based mountain rack override.
+  5. For each (line_key, agency_id, trip_group_id), group trips by merged
+     stop set and emit one feature per kept variant. Mode comes from the
+     GTFS route_type with an agency-based mountain rack override.
   6. Mountain bucket and ferry bucket without a pfaedle-usable shape fall
      back to straight-line geometry between GTFS stops.
 
@@ -36,7 +36,7 @@ import sys
 from collections import defaultdict
 from math import radians, cos, sin, sqrt, atan2
 from pathlib import Path
-from typing import Optional, NamedTuple
+from typing import Optional
 
 import yaml
 
@@ -379,6 +379,58 @@ def load_calendar_dates() -> dict:
     return svc_dates
 
 
+def load_calendar_dates_full() -> dict:
+    """Return {service_id: set(date_str YYYYMMDD)} — every active date for
+    each service across the full feed validity period, applying both
+    calendar.txt weekday patterns and calendar_dates.txt add/remove rows.
+
+    Distinct from load_calendar_dates() which only keeps the dates that are
+    in the freq-sampling window. This one is needed for the active-days
+    filter, which must count every day a service actually runs.
+    """
+    from datetime import date, timedelta
+
+    DAY_COLS = ["monday", "tuesday", "wednesday", "thursday",
+                "friday", "saturday", "sunday"]
+
+    def parse_d(s: str) -> date:
+        return date(int(s[:4]), int(s[4:6]), int(s[6:8]))
+
+    def fmt_d(d: date) -> str:
+        return f"{d.year:04d}{d.month:02d}{d.day:02d}"
+
+    active: dict = defaultdict(set)
+    cal_path = GTFS / "calendar.txt"
+    if cal_path.exists():
+        with open(cal_path, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                wd = [row.get(col, "0") == "1" for col in DAY_COLS]
+                try:
+                    start = parse_d(row["start_date"])
+                    end = parse_d(row["end_date"])
+                except (KeyError, ValueError):
+                    continue
+                sid = row["service_id"]
+                d = start
+                while d <= end:
+                    if wd[d.weekday()]:
+                        active[sid].add(fmt_d(d))
+                    d += timedelta(days=1)
+
+    cd_path = GTFS / "calendar_dates.txt"
+    if cd_path.exists():
+        with open(cd_path, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                sid = row["service_id"]
+                d_str = row["date"]
+                if row["exception_type"] == "1":
+                    active[sid].add(d_str)
+                elif row["exception_type"] == "2":
+                    active[sid].discard(d_str)
+
+    return dict(active)
+
+
 def load_routes() -> dict:
     routes = {}
     with open(GTFS / "routes.txt", encoding="utf-8-sig") as f:
@@ -451,21 +503,12 @@ def load_shapes() -> dict:
     return out
 
 
-# ── Canonical line table and trip-grouping ───────────────────────────────────
+# ── Trip-grouping exports ────────────────────────────────────────────────────
 
-class CanonEntry(NamedTuple):
-    line_key: tuple        # (short_name, long_name, bucket)
-    stops: list            # [(stop_id, arr, dep), ...]
-    dir_aware: bool        # True when variants have genuinely different stop sets
-    agency_id: str
-    no_draw: Optional[str] # None = drawable; "low_frequency" = freq < MIN_FREQ_SCORE
-    trip_group_id: int     # connected-component id within (long_norm, agency_id, bucket) partition
-
-
-_line_canonical_export: dict = defaultdict(list)
 _trip_group_export: dict = {}        # trip_id → (line_key, trip_group_id, agency_id)
 _trip_stops_export: dict = {}        # trip_id → [stop_id, ...]   (sequence)
 _trip_merged_export: dict = {}       # trip_id → frozenset(merged_stop_id)  (variant identity)
+_trip_weight_export: dict = {}       # trip_id → int (≈ trip-runs across calendar)
 
 _BUCKET_MODE_APPROX = {
     "train": "train", "tram": "tram", "metro": "metro",
@@ -475,10 +518,10 @@ _BUCKET_MODE_APPROX = {
 
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
     """One streaming pass → raw trip counts + speed per line, plus trip-group
-    partitioning. Populates module-level exports `_line_canonical_export`,
-    `_trip_group_export`, and `_trip_stops_export`.
+    partitioning. Populates module-level exports `_trip_group_export`,
+    `_trip_stops_export`, and `_trip_merged_export`.
     """
-    global _line_canonical_export, _trip_group_export, _trip_stops_export
+    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export
 
     stop_merge: dict = {}
     for sid, (_name, parent) in stop_meta.items():
@@ -652,6 +695,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         _trip_group_export[tid] = (lk, tg, aid)
         _trip_stops_export[tid] = [s[0] for s in sequence]
         _trip_merged_export[tid] = merged_set
+        _trip_weight_export[tid] = weight
 
         if tg_key not in line_canonical_tg_agency:
             line_canonical_tg_agency[tg_key] = aid
@@ -685,31 +729,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
             c for c in canons
             if frozenset(s[0] for s in c["stops"]) in variant_counts
         ]
-
-    # Low-frequency flag (kept for diagnostic / unmatched accounting).
-    _zero_freq = {"core_wd": 0, "eve_wd": 0, "we": 0}
-    low_freq_keys: set = {
-        tg_key[0] for tg_key in line_canonical_tg_stops
-        if tg_key[0][2] != "mountain"
-        and not (tg_key[0][0] == "CC" and tg_key[0][2] == "train")
-        and compute_freq_score(
-            line_freq.get(tg_key[0], _zero_freq),
-            _BUCKET_MODE_APPROX.get(tg_key[0][2], "regional_bus"),
-        ) < MIN_FREQ_SCORE
-    }
-
-    _line_canonical_export.clear()
-    for (line_key, tg_id), canons in line_canonical_tg_stops.items():
-        short_name, long_name, bucket = line_key
-        long_norm = long_name.replace(" ", "")
-        agency_id = line_canonical_tg_agency.get((line_key, tg_id), "")
-        no_draw = "low_frequency" if line_key in low_freq_keys else None
-        for canon in canons:
-            _line_canonical_export[(short_name, bucket)].append(
-                CanonEntry(line_key, canon["stops"], False, agency_id, no_draw, tg_id))
-            if long_norm and long_norm != short_name:
-                _line_canonical_export[(long_norm, bucket)].append(
-                    CanonEntry(line_key, canon["stops"], False, agency_id, no_draw, tg_id))
 
     # Compute per-line speed from canonical trips.
     line_speed: dict = {}
@@ -980,11 +999,15 @@ def main():
     stop_coords  = load_stops()
     stop_meta    = load_stop_meta()
     svc_dates    = load_calendar_dates()
+    svc_dates_full = load_calendar_dates_full()
     route_lookup = load_routes()
     agency_names = load_agencies()
     trip_lookup  = load_trips(route_lookup)
     print(f"  {len(stop_coords):,} stop entries, {len(svc_dates):,} service IDs, "
           f"{len(trip_lookup):,} trips, {len(agency_names):,} agencies")
+    print(f"  {len(svc_dates_full):,} service IDs with full-calendar coverage")
+
+    min_active_days = int(cfg.get("min_active_days", 150))
 
     trip_frequencies = load_frequencies()
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries "
@@ -993,20 +1016,28 @@ def main():
     line_freq, line_speed, line_canonical = stream_stop_times(
         trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
-    # Drop low-frequency canonical entries from the export pool (we don't
-    # emit features for those).
-    _removed_lk = 0
-    for _key in list(_line_canonical_export.keys()):
-        _kept = [e for e in _line_canonical_export[_key] if e.no_draw is None]
-        if not _kept:
-            del _line_canonical_export[_key]
-            _removed_lk += 1
-        elif len(_kept) != len(_line_canonical_export[_key]):
-            _line_canonical_export[_key] = _kept
-    print(f"  Removed {_removed_lk} low-freq keys from _line_canonical_export")
-
     for line_key in line_canonical:
         _ = line_freq[line_key]
+
+    # ── Active-days per line (concept: active-days-filter) ───────────────────
+    # Union of active calendar dates across every trip on the line, taken over
+    # the full feed validity period (not just the freq-sampling window). Used
+    # to drop construction-replacement services that have year-round frequency
+    # on the days they do run but only exist for a few weeks per year.
+    line_service_ids: dict = defaultdict(set)
+    for tid, (lk, _tg_id, _aid) in _trip_group_export.items():
+        t = trip_lookup.get(tid)
+        if t:
+            line_service_ids[lk].add(t["service_id"])
+    line_active_days: dict = {}
+    for lk, sids in line_service_ids.items():
+        union: set = set()
+        for sid in sids:
+            union |= svc_dates_full.get(sid, set())
+        line_active_days[lk] = len(union)
+    # svc_dates_full is the heaviest object in this script after stop_times;
+    # release it once line_active_days is computed.
+    svc_dates_full.clear()
 
     gtfs_index, gtfs_long_index = build_gtfs_index(line_freq, line_speed)
     print(f"  {len(gtfs_index):,} GTFS short-name entries, "
@@ -1040,15 +1071,122 @@ def main():
             continue
         tg_key = (line_key, aid, tg_id)
         groups[tg_key][merged_set].append(tid)
-        variant_counts[tg_key][merged_set] += 1
+        # Weighted by trip's active-date count so a depot run modelled as a few
+        # trip_ids active on a single date counts as much smaller service than
+        # the same trip_ids active every weekday. Same weight that the
+        # in-stream rare-variant filter already uses.
+        variant_counts[tg_key][merged_set] += _trip_weight_export.get(tid, 1)
 
-    # Snapshot for the comprehensive diagnostic before the rare-variant filter
-    # mutates `groups`. We deep-copy variant→trips so we still know who was in
-    # each dropped variant.
+    # Snapshot for the comprehensive diagnostic before the rare-group and
+    # rare-variant filters mutate `groups`. We deep-copy variant→trips so we
+    # still know who was in each dropped variant.
     diag_original = {
         tg_key: {ms: list(tids) for ms, tids in vmap.items()}
         for tg_key, vmap in groups.items()
     }
+
+    # ── Supergroup formation + rare-group filter ─────────────────────────────
+    # A supergroup is a transient classification used only for the rare-group
+    # drop below: trip groups inside one partition (short_name, agency, bucket)
+    # that share ≥1 merged stop are unioned. Once classified, drop trip groups
+    # whose weighted share of their supergroup's total is below 10% (5%
+    # fallback, then keep-all). Catches depot runs that were isolated as their
+    # own trip group because they share <2 merged stops with the main service.
+    tg_total_weight: dict = {
+        tg_key: sum(variant_counts[tg_key].values()) for tg_key in groups.keys()
+    }
+    tg_merged_union: dict = {}
+    for tg_key, vmap in groups.items():
+        u: set = set()
+        for ms in vmap.keys():
+            u |= ms
+        tg_merged_union[tg_key] = frozenset(u)
+
+    partition_to_tgkeys: dict = defaultdict(list)
+    for tg_key in groups.keys():
+        line_key, aid, _tg_id = tg_key
+        sn, ln, bkt = line_key
+        ln_norm = ln.replace(" ", "").lower()
+        partition_str = ln_norm if ln_norm else sn.replace(" ", "").lower()
+        partition_to_tgkeys[(partition_str, aid, bkt)].append(tg_key)
+
+    supergroup_id_by_tg: dict = {}        # tg_key → int (sequential)
+    supergroup_members: dict = defaultdict(list)  # sg_id → [tg_key, ...]
+    sg_counter = 0
+    for partition_key, tg_keys in partition_to_tgkeys.items():
+        K = len(tg_keys)
+        if K == 1:
+            sg_id = sg_counter
+            sg_counter += 1
+            supergroup_id_by_tg[tg_keys[0]] = sg_id
+            supergroup_members[sg_id].append(tg_keys[0])
+            continue
+
+        parent = list(range(K))
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        unions = [tg_merged_union[tg_keys[i]] for i in range(K)]
+        for i in range(K):
+            for j in range(i + 1, K):
+                ri, rj = find(i), find(j)
+                if ri == rj:
+                    continue
+                si, sj = unions[i], unions[j]
+                small, big = (si, sj) if len(si) <= len(sj) else (sj, si)
+                if any(s in big for s in small):
+                    parent[ri] = rj
+
+        cc_to_id: dict = {}
+        for i in range(K):
+            root = find(i)
+            if root not in cc_to_id:
+                cc_to_id[root] = sg_counter
+                sg_counter += 1
+            sg_id = cc_to_id[root]
+            supergroup_id_by_tg[tg_keys[i]] = sg_id
+            supergroup_members[sg_id].append(tg_keys[i])
+
+    supergroup_total_weight: dict = {
+        sg_id: sum(tg_total_weight[tg] for tg in members)
+        for sg_id, members in supergroup_members.items()
+    }
+
+    rare_group_dropped: set = set()
+    rare_group_threshold_by_sg: dict = {}
+    for sg_id, members in supergroup_members.items():
+        if len(members) == 1:
+            rare_group_threshold_by_sg[sg_id] = None
+            continue
+        sg_total = supergroup_total_weight[sg_id]
+        threshold_used = None
+        for pct in (0.10, 0.05):
+            threshold = max(1, sg_total * pct)
+            kept = [tg for tg in members if tg_total_weight[tg] >= threshold]
+            if kept:
+                threshold_used = pct
+                kept_set = set(kept)
+                for tg in members:
+                    if tg in kept_set:
+                        continue
+                    # Mountain bucket and CC-train carve-out: same exemption
+                    # the freq-score gate applies. Never drop these via the
+                    # rare-group filter.
+                    line_key_drop = tg[0]
+                    if line_key_drop[2] == "mountain" or (
+                        line_key_drop[0] == "CC" and line_key_drop[2] == "train"
+                    ):
+                        continue
+                    rare_group_dropped.add(tg)
+                break
+        rare_group_threshold_by_sg[sg_id] = threshold_used
+
+    for tg_key in rare_group_dropped:
+        groups.pop(tg_key, None)
+
     # filter_outcomes[tg_key] = {merged_set: ("kept" | "rare_variant", threshold_pct_used)}
     diag_filter: dict = {}
 
@@ -1073,16 +1211,37 @@ def main():
             for ms in vmap
         }
 
+    # Trip groups dropped by the supergroup filter never reached the per-variant
+    # filter loop above; record their variants as "kept" so they round-trip
+    # through the diagnostic loop and the group-level `rare_group_dropped`
+    # reason is what surfaces.
+    for tg_key in rare_group_dropped:
+        diag_filter[tg_key] = {
+            ms: ("kept", None) for ms in diag_original.get(tg_key, {})
+        }
+
     # Pre-filter low-freq groups out so they don't waste downstream work.
+    # Also apply the active-days gate (concept: active-days-filter): a line
+    # whose service runs on fewer than `min_active_days` distinct calendar
+    # dates across the full feed validity is dropped entirely, except for the
+    # mountain and ferry buckets (which legitimately run short seasonal
+    # windows). Same exemption shape as the freq-score gate.
     drawable_groups = {}
+    short_active_period_lines: set = set()
     for (line_key, aid, tg_id), variant_map in groups.items():
-        mode_approx = _BUCKET_MODE_APPROX.get(line_key[2], "regional_bus")
+        bucket = line_key[2]
+        mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         raw = line_freq.get(line_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
-        if line_key[2] == "mountain" or (
-            line_key[0] == "CC" and line_key[2] == "train"
+        if bucket not in {"mountain", "ferry"} and \
+                line_active_days.get(line_key, 0) < min_active_days:
+            short_active_period_lines.add(line_key)
+            continue
+        if bucket == "mountain" or (
+            line_key[0] == "CC" and bucket == "train"
         ) or compute_freq_score(raw, mode_approx) >= MIN_FREQ_SCORE:
             drawable_groups[(line_key, aid, tg_id)] = variant_map
     print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries")
+    print(f"  {len(short_active_period_lines):,} lines dropped by min_active_days={min_active_days}")
 
     # ── Emit features ────────────────────────────────────────────────────────
     features: list = []
@@ -1251,10 +1410,12 @@ def main():
           f"across {len(line_stops_out):,} features → {OUT_STOPS}")
 
     # gtfs_unmatched: GTFS lines with no emitted feature (after grouping).
-    all_line_keys: set = set()
-    for trips in _line_canonical_export.values():
-        for entry in trips:
-            all_line_keys.add(entry.line_key)
+    # Drawable line_keys come straight from drawable_groups — that dict has
+    # already passed the freq-score / mountain / CC exemptions used during
+    # emission, so the difference against matched_line_keys is exactly the set
+    # of lines that we thought we should draw but pfaedle never shaped (or
+    # whose polylines collapsed to < 2 coords).
+    all_line_keys = {lk for (lk, _aid, _tg) in drawable_groups}
     unmatched = all_line_keys - matched_line_keys
     unmatched_out = []
     for lk in sorted(unmatched, key=lambda x: (x[2], x[0], x[1])):
@@ -1262,8 +1423,6 @@ def main():
         freq = line_freq.get(lk, {"core_wd": 0, "eve_wd": 0, "we": 0})
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fs = compute_freq_score(freq, mode_approx)
-        if fs < MIN_FREQ_SCORE and bucket != "mountain":
-            continue
         unmatched_out.append({
             "short_name":  short_name,
             "long_name":   long_name,
@@ -1298,6 +1457,10 @@ def main():
         drawable = (line_key, aid, tg_id) in drawable_groups
         if drawable:
             group_reason = None
+        elif tg_key in rare_group_dropped:
+            group_reason = "rare_group_dropped"
+        elif line_key in short_active_period_lines:
+            group_reason = "short_active_period"
         elif bucket == "mountain" or (short_name == "CC" and bucket == "train"):
             # These should have been drawable; only here if neither emitted
             # nor low-freq. Real shouldn't-happen branch — record it.
@@ -1307,20 +1470,30 @@ def main():
         else:
             group_reason = "unknown_skipped"
 
+        group_trip_total = sum(len(t) for t in original_vmap.values())
+        group_weighted_total = tg_total_weight.get(tg_key, 0)
+        sg_id = supergroup_id_by_tg.get(tg_key)
+        sg_weighted_total = supergroup_total_weight.get(sg_id, 0)
+        sg_share = (group_weighted_total / sg_weighted_total) if sg_weighted_total else 0.0
+        sg_threshold = rare_group_threshold_by_sg.get(sg_id)
+        variant_weighted_total_for_group = sum(variant_counts[tg_key].values())
+
         variants_out = []
         for ms, (filt_outcome, threshold_pct) in var_outcomes.items():
             ms_trips = original_vmap.get(ms, [])
+            stations: list = []
             first_terminus = "?"
             last_terminus = "?"
             if ms_trips:
                 any_stops = _trip_stops_export.get(ms_trips[0], [])
-                if any_stops:
-                    f_uic = any_stops[0].split(":")[0]
-                    l_uic = any_stops[-1].split(":")[0]
-                    first_terminus = (stop_meta.get(any_stops[0],
-                                       stop_meta.get(f_uic, ("?", "")))[0] or "?")
-                    last_terminus = (stop_meta.get(any_stops[-1],
-                                       stop_meta.get(l_uic, ("?", "")))[0] or "?")
+                for sid in any_stops:
+                    uic = sid.split(":")[0]
+                    name = (stop_meta.get(sid,
+                              stop_meta.get(uic, ("?", "")))[0] or "?")
+                    stations.append({"stop_id": sid, "name": name})
+                if stations:
+                    first_terminus = stations[0]["name"]
+                    last_terminus = stations[-1]["name"]
 
             em = diag_emission.get((tg_key, ms), {})
             kept_by_filter = (filt_outcome == "kept")
@@ -1334,15 +1507,23 @@ def main():
             else:
                 v_reason = em.get("exclusion_reason")
 
+            share = (len(ms_trips) / group_trip_total) if group_trip_total else 0.0
+            ms_weight = variant_counts[tg_key].get(ms, 0)
+            weighted_share = (ms_weight / variant_weighted_total_for_group
+                              if variant_weighted_total_for_group else 0.0)
+
             v_entry = {
-                "merged_stop_count": len(ms),
                 "trip_count": len(ms_trips),
+                "trip_share_pct": round(share * 100, 1),
+                "weighted_trip_count": ms_weight,
+                "variant_share_of_group": round(weighted_share, 4),
                 "first_terminus": first_terminus,
                 "last_terminus": last_terminus,
                 "kept_by_variant_filter": kept_by_filter,
                 "rare_variant_threshold_pct": threshold_pct,
                 "exclusion_reason": v_reason,
                 "feature_emitted": em.get("feature_emitted", False),
+                "stations": stations,
             }
             if em.get("feature_emitted"):
                 v_entry["feature_id"] = em.get("feature_id", "")
@@ -1358,7 +1539,9 @@ def main():
                 v_entry["rep_trip_id"] = em.get("rep_trip_id", "")
             variants_out.append(v_entry)
 
-        total_trips_in_group = sum(len(t) for t in original_vmap.values())
+        active_days_val = line_active_days.get(line_key, 0)
+        threshold_field = (None if bucket in {"mountain", "ferry"}
+                           else min_active_days)
         diag_out.append({
             "ref": short_name,
             "long_name": long_name,
@@ -1366,9 +1549,16 @@ def main():
             "agency_id": aid,
             "agency_name": agency_names.get(aid, ""),
             "trip_group_id": tg_id,
-            "total_trip_count": total_trips_in_group,
+            "total_trip_count": group_trip_total,
+            "weighted_trip_count": group_weighted_total,
+            "supergroup_id": sg_id,
+            "supergroup_weighted_trip_count": sg_weighted_total,
+            "group_share_of_supergroup": round(sg_share, 4),
+            "rare_group_share_threshold": sg_threshold,
             "raw_freq": raw_freq,
             "freq_score": round(fscore, 3),
+            "active_days": active_days_val,
+            "min_active_days_threshold": threshold_field,
             "drawable": drawable,
             "group_exclusion_reason": group_reason,
             "variants": variants_out,
