@@ -10,7 +10,9 @@ The same collapse drops half the stop-pill information: a station's two platform
 
 ### Per-direction emission
 
-Every emitted line feature represents service in exactly one direction. This applies to all modes — train, tram, metro, bus, regional_bus, mountain — with the exceptions in **Mode exemptions** below. A line that operates both directions emits two features. A line observed in only one direction continues to emit one.
+Every emitted line feature for an in-scope mode represents service in exactly one direction. In-scope modes are train, tram, metro, bus, regional_bus, and the `rebucketed_rail` subset of mountain. A line that operates both directions emits two features. A line observed in only one direction continues to emit one.
+
+Out-of-scope modes (ferry, plus `aerial` and `funicular` mountain origins) collapse both directions into a single feature per merged stop set — see **Mode exemptions** below for the full rule.
 
 ### Direction key
 
@@ -48,12 +50,15 @@ The full emission key becomes `(line_key, agency_id, trip_group_id, merged_stop_
 
 ### Mode exemptions
 
-The per-direction split itself applies to **every** mode; there is no mode where the split is skipped. The exemptions below concern only the existing freq-score and active-days gates and the aerial dedup rule.
+Three rules — per-direction split, freq-score gate, active-days gate — share the same exemption set:
 
-- **Ferry bucket** — exempt from the freq-score and active-days gates, as today.
-- **True mountain modes** — GTFS `route_type` 5 (cable car), 6 (gondola), 7 (funicular) — exempt from the freq-score and active-days gates, as today.
-- **Rebucketed mountain rail** — trips that started life as GTFS `route_type` 2 and were rebucketed to `mountain` via the `mountain_agency_ids` whitelist are **not** exempt. The freq-score and active-days gates apply to them the same way they apply to normal `train` lines. The rendering style (light-yellow mountain color, fixed width) stays unchanged; only the gate behaviour changes. A `mountain_origin` field on each emission record distinguishes `aerial` / `funicular` / `rebucketed_rail` so downstream code can branch correctly.
-- The aerial-mountain dedup rule (cable-car / gondola bbox overlap, ref-keyed) runs **per direction** — opposite directions of the same haul cable are not collapsed. It is restricted to `aerial` origin and never applies to `rebucketed_rail`.
+- **Ferry bucket** — fully exempt. Per-direction split is skipped (both directions collapse into one feature), and both gates are skipped.
+- **True mountain modes** — GTFS `route_type` 5 (cable car), 6 (gondola), 7 (funicular). Fully exempt: per-direction split skipped, both gates skipped.
+- **Rebucketed mountain rail** — trips that started life as GTFS `route_type` 2 and were rebucketed to `mountain` via the `mountain_agency_ids` whitelist are **not** exempt from any of the three rules. The per-direction split, the freq-score gate, and the active-days gate all apply to them the same way they apply to normal `train` lines. The rendering style (light-yellow mountain color, fixed width) stays unchanged; only the pipeline behaviour matches `train`. A `mountain_origin` field on each emission record distinguishes `aerial` / `funicular` / `rebucketed_rail` so downstream code can branch correctly.
+
+For exempt modes the variant key collapses to `(merged_stop_set,)` — `direction_key` is set to a single canonical value on every trip in the group so all directions merge. Emitted features still carry a `direction_key` property; for exempt modes it carries the canonical sentinel (it does not represent a real terminus pair).
+
+The aerial-mountain dedup rule (cable-car / gondola bbox overlap, ref-keyed) is unchanged in spirit: same-ref aerial features that overlap collapse to the best-vertex-count winner. Because aerial is now fully exempt from the per-direction split, the rule no longer needs to key on `direction_key` — it keys on `ref` alone and never applies to `rebucketed_rail`.
 
 ## Constraints
 

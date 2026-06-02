@@ -203,8 +203,6 @@ def gtfs_to_mode(bucket: str, agency_id: str,
     """
     if bucket == "bus":
         ref = short_name.strip()
-        if ref.upper() == "EV":
-            return "regional_bus"
         digits = "".join(c for c in ref if c.isdigit())
         n = len(digits)
         if n == 3 and agency_id in TRANSN_CITY_AGENCIES and digits[0] in ("1", "3"):
@@ -591,14 +589,21 @@ def _mountain_origin(bucket: str, route_type: str):
 
 
 def _gate_exempt(bucket: str, mountain_origin) -> bool:
-    """True if a trip group is exempt from the freq-score and active-days
-    gates. Per direction-coverage concept: ferry + true mountain (aerial,
-    funicular) only; rebucketed rail is gated like normal train."""
+    """True if a trip group is exempt from the three direction-coverage rules:
+    per-direction split, freq-score gate, active-days gate. Per the
+    direction-coverage concept these three share the same exemption set —
+    ferry + true mountain (aerial, funicular). Rebucketed rail is treated like
+    normal train across all three."""
     if bucket == "ferry":
         return True
     if bucket == "mountain" and mountain_origin in ("aerial", "funicular"):
         return True
     return False
+
+
+# Canonical direction_key for trips in exempt modes (ferry, aerial, funicular).
+# Set on every trip in such a group so both directions collapse into one variant.
+EXEMPT_DIRECTION_KEY = ("*", "*")
 
 
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
@@ -1004,28 +1009,27 @@ _AERIAL_ROUTE_TYPES = {"5", "6"}
 
 def deduplicate_mountain(features: list) -> list:
     """Drop overlapping aerial features (cable cars, gondolas) sharing the same
-    ref AND direction. Best (most geometry vertices) wins.
+    ref. Best (most geometry vertices) wins.
 
     Restricted to mountain_origin == "aerial" (GTFS route_type 5/6). The
-    historic problem this solved was multiple OSM route relations for the same
-    physical haul cable. Per direction-coverage concept, opposite directions
-    of the same cable are kept (different direction_key); only same-direction
-    duplicates within a ref collapse. Funiculars, rebucketed mountain rail,
-    and every other mode are not collapsed.
+    problem this solves is multiple OSM route relations for the same physical
+    haul cable. Aerial is exempt from the per-direction split (see
+    direction-coverage Mode-exemptions), so the dedup key is `ref` alone.
+    Funiculars, rebucketed mountain rail, and every other mode are not
+    collapsed.
     """
     aerial_idx = [(i, f) for i, f in enumerate(features)
                   if f["properties"].get("mountain_origin") == "aerial"]
     aerial_set = {i for i, _ in aerial_idx}
     keep = set(i for i in range(len(features)) if i not in aerial_set)
 
-    by_ref_dir: dict = defaultdict(list)
+    by_ref: dict = defaultdict(list)
     for i, f in aerial_idx:
         ref = f["properties"]["ref"]
-        direction_key = f["properties"].get("direction_key", "")
-        by_ref_dir[(ref, direction_key)].append((i, f, _feat_bbox(f), _n_pts(f)))
+        by_ref[ref].append((i, f, _feat_bbox(f), _n_pts(f)))
 
     n_dropped = 0
-    for (ref, _dir), group in by_ref_dir.items():
+    for ref, group in by_ref.items():
         if not ref:
             for i, f, b, n in group:
                 keep.add(i)
@@ -1120,6 +1124,22 @@ def main():
     line_freq, line_speed, line_canonical = stream_stop_times(
         trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
+    # Override direction_key with EXEMPT_DIRECTION_KEY for ferry + aerial /
+    # funicular mountain trips. Both directions then share one variant key and
+    # collapse into a single emitted feature per merged stop set, per the
+    # direction-coverage Mode-exemptions rule. Rebucketed mountain rail keeps
+    # its real (first_uic, last_uic) direction_key and stays per-direction.
+    n_exempt_collapsed = 0
+    for tid, t in trip_lookup.items():
+        bucket = t["line_key"][2]
+        rt = route_lookup.get(t.get("route_id", ""), {}).get("type", "")
+        if _gate_exempt(bucket, _mountain_origin(bucket, rt)):
+            if tid in _trip_direction_export:
+                _trip_direction_export[tid] = EXEMPT_DIRECTION_KEY
+                n_exempt_collapsed += 1
+    print(f"  {n_exempt_collapsed:,} ferry/aerial/funicular trips collapsed "
+          f"to single direction_key")
+
     for line_key in line_canonical:
         _ = line_freq[line_key]
 
@@ -1145,7 +1165,10 @@ def main():
     # Each variant key is (merged_set, direction_key) so opposite directions of
     # the same merged-stop set form distinct variants. Per direction-coverage
     # concept: directions are split end-to-end so each gets its own pfaedle
-    # shape, rep trip, stop list, and filter outcome.
+    # shape, rep trip, stop list, and filter outcome. Ferry + aerial/funicular
+    # mountain are exempt — their direction_key was overwritten with the
+    # canonical EXEMPT_DIRECTION_KEY just after stream_stop_times, so all their
+    # trips share one variant and emit one feature per merged stop set.
     groups: dict = defaultdict(lambda: defaultdict(list))
     variant_counts: dict = defaultdict(lambda: defaultdict(int))
     for tid, (line_key, tg_id, aid) in _trip_group_export.items():

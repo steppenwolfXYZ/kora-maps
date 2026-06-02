@@ -43,12 +43,13 @@ Other transN-family agencies (TRN/Autr `000796`, TRN/Auto `000156`, etc.) are de
 
 Conditions are checked in order; the first one that matches wins.
 
-1. If `short_name` (case-insensitive, trimmed) is `"EV"` → **regional bus**. This catches train-replacement service (Ersatzverkehr).
-2. If `n == 3`, `agency_id` is in `TRANSN_CITY_AGENCIES`, and the first digit of the ref is `1` or `3` → **city bus**.
-3. If `n >= 3` → **regional bus**. Three or more digits in the ref means regional regardless of operator.
-4. If `n == 2` and `agency_id` is in `TWO_DIGIT_REGIONAL_AGENCIES` → **regional bus**.
-5. If `n == 0` (pure-letter ref) and the routed length is at least 10 km → **regional bus**. Pure-letter refs (e.g. `A`, `G`, `TEL`, `Rot`) get a length fallback because the digit-based rule cannot apply.
-6. Otherwise → **city bus**.
+1. If `n == 3`, `agency_id` is in `TRANSN_CITY_AGENCIES`, and the first digit of the ref is `1` or `3` → **city bus**.
+2. If `n >= 3` → **regional bus**. Three or more digits in the ref means regional regardless of operator.
+3. If `n == 2` and `agency_id` is in `TWO_DIGIT_REGIONAL_AGENCIES` → **regional bus**.
+4. If `n == 0` (pure-letter ref) and the routed length is at least 10 km → **regional bus**. Pure-letter refs (e.g. `A`, `G`, `TEL`, `Rot`) get a length fallback because the digit-based rule cannot apply.
+5. Otherwise → **city bus**.
+
+> **Historical note.** A previous iteration of this rule mapped `short_name == "EV"` (Ersatzverkehr / Bahnersatz / rail replacement) to **regional bus**. That rule has been removed: the MVP map shows general year-round connections, so all EV-prefixed lines are dropped upstream in `04_preprocess_gtfs.py` (any route whose `route_short_name` begins with `EV` is excluded before pfaedle runs). A future daily-updating variant of the map will reintroduce them with their own rendering.
 
 ## Constraints
 

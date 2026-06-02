@@ -6,6 +6,10 @@ Drops trips that pfaedle should not route:
   • Trips belonging to excluded agencies (long-distance coaches).
     Match is case-insensitive substring on agency_name vs config
     `excluded_agencies`.
+  • Trips whose route_short_name begins with "EV" (Bahnersatz /
+    rail-replacement buses). The MVP map shows general connections,
+    not construction-period substitutes; a future daily-updating
+    variant will reintroduce them.
   • Trips with any stop outside the bbox declared in
     config `osm_bbox`. (Foreign-terminus trips.)
 
@@ -72,26 +76,34 @@ def identify_excluded_agencies(excluded_tokens: list) -> set:
     return out
 
 
-def routes_for_agencies(excluded_agencies: set) -> tuple:
+def identify_excluded_routes(excluded_agencies: set) -> tuple:
     """
-    Returns (excluded_route_ids, route_to_agency).
-    route_to_agency is the full mapping (needed for diagnostics).
+    Returns (excluded_route_ids, route_to_agency, route_drop_reason).
+    A route is excluded if its agency is in `excluded_agencies` OR its
+    `route_short_name` begins with "EV" (Bahnersatz / rail-replacement).
+    Agency takes precedence in the reason map when both apply.
     """
     excluded = set()
     route_to_agency = {}
+    route_drop_reason: dict = {}
     with open(GTFS_IN / "routes.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             rid = row["route_id"]
             aid = row.get("agency_id", "")
+            short = (row.get("route_short_name") or "").strip().upper()
             route_to_agency[rid] = aid
             if aid in excluded_agencies:
                 excluded.add(rid)
-    return excluded, route_to_agency
+                route_drop_reason[rid] = "agency"
+            elif short.startswith("EV"):
+                excluded.add(rid)
+                route_drop_reason[rid] = "ev_route"
+    return excluded, route_to_agency, route_drop_reason
 
 
 def load_trips_index(excluded_route_ids: set) -> tuple:
     """
-    Returns (trip_to_route, trips_excluded_by_agency).
+    Returns (trip_to_route, trips_excluded_by_route).
     Reads trips.txt once.
     """
     trip_to_route = {}
@@ -107,7 +119,7 @@ def load_trips_index(excluded_route_ids: set) -> tuple:
 
 
 def stream_filter_stop_times(stop_coords: dict, bbox: dict,
-                             trips_excluded_by_agency: set) -> tuple:
+                             trips_excluded_by_route: set) -> tuple:
     """
     Streams stop_times.txt once, writes the filtered version to GTFS_OUT,
     and returns (foreign_terminus_trips, total_trips, kept_trips).
@@ -190,7 +202,7 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
                 seen_trips.add(tid)
                 cur_rows = []
                 cur_any_foreign = False
-                cur_excluded = tid in trips_excluded_by_agency
+                cur_excluded = tid in trips_excluded_by_route
 
             cur_rows.append(line)
 
@@ -313,17 +325,22 @@ def main() -> None:
     print(f"  {len(excluded_agencies):,} agencies matched")
 
     print(f"Identifying excluded routes…")
-    excluded_route_ids, route_to_agency = routes_for_agencies(excluded_agencies)
-    print(f"  {len(excluded_route_ids):,} routes via excluded agencies")
+    excluded_route_ids, route_to_agency, route_drop_reason = \
+        identify_excluded_routes(excluded_agencies)
+    n_agency = sum(1 for r in route_drop_reason.values() if r == "agency")
+    n_ev = sum(1 for r in route_drop_reason.values() if r == "ev_route")
+    print(f"  {len(excluded_route_ids):,} routes excluded "
+          f"({n_agency:,} via excluded agencies, "
+          f"{n_ev:,} via EV route_short_name)")
 
     print(f"Indexing trips…")
-    trip_to_route, trips_excluded_by_agency = load_trips_index(excluded_route_ids)
+    trip_to_route, trips_excluded_by_route = load_trips_index(excluded_route_ids)
     print(f"  {len(trip_to_route):,} trips total, "
-          f"{len(trips_excluded_by_agency):,} via excluded agencies")
+          f"{len(trips_excluded_by_route):,} via excluded routes")
 
     print(f"Streaming stop_times.txt → filter foreign-terminus trips…")
     foreign_terminus, total_trips, kept_trips, n_time_repairs = stream_filter_stop_times(
-        stop_coords, bbox, trips_excluded_by_agency)
+        stop_coords, bbox, trips_excluded_by_route)
     print(f"  {total_trips:,} trips scanned, "
           f"{len(foreign_terminus):,} foreign-terminus, "
           f"{kept_trips:,} kept")
@@ -331,7 +348,7 @@ def main() -> None:
         print(f"  Repaired {n_time_repairs} rows with arrival_time > departure_time "
               "(clamped dep = arr)")
 
-    dropped = trips_excluded_by_agency | foreign_terminus
+    dropped = trips_excluded_by_route | foreign_terminus
     print(f"Writing filtered trips.txt …")
     kept_route_ids, n_trips = write_filtered_trips(dropped)
     print(f"  {n_trips:,} trips, {len(kept_route_ids):,} distinct routes")
@@ -350,10 +367,15 @@ def main() -> None:
         copy_verbatim(name)
 
     # Diagnostic: summarize dropped trips by route+reason.
-    diag: dict = defaultdict(lambda: {"by_agency": 0, "foreign_terminus": 0})
-    for tid in trips_excluded_by_agency:
+    diag: dict = defaultdict(
+        lambda: {"by_agency": 0, "by_ev_route": 0, "foreign_terminus": 0})
+    for tid in trips_excluded_by_route:
         rid = trip_to_route.get(tid, "?")
-        diag[rid]["by_agency"] += 1
+        reason = route_drop_reason.get(rid, "agency")
+        if reason == "ev_route":
+            diag[rid]["by_ev_route"] += 1
+        else:
+            diag[rid]["by_agency"] += 1
     for tid in foreign_terminus:
         rid = trip_to_route.get(tid, "?")
         diag[rid]["foreign_terminus"] += 1
