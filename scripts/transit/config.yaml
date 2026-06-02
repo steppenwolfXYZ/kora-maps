@@ -38,6 +38,55 @@ excluded_agencies:
   - ic bus
   - alsa
 
+# ── Mountain agencies ────────────────────────────────────────────────────────
+# GTFS agency_ids whose `route_type=2` (rail) lines render as mountain mode
+# (yellow, no freq variance, exempt from the min-active-days and freq gates so
+# seasonal tourist services survive). The criterion is "agency is outside the
+# GA-Geltungsbereich"; Rigi Bahnen (000137) is a manual exception (in the GA
+# but unambiguously a tourist mountain line). agency_id keys, not name
+# substrings — the substring approach previously matched both BOB (valley) and
+# BOB-spb (Schynige Platte) and broke the Interlaken–Lauterbrunnen line.
+mountain_agency_ids:
+  - "000157"  # WAB     — Wengernalpbahn
+  - "000124"  # JB      — Jungfraubahn
+  - "000121"  # GGB     — Gornergratbahn
+  - "000137"  # RB      — Rigi Bahnen (GA-included, manual exception)
+  - "000136"  # PB      — Pilatusbahnen
+  - "000803"  # VerAlp  — VerticAlp Vallée du Trient
+  - "000140"  # BOB-spb — BOB Schynige Platte branch
+  - "000104"  # BRB     — Brienz Rothorn Bahn
+  - "000129"  # MG      — Ferrovia Monte Generoso
+  - "000160"  # DFB     — Dampfbahn Furka-Bergstrecke
+
+# ── Headway thresholds per bucket (minutes) ─────────────────────────────────
+# Endpoints of the per-bucket frequency score curve. The core-hours score is a
+# linear interpolation between these two points based on the line's effective
+# headway (CORE_MINUTES / trips-per-sample-day):
+#   actual_hw <= best_headway → score = 1.0
+#   actual_hw >= worst_headway → score = 0.0
+# Ferry's worst_headway is intentionally high so seasonal once-daily lake
+# services (BAT 74 Brienz, Thunersee, Walensee, etc.) clear the freq gate.
+# Mountain values are informational — mountain is exempt from the freq gate.
+# Every bucket appearing in either table must appear in both; a missing entry
+# is a fatal config error.
+headway:
+  best_headway:
+    train:          15
+    tram:            7
+    metro:           5
+    bus:             6
+    regional_bus:   30
+    ferry:          45
+    mountain:       60
+  worst_headway:
+    train:         240
+    tram:          100
+    metro:          75
+    bus:            90
+    regional_bus: 360
+    ferry:        2100
+    mountain:    1200
+
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates
 # across the full feed validity period is dropped. Catches construction-

@@ -28,15 +28,27 @@ The set covers operators that follow the "1-digit = city, 2-digit = regional" co
 
 The PostAuto sub-agency for Bus Commune Sion (PAG/BCS) is explicitly **not** in the set: it is a PostAuto-operated city service whose 2-digit refs are city lines.
 
+### transN city-bus agency set
+
+A closed set of agency_ids called `TRANSN_CITY_AGENCIES`. For agencies in this set, a 3-digit ref whose first digit is `1` or `3` denotes a city bus, overriding the default n≥3 → regional rule. transN numbers its urban networks in the 100s and 300s; everything else (200s, 400s, 500s) stays regional.
+
+In the current SBB feed this is:
+
+- TRN-tn (`000153`) — Neuchâtel city network (100s + 120s).
+- TRN/tc (`000792`) — La Chaux-de-Fonds + Le Locle urban network (300s).
+
+Other transN-family agencies (TRN/Autr `000796`, TRN/Auto `000156`, etc.) are deliberately **not** in the set: their 100s and 300s are regional village services.
+
 ### Classification
 
 Conditions are checked in order; the first one that matches wins.
 
 1. If `short_name` (case-insensitive, trimmed) is `"EV"` → **regional bus**. This catches train-replacement service (Ersatzverkehr).
-2. If `n >= 3` → **regional bus**. Three or more digits in the ref means regional regardless of operator.
-3. If `n == 2` and `agency_id` is in `TWO_DIGIT_REGIONAL_AGENCIES` → **regional bus**.
-4. If `n == 0` (pure-letter ref) and the routed length is at least 10 km → **regional bus**. Pure-letter refs (e.g. `A`, `G`, `TEL`, `Rot`) get a length fallback because the digit-based rule cannot apply.
-5. Otherwise → **city bus**.
+2. If `n == 3`, `agency_id` is in `TRANSN_CITY_AGENCIES`, and the first digit of the ref is `1` or `3` → **city bus**.
+3. If `n >= 3` → **regional bus**. Three or more digits in the ref means regional regardless of operator.
+4. If `n == 2` and `agency_id` is in `TWO_DIGIT_REGIONAL_AGENCIES` → **regional bus**.
+5. If `n == 0` (pure-letter ref) and the routed length is at least 10 km → **regional bus**. Pure-letter refs (e.g. `A`, `G`, `TEL`, `Rot`) get a length fallback because the digit-based rule cannot apply.
+6. Otherwise → **city bus**.
 
 ## Constraints
 

@@ -108,16 +108,37 @@ LOW_WE_HEADWAY = {
     "bus": 30, "regional_bus": 90, "ferry": 120, "mountain": 120,
 }
 
-# Best headway per mode (minutes) — at this headway, core_score = 1.0
-BEST_HEADWAY = {
-    "train":        15,
-    "tram":          7,
-    "metro":         5,
-    "bus":           6,
-    "regional_bus": 30,
-    "ferry":        45,
-    "mountain":     60,
-}
+# Headways per mode (minutes) — loaded from config.yaml at first call. The
+# core_score curve is linear in actual headway between best_headway (score=1.0)
+# and worst_headway (score=0.0). See .claude/concepts/bucket-worst-headway.md.
+
+_HEADWAY_CACHE: dict = {}
+
+
+def _headways() -> tuple:
+    """Return (best_headway_dict, worst_headway_dict). Loaded lazily; both
+    tables must cover the same bucket set or the pipeline aborts."""
+    if _HEADWAY_CACHE:
+        return _HEADWAY_CACHE["best"], _HEADWAY_CACHE["worst"]
+    cfg = yaml.safe_load(CFG_PATH.read_text())
+    hw = cfg.get("headway") or {}
+    best = hw.get("best_headway") or {}
+    worst = hw.get("worst_headway") or {}
+    if not best or not worst:
+        sys.exit(
+            "config.yaml is missing headway.best_headway / headway.worst_headway."
+        )
+    missing_worst = set(best) - set(worst)
+    missing_best  = set(worst) - set(best)
+    if missing_worst or missing_best:
+        sys.exit(
+            "config.yaml headway tables are inconsistent: "
+            f"buckets missing worst_headway={sorted(missing_worst)}, "
+            f"buckets missing best_headway={sorted(missing_best)}."
+        )
+    _HEADWAY_CACHE["best"]  = {k: float(v) for k, v in best.items()}
+    _HEADWAY_CACHE["worst"] = {k: float(v) for k, v in worst.items()}
+    return _HEADWAY_CACHE["best"], _HEADWAY_CACHE["worst"]
 
 # Bus mode classification — see .claude/concepts/bus-mode-classification.md.
 # Agencies that follow the "1-digit ref = city, 2-digit ref = regional"
@@ -133,6 +154,14 @@ TWO_DIGIT_REGIONAL_AGENCIES = {
 }
 # 000765 (PAG/BCS, PostAuto AG Bus Commune Sion) is deliberately excluded:
 # PostAuto-operated city service whose 2-digit refs are city lines.
+
+# transN city carve-out: agencies whose 3-digit refs starting with 1 or 3 are
+# city lines, overriding the default n>=3 → regional rule. transN numbers its
+# urban networks in the 100s (Neuchâtel) and 300s (La Chaux-de-Fonds / Le Locle).
+TRANSN_CITY_AGENCIES = {
+    "000153",  # TRN-tn (Neuchâtel)
+    "000792",  # TRN/tc (La Chaux-de-Fonds + Le Locle)
+}
 
 # Length fallback for pure-letter refs (km).
 LETTER_REF_REGIONAL_MIN_LENGTH = 10.0
@@ -177,6 +206,8 @@ def gtfs_to_mode(bucket: str, agency_id: str,
             return "regional_bus"
         digits = "".join(c for c in ref if c.isdigit())
         n = len(digits)
+        if n == 3 and agency_id in TRANSN_CITY_AGENCIES and digits[0] in ("1", "3"):
+            return "bus"
         if n >= 3:
             return "regional_bus"
         if n == 2 and agency_id in TWO_DIGIT_REGIONAL_AGENCIES:
@@ -465,8 +496,15 @@ def load_agencies() -> dict:
     return out
 
 
-def load_trips(route_lookup: dict) -> dict:
-    """{trip_id: {line_key, service_id, agency_id, shape_id, direction_id, route_id}}"""
+def load_trips(route_lookup: dict, mountain_aids: set) -> dict:
+    """{trip_id: {line_key, service_id, agency_id, shape_id, direction_id, route_id}}
+
+    `mountain_aids` rebuckets the listed agencies' `route_type=2` rail to
+    `mountain` at load time, so every downstream bucket-keyed exemption
+    (active-days, freq gate, mode→yellow) flows from a single decision. The
+    rail shape pfaedle produced is still preferred at emit time because the
+    straight-line fallback only fires when no pfaedle shape exists.
+    """
     trips = {}
     with open(GTFS / "trips.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -474,6 +512,9 @@ def load_trips(route_lookup: dict) -> dict:
             if not r:
                 continue
             bucket = gtfs_type_to_bucket(r["type"])
+            agency_id = r.get("agency_id", "")
+            if bucket == "train" and agency_id in mountain_aids:
+                bucket = "mountain"
             line_key = (r["short_name"], r["long_name"], bucket)
             trips[row["trip_id"]] = {
                 "line_key": line_key,
@@ -863,25 +904,20 @@ def corridor_freq(canon_stops: list, pair_freq: dict):
 
 
 def compute_freq_score(raw_freq: dict, mode: str) -> float:
-    best_hw = BEST_HEADWAY.get(mode, 15)
+    best_map, worst_map = _headways()
+    if mode not in best_map:
+        sys.exit(f"compute_freq_score: bucket {mode!r} missing from headway config.")
+    best_hw = best_map[mode]
+    worst_hw = worst_map[mode]
     core_trips = raw_freq.get("core_wd", 0)
     eve_trips  = raw_freq.get("eve_wd",  0)
     we_trips   = raw_freq.get("we",      0)
 
-    if core_trips >= 2:
-        actual_headway = CORE_MINUTES / core_trips
-        core_score = min(1.0, best_hw / actual_headway)
-    elif core_trips >= 1:
-        # Average between 1 and 2 trips per sample day — same tiny score as the
-        # original single-date "exactly 1 trip" branch.
-        core_score = min(0.15, best_hw / CORE_MINUTES)
-    elif core_trips > 0:
-        # Fractional average (line runs on some samples but averages < 1
-        # trip/day). Pro-rate the floor score so the no-draw threshold is hit
-        # smoothly rather than at a cliff edge.
-        core_score = core_trips * min(0.15, best_hw / CORE_MINUTES)
-    else:
+    if core_trips <= 0:
         return 0.0
+    actual_hw = CORE_MINUTES / core_trips
+    core_score = (worst_hw - actual_hw) / (worst_hw - best_hw)
+    core_score = max(0.0, min(1.0, core_score))
 
     low_eve = LOW_EVE_HEADWAY.get(mode, 30)
     if eve_trips >= 2:
@@ -1025,9 +1061,13 @@ def main():
     svc_dates_full = load_calendar_dates_full()
     route_lookup = load_routes()
     agency_names = load_agencies()
-    trip_lookup  = load_trips(route_lookup)
+    mountain_aids = set(cfg.get("mountain_agency_ids", []) or [])
+    trip_lookup  = load_trips(route_lookup, mountain_aids)
     print(f"  {len(stop_coords):,} stop entries, {len(svc_dates):,} service IDs, "
           f"{len(trip_lookup):,} trips, {len(agency_names):,} agencies")
+    if mountain_aids:
+        print(f"  {len(mountain_aids)} agencies rebucketed train→mountain: "
+              f"{sorted(mountain_aids)}")
     print(f"  {len(svc_dates_full):,} service IDs with full-calendar coverage")
 
     min_active_days = int(cfg.get("min_active_days", 150))

@@ -54,7 +54,7 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 | City bus | blue | |
 | Ferry | blue | same as city bus |
 | Long-distance bus | turquoise | |
-| Mountain railway | light yellow `#ffe566` | funicular, cable car, gondola (GTFS route_type 5/6/7) — fixed color, no freq variance. Rack railways with GTFS route_type=2 (Jungfraubahn, WAB, etc.) render as train (red). |
+| Mountain railway | light yellow `#ffe566` | funicular, cable car, gondola (GTFS route_type 5/6/7) plus rack-rail operators in the `mountain_agency_ids` whitelist (WAB, JB, GGB, RB, PB, BRB, MG, DFB, BOB-spb, VerAlp) — fixed color, no freq variance. |
 
 **Speed and frequency encoding:**
 - Line thickness = speed (faster = thicker)
