@@ -19,15 +19,16 @@
 # Download steps (1 and 2) skip when the target file is already present. Use
 # one of the force flags below to re-download:
 #
-#   --force         re-download GTFS and OSM
+#   --force         re-download GTFS, atlas, and OSM
 #   --force-gtfs    re-download GTFS only
+#   --force-atlas   re-download atlas only
 #   --force-osm     re-download OSM only
 #
 # Examples:
 #   ./scripts/rebuild_transit.sh                  # default: --start 3
 #   ./scripts/rebuild_transit.sh --start 4        # bbox cut up-to-date, re-route only
 #   ./scripts/rebuild_transit.sh --start 6        # iterate on emission + style + tiles
-#   ./scripts/rebuild_transit.sh --start 1 --force-gtfs   # refresh GTFS, leave OSM alone
+#   ./scripts/rebuild_transit.sh --start 1 --force-gtfs   # refresh GTFS, leave atlas+OSM alone
 #   ./scripts/rebuild_transit.sh --start 8        # rebuild pmtiles only
 
 set -euo pipefail
@@ -35,19 +36,21 @@ cd "$(dirname "$0")/.."
 
 START=3
 FORCE_GTFS=0
+FORCE_ATLAS=0
 FORCE_OSM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --start)        shift; START="$1" ;;
     --start=*)      START="${1#--start=}" ;;
-    --force)        FORCE_GTFS=1; FORCE_OSM=1 ;;
+    --force)        FORCE_GTFS=1; FORCE_ATLAS=1; FORCE_OSM=1 ;;
     --force-gtfs)   FORCE_GTFS=1 ;;
+    --force-atlas)  FORCE_ATLAS=1 ;;
     --force-osm)    FORCE_OSM=1 ;;
     -h|--help)
-      sed -n '2,30p' "$0"; exit 0 ;;
+      sed -n '2,32p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2
-      echo "usage: $0 [--start N] [--force | --force-gtfs | --force-osm]" >&2
+      echo "usage: $0 [--start N] [--force | --force-gtfs | --force-atlas | --force-osm]" >&2
       exit 2 ;;
   esac
   shift
@@ -60,8 +63,9 @@ fi
 
 GTFS_ARGS=()
 OSM_ARGS=()
-if [[ $FORCE_GTFS -eq 1 ]]; then GTFS_ARGS+=(--force); fi
-if [[ $FORCE_OSM  -eq 1 ]]; then OSM_ARGS+=(--force);  fi
+if [[ $FORCE_GTFS  -eq 1 ]]; then GTFS_ARGS+=(--force-gtfs);  fi
+if [[ $FORCE_ATLAS -eq 1 ]]; then GTFS_ARGS+=(--force-atlas); fi
+if [[ $FORCE_OSM   -eq 1 ]]; then OSM_ARGS+=(--force);        fi
 
 echo "══════════════════════════════════════════"
 echo "  Transit Rebuild Pipeline (pfaedle)"

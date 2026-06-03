@@ -4,7 +4,9 @@
 
 Numbered 1–8 in `scripts/transit/`; the rebuild script runs them in order.
 
-- `01_download_gtfs.py` — fetches the official Swiss GTFS feed ("Timetable 2026 (GTFS2020)") from opentransportdata.swiss → `data/gtfs/`. Discovers the latest release at runtime (resource URLs include a date suffix). Refreshed ~2×/week. Carries `original_stop_id` (SLOID) on stops and full sector-range platform codes (e.g. `12A-C`) — required by `gtfs-source-switch` and consumed by `prm-platform-positions`.
+- `01_download_gtfs.py` — fetches two sources:
+  - Official Swiss GTFS feed ("Timetable 2026 (GTFS2020)") from opentransportdata.swiss → `data/gtfs/`. Discovers the latest release at runtime (resource URLs include a date suffix). Refreshed ~2×/week. Carries `original_stop_id` (SLOID) on stops and full sector-range platform codes (e.g. `12A-C`) — required by `gtfs-source-switch` and consumed by `prm-platform-positions`.
+  - Atlas v2 traffic-point CSV from opentransportdata.swiss → `data/atlas/actual-date-world-traffic-point.csv`. Per-platform attributes (length, compassDirection) keyed by SLOID; consumed by `prm-platform-positions`.
 - `02_download_osm.py` — fetches CH + LI + DE + FR + IT + AT country PBFs → `data/osm/`. Neighbour PBFs are required because the bbox extends past CH soil (Domodossola, Konstanz, Annemasse, Lörrach, Bregenz). One-off download ≈ 12 GB.
 - `03_bbox_osm.py` — cuts each country PBF to the bbox in `scripts/transit/config.yaml:osm_bbox`, then merges the slices → `data/osm/ch_pfaedle.osm.pbf`. Cut-then-merge avoids a >10 GB intermediate file.
 - `04_preprocess_gtfs.py` — drops excluded-agency trips, EV-prefixed routes (Bahnersatz / rail replacement), and foreign-terminus trips, repairs `arr > dep` rows → `data/gtfs_filtered/`.
@@ -15,7 +17,7 @@ Numbered 1–8 in `scripts/transit/`; the rebuild script runs them in order.
 
 `scripts/generate_style.py` is not numbered — it lives outside `scripts/transit/` because it generates the whole MapLibre style, not transit-only — and runs as a fixed step inside step 7 of the rebuild flow (between extract-stops and pmtiles).
 
-Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --force-osm]`. Default is `--start 3` (bbox cut and everything after). Each step's output is the next step's input, so middle-skipping is not supported; `--start N` always runs steps N..8 contiguously. Download steps (1 and 2) skip when the target file is already present; `--force` re-downloads both, `--force-gtfs` / `--force-osm` re-download only that source. This makes `--start 1` cheap to re-run without the multi-GB OSM download.
+Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --force-atlas | --force-osm]`. Default is `--start 3` (bbox cut and everything after). Each step's output is the next step's input, so middle-skipping is not supported; `--start N` always runs steps N..8 contiguously. Download steps (1 and 2) skip when the target file is already present; `--force` re-downloads all three (GTFS, atlas, OSM), the per-source `--force-*` flags re-download only that one. This makes `--start 1` cheap to re-run without the multi-GB OSM download.
 
 ## Diagnostic outputs (in `data/transit/`)
 
@@ -27,6 +29,7 @@ Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --f
 | `pfaedle_unrouted.json` | Trips that pfaedle could not shape (rep trip's `shape_id` missing from `shapes.txt`), with `direction_key` recording which direction failed. Aerial GTFS `route_type` 5/6 (cable car / gondola) trips that fail pfaedle do NOT land here — they are emitted with a straight-line fallback instead and tagged `geometry_source: "straight_line_fallback"`. |
 | `line_stops.json` | Per emitted feature: ordered list of `[lon, lat, stop_id]` plus the feature's `direction_key`. Stop IDs keep their platform suffix (e.g. `8576646:J`) so per-direction platforms stay distinguishable. |
 | `gtfs_groups_full.json` | **Comprehensive lookup.** One entry per `(line_key, agency_id, trip_group_id)` including non-drawable ones, with `drawable`, `freq_score`, `mountain_origin` (`aerial` / `funicular` / `rebucketed_rail` / null), and a `group_exclusion_reason` (`low_frequency`, etc.). Each group lists every `(merged_stop_set, direction_key)` variant including dropped ones, with `direction_key`, `kept_by_variant_filter`, `exclusion_reason` (`rare_variant`, `pfaedle_unrouted`, `polyline_too_short`, or null when emitted), `first_terminus` / `last_terminus`, and for emitted variants the `feature_id`, `shape_id`, `n_coords`, `line_km`, `rep_trip_id`, and `geometry_source` (`pfaedle` or `straight_line_fallback`). Read this instead of re-running `stream_stop_times` to debug missing lines. |
+| `stop_attributes_sources.json` | Per-stop atlas attribute lookup, one entry per stop that appears in any drawn line. Each entry carries `status` (`atlas_match` / `no_atlas_match`), the SLOID picked from GTFS `original_stop_id`, and (when matched) `length` (m) and `compass_direction` (degrees). Source for the upcoming pill-alignment work; also surfaces atlas-coverage gaps. |
 
 ## Pipeline config (`scripts/transit/config.yaml`)
 

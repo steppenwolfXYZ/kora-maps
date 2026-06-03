@@ -43,8 +43,14 @@ SNAP_GATE_DISABLED = _transit_cfg.get("debug", {}).get("disable_snap_gate", Fals
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 GTFS_STOPS   = ROOT / "data" / "gtfs_routed" / "stops.txt"
+# pfaedle rewrites stops.txt to a canonical schema and drops `original_stop_id`,
+# so the SLOID lookup reads from the pre-pfaedle filtered feed where the
+# column is still intact.
+GTFS_STOPS_PRE_PFAEDLE = ROOT / "data" / "gtfs_filtered" / "stops.txt"
+ATLAS_CSV    = ROOT / "data" / "atlas" / "actual-date-world-traffic-point.csv"
 OUT_DOTS     = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
+OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
 
 RAIL_MODES = {"train"}
 # Modes that get pills; ferry and mountain are excluded
@@ -110,6 +116,95 @@ def load_stop_meta() -> dict:
             if base not in meta:
                 meta[base] = entry
     return meta
+
+
+def load_stop_sloid() -> dict:
+    """Return {stop_id: sloid} from the pre-pfaedle filtered stops.txt
+    (`original_stop_id` column, dropped by pfaedle in `gtfs_routed`).
+    """
+    out = {}
+    if not GTFS_STOPS_PRE_PFAEDLE.exists():
+        return out
+    with open(GTFS_STOPS_PRE_PFAEDLE, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            sloid = (row.get("original_stop_id") or "").strip()
+            if sloid:
+                out[row["stop_id"]] = sloid
+    return out
+
+
+def load_atlas_attributes() -> dict:
+    """Return {sloid: {"length": float|None, "compass_direction": float|None}}.
+
+    Reads only the BOARDING_PLATFORM rows from atlas v2 traffic-point CSV.
+    Empty / unparseable numeric fields become None.
+    """
+    out = {}
+    if not ATLAS_CSV.exists():
+        print(f"WARNING: atlas CSV not found at {ATLAS_CSV} — attributes will be empty")
+        return out
+
+    def _f(v):
+        v = (v or "").strip()
+        if not v:
+            return None
+        try:
+            return float(v)
+        except ValueError:
+            return None
+
+    with open(ATLAS_CSV, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f, delimiter=";"):
+            if row.get("trafficPointElementType") != "BOARDING_PLATFORM":
+                continue
+            sloid = row.get("sloid", "").strip()
+            if not sloid:
+                continue
+            out[sloid] = {
+                "length": _f(row.get("length")),
+                "compass_direction": _f(row.get("compassDirection")),
+            }
+    return out
+
+
+def write_stop_attributes_diag(line_stops: dict) -> None:
+    """Build the per-stop attribute lookup + diagnostic for every stop_id that
+    appears in any drawn line. Emits stop_attributes_sources.json.
+    """
+    stop_sloid = load_stop_sloid()
+    atlas = load_atlas_attributes()
+    print(f"  {len(stop_sloid):,} GTFS stops with SLOID, "
+          f"{len(atlas):,} atlas BOARDING_PLATFORM rows")
+
+    used_stop_ids: set = set()
+    for ls_entry in line_stops.values():
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        for trip in triplets:
+            if len(trip) >= 3 and trip[2]:
+                used_stop_ids.add(trip[2])
+
+    out: dict = {}
+    n_match = 0
+    for sid in used_stop_ids:
+        sloid = stop_sloid.get(sid)
+        atlas_row = atlas.get(sloid) if sloid else None
+        if atlas_row is not None:
+            out[sid] = {
+                "status": "atlas_match",
+                "sloid": sloid,
+                "length": atlas_row["length"],
+                "compass_direction": atlas_row["compass_direction"],
+            }
+            n_match += 1
+        else:
+            out[sid] = {
+                "status": "no_atlas_match",
+                "sloid": sloid,
+            }
+
+    OUT_STOP_ATTRS_DIAG.write_text(json.dumps(out, ensure_ascii=False))
+    print(f"  Stop attributes: {n_match:,}/{len(out):,} stops matched atlas "
+          f"→ {OUT_STOP_ATTRS_DIAG}")
 
 
 # =============================================================================
@@ -517,6 +612,9 @@ def main():
     line_stops = json.loads(LINE_STOPS.read_text())
     stop_meta  = load_stop_meta()
     print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
+
+    print("Loading atlas platform attributes...")
+    write_stop_attributes_diag(line_stops)
 
     print("Building stop dots and pill candidates...")
 

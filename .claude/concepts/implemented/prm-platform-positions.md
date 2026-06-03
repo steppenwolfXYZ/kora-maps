@@ -24,11 +24,7 @@ A new `platform_attributes_lookup` keyed by GTFS `stop_id` returns `{length, com
 
 - **SLOID direct join.** GTFS `stops.txt` carries the SLOID in the `original_stop_id` column, populated for ~97% of platform-level stops in the OTD feed. Atlas rows are keyed by the same SLOID. Direct join on the SLOID string.
 
-No fallback decomposition is needed: the lookup is for attribute enrichment, not positioning, so a stop without atlas data simply has no attributes attached.
-
-### Multi-match resolution
-
-When the SLOID join returns more than one atlas BOARDING_PLATFORM row (e.g. a track recorded as several adjacent edges sharing a SLOID), the row geographically closest to the GTFS stop coordinate is selected. Because the OTD feed's per-platform coordinates are themselves atlas-derived (via SLOID), the geographic disambiguation is sound and deterministic.
+No fallback decomposition is needed: the lookup is for attribute enrichment, not positioning, so a stop without atlas data simply has no attributes attached. SLOIDs are unique per BOARDING_PLATFORM row in atlas, so the join is single-valued by construction; no multi-match resolution is required.
 
 ### Per-stop positions are unchanged
 
