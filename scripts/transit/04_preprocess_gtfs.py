@@ -305,6 +305,36 @@ def copy_verbatim(name: str) -> None:
     shutil.copyfile(src, GTFS_OUT / name)
 
 
+def write_filtered_transfers(kept_route_ids: set, dropped_trip_ids: set) -> tuple:
+    """Copy transfers.txt but drop rows that reference a route or trip we
+    filtered out. pfaedle validates the whole feed at load time and refuses to
+    proceed when it sees a transfer pointing at an unknown route_id.
+    """
+    src = GTFS_IN / "transfers.txt"
+    dst = GTFS_OUT / "transfers.txt"
+    if not src.exists():
+        return 0, 0
+    total = kept = 0
+    with open(src, encoding="utf-8-sig", newline="") as fin, \
+         open(dst, "w", encoding="utf-8", newline="") as fout:
+        reader = csv.DictReader(fin)
+        writer = csv.DictWriter(fout, fieldnames=reader.fieldnames)
+        writer.writeheader()
+        for row in reader:
+            total += 1
+            from_route = (row.get("from_route_id") or "").strip()
+            to_route   = (row.get("to_route_id")   or "").strip()
+            from_trip  = (row.get("from_trip_id")  or "").strip()
+            to_trip    = (row.get("to_trip_id")    or "").strip()
+            if from_route and from_route not in kept_route_ids: continue
+            if to_route   and to_route   not in kept_route_ids: continue
+            if from_trip  and from_trip  in dropped_trip_ids:   continue
+            if to_trip    and to_trip    in dropped_trip_ids:   continue
+            writer.writerow(row)
+            kept += 1
+    return total, kept
+
+
 def main() -> None:
     if not GTFS_IN.exists():
         sys.exit(f"missing {GTFS_IN} — run 01_download_gtfs.py first")
@@ -363,8 +393,13 @@ def main() -> None:
 
     print(f"Copying remaining GTFS files…")
     for name in ("stops.txt", "calendar.txt", "calendar_dates.txt",
-                 "feed_info.txt", "transfers.txt", "frequencies.txt"):
+                 "feed_info.txt", "frequencies.txt"):
         copy_verbatim(name)
+
+    print(f"Filtering transfers.txt …")
+    n_xf_total, n_xf_kept = write_filtered_transfers(kept_route_ids, dropped)
+    print(f"  {n_xf_kept:,} kept of {n_xf_total:,} "
+          f"(dropped rows referencing excluded routes/trips)")
 
     # Diagnostic: summarize dropped trips by route+reason.
     diag: dict = defaultdict(

@@ -1,65 +1,53 @@
-# PRM Platform Positions
+# PRM Platform Attributes
 
 ## Problem
 
-Per-platform stop positions in the rendered map are unreliable. The visible symptoms are stops placed in the middle of intersections, both directions of a bus collapsed onto a single point, and stops snapped to the wrong side of a station because no nearby OSM platform node could be matched.
+The rendering pipeline needs per-platform attributes — platform `length` and compass orientation — that are not present in GTFS. These are needed by the upcoming pill-alignment concept and likely later features. The Swiss atlas master data system carries them; no other publicly available dataset does.
 
-The root cause is in the GTFS feed: every platform-level `stop_id` in the Swiss SBB feed (e.g. `8500010:7` for Basel SBB platform 7, `8507000:A-D` for Bern platforms A–D) shares its parent station's exact coordinates. The platform identity is encoded in the `platform_code` column and in the stop_id suffix, but the per-platform WGS84 lat/lon is not — it is always the station centroid. `trips.txt` and `stop_times.txt` correctly reference platform-specific stop_ids per direction, so the per-direction information exists; only the coordinates collapse it.
-
-The standard GTFS feed published by opentransportdata.swiss has no `shapes.txt` either, but that is the pfaedle problem, not this one. This concept is exclusively about per-platform coordinates.
+Per-platform coordinates, originally also in scope under this concept's name, are no longer needed. The gtfs-source-switch concept moved the pipeline to the official OTD GTFS feed, which carries proper per-platform coordinates for every numbered and sector-range platform (e.g. Bern's `12A-C` resolves to a point on track 12, distinct from the station centroid). Atlas's role here narrows to attribute enrichment.
 
 ## Current behaviour
 
-The pipeline today uses the GTFS centroid coordinate as the rendered stop position. No OSM platform data is consumed and no per-platform refinement is applied, so every platform-level `stop_id` at a station resolves to the parent station's centroid. An OSM stop-node name-matching override and a snap-distance gate exist in the code from before the pfaedle migration but produce no meaningful corrections any more; both are removed by this work.
+No atlas data is loaded. Per-platform attributes are unavailable to downstream code.
 
 ## Requirements
 
-An authoritative per-platform coordinate source is introduced. The source is the Swiss atlas v2 "Zones and stop places" CSV (dataset id `traffic-point-v2` on opentransportdata.swiss, refreshed daily). Rows with `trafficPointElementType = BOARDING_PLATFORM` carry one WGS84 coordinate per physical track edge, together with the SLOID, the parent station SLOID in `parentSloidServicePoint` and the parent station UIC in `number`, the customer-facing platform code in `designation`, and edge length and orientation (`length`, `compassDirection`). `boardingAreaHeight` is the accessibility metric "platform height above rail" and is not consumed.
+### Source
 
-The PRM accessibility companion dataset (`platform-v2`, same portal) carries no coordinates; it is named here only as the future home of accessibility attributes (wheelchair-area dimensions, boarding device, inclination) that other features may want later. The colloquial name "PRM platforms" in this concept refers to atlas's per-platform coordinate model, not to that companion file.
+Per-platform attributes are loaded from the Swiss atlas v2 "Zones and stop places" CSV (`traffic-point-v2` on opentransportdata.swiss, refreshed daily). Rows with `trafficPointElementType = BOARDING_PLATFORM` carry the SLOID, the parent station SLOID and UIC (`parentSloidServicePoint`, `number`), the WGS84 coordinate, and the per-platform attributes `length` (m) and `compassDirection` (degrees, geographic). Only those attribute fields are consumed by this concept.
 
-The Swiss NeTEx export carries the same data but is not used: ~4 GB streaming XML versus ~22 MB pandas CSV, with no field benefit for stop positioning. NeTEx adoption is deferred until an independent need (e.g. inter-Quay interchange paths) justifies its setup cost; at that point platform coordinates can move with it.
+The PRM accessibility companion dataset (`platform-v2`, same portal) is named here only as the future home of wheelchair-area dimensions, inclination, and tactile/boarding device fields if later features want them.
 
 ### Lookup
 
-A new `platform_position_lookup` keyed by GTFS `stop_id` returns a WGS84 coordinate when one is available. The lookup is populated from `traffic-point-v2` rows filtered to `trafficPointElementType = BOARDING_PLATFORM`. Two join paths are tried, in priority order:
+A new `platform_attributes_lookup` keyed by GTFS `stop_id` returns `{length, compassDirection}` when atlas has a row for the stop. The lookup is populated from `traffic-point-v2` rows filtered to `trafficPointElementType = BOARDING_PLATFORM`. Single join path:
 
-1. **SLOID direct join.** GTFS `stops.txt` carries the SLOID in the `original_stop_id` column from October 2025 onwards. Atlas rows are keyed by the same SLOID. Direct join on the SLOID string.
-2. **`(UIC, platform_code)` decomposition.** GTFS `stop_id` of the form `XXXXXXX:N` decomposes as `<parent UIC>:<platform_code>`. Atlas rows expose the parent UIC in `number` and the platform code in `designation`. Used when SLOID is absent from the GTFS row.
+- **SLOID direct join.** GTFS `stops.txt` carries the SLOID in the `original_stop_id` column, populated for ~97% of platform-level stops in the OTD feed. Atlas rows are keyed by the same SLOID. Direct join on the SLOID string.
 
-The lookup is built once per pipeline run, at the stop-extraction stage (the stage that currently finalises each stop's rendered coordinate). The atlas CSV is loaded there and consumed there; no other stage references it.
+No fallback decomposition is needed: the lookup is for attribute enrichment, not positioning, so a stop without atlas data simply has no attributes attached.
 
 ### Multi-match resolution
 
-When the `(UIC, platform_code)` decomposition matches more than one BOARDING_PLATFORM row (stub tracks, sectorised long platforms), the candidate with the lexicographically smallest SLOID is selected. This rule is deterministic and stable across atlas refreshes. Refinement is deferred until evidence of wrong picks surfaces; the diagnostic output below makes such cases inspectable.
+When the SLOID join returns more than one atlas BOARDING_PLATFORM row (e.g. a track recorded as several adjacent edges sharing a SLOID), the row geographically closest to the GTFS stop coordinate is selected. Because the OTD feed's per-platform coordinates are themselves atlas-derived (via SLOID), the geographic disambiguation is sound and deterministic.
+
+### Per-stop positions are unchanged
+
+The GTFS coordinate stays the rendered stop position; this concept never overrides it. Snap-to-line cosmetic alignment continues as today. The legacy OSM-stop-node name-matching override and the snap-distance gate (dead since the pfaedle migration) are removed as part of this work.
 
 ### Diagnostic output
 
-A new diagnostic file `stop_position_sources.json` is written under `data/transit/`, keyed by GTFS `stop_id`, with one entry per stop that appears in any drawn line. Each entry records the resolution path used (`sloid_join`, `uic_join`, or `centroid_fallback`), the selected atlas SLOID when an atlas join succeeded, and the rejected candidate SLOIDs when the `(UIC, platform_code)` join returned more than one row. Stops resolved via the centroid fallback are recorded with the path tag only and no SLOID. This makes both wrong-track picks (the multi-match failure mode) and atlas-coverage gaps inspectable without re-running the pipeline.
-
-### Position chain
-
-After this work, every stop's position is produced by:
-
-1. Look up the GTFS stop_id in `platform_position_lookup`. If a coordinate is returned, use it. Otherwise use the GTFS centroid.
-2. Orthogonally snap the result to the line polyline of the line being drawn. The snap is cosmetic — it keeps the rendered dot visually on the line.
-
-The OSM stop-node name-matching override and the snap-distance gate that exist in the current pipeline are removed in both branches of step 1. The grid of OSM stop nodes (`stop_position`, `tram_stop`, `platform`, `halt`) that fed only the override becomes unused and is removed at the same time. Atlas is the single source of platform positions; there is no second mechanism competing with it.
-
-### Per-direction correctness
-
-Because the lookup keys on the platform-specific `stop_id`, and because `stop_times.txt` already references different platform stop_ids per direction, the two directions of a line at the same station resolve to different platform coordinates automatically. No explicit direction logic is required.
+A new diagnostic file `stop_attributes_sources.json` is written under `data/transit/`, keyed by GTFS `stop_id`, with one entry per stop that appears in any drawn line. Each entry records whether atlas attributes were found and the picked SLOID. Stops without an atlas match are recorded with a `no_atlas_match` tag so coverage gaps are inspectable without re-running the pipeline.
 
 ### Source download and refresh
 
-The atlas v2 traffic-point CSV download is added to the existing GTFS download stage; the two sources refresh together. A new `--force` flag on the rebuild script forces re-download of all external source data (GTFS, atlas, OSM); without the flag, each download step skips when the target file already exists locally. This lets the rebuild be re-run from an early stage without paying the multi-GB OSM download every time.
+The atlas v2 traffic-point CSV download is added to the existing GTFS download stage; the two sources refresh together. A new `--force-atlas` flag is added to the rebuild script, consistent with the `--force-gtfs` / `--force-osm` pattern established by gtfs-source-switch; the bare `--force` re-fetches atlas alongside the others.
 
 ## Constraints
 
-- Atlas v2 coverage is not 100%. Roadside bus stops often lack a per-edge BOARDING_PLATFORM row; coverage gaps fall through to the GTFS centroid branch of the position chain, not to a missing stop.
-- Stops outside Switzerland (e.g. Domodossola, Konstanz, Lindau, Annemasse) are not in atlas and use the centroid branch.
-- The atlas v2 traffic-point dataset updates daily. Refresh is handled by the same download pipeline pattern as GTFS.
-- The SLOID format and its presence in GTFS `original_stop_id` are recent additions and may evolve. The `(UIC, platform_code)` decomposition is the resilient join path.
-- BOARDING_AREA rows in atlas (the platform-body records) are not consumed. Swiss train stop_ids encode the track number, which maps to BOARDING_PLATFORM `designation` directly; tram and bus feeds use customer-facing platform letters or numbers that also map to BOARDING_PLATFORM `designation`. The lookup can be extended later if a feed surfaces platform-body codes.
-- This work depends on direction-coverage being landed first: per-direction stop_ids must already flow through the stop-extraction stage. It is independent of the pfaedle migration and the gtfs-line-grouping concept.
-- International expansion is out of scope. Atlas v2 is Swiss-only. Per-country equivalents (DELFI for Germany, IDFM for France, VAO for Austria, etc.) have different schemas and identifiers and will be separate adapters when those countries are added.
+- Atlas v2 coverage of attributes is partial: `length` is populated on ~30% of BOARDING_PLATFORM rows, `compassDirection` on ~38%. Even when the SLOID join succeeds, the attribute fields may be empty. Downstream consumers must handle the empty case.
+- Stops outside Switzerland (e.g. Domodossola, Konstanz, Lindau, Annemasse) are not in atlas. They simply have no attributes.
+- The atlas v2 traffic-point dataset updates daily. Refresh is handled by the `--force` / skip-if-present pattern, with the new `--force-atlas` flag for selective refresh.
+- The SLOID format and its presence in GTFS `original_stop_id` may evolve. Missing matches degrade gracefully to "no attributes" — no downstream consumer is allowed to require an atlas hit.
+- BOARDING_AREA rows (the platform-body records, no per-track coordinates) are not consumed; the concept reads only BOARDING_PLATFORM (track edge) rows.
+- This work depends on gtfs-source-switch and direction-coverage being landed first.
+- International expansion is out of scope. Atlas v2 is Swiss-only. Per-country equivalents (DELFI, IDFM, VAO, etc.) will be separate adapters when those countries are added.

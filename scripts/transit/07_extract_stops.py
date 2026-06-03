@@ -91,14 +91,20 @@ PILL_GAP_SCALE = 12   # metres per unit of width_base
 # =============================================================================
 
 def load_stop_meta() -> dict:
-    """Return {stop_id: {"name": stop_name, "parent": parent_station}}."""
+    """Return {stop_id: {"name": stop_name, "parent": parent_station}}.
+
+    The official OTD GTFS feed prefixes parent_station values with `Parent`
+    (e.g. `Parent8507000`); the prefix is stripped here so downstream
+    clustering and comparisons are format-agnostic.
+    """
     meta = {}
     if not GTFS_STOPS.exists():
         return meta
     with open(GTFS_STOPS, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             sid = row["stop_id"]
-            entry = {"name": row.get("stop_name", ""), "parent": row.get("parent_station", "")}
+            parent = row.get("parent_station", "").removeprefix("Parent")
+            entry = {"name": row.get("stop_name", ""), "parent": parent}
             meta[sid] = entry
             base = sid.split(":")[0]
             if base not in meta:

@@ -145,23 +145,23 @@ def _headways() -> tuple:
 # Agencies that follow the "1-digit ref = city, 2-digit ref = regional"
 # numbering convention. 1-digit refs on these operators are still city buses.
 TWO_DIGIT_REGIONAL_AGENCIES = {
-    "000146",  # STI Bus AG
-    "000605",  # STI Berg
-    "000859",  # STI-gwb
-    "000766",  # BuS/cb (Bus und Service AG, Chur)
-    "000236",  # BCD (Chur-Dreibündenstein)
-    "000801",  # PAG (PostAuto AG)
-    "007088",  # THP (Trägerverein Historische Postautolinie)
+    "146",   # STI Bus AG
+    "605",   # STI Berg
+    "859",   # STI-gwb
+    "766",   # BuS/cb (Bus und Service AG, Chur)
+    "236",   # BCD (Chur-Dreibündenstein)
+    "801",   # PAG (PostAuto AG)
+    "7088",  # THP (Trägerverein Historische Postautolinie)
 }
-# 000765 (PAG/BCS, PostAuto AG Bus Commune Sion) is deliberately excluded:
+# 765 (PAG/BCS, PostAuto AG Bus Commune Sion) is deliberately excluded:
 # PostAuto-operated city service whose 2-digit refs are city lines.
 
 # transN city carve-out: agencies whose 3-digit refs starting with 1 or 3 are
 # city lines, overriding the default n>=3 → regional rule. transN numbers its
 # urban networks in the 100s (Neuchâtel) and 300s (La Chaux-de-Fonds / Le Locle).
 TRANSN_CITY_AGENCIES = {
-    "000153",  # TRN-tn (Neuchâtel)
-    "000792",  # TRN/tc (La Chaux-de-Fonds + Le Locle)
+    "153",   # TRN-tn (Neuchâtel)
+    "792",   # TRN/tc (La Chaux-de-Fonds + Le Locle)
 }
 
 # Length fallback for pure-letter refs (km).
@@ -176,32 +176,44 @@ def load_cfg() -> dict:
 
 # ── Mode classification (GTFS-side) ──────────────────────────────────────────
 
+# Mapping from the extended GTFS route_type code space (used by the official
+# opentransportdata.swiss feed) to rendering buckets. See
+# .claude/concepts/gtfs-source-switch.md for the rationale per code.
+# Returning "" excludes the route from emission entirely.
+_TRAIN_TYPES    = frozenset({"100", "101", "102", "103", "105", "106", "107", "109"})
+_MOUNTAIN_TYPES = frozenset({"116", "1300", "1303", "1400"})
+
 def gtfs_type_to_bucket(route_type: str) -> str:
     t = route_type.strip()
-    if t == "0":  return "tram"
-    if t == "1":  return "metro"
-    if t == "2":  return "train"
-    if t == "3":  return "bus"
-    if t == "4":  return "ferry"
-    if t == "5":  return "mountain"
-    if t == "6":  return "mountain"
-    if t == "7":  return "mountain"
-    if t == "11": return "bus"    # trolleybus → bus bucket
-    return "bus"
+    if t in _TRAIN_TYPES:    return "train"
+    if t in _MOUNTAIN_TYPES: return "mountain"
+    if t == "401":           return "metro"
+    if t in ("700", "702"):  return "bus"
+    if t == "800":           return "bus"    # trolleybus — fixed city_bus, see gtfs_to_mode
+    if t == "900":           return "tram"
+    if t == "1000":          return "ferry"
+    # Excluded by concept: 117 EXT, 202 National Coach, 705 BN, 710 Sightseeing,
+    # 715 Demand & Response, 1500 Taxi, and any unknown extended code.
+    return ""
 
 
 def gtfs_to_mode(bucket: str, agency_id: str,
                  short_name: str = "",
-                 length_km: Optional[float] = None) -> str:
+                 length_km: Optional[float] = None,
+                 route_type: str = "") -> str:
     """Map a GTFS bucket + agency to one of the rendering modes.
 
     - bucket == "bus" → bus / regional_bus by ref digit count, agency,
       and a length fallback for pure-letter refs.
       See .claude/concepts/bus-mode-classification.md for the full rule.
+      Trolleybuses (route_type=800) bypass the regional reclassification
+      and stay city bus per .claude/concepts/gtfs-source-switch.md.
     - Other buckets pass through. Mountain classification comes solely from
-      GTFS route_type (5/6/7) at the bucket layer.
+      GTFS route_type at the bucket layer.
     """
     if bucket == "bus":
+        if route_type == "800":
+            return "bus"
         ref = short_name.strip()
         digits = "".join(c for c in ref if c.isdigit())
         n = len(digits)
@@ -374,7 +386,8 @@ def load_stop_meta() -> dict:
             sid = row["stop_id"]
             if sid.startswith("0000"):
                 continue
-            meta[sid] = (row.get("stop_name", ""), row.get("parent_station", ""))
+            parent = row.get("parent_station", "").removeprefix("Parent")
+            meta[sid] = (row.get("stop_name", ""), parent)
             base = sid.split(":")[0]
             if base not in meta:
                 meta[base] = meta[sid]
@@ -511,6 +524,8 @@ def load_trips(route_lookup: dict, mountain_aids: set) -> dict:
             if not r:
                 continue
             bucket = gtfs_type_to_bucket(r["type"])
+            if not bucket:
+                continue
             agency_id = r.get("agency_id", "")
             if bucket == "train" and agency_id in mountain_aids:
                 bucket = "mountain"
@@ -571,19 +586,22 @@ _BUCKET_MODE_APPROX = {
 
 def _mountain_origin(bucket: str, route_type: str):
     """Classify the origin of a mountain-bucket trip group. Returns one of
-    `aerial`, `funicular`, `rebucketed_rail`, or None for non-mountain buckets.
+    `aerial`, `funicular`, `rack`, `rebucketed_rail`, or None for non-mountain
+    buckets.
 
     aerial / funicular are exempt from the freq-score and active-days gates;
-    rebucketed_rail is not (it's rail that got the mountain color via the
-    `mountain_agency_ids` whitelist but otherwise behaves like train).
+    rack and rebucketed_rail are not (they run regular timetables, same gate
+    behaviour as train).
     """
     if bucket != "mountain":
         return None
-    if route_type == "7":
+    if route_type == "1400":
         return "funicular"
-    if route_type in ("5", "6"):
+    if route_type in ("1300", "1303"):
         return "aerial"
-    if route_type == "2":
+    if route_type == "116":
+        return "rack"
+    if route_type in _TRAIN_TYPES:
         return "rebucketed_rail"
     return None
 
@@ -1004,7 +1022,7 @@ def _n_pts(feat) -> int:
     return len(coords)
 
 
-_AERIAL_ROUTE_TYPES = {"5", "6"}
+_AERIAL_ROUTE_TYPES = {"1300", "1303"}
 
 
 def deduplicate_mountain(features: list) -> list:
@@ -1053,11 +1071,11 @@ def deduplicate_mountain(features: list) -> list:
 
 # ── Pfaedle shape grouping ───────────────────────────────────────────────────
 
-# Aerial GTFS route_types (5 = cable car, 6 = gondola / aerial lift) where
-# OSM coverage is patchy enough that a missing pfaedle shape is treated as a
-# straight-line fallback rather than a hard `pfaedle_unrouted` failure. All
-# other modes (incl. funicular = 7) drop the feature when pfaedle has no
-# shape, same as rail / bus today.
+# Aerial GTFS route_types (extended codes 1300 = aerial lift, 1303 =
+# Bern-style elevator) where OSM coverage is patchy enough that a missing
+# pfaedle shape is treated as a straight-line fallback rather than a hard
+# `pfaedle_unrouted` failure. Funiculars (1400) and every other mode drop
+# the feature when pfaedle has no shape, same as rail / bus today.
 _STRAIGHT_LINE_FALLBACK_ROUTE_TYPES = _AERIAL_ROUTE_TYPES
 
 
@@ -1202,6 +1220,7 @@ def main():
     # rail does not. route_type is taken from any trip in the group; trips in
     # one (line_key, agency_id, tg_id) share the same route_type in practice.
     tg_mountain_origin: dict = {}
+    tg_route_type: dict = {}
     for tg_key, vmap in groups.items():
         line_key, _aid, _tg_id = tg_key
         bucket = line_key[2]
@@ -1213,6 +1232,7 @@ def main():
                       .get("type", ""))
                 break
         tg_mountain_origin[tg_key] = _mountain_origin(bucket, rt)
+        tg_route_type[tg_key] = rt
 
     # ── Active-days per variant (concept: active-days-filter) ────────────────
     # For each emitted-feature unit (line_key, agency_id, trip_group_id,
@@ -1541,7 +1561,8 @@ def main():
 
             # Final mode classification.
             mode = gtfs_to_mode(bucket, agency_id,
-                                short_name=short_name, length_km=length_km)
+                                short_name=short_name, length_km=length_km,
+                                route_type=route_type)
 
             # Frequency: try corridor boost (use rep trip's stop pair freq).
             stop_seq = [(sid, 0, 0) for sid in stop_ids]
@@ -1788,6 +1809,7 @@ def main():
             "ref": short_name,
             "long_name": long_name,
             "bucket": bucket,
+            "route_type": tg_route_type.get(tg_key, ""),
             "mountain_origin": mountain_origin,
             "agency_id": aid,
             "agency_name": agency_names.get(aid, ""),

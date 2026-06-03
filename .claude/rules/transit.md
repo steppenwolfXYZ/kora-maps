@@ -4,7 +4,7 @@
 
 Numbered 1–8 in `scripts/transit/`; the rebuild script runs them in order.
 
-- `01_download_gtfs.py` — fetches the SBB GTFS feed → `data/gtfs/`.
+- `01_download_gtfs.py` — fetches the official Swiss GTFS feed ("Timetable 2026 (GTFS2020)") from opentransportdata.swiss → `data/gtfs/`. Discovers the latest release at runtime (resource URLs include a date suffix). Refreshed ~2×/week. Carries `original_stop_id` (SLOID) on stops and full sector-range platform codes (e.g. `12A-C`) — required by `gtfs-source-switch` and consumed by `prm-platform-positions`.
 - `02_download_osm.py` — fetches CH + LI + DE + FR + IT + AT country PBFs → `data/osm/`. Neighbour PBFs are required because the bbox extends past CH soil (Domodossola, Konstanz, Annemasse, Lörrach, Bregenz). One-off download ≈ 12 GB.
 - `03_bbox_osm.py` — cuts each country PBF to the bbox in `scripts/transit/config.yaml:osm_bbox`, then merges the slices → `data/osm/ch_pfaedle.osm.pbf`. Cut-then-merge avoids a >10 GB intermediate file.
 - `04_preprocess_gtfs.py` — drops excluded-agency trips, EV-prefixed routes (Bahnersatz / rail replacement), and foreign-terminus trips, repairs `arr > dep` rows → `data/gtfs_filtered/`.
@@ -15,7 +15,7 @@ Numbered 1–8 in `scripts/transit/`; the rebuild script runs them in order.
 
 `scripts/generate_style.py` is not numbered — it lives outside `scripts/transit/` because it generates the whole MapLibre style, not transit-only — and runs as a fixed step inside step 7 of the rebuild flow (between extract-stops and pmtiles).
 
-Rebuild: `./scripts/rebuild_transit.sh [--start N]`. Default is `--start 3` (bbox cut and everything after). Each step's output is the next step's input, so middle-skipping is not supported; `--start N` always runs steps N..8 contiguously.
+Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --force-osm]`. Default is `--start 3` (bbox cut and everything after). Each step's output is the next step's input, so middle-skipping is not supported; `--start N` always runs steps N..8 contiguously. Download steps (1 and 2) skip when the target file is already present; `--force` re-downloads both, `--force-gtfs` / `--force-osm` re-download only that source. This makes `--start 1` cheap to re-run without the multi-GB OSM download.
 
 ## Diagnostic outputs (in `data/transit/`)
 
@@ -52,10 +52,24 @@ Rebuild: `./scripts/rebuild_transit.sh [--start N]`. Default is `--start 3` (bbo
 
 ## Mountain and ferry
 
-Every variant goes through pfaedle, including mountain (route_type 5/6/7) and ferry (route_type 4). When pfaedle produces a shape, it is used; mountain features keep their visual style (light yellow, fixed width). Straight-line fallback is reserved for aerial GTFS `route_type` 5 (cable car) and 6 (gondola) — these emit a straight line between consecutive stops when pfaedle has no shape, tagged `geometry_source: "straight_line_fallback"`. Funiculars (route_type 7), ferries, and every other mode that pfaedle fails to shape are dropped and logged to `pfaedle_unrouted.json`, same as rail/bus.
+Every variant goes through pfaedle, including mountain (extended route_types 1300 / 1303 / 1400 / 116) and ferry (extended route_type 1000). When pfaedle produces a shape, it is used; mountain features keep their visual style (light yellow, fixed width). Straight-line fallback is reserved for aerial extended `route_type` 1300 (aerial lift) and 1303 (elevator-style, e.g. Bern Aufzug) — these emit a straight line between consecutive stops when pfaedle has no shape, tagged `geometry_source: "straight_line_fallback"`. Funiculars (1400), rack & pinion (116), ferries, and every other mode that pfaedle fails to shape are dropped and logged to `pfaedle_unrouted.json`, same as rail/bus.
 
-Mountain classification comes from GTFS route_type (5/6/7) plus the `mountain_agency_ids` whitelist (rebuckets listed agencies' `route_type=2` rail to `mountain` at `load_trips`). Rack railways outside that whitelist stay in `train`. Every mountain feature carries `mountain_origin` ∈ {`aerial` (rt 5/6), `funicular` (rt 7), `rebucketed_rail` (rt 2 via whitelist)}.
+Mountain classification comes from extended `route_type` ∈ {1300, 1303, 1400, 116} plus the `mountain_agency_ids` whitelist (rebuckets listed agencies' rail extended-100s trips to `mountain` at `load_trips`). Rack railways outside that whitelist still land in `mountain` via their native 116 code. Every mountain feature carries `mountain_origin` ∈ {`aerial` (1300, 1303), `funicular` (1400), `rack` (116), `rebucketed_rail` (100s via whitelist)}.
 
-**Exemptions** are scoped by `mountain_origin`, not the bucket alone, and cover three rules that all apply to the same set: per-direction split, freq-score gate (`MIN_FREQ_SCORE`), and active-days gate (`min_active_days`). `ferry`, `aerial`, and `funicular` are fully exempt from all three — their two directions collapse into one feature, and neither gate gates them. `rebucketed_rail` is treated like normal `train`: per-direction split applies, both gates apply. The rare-group filter still treats the full mountain bucket as exempt.
+**Exemptions** are scoped by `mountain_origin`, not the bucket alone, and cover three rules that all apply to the same set: per-direction split, freq-score gate (`MIN_FREQ_SCORE`), and active-days gate (`min_active_days`). `ferry`, `aerial`, and `funicular` are fully exempt from all three — their two directions collapse into one feature, and neither gate gates them. `rack` and `rebucketed_rail` are treated like normal `train`: per-direction split applies, both gates apply. The rare-group filter still treats the full mountain bucket as exempt.
 
-`deduplicate_mountain()` collapses overlapping features per `ref` (no direction_key in the key, since aerial doesn't split per direction) and only for `mountain_origin == "aerial"`. Best vertex count wins the bbox-overlap tiebreak. Funiculars, rebucketed rail, and other modes are not collapsed because a shared bbox typically indicates two different branches off a common stem rather than a duplicate.
+`deduplicate_mountain()` collapses overlapping features per `ref` (no direction_key in the key, since aerial doesn't split per direction) and only for `mountain_origin == "aerial"`. Best vertex count wins the bbox-overlap tiebreak. Funiculars, rack, rebucketed rail, and other modes are not collapsed because a shared bbox typically indicates two different branches off a common stem rather than a duplicate.
+
+## Route type classification (extended GTFS codes)
+
+The official OTD feed uses extended GTFS `route_type` codes (3–4 digit). See `.claude/concepts/implemented/gtfs-source-switch.md` for the full rationale. Summary of the mapping in `06_score_and_match.py:gtfs_type_to_bucket`:
+
+- **train**: 100, 101, 102, 103, 105, 106, 107 (Tourist Railway — rebucketed to mountain via `mountain_agency_ids` when applicable), 109
+- **mountain**: 116 (rack), 1300 (aerial lift), 1303 (Bern Aufzug-style elevator), 1400 (funicular)
+- **metro**: 401
+- **bus**: 700, 702 (the bus-mode-classification concept decides city_bus vs regional_bus); 800 (trolleybus, fixed city_bus, bypasses the regional reclassification)
+- **tram**: 900
+- **ferry**: 1000
+- **excluded** (not drawn): 117 (EXT — extra/event trains), 202 (National Coach), 705 (BN — night buses), 710 (Sightseeing Bus), 715 (Demand & Response Bus), 1500 (Taxi), and any unknown extended code
+
+**715 Demand & Response Bus** exists in the feed (~78 PostAuto routes — PubliCar etc.) but has no fixed timetable that this map can render. Future work could draw on-demand services as a distinct mode if useful.

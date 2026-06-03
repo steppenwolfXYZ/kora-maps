@@ -39,24 +39,25 @@ excluded_agencies:
   - alsa
 
 # ── Mountain agencies ────────────────────────────────────────────────────────
-# GTFS agency_ids whose `route_type=2` (rail) lines render as mountain mode
-# (yellow, no freq variance, exempt from the min-active-days and freq gates so
-# seasonal tourist services survive). The criterion is "agency is outside the
-# GA-Geltungsbereich"; Rigi Bahnen (000137) is a manual exception (in the GA
-# but unambiguously a tourist mountain line). agency_id keys, not name
-# substrings — the substring approach previously matched both BOB (valley) and
-# BOB-spb (Schynige Platte) and broke the Interlaken–Lauterbrunnen line.
+# GTFS agency_ids whose rail lines (extended route_type 100s) render as mountain
+# mode (yellow, no freq variance). Listed agencies are not freq/active-days
+# exempt — they run regular timetables; the rebucketing only changes the visual
+# style. The criterion is "agency is outside the GA-Geltungsbereich"; Rigi
+# Bahnen (137) is a manual exception (in the GA but unambiguously a tourist
+# mountain line). agency_id keys, not name substrings — the substring approach
+# previously matched both BOB (valley) and BOB-spb (Schynige Platte) and broke
+# the Interlaken–Lauterbrunnen line.
 mountain_agency_ids:
-  - "000157"  # WAB     — Wengernalpbahn
-  - "000124"  # JB      — Jungfraubahn
-  - "000121"  # GGB     — Gornergratbahn
-  - "000137"  # RB      — Rigi Bahnen (GA-included, manual exception)
-  - "000136"  # PB      — Pilatusbahnen
-  - "000803"  # VerAlp  — VerticAlp Vallée du Trient
-  - "000140"  # BOB-spb — BOB Schynige Platte branch
-  - "000104"  # BRB     — Brienz Rothorn Bahn
-  - "000129"  # MG      — Ferrovia Monte Generoso
-  - "000160"  # DFB     — Dampfbahn Furka-Bergstrecke
+  - "157"   # WAB     — Wengernalpbahn
+  - "124"   # JB      — Jungfraubahn
+  - "121"   # GGB     — Gornergratbahn
+  - "137"   # RB      — Rigi Bahnen (GA-included, manual exception)
+  - "136"   # PB      — Pilatusbahnen
+  - "803"   # VerAlp  — VerticAlp Vallée du Trient
+  - "140"   # BOB-spb — BOB Schynige Platte branch
+  - "104"   # BRB     — Brienz Rothorn Bahn
+  - "129"   # MG      — Ferrovia Monte Generoso
+  - "160"   # DFB     — Dampfbahn Furka-Bergstrecke
 
 # ── Headway thresholds per bucket (minutes) ─────────────────────────────────
 # Endpoints of the per-bucket frequency score curve. The core-hours score is a

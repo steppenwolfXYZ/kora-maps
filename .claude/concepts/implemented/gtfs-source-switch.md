@@ -16,6 +16,16 @@ The official "Timetable 2026 (GTFS2020)" dataset on opentransportdata.swiss carr
 
 The GTFS download is switched from `gtfs.geops.ch` to the official "Timetable 2026 (GTFS2020)" dataset on opentransportdata.swiss. The release-date suffix in the resource URL means the download step discovers the current resource at runtime rather than hardcoding a URL.
 
+### Download tooling
+
+Per-source download flags are added to the rebuild script:
+
+- `--force` re-fetches every download source.
+- `--force-gtfs` re-fetches only GTFS.
+- `--force-osm` re-fetches only OSM.
+
+Without any flag, every download step (GTFS and OSM today; any source added later by separate concepts) skips when the target file already exists locally. This lets a partial rebuild from an early stage be re-run without paying the multi-GB OSM download every time, and supports the common case of refreshing GTFS without touching OSM. The GTFS and OSM download scripts each get a `--force` flag of their own; the rebuild script passes the appropriate flag(s) through. Subsequent concepts that introduce new download sources extend the pattern (e.g. `--force-atlas`) without re-introducing the tooling.
+
 ### Schema differences absorbed
 
 The pipeline adapts to the following behaviour-affecting differences relative to the Geops feed:
@@ -28,7 +38,30 @@ The pipeline adapts to the following behaviour-affecting differences relative to
 
 ### Bucket re-classification
 
-The route_type-to-bucket mapping in the trip-loading stage is rewritten against the extended code space. Each existing bucket — train, tram, city_bus, regional_bus, ferry, mountain — gets a documented set of accepted extended codes. The `mountain_agency_ids` rebucketing rule (which overrides rail-coded routes from listed agencies to the mountain bucket) is preserved unchanged.
+The route_type-to-bucket mapping in the trip-loading stage is rewritten against the extended code space. The buckets — train, tram, city_bus, regional_bus, ferry, mountain, metro — each get a documented set of accepted extended codes. The mapping for every `route_type` value that appears in the current official feed:
+
+| Code | Label | Bucket |
+|---|---|---|
+| 100, 101, 102, 103, 105, 106, 109 | Railway, High Speed, Long Distance, Inter Regional, Sleeper, Regional, Suburban | train |
+| 107 | Tourist Railway | train OR mountain via the `mountain_agency_ids` whitelist (same rule as today's rail rebucketing) |
+| 116 | Rack & Pinion Railway | mountain (origin=rack); supersedes the `mountain_agency_ids` rebucketing for agencies whose rack routes carry this code natively |
+| 117 | EXT (extra / event trains) | exclude |
+| 202 | National Coach | exclude |
+| 401 | Metro | metro |
+| 700 | Bus | bus → bus-mode-classification decides city_bus vs regional_bus |
+| 702 | Express Bus (EXB) | regional_bus (flagged for possible later exclusion; mixes long alpine PostAuto routes with short cross-town express) |
+| 705 | Night Bus (BN) | exclude (~98.5% are N-prefixed night services; the daytime strays are construction-replacement or special services we also don't want) |
+| 710 | Sightseeing Bus | exclude |
+| 715 | Demand & Response Bus | exclude (no fixed schedule); existence noted in `transit.md` so future feature work can find them |
+| 800 | Trolleybus | city_bus (fixed; not subject to regional reclassification) — currently no routes use this code in the feed but the mapping is defined for when they do |
+| 900 | Tram | tram |
+| 1000 | Water Transport | ferry |
+| 1300 | Aerial Lift | mountain (origin=aerial) |
+| 1303 | (Bern Aufzug, elevator) | mountain |
+| 1400 | Funicular | mountain (origin=funicular) |
+| 1500 | Taxi | exclude |
+
+The `mountain_agency_ids` rebucketing rule (which overrides rail-coded routes from listed agencies to the mountain bucket) is preserved for the 107 case and for any rail routes that don't carry 116 natively. Codes not listed above that appear in future feed updates default to exclude until classified.
 
 ### Verified parity
 

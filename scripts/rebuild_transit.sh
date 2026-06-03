@@ -16,26 +16,38 @@
 # and their existing outputs reused. Steps cannot be skipped individually —
 # each step's output is the next step's input.
 #
+# Download steps (1 and 2) skip when the target file is already present. Use
+# one of the force flags below to re-download:
+#
+#   --force         re-download GTFS and OSM
+#   --force-gtfs    re-download GTFS only
+#   --force-osm     re-download OSM only
+#
 # Examples:
 #   ./scripts/rebuild_transit.sh                  # default: --start 3
 #   ./scripts/rebuild_transit.sh --start 4        # bbox cut up-to-date, re-route only
 #   ./scripts/rebuild_transit.sh --start 6        # iterate on emission + style + tiles
-#   ./scripts/rebuild_transit.sh --start 2        # refresh OSM and everything after
+#   ./scripts/rebuild_transit.sh --start 1 --force-gtfs   # refresh GTFS, leave OSM alone
 #   ./scripts/rebuild_transit.sh --start 8        # rebuild pmtiles only
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 START=3
+FORCE_GTFS=0
+FORCE_OSM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --start)     shift; START="$1" ;;
-    --start=*)   START="${1#--start=}" ;;
+    --start)        shift; START="$1" ;;
+    --start=*)      START="${1#--start=}" ;;
+    --force)        FORCE_GTFS=1; FORCE_OSM=1 ;;
+    --force-gtfs)   FORCE_GTFS=1 ;;
+    --force-osm)    FORCE_OSM=1 ;;
     -h|--help)
-      sed -n '2,26p' "$0"; exit 0 ;;
+      sed -n '2,30p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2
-      echo "usage: $0 [--start N]   (1 ≤ N ≤ 8, default 3)" >&2
+      echo "usage: $0 [--start N] [--force | --force-gtfs | --force-osm]" >&2
       exit 2 ;;
   esac
   shift
@@ -46,6 +58,11 @@ if ! [[ "$START" =~ ^[1-8]$ ]]; then
   exit 2
 fi
 
+GTFS_ARGS=()
+OSM_ARGS=()
+if [[ $FORCE_GTFS -eq 1 ]]; then GTFS_ARGS+=(--force); fi
+if [[ $FORCE_OSM  -eq 1 ]]; then OSM_ARGS+=(--force);  fi
+
 echo "══════════════════════════════════════════"
 echo "  Transit Rebuild Pipeline (pfaedle)"
 echo "  Starting at step $START"
@@ -54,13 +71,13 @@ echo "════════════════════════�
 if [[ $START -le 1 ]]; then
   echo ""
   echo "▶ Step 1 — Download GTFS"
-  time python3 scripts/transit/01_download_gtfs.py
+  time python3 scripts/transit/01_download_gtfs.py ${GTFS_ARGS[@]+"${GTFS_ARGS[@]}"}
 fi
 
 if [[ $START -le 2 ]]; then
   echo ""
   echo "▶ Step 2 — Download OSM (CH + LI + DE + FR + IT + AT)"
-  time python3 scripts/transit/02_download_osm.py
+  time python3 scripts/transit/02_download_osm.py ${OSM_ARGS[@]+"${OSM_ARGS[@]}"}
 fi
 
 if [[ $START -le 3 ]]; then
