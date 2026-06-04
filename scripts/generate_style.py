@@ -1220,6 +1220,25 @@ def build_station_layers() -> list:
         }
     })
 
+    # Debug overlay: clickable dot at every stop's GTFS coordinate. Carries
+    # the atlas platform length and the list of lines visiting that stop
+    # (with origin / destination); rendered as a popup on click.
+    layers.append({
+        "id": "debug-stop-dot",
+        "type": "circle",
+        "source": "transit_debug_stops",
+        "source-layer": "transit_debug_stops",
+        "minzoom": 5,
+        "paint": {
+            "circle-color": "#ffffff",
+            "circle-stroke-color": "#000000",
+            "circle-radius": 3,
+            "circle-stroke-width": 1,
+            "circle-opacity": 0.9,
+            "circle-stroke-opacity": 0.9,
+        }
+    })
+
     return layers
 
 
@@ -1268,6 +1287,10 @@ def generate_style(cfg) -> dict:
             "transit_debug_platforms": {
                 "type": "vector",
                 "url": "pmtiles:///tl_debug_platforms.pmtiles"
+            },
+            "transit_debug_stops": {
+                "type": "vector",
+                "url": "pmtiles:///tl_debug_stops.pmtiles"
             }
         },
         "glyphs": g["glyphs"],

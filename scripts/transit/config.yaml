@@ -85,34 +85,74 @@ pill_rendering:
     bus:          100
     regional_bus: 100
 
-# ── Headway thresholds per bucket (minutes) ─────────────────────────────────
-# Endpoints of the per-bucket frequency score curve. The core-hours score is a
-# linear interpolation between these two points based on the line's effective
-# headway (CORE_MINUTES / trips-per-sample-day):
-#   actual_hw <= best_headway → score = 1.0
-#   actual_hw >= worst_headway → score = 0.0
-# Ferry's worst_headway is intentionally high so seasonal once-daily lake
-# services (BAT 74 Brienz, Thunersee, Walensee, etc.) clear the freq gate.
+# ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
+# Endpoints of the per-bucket frequency score curve. The line's weighted
+# frequency (window_weights × per-window trips/hour) is mapped onto [0, 1]:
+#   f_weighted >= best_freq → score = 1.0
+#   f_weighted <= worst_freq → score = 0.0
+# Between the endpoints, the score is computed on a log curve with a power
+# applied to bend the mid-range. See
+# .claude/concepts/frequency-weighted-line-scoring.md.
+# Ferry's worst_freq is intentionally low so seasonal once-daily lake services
+# (BAT 74 Brienz, Thunersee, Walensee, etc.) clear the freq gate.
 # Mountain values are informational — mountain is exempt from the freq gate.
 # Every bucket appearing in either table must appear in both; a missing entry
 # is a fatal config error.
-headway:
-  best_headway:
-    train:          15
-    tram:            7
-    metro:           5
-    bus:             6
-    regional_bus:   30
-    ferry:          45
-    mountain:       60
-  worst_headway:
-    train:         240
-    tram:          100
-    metro:          75
-    bus:            90
-    regional_bus: 360
-    ferry:        2100
-    mountain:    1200
+frequency:
+  best_freq:
+    train:           4.0
+    tram:            8.6
+    metro:          12.0
+    bus:            10.0
+    regional_bus:    2.0
+    ferry:           1.33
+    mountain:        1.0
+  worst_freq:
+    train:           0.25
+    tram:            0.6
+    metro:           0.8
+    bus:             0.75
+    regional_bus:    0.17
+    ferry:           0.029
+    mountain:        0.05
+
+# ── Per-window weights ───────────────────────────────────────────────────────
+# Relative importance of each scoring window for visual line prominence.
+# Must sum to 1.0. A line with no service in a window contributes zero from
+# that window to the weighted frequency.
+window_weights:
+  core: 0.6
+  eve:  0.2
+  we:   0.2
+
+# ── Line width endpoints per bucket ──────────────────────────────────────────
+# min: width_base for a line at score = 0 (worst_freq); max: at score = 1
+# (best_freq). Train is set wider than other modes. Mountain has min = max
+# (fixed width regardless of score) — mountain is colored/sized by mode, not
+# by service level. Every mode that draws must appear; a missing entry is a
+# fatal config error.
+line_width:
+  train:
+    min: 0.60
+    max: 3.75
+  tram:
+    min: 0.50
+    max: 3.00
+  metro:
+    min: 0.50
+    max: 3.00
+  bus:
+    min: 0.50
+    max: 2.50
+  regional_bus:
+    min: 0.50
+    max: 2.50
+  ferry:
+    min: 0.50
+    max: 2.50
+  mountain:
+    min: 2.50
+    max: 2.50
 
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates

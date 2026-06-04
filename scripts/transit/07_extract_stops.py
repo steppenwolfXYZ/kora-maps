@@ -52,6 +52,7 @@ OUT_DOTS     = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
 OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
+OUT_DEBUG_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
 
 # Per-mode platform-length defaults and sanity ranges from config.
 PILL_CFG = _transit_cfg.get("pill_rendering", {})
@@ -603,6 +604,116 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
     print(f"  Debug platforms: {len(feats):,} features → {OUT_DEBUG_PLATFORMS}")
 
 
+def write_debug_stops(line_stops: dict, line_lookup: dict,
+                       stop_attrs: dict, stop_meta: dict) -> None:
+    """Emit transit_debug_stops.geojson — one Point per (line, stop) pair,
+    1:1 with the debug platform lines. The point sits at the GTFS coord
+    snapped onto that line's polyline (the same snap-to-line used by the
+    pipeline's dot placement), so every debug line has a matching dot and
+    every dot has a matching line.
+
+    The popup data is keyed on stop_id and lists every line visiting that
+    stop (with origin / destination), regardless of which line's snap this
+    particular dot was rendered from.
+    """
+    cfg = PILL_CFG
+
+    # First pass: per stop_id, build the (deduped) list of lines visiting it
+    # plus the stop name. This populates the popup for every dot rendered
+    # at this stop, regardless of which line's snap produced the dot.
+    by_stop: dict = {}
+    for osm_id, ls_entry in line_stops.items():
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id)
+        if not line or not triplets:
+            continue
+        mode = line["mode"]
+        if mode not in cfg.get("default_length_m", {}):
+            continue
+        first_trip = triplets[0]
+        last_trip = triplets[-1]
+        origin_sid = first_trip[2] if len(first_trip) >= 3 else ""
+        dest_sid = last_trip[2] if len(last_trip) >= 3 else ""
+        origin_name = (stop_meta.get(origin_sid, {}).get("name") or "?")
+        dest_name = (stop_meta.get(dest_sid, {}).get("name") or "?")
+        line_info = {
+            "ref":         line.get("ref", ""),
+            "mode":        mode,
+            "color":       line.get("color", "#888888"),
+            "origin":      origin_name,
+            "destination": dest_name,
+        }
+        for trip in triplets:
+            if len(trip) < 3:
+                continue
+            sid = trip[2]
+            if not sid:
+                continue
+            entry = by_stop.get(sid)
+            if entry is None:
+                entry = {
+                    "name": stop_meta.get(sid, {}).get("name", ""),
+                    "visits": [],
+                }
+                by_stop[sid] = entry
+            entry["visits"].append(line_info)
+
+    per_stop_lines_json: dict = {}
+    per_stop_name: dict = {}
+    for sid, data in by_stop.items():
+        seen = set()
+        unique = []
+        for v in data["visits"]:
+            key = (v["ref"], v["origin"], v["destination"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(v)
+        per_stop_lines_json[sid] = json.dumps(unique, ensure_ascii=False)
+        per_stop_name[sid] = data["name"]
+
+    # Second pass: one dot per (line, stop) at the snapped position on that
+    # line's polyline. 1:1 with debug platform lines (same filtering).
+    feats = []
+    for osm_id, ls_entry in line_stops.items():
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id)
+        if not line or not triplets:
+            continue
+        mode = line["mode"]
+        if mode not in cfg.get("default_length_m", {}):
+            continue
+        polyline = flatten_coords(line["coords"])
+        if len(polyline) < 2:
+            continue
+        for trip in triplets:
+            if len(trip) < 3:
+                continue
+            lon, lat, sid = trip[0], trip[1], trip[2]
+            if not sid:
+                continue
+            slon, slat = snap_to_line(lon, lat, polyline)
+            attrs = stop_attrs.get(sid) or {}
+            atlas_len = attrs.get("length") if isinstance(attrs, dict) else None
+            feats.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": MODE_MINZOOM.get(mode, 11)},
+                "geometry": {"type": "Point", "coordinates": [slon, slat]},
+                "properties": {
+                    "stop_id":          sid,
+                    "stop_name":        per_stop_name.get(sid, ""),
+                    "mode":             mode,
+                    "platform_length":  atlas_len,
+                    "lines_json":       per_stop_lines_json.get(sid, "[]"),
+                },
+            })
+    OUT_DEBUG_STOPS.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": feats,
+    }, ensure_ascii=False))
+    print(f"  Debug stops: {len(feats):,} features → {OUT_DEBUG_STOPS}")
+
+
 # =============================================================================
 # Geometry helpers
 # =============================================================================
@@ -1014,6 +1125,9 @@ def main():
 
     print("Emitting debug platform extents...")
     write_debug_platforms(line_stops, line_lookup, stop_attrs)
+
+    print("Emitting debug stop dots...")
+    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta)
 
     print("Building stop dots and pill candidates...")
 

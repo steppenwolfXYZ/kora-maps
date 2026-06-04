@@ -39,7 +39,7 @@ import json
 import colorsys
 import sys
 from collections import defaultdict
-from math import radians, cos, sin, sqrt, atan2
+from math import radians, cos, sin, sqrt, atan2, log
 from pathlib import Path
 from typing import Optional
 
@@ -84,64 +84,92 @@ def _sample_dates() -> tuple:
 
 
 CORE_START    = 7 * 3600
-CORE_END      = 18 * 3600
-EVENING_START = 18 * 3600
-EVENING_END   = 22 * 3600
+CORE_END      = 19 * 3600
+EVENING_START = 19 * 3600
+EVENING_END   = 23 * 3600
 WEEKEND_START = 7 * 3600
 WEEKEND_END   = 20 * 3600
 
-CORE_MINUTES    = (CORE_END - CORE_START) / 60        # 660 min
-EVENING_MINUTES = (EVENING_END - EVENING_START) / 60  # 240 min
-WEEKEND_MINUTES = (WEEKEND_END - WEEKEND_START) / 60  # 780 min
+CORE_HOURS    = (CORE_END - CORE_START) / 3600        # 12 h
+EVENING_HOURS = (EVENING_END - EVENING_START) / 3600  # 4 h
+WEEKEND_HOURS = (WEEKEND_END - WEEKEND_START) / 3600  # 13 h
 
-# Off-peak malus factors (multiplicative).
-MALUS_LOW = 0.10
-MALUS_NO  = 0.20
+# Power applied to the log-score so the mid range falls off faster. See
+# .claude/concepts/frequency-weighted-line-scoring.md.
+SCORE_POWER = 2.5
 
-# Minimum freq_score required to draw a line (all modes; mountain exempt).
-MIN_FREQ_SCORE = 0.075
+# Frequency endpoints per mode (trips/hour) loaded from config.yaml. The score
+# curve is log in frequency between worst_freq (score=0.0) and best_freq
+# (score=1.0), then raised to SCORE_POWER. See
+# .claude/concepts/frequency-weighted-line-scoring.md.
 
-# Low-service evening/weekend headway thresholds per mode (minutes).
-LOW_EVE_HEADWAY = {
-    "train": 60, "tram": 20, "metro": 15,
-    "bus": 20, "regional_bus": 60, "ferry": 90, "mountain": 120,
-}
-LOW_WE_HEADWAY = {
-    "train": 60, "tram": 30, "metro": 20,
-    "bus": 30, "regional_bus": 90, "ferry": 120, "mountain": 120,
-}
-
-# Headways per mode (minutes) — loaded from config.yaml at first call. The
-# core_score curve is linear in actual headway between best_headway (score=1.0)
-# and worst_headway (score=0.0). See .claude/concepts/bucket-worst-headway.md.
-
-_HEADWAY_CACHE: dict = {}
+_FREQ_CACHE: dict = {}
+_WEIGHTS_CACHE: dict = {}
+_LINE_WIDTH_CACHE: dict = {}
 
 
-def _headways() -> tuple:
-    """Return (best_headway_dict, worst_headway_dict). Loaded lazily; both
-    tables must cover the same bucket set or the pipeline aborts."""
-    if _HEADWAY_CACHE:
-        return _HEADWAY_CACHE["best"], _HEADWAY_CACHE["worst"]
+def _frequencies() -> tuple:
+    """Return (best_freq_dict, worst_freq_dict) in trips/hour. Loaded lazily;
+    both tables must cover the same bucket set or the pipeline aborts."""
+    if _FREQ_CACHE:
+        return _FREQ_CACHE["best"], _FREQ_CACHE["worst"]
     cfg = yaml.safe_load(CFG_PATH.read_text())
-    hw = cfg.get("headway") or {}
-    best = hw.get("best_headway") or {}
-    worst = hw.get("worst_headway") or {}
+    fq = cfg.get("frequency") or {}
+    best = fq.get("best_freq") or {}
+    worst = fq.get("worst_freq") or {}
     if not best or not worst:
         sys.exit(
-            "config.yaml is missing headway.best_headway / headway.worst_headway."
+            "config.yaml is missing frequency.best_freq / frequency.worst_freq."
         )
     missing_worst = set(best) - set(worst)
     missing_best  = set(worst) - set(best)
     if missing_worst or missing_best:
         sys.exit(
-            "config.yaml headway tables are inconsistent: "
-            f"buckets missing worst_headway={sorted(missing_worst)}, "
-            f"buckets missing best_headway={sorted(missing_best)}."
+            "config.yaml frequency tables are inconsistent: "
+            f"buckets missing worst_freq={sorted(missing_worst)}, "
+            f"buckets missing best_freq={sorted(missing_best)}."
         )
-    _HEADWAY_CACHE["best"]  = {k: float(v) for k, v in best.items()}
-    _HEADWAY_CACHE["worst"] = {k: float(v) for k, v in worst.items()}
-    return _HEADWAY_CACHE["best"], _HEADWAY_CACHE["worst"]
+    _FREQ_CACHE["best"]  = {k: float(v) for k, v in best.items()}
+    _FREQ_CACHE["worst"] = {k: float(v) for k, v in worst.items()}
+    return _FREQ_CACHE["best"], _FREQ_CACHE["worst"]
+
+
+def _window_weights() -> tuple:
+    """Return (w_core, w_eve, w_we). Must sum to 1.0 (±1e-6)."""
+    if _WEIGHTS_CACHE:
+        return _WEIGHTS_CACHE["core"], _WEIGHTS_CACHE["eve"], _WEIGHTS_CACHE["we"]
+    cfg = yaml.safe_load(CFG_PATH.read_text())
+    ww = cfg.get("window_weights") or {}
+    try:
+        w_core = float(ww["core"])
+        w_eve  = float(ww["eve"])
+        w_we   = float(ww["we"])
+    except KeyError as e:
+        sys.exit(f"config.yaml window_weights missing key: {e}")
+    total = w_core + w_eve + w_we
+    if abs(total - 1.0) > 1e-6:
+        sys.exit(f"config.yaml window_weights must sum to 1.0 (got {total}).")
+    _WEIGHTS_CACHE.update({"core": w_core, "eve": w_eve, "we": w_we})
+    return w_core, w_eve, w_we
+
+
+def _line_width_bounds() -> dict:
+    """Return {mode: (min, max)} from line_width config block. Every mode the
+    pipeline can emit must have an entry."""
+    if _LINE_WIDTH_CACHE:
+        return _LINE_WIDTH_CACHE["bounds"]
+    cfg = yaml.safe_load(CFG_PATH.read_text())
+    lw = cfg.get("line_width") or {}
+    if not lw:
+        sys.exit("config.yaml is missing line_width.")
+    bounds = {}
+    for mode, vals in lw.items():
+        try:
+            bounds[mode] = (float(vals["min"]), float(vals["max"]))
+        except (KeyError, TypeError):
+            sys.exit(f"config.yaml line_width.{mode} must have min and max.")
+    _LINE_WIDTH_CACHE["bounds"] = bounds
+    return bounds
 
 # Bus mode classification — see .claude/concepts/bus-mode-classification.md.
 # Agencies that follow the "1-digit ref = city, 2-digit ref = regional"
@@ -270,13 +298,16 @@ def speed_to_color(mode: str, speed_kmh) -> str:
     return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
 
 
-def freq_to_width_base(freq_score, mode) -> float:
-    if mode == "mountain":  return 0.75
-    if freq_score is None:  return 1.1
-    base = 1.1 + freq_score * 1.5
-    if mode == "train":
-        base *= 1.5
-    return round(base, 1)
+def score_to_width_base(score, mode) -> float:
+    """Map score ∈ [0, 1] to width_base using the per-mode line_width bounds.
+    Mountain's bounds are (0.75, 0.75) so the score has no effect there."""
+    bounds = _line_width_bounds()
+    if mode not in bounds:
+        sys.exit(f"score_to_width_base: mode {mode!r} missing from line_width config.")
+    w_min, w_max = bounds[mode]
+    if score is None:
+        return round(w_min, 2)
+    return round(w_min + (w_max - w_min) * score, 2)
 
 
 # ── Service area filter ──────────────────────────────────────────────────────
@@ -862,94 +893,51 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         if seg_speeds:
             tg_speed[tg_key] = round(sum(seg_speeds) / len(seg_speeds), 1)
 
-    # Normalise tg_freq from "trip × sample-days-hit" totals to "average trips
-    # per sample day". compute_freq_score treats these the same way it treated
-    # the old single-date integer counts.
+    # Normalise tg_freq from "trip × sample-days-hit" totals to trips/hour per
+    # window. f_core = trips_in_core_window / (n_weekday_samples · core_hours)
+    # — the trip group's average trips-per-hour during the core window across
+    # weekday sample dates. Same for eve and we.
     tg_freq_out: dict = {}
     for tg_key, (c, e, w) in tg_freq.items():
         tg_freq_out[tg_key] = {
-            "core_wd": c / n_wd_samples,
-            "eve_wd":  e / n_wd_samples,
-            "we":      w / n_we_samples,
+            "f_core": c / (n_wd_samples * CORE_HOURS),
+            "f_eve":  e / (n_wd_samples * EVENING_HOURS),
+            "f_we":   w / (n_we_samples * WEEKEND_HOURS),
         }
 
     return tg_freq_out, tg_speed, tg_canon
 
 
-# ── Stop-pair corridor frequency ─────────────────────────────────────────────
+# ── Per-window frequency scoring ─────────────────────────────────────────────
 
-def build_stop_pair_freq(tg_freq: dict, tg_canon: dict) -> dict:
-    """Aggregate per-(UIC, UIC) corridor frequency across all trip groups. Each
-    trip group contributes its own correctly-scoped frequency to every
-    consecutive pair on its canonical stop sequence. Cross-group aggregation is
-    the point (trunk reinforcement) but no per-line_key or per-name aggregator
-    feeds in — only trip groups."""
-    pair_freq: dict = defaultdict(lambda: {"core_wd": 0, "eve_wd": 0, "we": 0})
-    for tg_key, canon in tg_canon.items():
-        freq = tg_freq.get(tg_key)
-        if not freq:
-            continue
-        uics = []
-        for stop_id, _arr, _dep in canon["stops"]:
-            uic = stop_id.split(":")[0]
-            if not uics or uics[-1] != uic:
-                uics.append(uic)
-        for i in range(len(uics) - 1):
-            pair = (uics[i], uics[i + 1])
-            pair_freq[pair]["core_wd"] += freq["core_wd"]
-            pair_freq[pair]["eve_wd"]  += freq["eve_wd"]
-            pair_freq[pair]["we"]      += freq["we"]
-    return dict(pair_freq)
-
-
-def corridor_freq(canon_stops: list, pair_freq: dict):
-    uics = []
-    for stop_id, _arr, _dep in canon_stops:
-        uic = stop_id.split(":")[0]
-        if not uics or uics[-1] != uic:
-            uics.append(uic)
-    best = None
-    for i in range(len(uics) - 1):
-        pf = pair_freq.get((uics[i], uics[i + 1]))
-        if pf and (best is None or pf["core_wd"] > best["core_wd"]):
-            best = pf
-    return best
-
-
-def compute_freq_score(raw_freq: dict, mode: str) -> float:
-    best_map, worst_map = _headways()
-    if mode not in best_map:
-        sys.exit(f"compute_freq_score: bucket {mode!r} missing from headway config.")
-    best_hw = best_map[mode]
-    worst_hw = worst_map[mode]
-    core_trips = raw_freq.get("core_wd", 0)
-    eve_trips  = raw_freq.get("eve_wd",  0)
-    we_trips   = raw_freq.get("we",      0)
-
-    if core_trips <= 0:
+def weighted_freq(freq: dict) -> float:
+    """Combine the three per-window frequencies into a single weighted
+    trips/hour value using window_weights from config."""
+    if not freq:
         return 0.0
-    actual_hw = CORE_MINUTES / core_trips
-    core_score = (worst_hw - actual_hw) / (worst_hw - best_hw)
-    core_score = max(0.0, min(1.0, core_score))
+    w_core, w_eve, w_we = _window_weights()
+    return w_core * freq.get("f_core", 0.0) \
+         + w_eve  * freq.get("f_eve",  0.0) \
+         + w_we   * freq.get("f_we",   0.0)
 
-    low_eve = LOW_EVE_HEADWAY.get(mode, 30)
-    if eve_trips >= 2:
-        eve_factor = MALUS_LOW if EVENING_MINUTES / eve_trips > low_eve else 0.0
-    elif eve_trips == 0:
-        eve_factor = MALUS_NO
-    else:
-        eve_factor = 0.0
 
-    low_we = LOW_WE_HEADWAY.get(mode, 60)
-    if we_trips >= 2:
-        we_factor = MALUS_LOW if WEEKEND_MINUTES / we_trips > low_we else 0.0
-    elif we_trips == 0:
-        we_factor = MALUS_NO
-    else:
-        we_factor = 0.0
-
-    final = core_score * (1 - eve_factor) * (1 - we_factor)
-    return round(max(0.0, min(1.0, final)), 3)
+def compute_freq_score(freq: dict, mode: str) -> float:
+    """Map a per-window frequency dict to a [0, 1] score using the per-mode
+    frequency endpoints and the log-based curve with SCORE_POWER. The score is
+    the powered/clamped output that drives width and the freq-score gate."""
+    best_map, worst_map = _frequencies()
+    if mode not in best_map:
+        sys.exit(f"compute_freq_score: mode {mode!r} missing from frequency config.")
+    best_f = best_map[mode]
+    worst_f = worst_map[mode]
+    f_weighted = weighted_freq(freq)
+    if f_weighted <= worst_f:
+        return 0.0
+    if f_weighted >= best_f:
+        return 1.0
+    score_log = (log(f_weighted) - log(worst_f)) / (log(best_f) - log(worst_f))
+    score_log = max(0.0, min(1.0, score_log))
+    return round(score_log ** SCORE_POWER, 4)
 
 
 # ── Mountain feature deduplication ───────────────────────────────────────────
@@ -1109,10 +1097,6 @@ def main():
                 n_exempt_collapsed += 1
     print(f"  {n_exempt_collapsed:,} ferry/aerial/funicular trips collapsed "
           f"to single direction_key")
-
-    print("  Building corridor stop-pair frequency table...")
-    pair_freq = build_stop_pair_freq(tg_freq, tg_canon)
-    print(f"  {len(pair_freq):,} stop pairs indexed")
 
     print("\nLoading pfaedle shapes...")
     shapes = load_shapes()
@@ -1392,14 +1376,17 @@ def main():
     # direction-coverage concept: ferry + true mountain (aerial/funicular)
     # skip the gate; rebucketed rail does not.
     drawable_groups = {}
+    best_freq_map, worst_freq_map = _frequencies()
     for (line_key, aid, tg_id), variant_map in groups.items():
         bucket = line_key[2]
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         tg_key = (line_key, aid, tg_id)
-        raw = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        raw = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
+        f_weighted = weighted_freq(raw)
+        worst_f = worst_freq_map.get(mode_approx, 0.0)
         if _gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
             line_key[0] == "CC" and bucket == "train"
-        ) or compute_freq_score(raw, mode_approx) >= MIN_FREQ_SCORE:
+        ) or f_weighted > worst_f:
             drawable_groups[tg_key] = variant_map
     print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries")
 
@@ -1418,7 +1405,7 @@ def main():
         all_trips = [tid for trips in variant_map.values() for tid in trips]
 
         tg_key = (line_key, agency_id, tg_id)
-        raw_freq  = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        raw_freq  = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
         speed_kmh = tg_speed.get(tg_key)
         for var_key, trip_ids in variant_map.items():
             merged_set, direction_key = var_key
@@ -1505,21 +1492,10 @@ def main():
                                 short_name=short_name, length_km=length_km,
                                 route_type=route_type)
 
-            # Frequency: try corridor boost (use rep trip's stop pair freq).
-            stop_seq = [(sid, 0, 0) for sid in stop_ids]
-            corr_raw = corridor_freq(stop_seq, pair_freq) if stop_seq else None
-            own_raw = dict(raw_freq)
-            if corr_raw and own_raw["core_wd"] > 0 and corr_raw["core_wd"] > own_raw["core_wd"]:
-                eff_raw = corr_raw
-            else:
-                eff_raw = own_raw
-
-            freq_score = compute_freq_score(eff_raw, mode)
-            if mode == "mountain" and freq_score < 0.4:
-                freq_score = 0.4
+            freq_score = compute_freq_score(raw_freq, mode)
 
             color      = speed_to_color(mode, speed_kmh)
-            width_base = freq_to_width_base(freq_score, mode)
+            width_base = score_to_width_base(freq_score, mode)
 
             feature_id_counter += 1
             feat_id = f"tg{tg_id}_s{feature_id_counter}"
@@ -1616,7 +1592,7 @@ def main():
                          key=lambda k: (k[0][2], k[0][0], k[0][1], k[1], k[2])):
         line_key, aid, tg_id = tg_key
         short_name, long_name, bucket = line_key
-        freq = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        freq = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fs = compute_freq_score(freq, mode_approx)
         unmatched_out.append({
@@ -1625,8 +1601,8 @@ def main():
             "bucket":        bucket,
             "agency_id":     aid,
             "trip_group_id": tg_id,
-            "freq_score":    round(fs, 3),
-            "total_trips":   sum(freq.values()),
+            "f_weighted":    round(weighted_freq(freq), 3),
+            "freq_score":    round(fs, 4),
         })
     OUT_GTFS_UNMATCHED.write_text(json.dumps(unmatched_out, ensure_ascii=False))
     print(f"  GTFS unmatched: {len(unmatched_out)} trip groups with service but no feature → {OUT_GTFS_UNMATCHED}")
@@ -1644,13 +1620,16 @@ def main():
     # file directly instead of re-running stream_stop_times to debug missing
     # or unexpected lines.
     diag_out = []
+    _, worst_freq_map_diag = _frequencies()
     for tg_key, var_outcomes in diag_filter.items():
         line_key, aid, tg_id = tg_key
         short_name, long_name, bucket = line_key
         original_vmap = diag_original.get(tg_key, {})
-        raw_freq = dict(tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0}))
+        raw_freq = dict(tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}))
+        f_weighted = weighted_freq(raw_freq)
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fscore = compute_freq_score(raw_freq, mode_approx)
+        worst_f_diag = worst_freq_map_diag.get(mode_approx, 0.0)
 
         mountain_origin = tg_mountain_origin.get(tg_key)
         drawable = (line_key, aid, tg_id) in drawable_groups
@@ -1666,7 +1645,7 @@ def main():
             # These should have been drawable; only here if neither emitted
             # nor low-freq. Real shouldn't-happen branch — record it.
             group_reason = "unknown_skipped"
-        elif fscore < MIN_FREQ_SCORE:
+        elif f_weighted <= worst_f_diag:
             group_reason = "low_frequency"
         else:
             group_reason = "unknown_skipped"
@@ -1765,7 +1744,8 @@ def main():
             "group_share_of_supergroup": round(sg_share, 4),
             "rare_group_share_threshold": sg_threshold,
             "raw_freq": raw_freq,
-            "freq_score": round(fscore, 3),
+            "f_weighted": round(f_weighted, 3),
+            "freq_score": round(fscore, 4),
             "min_active_days_threshold": threshold_field,
             "drawable": drawable,
             "group_exclusion_reason": group_reason,

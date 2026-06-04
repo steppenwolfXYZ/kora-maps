@@ -7,6 +7,19 @@ When in doubt about whether the request is "report" or "implement", default to r
 
 Words that authorise implementation: "implement", "fix it", "do it", "go ahead", "make the change", "code it up", "ship it". Without one of those (or an obvious equivalent), stay in report mode.
 
+## Questions and reactions are not directives
+A question is a question. An exclamation, a swearword, a "WTF", a "that sounds dumb", an opinion, a comparison, a complaint — none of these are instructions to change anything. Examples that are NOT directives:
+
+- "what does X do?"
+- "why is X like that?"
+- "sounds like a dumb idea"
+- "this is broken"
+- "I don't like X"
+- "X seems wrong"
+- "why on earth would we do that?"
+
+Answer the question or acknowledge the reaction. Do not edit code, do not propose code edits, do not write concepts. A change happens only when the user explicitly authorises it with one of the words listed under "Investigation and analysis". When unsure whether the user wants action, ask.
+
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 

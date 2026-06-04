@@ -34,6 +34,8 @@
 		'transit-stop-pill-endpoint',
 	];
 
+	const DEBUG_STOP_LAYER = 'debug-stop-dot';
+
 	$effect(() => {
 		const map = new maplibregl.Map({
 			container,
@@ -66,7 +68,8 @@
 			const hoverLayers = [
 				...TRANSIT_LINE_LAYERS,
 				...TRANSIT_STOP_DOT_LAYERS,
-				...TRANSIT_STOP_PILL_LAYERS
+				...TRANSIT_STOP_PILL_LAYERS,
+				DEBUG_STOP_LAYER
 			];
 			for (const layer of hoverLayers) {
 				map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -77,6 +80,50 @@
 		map.on('click', (e) => {
 			if (popup) { popup.remove(); popup = null; }
 			const fmt = (v: unknown) => v == null ? '–' : String(v);
+
+			// Debug stop dot takes highest priority — these are the data probe.
+			const debugStopFeatures = map.queryRenderedFeatures(e.point, {
+				layers: [DEBUG_STOP_LAYER]
+			});
+			if (debugStopFeatures.length) {
+				const p = debugStopFeatures[0].properties as Record<string, unknown>;
+				const lengthVal = typeof p.platform_length === 'number'
+					? `${p.platform_length} m`
+					: p.platform_length ? `${p.platform_length} m` : '– (default)';
+				let linesHtml = '';
+				if (p.lines_json) {
+					try {
+						const lines: { ref: string; color: string; mode: string;
+							origin: string; destination: string }[] = JSON.parse(String(p.lines_json));
+						if (lines.length) {
+							const badges = lines.map(l => {
+								const label = l.ref || l.mode || '?';
+								const c = (l.color || '#888888').replace('#', '');
+								const r = parseInt(c.slice(0, 2), 16);
+								const g = parseInt(c.slice(2, 4), 16);
+								const b = parseInt(c.slice(4, 6), 16);
+								const lum = r * 0.299 + g * 0.587 + b * 0.114;
+								const fg = lum > 140 ? '#000' : '#fff';
+								const route = `${l.origin || '?'} → ${l.destination || '?'}`;
+								const titleAttr = ` title="${route.replace(/"/g, '&quot;')}"`;
+								return `<span${titleAttr} style="display:inline-block;background:#${c};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em;cursor:default">${label}</span>`;
+							}).join('');
+							linesHtml = `<div style="margin-top:6px">${badges}</div>`;
+						}
+					} catch { /* ignore malformed */ }
+				}
+				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
+					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)}]<br>
+					id: ${fmt(p.stop_id)}<br>
+					platform length: ${lengthVal}
+					${linesHtml}
+				</div>`;
+				popup = new maplibregl.Popup({ maxWidth: '320px' })
+					.setLngLat(e.lngLat)
+					.setHTML(html)
+					.addTo(map);
+				return;
+			}
 
 			// Station click takes priority over line click
 			const stopFeatures = map.queryRenderedFeatures(e.point, {

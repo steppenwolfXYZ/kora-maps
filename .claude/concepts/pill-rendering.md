@@ -74,7 +74,12 @@ For each platform's allowed range:
 
 ### Debug overlay
 
-A thin black line at the full extent of each platform's allowed range is rendered as a debug overlay, replacing the current debug-dot. Development-time visual aid only — not part of the medium-zoom production style.
+Two debug elements render on top of the production style, both filtered to the modes in scope (train, metro, tram, bus, regional_bus):
+
+- A **thin black line** tracing each platform's full allowed range along its line's polyline — one per `(line, stop)` pair.
+- A **clickable white-filled, black-outlined dot** at the GTFS coordinate snapped onto each line's polyline — 1:1 with the debug lines (every line has a dot, every dot has a line). Clicking opens a popup with the stop name, mode, atlas platform length (or `– (default)` when atlas had none), and mode-coloured badges for each line stopping there. Hovering a badge shows the line's `origin → destination` as a tooltip.
+
+These are development-time visual aids only; not part of the medium-zoom production style.
 
 ## Constraints
 
@@ -97,10 +102,10 @@ Pills are drawn **as if each sub-group were a separate cluster**: the axis proje
 1. Sub-cluster the merged cluster spatially (the same radius as the initial cluster pass: 300 m rail, 50 m non-rail). Each sub-cluster is a connected component of stops within the radius.
 2. For each sub-cluster:
    - Compute the mean polyline tangent across that sub-cluster's stops, with direction canonicalised (so NB and SB versions of the same polyline don't cancel out).
-   - Anchor the **local station axis** at the mean of the sub-cluster's range midpoints projected onto its tangent.
+   - Anchor the **local station axis** at the centre of the **intersection of all per-stop range tangent-coords** when that intersection is non-empty (every range covers some common axis position); otherwise fall back to the mean of range midpoints.
    - For each stop, place its dot at the point on its allowed-range polyline closest to that axis line.
 
-For parallel-line sub-clusters every dot lands on the axis and the sub-pill is a clean perpendicular bar. For sub-clusters with non-overlapping ranges, dots clamp to the range end closest to the axis, producing the shortest possible sub-pill given the geometry.
+The intersection-center preference is what makes the sub-pill align cleanly when extents overlap: every dot lands on the axis line and the bar is perpendicular. For sub-clusters with non-overlapping ranges, the intersection is empty and the mean-midpoint fallback applies — dots clamp to the range end closest to the axis, producing the shortest possible sub-pill given the geometry.
 
 The single-axis-across-the-whole-merged-cluster approach used previously is explicitly **not** done: it muddles the mean tangent across physically distinct platform groups (e.g. Eigerplatz Nord on a N–S street vs Eigerplatz Süd curving east on Eigerstrasse), pulls each sub-pill toward the merged centroid, and stretches sub-pills toward each other along their line direction in order to shorten the connector — a trade-off explicitly disallowed by the rule "neither the angle nor the length of a pill changes to make the connector shorter."
 
@@ -111,3 +116,10 @@ Each sub-pill may then be translated along its mean tangent toward an adjacent s
 ### Connectors
 
 The NN-path-through-all-dots and the split-on-largest-gap mechanism are unchanged. After the two stages above, adjacent sub-pills' inner dots are as close as their ranges allow; the inter-sub-cluster gap remains the largest segment in the NN path and the pill splits there into two pills plus a connector. The connector is the natural geographic gap between sub-pills.
+
+## Status
+
+The two-stage algorithm above plus the debug overlays are implemented in `07_extract_stops.py` (`coordinate_dots_in_cluster`, `shift_sub_pills_toward_target`, `_spatial_subclusters`, `write_debug_platforms`, `write_debug_stops`). Observed behaviour at the stations checked so far:
+
+- **Eigerplatz**: two clean perpendicular sub-pills (Nord, Süd) with a connector between them. Stage 2 shift collapses to zero — both sub-clusters' dots are already at their range ends.
+- **Zürich main station**: the approach does not yet produce the desired single-bar look across all rail platforms. Sub-clusters at different parts of the station end up with axes at different tangent-coords even with the intersection-center preference, and the platforms span more than the spatial sub-cluster radius. A different approach to global alignment across the merged cluster will likely be needed.
