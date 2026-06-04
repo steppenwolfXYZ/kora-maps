@@ -9,7 +9,9 @@ Pipeline:
      `_trip_stops_export` (trip_id → [stop_id, …]),
      `_trip_merged_export` (trip_id → frozenset(merged_stop_id)), and
      `_trip_direction_export` (trip_id → (first_uic, last_uic)).
-  3. Score per-line frequency & speed (GTFS-side, unchanged from before).
+  3. Aggregate frequency, speed, and canonical-trip stops per
+     tg_key = (line_key, agency_id, trip_group_id) — the only line identity in
+     this pipeline (see trip-group-as-sole-line-identity concept).
   4. Load pfaedle shapes (shapes.txt) and per-trip shape_id from trips.txt.
   5. For each (line_key, agency_id, trip_group_id), group trips by merged
      stop set and emit one feature per kept variant. Mode comes from the
@@ -271,7 +273,10 @@ def speed_to_color(mode: str, speed_kmh) -> str:
 def freq_to_width_base(freq_score, mode) -> float:
     if mode == "mountain":  return 0.75
     if freq_score is None:  return 1.1
-    return round(1.1 + freq_score * 1.5, 1)
+    base = 1.1 + freq_score * 1.5
+    if mode == "train":
+        base *= 1.5
+    return round(base, 1)
 
 
 # ── Service area filter ──────────────────────────────────────────────────────
@@ -640,8 +645,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     print(f"  Sample dates: {n_wd_samples} weekday + {n_we_samples} weekend")
     print("  Streaming stop_times.txt ...")
 
-    line_freq: dict = defaultdict(lambda: {"core_wd": 0, "eve_wd": 0, "we": 0})
-    line_canonical: dict = {}
+    # Per-trip freq contribution buffered here, summed into tg_freq once trip
+    # groups are assigned. No per-line_key aggregation exists — trip group is
+    # the only line identity in this pipeline (see
+    # .claude/concepts/trip-group-as-sole-line-identity.md).
+    trip_freq: dict = {}
 
     # Per-trip buffer for the post-stream grouping phase.
     # trip_id → (line_key, agency_id, weight, raw_variant_frozenset,
@@ -666,33 +674,24 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         wd_hits = sum(1 for d in wd_set if d in active_dates)
         we_hits = sum(1 for d in we_set if d in active_dates)
 
+        core_n = eve_n = we_n = 0
         freq_entries = trip_frequencies.get(trip_id, [])
         if freq_entries:
             for start, end, headway in freq_entries:
                 if headway <= 0:
                     continue
-                n_core = max(0, (min(end, CORE_END) - max(start, CORE_START)) // headway)
-                n_eve  = max(0, (min(end, EVENING_END) - max(start, EVENING_START)) // headway)
-                n_we   = max(0, (min(end, WEEKEND_END) - max(start, WEEKEND_START)) // headway)
-                line_freq[line_key]["core_wd"] += n_core * wd_hits
-                line_freq[line_key]["eve_wd"]  += n_eve  * wd_hits
-                line_freq[line_key]["we"]      += n_we   * we_hits
+                core_n += max(0, (min(end, CORE_END) - max(start, CORE_START)) // headway)
+                eve_n  += max(0, (min(end, EVENING_END) - max(start, EVENING_START)) // headway)
+                we_n   += max(0, (min(end, WEEKEND_END) - max(start, WEEKEND_START)) // headway)
+            trip_freq[trip_id] = (core_n * wd_hits, eve_n * wd_hits, we_n * we_hits)
         else:
             if CORE_START <= first_dep < CORE_END:
-                line_freq[line_key]["core_wd"] += wd_hits
+                core_n = 1
             elif EVENING_START <= first_dep < EVENING_END:
-                line_freq[line_key]["eve_wd"] += wd_hits
+                eve_n = 1
             if WEEKEND_START <= first_dep < WEEKEND_END:
-                line_freq[line_key]["we"] += we_hits
-
-        n = len(stops)
-        canon_score = n * len(active_dates)
-        if canon_score > line_canonical.get(line_key, {}).get("canon_score", 0):
-            line_canonical[line_key] = {
-                "stop_count": n,
-                "canon_score": canon_score,
-                "stops": [(s[1], s[2], s[3]) for s in stops],
-            }
+                we_n = 1
+            trip_freq[trip_id] = (core_n * wd_hits, eve_n * wd_hits, we_n * we_hits)
 
         raw_variant = frozenset(s[1] for s in stops)
         merged_set = frozenset(stop_merge.get(s[1]) or s[1].split(":")[0] for s in stops)
@@ -788,17 +787,19 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
 
     print(f"  {len(partition_trips):,} partitions → {n_groups_total:,} trip-groups")
 
-    # ── Per-(line_key, trip_group_id) accumulators ───────────────────────────
-    line_canonical_tg_stops: dict = {}
-    line_variant_counts: dict = defaultdict(lambda: defaultdict(int))
-    line_variant_sequences: dict = {}
-    line_canonical_tg_agency: dict = {}
+    # ── Per-tg_key aggregation ───────────────────────────────────────────────
+    # tg_key = (line_key, agency_id, trip_group_id) — the only line identity in
+    # this pipeline. Frequency and the canonical trip are both summed/picked
+    # here, in the single loop over trip_buf, against the trip-group partition
+    # built above. No second partition, no name-based fallback.
+    tg_freq: dict = defaultdict(lambda: [0, 0, 0])
+    tg_canon: dict = {}  # tg_key → {"canon_score": int, "stops": [(sid, arr, dep), ...]}
 
     for tid, (lk, aid, weight, raw_variant, merged_set, sequence) in trip_buf.items():
         tg = trip_group.get(tid)
         if tg is None:
             continue
-        tg_key = (lk, tg)
+        tg_key = (lk, aid, tg)
         # Expose per-trip group identity, stop sequence, and merged-stop variant
         # for downstream emission and per-group shape dedup.
         _trip_group_export[tid] = (lk, tg, aid)
@@ -811,42 +812,25 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         last_uic = stop_merge.get(last_sid) or last_sid.split(":")[0]
         _trip_direction_export[tid] = (first_uic, last_uic)
 
-        if tg_key not in line_canonical_tg_agency:
-            line_canonical_tg_agency[tg_key] = aid
-        line_variant_counts[tg_key][raw_variant] += weight
-        if (tg_key, raw_variant) not in line_variant_sequences:
-            line_variant_sequences[(tg_key, raw_variant)] = sequence
+        tc = trip_freq.get(tid)
+        if tc is not None:
+            tgf = tg_freq[tg_key]
+            tgf[0] += tc[0]
+            tgf[1] += tc[1]
+            tgf[2] += tc[2]
+
         n = len(sequence)
-        new_sid_set = raw_variant
-        existing_list = line_canonical_tg_stops.get(tg_key)
-        if existing_list is None:
-            line_canonical_tg_stops[tg_key] = [{"stop_count": n, "stops": sequence}]
-        elif not any(frozenset(s[0] for s in e["stops"]) == new_sid_set for e in existing_list):
-            existing_list.append({"stop_count": n, "stops": sequence})
-            existing_list.sort(key=lambda e: -e["stop_count"])
+        canon_score = n * weight
+        existing = tg_canon.get(tg_key)
+        if existing is None or canon_score > existing["canon_score"]:
+            tg_canon[tg_key] = {"canon_score": canon_score, "stops": sequence}
 
     trip_buf.clear()
+    trip_freq.clear()
 
-    # 10% / 5% rare-variant filter.
-    for tg_key, variant_counts in list(line_variant_counts.items()):
-        total = sum(variant_counts.values())
-        for pct in (0.10, 0.05):
-            threshold = max(1, total * pct)
-            filtered = {v: c for v, c in variant_counts.items() if c >= threshold}
-            if filtered:
-                line_variant_counts[tg_key] = filtered
-                break
-
-    for tg_key, canons in line_canonical_tg_stops.items():
-        variant_counts = line_variant_counts.get(tg_key, {})
-        line_canonical_tg_stops[tg_key] = [
-            c for c in canons
-            if frozenset(s[0] for s in c["stops"]) in variant_counts
-        ]
-
-    # Compute per-line speed from canonical trips.
-    line_speed: dict = {}
-    for line_key, canon in line_canonical.items():
+    # Compute per-trip-group speed from each group's canonical trip.
+    tg_speed: dict = {}
+    for tg_key, canon in tg_canon.items():
         stops = canon["stops"]
         if len(stops) < 2:
             continue
@@ -876,69 +860,37 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
                 seg_speeds.append(total_dist / (total_time / 3600))
 
         if seg_speeds:
-            line_speed[line_key] = round(sum(seg_speeds) / len(seg_speeds), 1)
+            tg_speed[tg_key] = round(sum(seg_speeds) / len(seg_speeds), 1)
 
-    # Normalise the freq counters from "trip × sample-days-hit" totals to
-    # "average trips per sample day". compute_freq_score treats these the same
-    # way it treated the old single-date integer counts.
-    for freq in line_freq.values():
-        freq["core_wd"] = freq["core_wd"] / n_wd_samples
-        freq["eve_wd"]  = freq["eve_wd"]  / n_wd_samples
-        freq["we"]      = freq["we"]      / n_we_samples
+    # Normalise tg_freq from "trip × sample-days-hit" totals to "average trips
+    # per sample day". compute_freq_score treats these the same way it treated
+    # the old single-date integer counts.
+    tg_freq_out: dict = {}
+    for tg_key, (c, e, w) in tg_freq.items():
+        tg_freq_out[tg_key] = {
+            "core_wd": c / n_wd_samples,
+            "eve_wd":  e / n_wd_samples,
+            "we":      w / n_we_samples,
+        }
 
-    return line_freq, line_speed, line_canonical
-
-
-# ── Indexes & scoring (GTFS-side, unchanged) ─────────────────────────────────
-
-def build_gtfs_index(line_freq, line_speed) -> tuple:
-    """Build short-name and long-name keyed indexes of (raw_freq, speed_kmh)."""
-    short_acc, long_acc = {}, {}
-    for line_key, freq in line_freq.items():
-        short_name, long_name, bucket = line_key
-        speed = line_speed.get(line_key)
-        skey = (bucket, short_name)
-        if skey not in short_acc:
-            short_acc[skey] = {"freqs": [], "speeds": []}
-        short_acc[skey]["freqs"].append(dict(freq))
-        if speed:
-            short_acc[skey]["speeds"].append(speed)
-        long_norm = long_name.replace(" ", "")
-        if long_norm and long_norm != short_name and long_norm != short_name.replace(" ", ""):
-            lkey = (bucket, long_norm)
-            if lkey not in long_acc:
-                long_acc[lkey] = {"freqs": [], "speeds": []}
-            long_acc[lkey]["freqs"].append(dict(freq))
-            if speed:
-                long_acc[lkey]["speeds"].append(speed)
-
-    def _finalise(acc):
-        result = {}
-        for key, data in acc.items():
-            merged = {"core_wd": 0, "eve_wd": 0, "we": 0}
-            for f in data["freqs"]:
-                merged["core_wd"] += f["core_wd"]
-                merged["eve_wd"]  += f["eve_wd"]
-                merged["we"]      += f["we"]
-            speeds = data["speeds"]
-            result[key] = {
-                "raw_freq": merged,
-                "speed_kmh": round(sum(speeds) / len(speeds), 1) if speeds else None,
-            }
-        return result
-
-    return _finalise(short_acc), _finalise(long_acc)
+    return tg_freq_out, tg_speed, tg_canon
 
 
-def build_stop_pair_freq(line_freq: dict, line_canonical: dict) -> dict:
+# ── Stop-pair corridor frequency ─────────────────────────────────────────────
+
+def build_stop_pair_freq(tg_freq: dict, tg_canon: dict) -> dict:
+    """Aggregate per-(UIC, UIC) corridor frequency across all trip groups. Each
+    trip group contributes its own correctly-scoped frequency to every
+    consecutive pair on its canonical stop sequence. Cross-group aggregation is
+    the point (trunk reinforcement) but no per-line_key or per-name aggregator
+    feeds in — only trip groups."""
     pair_freq: dict = defaultdict(lambda: {"core_wd": 0, "eve_wd": 0, "we": 0})
-    for line_key, canon in line_canonical.items():
-        freq = line_freq.get(line_key)
+    for tg_key, canon in tg_canon.items():
+        freq = tg_freq.get(tg_key)
         if not freq:
             continue
-        stops = canon["stops"]
         uics = []
-        for stop_id, _arr, _dep in stops:
+        for stop_id, _arr, _dep in canon["stops"]:
             uic = stop_id.split(":")[0]
             if not uics or uics[-1] != uic:
                 uics.append(uic)
@@ -1139,7 +1091,7 @@ def main():
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries "
           f"for {len(trip_frequencies):,} trips")
 
-    line_freq, line_speed, line_canonical = stream_stop_times(
+    tg_freq, tg_speed, tg_canon = stream_stop_times(
         trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
     # Override direction_key with EXEMPT_DIRECTION_KEY for ferry + aerial /
@@ -1158,15 +1110,8 @@ def main():
     print(f"  {n_exempt_collapsed:,} ferry/aerial/funicular trips collapsed "
           f"to single direction_key")
 
-    for line_key in line_canonical:
-        _ = line_freq[line_key]
-
-    gtfs_index, gtfs_long_index = build_gtfs_index(line_freq, line_speed)
-    print(f"  {len(gtfs_index):,} GTFS short-name entries, "
-          f"{len(gtfs_long_index):,} long-name entries")
-
     print("  Building corridor stop-pair frequency table...")
-    pair_freq = build_stop_pair_freq(line_freq, line_canonical)
+    pair_freq = build_stop_pair_freq(tg_freq, tg_canon)
     print(f"  {len(pair_freq):,} stop pairs indexed")
 
     print("\nLoading pfaedle shapes...")
@@ -1450,11 +1395,12 @@ def main():
     for (line_key, aid, tg_id), variant_map in groups.items():
         bucket = line_key[2]
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
-        raw = line_freq.get(line_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
-        if _gate_exempt(bucket, tg_mountain_origin.get((line_key, aid, tg_id))) or (
+        tg_key = (line_key, aid, tg_id)
+        raw = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        if _gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
             line_key[0] == "CC" and bucket == "train"
         ) or compute_freq_score(raw, mode_approx) >= MIN_FREQ_SCORE:
-            drawable_groups[(line_key, aid, tg_id)] = variant_map
+            drawable_groups[tg_key] = variant_map
     print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries")
 
     # ── Emit features ────────────────────────────────────────────────────────
@@ -1462,7 +1408,7 @@ def main():
     line_stops_out: dict = {}
     pfaedle_unrouted: list = []
     trip_groups_diag: list = []
-    matched_line_keys: set = set()
+    matched_tg_keys: set = set()
     feature_id_counter = 0
     # Per-(tg_key, var_key) emission outcome for the comprehensive diagnostic.
     diag_emission: dict = {}
@@ -1471,14 +1417,9 @@ def main():
         short_name, long_name, bucket = line_key
         all_trips = [tid for trips in variant_map.values() for tid in trips]
 
-        long_norm = long_name.replace(" ", "")
-        gtfs_meta = (gtfs_long_index.get((bucket, long_norm))
-                     or gtfs_index.get((bucket, short_name)))
-        raw_freq  = (gtfs_meta or {}).get("raw_freq",
-                                          {"core_wd": 0, "eve_wd": 0, "we": 0})
-        speed_kmh = (gtfs_meta or {}).get("speed_kmh")
-
         tg_key = (line_key, agency_id, tg_id)
+        raw_freq  = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
+        speed_kmh = tg_speed.get(tg_key)
         for var_key, trip_ids in variant_map.items():
             merged_set, direction_key = var_key
             # Pick the rep from the most common platform sub-variant within
@@ -1626,7 +1567,7 @@ def main():
                 "direction_key": direction_key_str,
             }
 
-            matched_line_keys.add(line_key)
+            matched_tg_keys.add(tg_key)
             diag_emission[(tg_key, var_key)] = {
                 "feature_emitted": True,
                 "exclusion_reason": None,
@@ -1663,29 +1604,32 @@ def main():
     print(f"  {sum(len(v['stops']) for v in line_stops_out.values()):,} stops "
           f"across {len(line_stops_out):,} features → {OUT_STOPS}")
 
-    # gtfs_unmatched: GTFS lines with no emitted feature (after grouping).
-    # Drawable line_keys come straight from drawable_groups — that dict has
+    # gtfs_unmatched: trip groups with no emitted feature (after grouping).
+    # Drawable tg_keys come straight from drawable_groups — that dict has
     # already passed the freq-score / mountain / CC exemptions used during
-    # emission, so the difference against matched_line_keys is exactly the set
-    # of lines that we thought we should draw but pfaedle never shaped (or
-    # whose polylines collapsed to < 2 coords).
-    all_line_keys = {lk for (lk, _aid, _tg) in drawable_groups}
-    unmatched = all_line_keys - matched_line_keys
+    # emission, so the difference against matched_tg_keys is exactly the set
+    # of trip groups that we thought we should draw but pfaedle never shaped
+    # (or whose polylines collapsed to < 2 coords).
+    unmatched_tg = set(drawable_groups.keys()) - matched_tg_keys
     unmatched_out = []
-    for lk in sorted(unmatched, key=lambda x: (x[2], x[0], x[1])):
-        short_name, long_name, bucket = lk
-        freq = line_freq.get(lk, {"core_wd": 0, "eve_wd": 0, "we": 0})
+    for tg_key in sorted(unmatched_tg,
+                         key=lambda k: (k[0][2], k[0][0], k[0][1], k[1], k[2])):
+        line_key, aid, tg_id = tg_key
+        short_name, long_name, bucket = line_key
+        freq = tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0})
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fs = compute_freq_score(freq, mode_approx)
         unmatched_out.append({
-            "short_name":  short_name,
-            "long_name":   long_name,
-            "bucket":      bucket,
-            "freq_score":  round(fs, 3),
-            "total_trips": sum(freq.values()),
+            "short_name":    short_name,
+            "long_name":     long_name,
+            "bucket":        bucket,
+            "agency_id":     aid,
+            "trip_group_id": tg_id,
+            "freq_score":    round(fs, 3),
+            "total_trips":   sum(freq.values()),
         })
     OUT_GTFS_UNMATCHED.write_text(json.dumps(unmatched_out, ensure_ascii=False))
-    print(f"  GTFS unmatched: {len(unmatched_out)} lines with service but no feature → {OUT_GTFS_UNMATCHED}")
+    print(f"  GTFS unmatched: {len(unmatched_out)} trip groups with service but no feature → {OUT_GTFS_UNMATCHED}")
 
     OUT_TRIP_GROUPS.write_text(json.dumps(trip_groups_diag, ensure_ascii=False))
     print(f"  Trip groups:   {len(trip_groups_diag)} groups → {OUT_TRIP_GROUPS}")
@@ -1704,7 +1648,7 @@ def main():
         line_key, aid, tg_id = tg_key
         short_name, long_name, bucket = line_key
         original_vmap = diag_original.get(tg_key, {})
-        raw_freq = dict(line_freq.get(line_key, {"core_wd": 0, "eve_wd": 0, "we": 0}))
+        raw_freq = dict(tg_freq.get(tg_key, {"core_wd": 0, "eve_wd": 0, "we": 0}))
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         fscore = compute_freq_score(raw_freq, mode_approx)
 

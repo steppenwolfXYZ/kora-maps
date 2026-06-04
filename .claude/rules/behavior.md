@@ -1,7 +1,11 @@
 # Behavioral Rules
 
-## Issue investigation
-When asked to investigate an issue (e.g. "why is X wrong?", "look into Y"), deliver a diagnostic report only — root cause, relevant data, and options. Do NOT implement any changes. Never write or propose code until the concept has been explicitly discussed and agreed upon.
+## Investigation and analysis
+When asked to investigate, analyze, check, look at, diagnose, or "consider a solution" (e.g. "why is X wrong?", "look into Y", "check out Z", "analyze that station", "consider a solution that tries to..."), deliver a written report — no file edits, no implementation. Read-only exploration (reading code, grep, querying data) is fine; writing or modifying anything is not. Asking for a "solution" or "fix" is asking for the IDEA, not the code — close with "want me to implement?" and wait for an explicit go-ahead.
+
+When in doubt about whether the request is "report" or "implement", default to report.
+
+Words that authorise implementation: "implement", "fix it", "do it", "go ahead", "make the change", "code it up", "ship it". Without one of those (or an obvious equivalent), stay in report mode.
 
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.

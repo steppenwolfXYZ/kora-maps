@@ -1202,25 +1202,23 @@ def build_station_layers() -> list:
         }
     })
 
-    debug_stop_sources = [
-        ("transit_stops_rail",      5),
-        ("transit_stops_tram",     10),
-        ("transit_stops_regional",  9),
-        ("transit_stops_bus",      11),
-    ]
-    for src, dbg_minzoom in debug_stop_sources:
-        layers.append({
-            "id": f"debug-stop-dot-{src}",
-            "type": "circle",
-            "source": src,
-            "source-layer": "transit_stops",
-            "minzoom": dbg_minzoom,
-            "paint": {
-                "circle-color": "#000000",
-                "circle-radius": 1.5,
-                "circle-opacity": 0.8,
-            }
-        })
+    # Debug overlay (pill-rendering concept): thin black line tracing each
+    # platform's full allowed range along the line's polyline. Replaces the
+    # previous debug-dot. Per-mode minzooms are baked into the features via
+    # tippecanoe, so a single layer covers every mode.
+    layers.append({
+        "id": "debug-platform-line",
+        "type": "line",
+        "source": "transit_debug_platforms",
+        "source-layer": "transit_debug_platforms",
+        "minzoom": 5,
+        "layout": {"line-cap": "round", "line-join": "round"},
+        "paint": {
+            "line-color": "#000000",
+            "line-width": 0.6,
+            "line-opacity": 0.7,
+        }
+    })
 
     return layers
 
@@ -1266,6 +1264,10 @@ def generate_style(cfg) -> dict:
             "transit_stop_pills": {
                 "type": "vector",
                 "url": "pmtiles:///tl_stop_pills.pmtiles"
+            },
+            "transit_debug_platforms": {
+                "type": "vector",
+                "url": "pmtiles:///tl_debug_platforms.pmtiles"
             }
         },
         "glyphs": g["glyphs"],

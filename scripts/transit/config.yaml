@@ -59,6 +59,32 @@ mountain_agency_ids:
   - "129"   # MG      — Ferrovia Monte Generoso
   - "160"   # DFB     — Dampfbahn Furka-Bergstrecke
 
+# ── Pill rendering: per-mode platform length defaults and sanity ranges ─────
+# See .claude/concepts/pill-rendering.md.
+# `default_length_m` applies when atlas has no length for the stop (always for
+# tram/bus/regional_bus; rare for train/metro). `sanity_min_m` / `sanity_max_m`
+# clip atlas values: anything outside the range falls through to the default
+# — catches 0 m placeholders and km-scale ferry-route mislabels.
+pill_rendering:
+  default_length_m:
+    train:        100
+    metro:         60
+    tram:          35
+    bus:           30
+    regional_bus:  30
+  sanity_min_m:
+    train:         30
+    metro:         30
+    tram:          10
+    bus:            5
+    regional_bus:   5
+  sanity_max_m:
+    train:        700
+    metro:        400
+    tram:         100
+    bus:          100
+    regional_bus: 100
+
 # ── Headway thresholds per bucket (minutes) ─────────────────────────────────
 # Endpoints of the per-bucket frequency score curve. The core-hours score is a
 # linear interpolation between these two points based on the line's effective

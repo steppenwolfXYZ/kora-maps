@@ -51,6 +51,10 @@ ATLAS_CSV    = ROOT / "data" / "atlas" / "actual-date-world-traffic-point.csv"
 OUT_DOTS     = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
+OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
+
+# Per-mode platform-length defaults and sanity ranges from config.
+PILL_CFG = _transit_cfg.get("pill_rendering", {})
 
 RAIL_MODES = {"train"}
 # Modes that get pills; ferry and mountain are excluded
@@ -167,9 +171,10 @@ def load_atlas_attributes() -> dict:
     return out
 
 
-def write_stop_attributes_diag(line_stops: dict) -> None:
+def write_stop_attributes_diag(line_stops: dict) -> dict:
     """Build the per-stop attribute lookup + diagnostic for every stop_id that
-    appears in any drawn line. Emits stop_attributes_sources.json.
+    appears in any drawn line. Emits stop_attributes_sources.json and returns
+    the per-stop dict for downstream consumers (debug overlay, dot placement).
     """
     stop_sloid = load_stop_sloid()
     atlas = load_atlas_attributes()
@@ -205,6 +210,397 @@ def write_stop_attributes_diag(line_stops: dict) -> None:
     OUT_STOP_ATTRS_DIAG.write_text(json.dumps(out, ensure_ascii=False))
     print(f"  Stop attributes: {n_match:,}/{len(out):,} stops matched atlas "
           f"→ {OUT_STOP_ATTRS_DIAG}")
+    return out
+
+
+# =============================================================================
+# Platform-extent computation (pill-rendering concept)
+# =============================================================================
+
+def _cum_dist_m(coords):
+    """Cumulative distance in metres from start of polyline to each vertex."""
+    out = [0.0]
+    for i in range(1, len(coords)):
+        out.append(out[-1] + haversine_km(
+            coords[i-1][0], coords[i-1][1], coords[i][0], coords[i][1]) * 1000.0)
+    return out
+
+
+def _project_meters(px, py, coords, dists):
+    """Closest point on polyline to (px, py); returns cumulative distance from
+    polyline start in metres."""
+    best_sq = float("inf")
+    best_t = 0.0
+    for i in range(len(coords) - 1):
+        ax, ay = coords[i]
+        bx, by = coords[i+1]
+        dx, dy = bx - ax, by - ay
+        seg_sq_lonlat = dx*dx + dy*dy
+        if seg_sq_lonlat == 0:
+            tt = 0.0
+        else:
+            tt = max(0.0, min(1.0, ((px-ax)*dx + (py-ay)*dy) / seg_sq_lonlat))
+        cx, cy = ax + tt*dx, ay + tt*dy
+        d = (px-cx)**2 + (py-cy)**2
+        if d < best_sq:
+            best_sq = d
+            seg_len_m = dists[i+1] - dists[i]
+            best_t = dists[i] + tt * seg_len_m
+    return best_t
+
+
+def _interp_at(coords, dists, t):
+    """Interpolate polyline at cumulative distance t (metres). Clamps to ends."""
+    if t <= 0:
+        return coords[0][0], coords[0][1]
+    if t >= dists[-1]:
+        return coords[-1][0], coords[-1][1]
+    for i in range(len(dists) - 1):
+        if dists[i] <= t <= dists[i+1]:
+            seg = dists[i+1] - dists[i]
+            if seg == 0:
+                return coords[i][0], coords[i][1]
+            f = (t - dists[i]) / seg
+            ax, ay = coords[i]
+            bx, by = coords[i+1]
+            return ax + f * (bx - ax), ay + f * (by - ay)
+    return coords[-1][0], coords[-1][1]
+
+
+def _slice_polyline(coords, dists, t_start, t_end):
+    """Return the polyline vertex sequence between cumulative distances
+    t_start and t_end (metres), with interpolated endpoints."""
+    if t_start > t_end:
+        t_start, t_end = t_end, t_start
+    t_start = max(0.0, t_start)
+    t_end = min(dists[-1], t_end)
+    pts = [_interp_at(coords, dists, t_start)]
+    for i, d in enumerate(dists):
+        if t_start < d < t_end:
+            pts.append((coords[i][0], coords[i][1]))
+    pts.append(_interp_at(coords, dists, t_end))
+    return pts
+
+
+def _resolve_length(mode: str, atlas_length, cfg: dict):
+    """Pick the platform length to use for a given mode and atlas value.
+
+    Atlas value is used when it lies within the per-mode sanity range;
+    otherwise the per-mode default is returned. Returns None for modes
+    not in the rendering scope (ferry, mountain).
+    """
+    if mode not in cfg.get("default_length_m", {}):
+        return None
+    smin = cfg["sanity_min_m"][mode]
+    smax = cfg["sanity_max_m"][mode]
+    if atlas_length is not None and smin <= atlas_length <= smax:
+        return atlas_length
+    return cfg["default_length_m"][mode]
+
+
+def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
+    """Return the (lon, lat) sequence tracing the platform's allowed range
+    along its polyline, or None for out-of-scope modes / degenerate geometry.
+
+    Anchoring (per pill-rendering concept):
+      • train, metro  — GTFS coord is platform CENTRE → range = ±L/2.
+      • tram, bus     — GTFS coord is FRONT of stop  → range = [coord - L, coord].
+    """
+    if len(polyline) < 2:
+        return None
+    L = _resolve_length(mode, atlas_length, cfg)
+    if L is None:
+        return None
+    dists = _cum_dist_m(polyline)
+    if dists[-1] <= 0:
+        return None
+    t = _project_meters(stop_lon, stop_lat, polyline, dists)
+    if mode in ("train", "metro"):
+        t_start, t_end = t - L / 2.0, t + L / 2.0
+    else:
+        t_start, t_end = t - L, t
+    return _slice_polyline(polyline, dists, t_start, t_end)
+
+
+def _mean_unit_tangent(cluster: list):
+    """Mean unit tangent across all extents in the cluster, with direction
+    canonicalised (positive x, then positive y) so opposite-direction polylines
+    don't cancel. Returns (tx, ty) or None if no usable extents.
+    """
+    ax = ay = 0.0
+    n = 0
+    for s in cluster:
+        ext = s.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        dx = ext[-1][0] - ext[0][0]
+        dy = ext[-1][1] - ext[0][1]
+        mag = sqrt(dx*dx + dy*dy)
+        if mag <= 0:
+            continue
+        if dx < 0 or (dx == 0 and dy < 0):
+            dx, dy = -dx, -dy
+        ax += dx / mag
+        ay += dy / mag
+        n += 1
+    if n == 0:
+        return None
+    mag = sqrt(ax*ax + ay*ay)
+    if mag <= 0:
+        return None
+    return (ax / mag, ay / mag)
+
+
+def _closest_to_axis_line(polyline, cx, cy, ax, ay):
+    """Closest point on `polyline` to the line through (cx, cy) with unit
+    direction (ax, ay). Distance from (px, py) to that line equals
+    |(px-cx)*(-ay) + (py-cy)*ax| since (ax, ay) is unit.
+
+    Per segment: signed distance is linear in segment-parameter t. If the
+    signs flip across a segment, the zero crossing is the closest point; else
+    the closer endpoint of any segment wins overall.
+    """
+    def signed_d(x, y):
+        return (x - cx) * (-ay) + (y - cy) * ax
+
+    best_abs = float("inf")
+    best_pt = (polyline[0][0], polyline[0][1])
+    for i in range(len(polyline) - 1):
+        x1, y1 = polyline[i]
+        x2, y2 = polyline[i + 1]
+        d1 = signed_d(x1, y1)
+        d2 = signed_d(x2, y2)
+        if d1 == 0 and d2 == 0:
+            # segment lies on axis line — any point is closest
+            return (x1, y1)
+        if d1 * d2 < 0:
+            # signs differ → zero crossing is at t = d1 / (d1 - d2)
+            t = d1 / (d1 - d2)
+            return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+        # otherwise track closest endpoint seen so far
+        if abs(d1) < best_abs:
+            best_abs = abs(d1)
+            best_pt = (x1, y1)
+        if abs(d2) < best_abs:
+            best_abs = abs(d2)
+            best_pt = (x2, y2)
+    return best_pt
+
+
+def shift_sub_pills_toward_target(merged_cluster: list, sub_clusters: list) -> None:
+    """Stage 2 of the dot-placement pipeline (pill-rendering concept).
+
+    Translate each sub-pill along its mean tangent toward the common target —
+    the mean of all merged-cluster dot positions projected onto that
+    sub-cluster's tangent. The shift is uniform across every dot in the sub
+    (so the perpendicular extent — i.e. pill length and angle — is preserved)
+    and bounded by `min(free_range)` across the sub's dots. When any dot is
+    already at the range end on the side it would need to move toward, the
+    shift collapses to zero — correct, the pill is already as close to the
+    target as it can be without lengthening.
+
+    For Zürich HB the merged cluster's sub-pills (parallel platforms in
+    different sub-clusters) all shift toward a common along-track coordinate;
+    if every dot has enough free range, the sub-pills converge onto the same
+    perpendicular axis and merge visually into one big bar. For Eigerplatz
+    the per-sub shifts collapse to zero (each sub's dots already clamp to the
+    range end nearest the neighbour), so the two sub-pills stay where they
+    are and the connector stays at its natural geographic length.
+    """
+    if len(sub_clusters) < 2:
+        return
+    # Snapshot initial positions so all sub-clusters compute targets from the
+    # same starting state — otherwise a sub processed earlier moves the merged
+    # cluster's mean and the next sub aims at a different target.
+    snapshot = {id(s): (s["lon"], s["lat"]) for s in merged_cluster}
+
+    pending_shifts = []  # (sub, dx, dy)
+    for sub in sub_clusters:
+        if len(sub) < 1:
+            continue
+        tangent = _mean_unit_tangent(sub)
+        if tangent is None:
+            continue
+        tx, ty = tangent
+        # Target tangent-coord = mean projection of the WHOLE merged cluster's
+        # dot positions (from the snapshot) onto this sub's tangent.
+        t_target = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+                        for s in merged_cluster) / len(merged_cluster)
+        t_current = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+                         for s in sub) / len(sub)
+        delta = t_target - t_current
+        if abs(delta) < 1e-12:
+            continue
+        sign = 1.0 if delta > 0 else -1.0
+
+        # Per-dot free shift in the chosen direction.
+        free_shifts = []
+        for s in sub:
+            ext = s.get("extent")
+            if not ext or len(ext) < 2:
+                continue
+            t_dot = snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+            r_proj = [p[0] * tx + p[1] * ty for p in ext]
+            r_min = min(r_proj)
+            r_max = max(r_proj)
+            if sign > 0:
+                free = r_max - t_dot
+            else:
+                free = t_dot - r_min
+            free_shifts.append(max(0.0, free))
+        if not free_shifts:
+            continue
+        max_safe = min(free_shifts)
+        actual = sign * min(max_safe, abs(delta))
+        if abs(actual) < 1e-12:
+            continue
+        pending_shifts.append((sub, actual * tx, actual * ty))
+
+    # Apply all shifts after every target has been computed.
+    for sub, dx, dy in pending_shifts:
+        for s in sub:
+            ext = s.get("extent")
+            if not ext or len(ext) < 2:
+                continue
+            new_x = s["lon"] + dx
+            new_y = s["lat"] + dy
+            s["lon"], s["lat"] = snap_to_line(new_x, new_y, ext)
+
+
+def _spatial_subclusters(cluster: list, radius_km: float) -> list:
+    """Split a cluster into connected components by spatial proximity.
+
+    Two stops belong to the same component when they are within `radius_km`
+    of each other. Used after `merge_clusters_by_parent_station` to recover
+    the physically distinct platform groups inside a parent_station-merged
+    cluster (e.g. Eigerplatz Nord vs Süd), so axis projection can run per
+    sub-cluster instead of across the merged whole.
+    """
+    n = len(cluster)
+    if n <= 1:
+        return [list(cluster)]
+    visited = [False] * n
+    subs = []
+    for i in range(n):
+        if visited[i]:
+            continue
+        queue = [i]
+        comp = []
+        visited[i] = True
+        while queue:
+            k = queue.pop(0)
+            comp.append(cluster[k])
+            kx, ky = cluster[k]["lon"], cluster[k]["lat"]
+            for j in range(n):
+                if visited[j]:
+                    continue
+                if haversine_km(kx, ky,
+                                cluster[j]["lon"], cluster[j]["lat"]) <= radius_km:
+                    queue.append(j)
+                    visited[j] = True
+        subs.append(comp)
+    return subs
+
+
+def coordinate_dots_in_cluster(cluster: list) -> None:
+    """Place each stop's dot at the point on its allowed-range polyline closest
+    to the station axis line — the line perpendicular to the cluster's mean
+    polyline tangent, positioned at the mean of the ranges' tangent-projected
+    midpoints.
+
+    For parallel-line clusters where every range covers a common interval,
+    the axis lands inside all of them and every dot ends up on the axis line —
+    a clean perpendicular bar. For clusters where opposite-direction stops'
+    ranges don't overlap, each direction's dots clamp to the end of their
+    range closest to the axis, producing two aligned sub-bars; the existing
+    pill-split-on-NN-gap mechanism downstream emits two pills + a connector.
+
+    Single-stop clusters are left untouched. Range midpoints are preferred
+    over stop positions as the axis anchor because the stops' GTFS coords
+    sit at the platform front (tram/bus) or centre (rail), which biases a
+    stop-centroid toward the front and away from the range that the dot can
+    actually reach.
+    """
+    if len(cluster) < 2:
+        return
+    tangent = _mean_unit_tangent(cluster)
+    if tangent is None:
+        return
+    tx, ty = tangent
+    ax, ay = -ty, tx  # axis direction perpendicular to mean tangent
+
+    # Target tangent-coord = mean projection of each range's midpoint.
+    # Range midpoint approximated by the average of its first and last vertices
+    # (good enough for the short, near-straight extents this concept produces).
+    t_targets = []
+    for s in cluster:
+        ext = s.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        mx = (ext[0][0] + ext[-1][0]) / 2
+        my = (ext[0][1] + ext[-1][1]) / 2
+        t_targets.append(mx * tx + my * ty)
+    if not t_targets:
+        return
+    t_target = sum(t_targets) / len(t_targets)
+
+    # Centroid (just for the axis-orthogonal coordinate of the axis line).
+    cx = sum(s["lon"] for s in cluster) / len(cluster)
+    cy = sum(s["lat"] for s in cluster) / len(cluster)
+    t_centroid = cx * tx + cy * ty
+    shift = t_target - t_centroid
+    ox, oy = cx + shift * tx, cy + shift * ty
+
+    for s in cluster:
+        ext = s.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        s["lon"], s["lat"] = _closest_to_axis_line(ext, ox, oy, ax, ay)
+
+
+def write_debug_platforms(line_stops: dict, line_lookup: dict,
+                           stop_attrs: dict) -> None:
+    """Emit transit_debug_platforms.geojson — one LineString per stop tracing
+    the platform's full allowed range along the line's polyline. Debug-only
+    overlay; replaces the previous black-dot debug feature.
+    """
+    cfg = PILL_CFG
+    if not cfg.get("default_length_m"):
+        print("  No pill_rendering config — debug platforms skipped.")
+        return
+    feats = []
+    for osm_id, ls_entry in line_stops.items():
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id)
+        if not line:
+            continue
+        mode = line["mode"]
+        if mode not in cfg["default_length_m"]:
+            continue
+        polyline = flatten_coords(line["coords"])
+        if len(polyline) < 2:
+            continue
+        for trip in triplets:
+            if len(trip) < 3:
+                continue
+            stop_lon, stop_lat, stop_id = trip[0], trip[1], trip[2]
+            atlas_length = (stop_attrs.get(stop_id, {}) or {}).get("length")
+            extent = _platform_extent(stop_lon, stop_lat, polyline,
+                                       mode, atlas_length, cfg)
+            if extent is None or len(extent) < 2:
+                continue
+            feats.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": MODE_MINZOOM.get(mode, 11)},
+                "geometry": {"type": "LineString",
+                             "coordinates": [list(p) for p in extent]},
+                "properties": {"mode": mode, "stop_id": stop_id},
+            })
+    OUT_DEBUG_PLATFORMS.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": feats,
+    }, ensure_ascii=False))
+    print(f"  Debug platforms: {len(feats):,} features → {OUT_DEBUG_PLATFORMS}")
 
 
 # =============================================================================
@@ -614,7 +1010,10 @@ def main():
     print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
 
     print("Loading atlas platform attributes...")
-    write_stop_attributes_diag(line_stops)
+    stop_attrs = write_stop_attributes_diag(line_stops)
+
+    print("Emitting debug platform extents...")
+    write_debug_platforms(line_stops, line_lookup, stop_attrs)
 
     print("Building stop dots and pill candidates...")
 
@@ -670,6 +1069,8 @@ def main():
                 snap_d = haversine_km(lon, lat, slon, slat)
                 if not SNAP_GATE_DISABLED and snap_d > 0.300:
                     continue  # stop too far from this line's pfaedle geometry
+                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG)
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
@@ -680,6 +1081,7 @@ def main():
                     "stop_id":        sid,
                     "stop_name":      stop_name,
                     "parent_station": parent_sta,
+                    "extent":         extent,
                 })
 
         elif mode == "ferry":
@@ -714,6 +1116,8 @@ def main():
                 gtfs_snap_d = haversine_km(lon, lat, cx, cy)
                 if not SNAP_GATE_DISABLED and gtfs_snap_d > 0.150:
                     continue  # stop too far from this line's pfaedle geometry
+                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG)
                 # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
                     "lon":            cx,
@@ -725,6 +1129,7 @@ def main():
                     "stop_id":        sid,
                     "stop_name":      stop_name,
                     "parent_station": parent_sta,
+                    "extent":         extent,
                 })
 
         else:
@@ -756,6 +1161,16 @@ def main():
     rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
     rail_pill_clusters = merge_clusters_by_parent_station(rail_pill_clusters)
     print(f"  → {len(rail_pill_clusters):,} rail station clusters")
+    # Sub-cluster within each parent_station-merged cluster, run axis
+    # projection per sub-cluster (stage 1), then translate each sub-pill
+    # toward the common target along its mean tangent (stage 2). The merged
+    # cluster stays intact for the downstream NN-path + split-on-gap +
+    # connector logic.
+    for c in rail_pill_clusters:
+        subs = _spatial_subclusters(c, PILL_CLUSTER_RAIL_KM)
+        for sub in subs:
+            coordinate_dots_in_cluster(sub)
+        shift_sub_pills_toward_target(c, subs)
 
     rail_features = []
     pill_features_rail = []
@@ -825,6 +1240,12 @@ def main():
           f"(tram+metro+bus+regional combined) → clustering...")
     nonrail_clusters = cluster_stops_for_pills(all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM)
     nonrail_clusters = merge_clusters_by_parent_station(nonrail_clusters)
+    # Same two-stage placement as rail (see pill-rendering concept).
+    for c in nonrail_clusters:
+        subs = _spatial_subclusters(c, PILL_CLUSTER_NONRAIL_KM)
+        for sub in subs:
+            coordinate_dots_in_cluster(sub)
+        shift_sub_pills_toward_target(c, subs)
     nonrail_pill_count = 0
     nonrail_dot_features = []
     for cluster in nonrail_clusters:

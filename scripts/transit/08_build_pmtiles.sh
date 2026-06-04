@@ -74,5 +74,12 @@ tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
   "$DATA/transit_stop_pills.geojson"
 
 echo ""
+echo "=== Building tl_debug_platforms.pmtiles ==="
+tippecanoe -o "$STATIC/tl_debug_platforms.pmtiles" --force \
+  -z14 -Z5 --layer transit_debug_platforms \
+  --drop-densest-as-needed \
+  "$DATA/transit_debug_platforms.geojson"
+
+echo ""
 echo "=== Done! ==="
 ls -lh "$STATIC"/tl_*.pmtiles
