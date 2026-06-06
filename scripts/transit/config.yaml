@@ -20,6 +20,26 @@ osm_bbox:
   max_lon: 10.52
   max_lat: 47.83
 
+# ── GTFS stop coordinate overrides ───────────────────────────────────────────
+# Hand-set coordinates for parent stops whose official GTFS coord sits too far
+# from the actual platform for pfaedle to route. The Eiger Express (route 2444)
+# at Grindelwald Terminal is the canonical case: GTFS uses the train-station
+# centroid, but the V-Bahn boarding gate is ~250 m away across the Terminal
+# building — outside pfaedle's snap radius for the Eiger Express OSM way, so
+# pfaedle ends up snapping to the closer Männlichenbahn lower-station node,
+# fails to route (Männlichenbahn doesn't reach Eigergletscher) and emits a
+# 2-vertex straight stub. Coords here are taken from the matching OSM
+# aerialway endpoints (way 799042591). Applied at step 04; affects all trips
+# referencing the stop_id, but co-using lines (Männlichenbahn GGM, Jungfraubahn
+# 65) still snap within radius of their own OSM endpoints from the moved coord.
+gtfs_stop_overrides:
+  - stop_id: "8505226"   # Grindelwald Terminal → Eiger Express V-Bahn lower station
+    lon: 8.0193659
+    lat: 46.6243074
+  - stop_id: "8507361"   # Eigergletscher → Eiger Express upper station
+    lon: 7.9757404
+    lat: 46.5754791
+
 # ── GTFS preprocessing: agency denylists ─────────────────────────────────────
 # Both lists key on substrings of agency_name (case-insensitive) as found in
 # data/gtfs/agency.txt. Matching is "agency_name contains any of these tokens".
@@ -133,22 +153,22 @@ window_weights:
 # fatal config error.
 line_width:
   train:
-    min: 0.60
+    min: 1.00
     max: 3.75
   tram:
-    min: 0.50
+    min: 0.70
     max: 3.00
   metro:
-    min: 0.50
+    min: 1.00
     max: 3.00
   bus:
-    min: 0.50
+    min: 0.70
     max: 2.50
   regional_bus:
-    min: 0.50
+    min: 1.00
     max: 2.50
   ferry:
-    min: 0.50
+    min: 1.00
     max: 2.50
   mountain:
     min: 2.50
@@ -159,9 +179,14 @@ line_width:
 # across the full feed validity period is dropped. Catches construction-
 # replacement bus services (e.g. SVB Bern 3A / 9A) that have year-round
 # frequency on the days they do run but only exist for a few weeks.
-# Mountain and ferry buckets are exempt regardless of this value.
-# Lower this (e.g. 100) to loosen; raise to tighten.
+# Ferry + aerial / funicular mountain are exempt entirely (see _gate_exempt).
+# Per-bucket overrides via `min_active_days_by_bucket` — used for buckets where
+# seasonal services should still draw (e.g. summer-only rack mountain lines
+# like Schynige Platte Bahn or Brienzer Rothorn Bahn).
+# Lower the default (e.g. 100) to loosen; raise to tighten.
 min_active_days: 150
+min_active_days_by_bucket:
+  mountain: 90
 
 # ── Frequency sampling ───────────────────────────────────────────────────────
 # Sample dates the low-frequency filter measures trip counts on, generated
@@ -228,3 +253,13 @@ pfaedle:
     - funicular
     - cablecar
     - gondola
+  # Cost (seconds per meter) of moving a stop's matched edge away from its
+  # GTFS coord. Pfaedle's default of 0.0039 is too low at terminal stops on a
+  # oneway curb: it prefers a closer-but-wrong snap on a routable way over the
+  # longer-but-correct legal route (Bern Bahnhof platform H on bus 21 outbound
+  # is the canonical case — the legal loop south to exit then north adds
+  # ~100 m of travel, vs. ~22 m of snap distance to the bidirectional main road
+  # which wins at the default factor). Boosting weights snap distance more
+  # heavily so closer-to-the-platform snaps win even when they require a
+  # longer legal path. Passed to pfaedle via -P at runtime.
+  station_move_penalty_fac: 0.05

@@ -31,7 +31,7 @@ Pill rules:
 import csv
 import json
 import yaml
-from math import radians, cos, sin, sqrt, atan2, degrees, floor
+from math import radians, cos, sin, sqrt, atan2, degrees, floor, pi
 from pathlib import Path
 from collections import defaultdict
 
@@ -53,6 +53,14 @@ OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
 OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
 OUT_DEBUG_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
+OUT_DEBUG_BARS      = ROOT / "data" / "transit" / "transit_debug_bars.geojson"
+
+# Diagnostic state populated by coordinate_dots_global_stab:
+# - _DIAG_BARS: list of (endpoint1, endpoint2) tuples for each max-stab bar.
+# - _STABBED_PAIRS: set of (osm_id, stop_id) for (line, stop) records placed
+#   on a bar. Read by write_debug_stops to mark stabbed dots as filled.
+_DIAG_BARS = []
+_STABBED_PAIRS = set()
 
 # Per-mode platform-length defaults and sanity ranges from config.
 PILL_CFG = _transit_cfg.get("pill_rendering", {})
@@ -94,7 +102,7 @@ PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
 # the cluster is split into two pills + a connector at that gap.
 # Tune this to separate distinct platform groups while keeping curved stops
 # in a single bent pill.
-PILL_GAP_SCALE = 12   # metres per unit of width_base
+PILL_GAP_SCALE = 20   # metres per unit of width_base
 
 
 # =============================================================================
@@ -214,6 +222,42 @@ def write_stop_attributes_diag(line_stops: dict) -> dict:
     return out
 
 
+TERMINUS_DEDUP_RADIUS_M = 10.0
+
+
+def compute_terminus_skip_oids(line_stops: dict,
+                                radius_m: float = TERMINUS_DEDUP_RADIUS_M) -> set:
+    """Return the set of osm_ids whose FIRST entry (departure terminus) should
+    be omitted from dot/pill/extent rendering because another line arrives at
+    the same stop_id within `radius_m`. Keeps the arrival side as the visible
+    dot+extent (its extent is the non-degenerate one for non-rail) and lets
+    the popup-aggregation pass surface both directions.
+    """
+    arrivals_by_sid: dict = {}
+    departures: list = []
+    for oid, entry in line_stops.items():
+        triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if not triplets or len(triplets) < 2:
+            continue
+        first = triplets[0]
+        last = triplets[-1]
+        if len(first) >= 3 and first[2]:
+            departures.append((str(oid), first[2], first[0], first[1]))
+        if len(last) >= 3 and last[2]:
+            arrivals_by_sid.setdefault(last[2], []).append(
+                (str(oid), last[0], last[1]))
+
+    skip: set = set()
+    for oid_dep, sid, lon_d, lat_d in departures:
+        for oid_arr, lon_a, lat_a in arrivals_by_sid.get(sid, []):
+            if oid_arr == oid_dep:
+                continue
+            if haversine_km(lon_d, lat_d, lon_a, lat_a) * 1000.0 <= radius_m:
+                skip.add(oid_dep)
+                break
+    return skip
+
+
 # =============================================================================
 # Platform-extent computation (pill-rendering concept)
 # =============================================================================
@@ -304,8 +348,17 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
     along its polyline, or None for out-of-scope modes / degenerate geometry.
 
     Anchoring (per pill-rendering concept):
-      • train, metro  — GTFS coord is platform CENTRE → range = ±L/2.
-      • tram, bus     — GTFS coord is FRONT of stop  → range = [coord - L, coord].
+      • train, metro  — GTFS coord (snapped to polyline) is platform CENTRE
+                        → range = ±L/2.
+      • tram, bus     — GTFS coord is FRONT of stop → range = [coord - L, coord].
+
+    For rail: the snapped GTFS coord is always at the centre of the extent.
+    When the polyline doesn't extend the full ±L/2 around it (e.g. a
+    terminating-track polyline that ends at the buffer), the missing length
+    on the clipped side is added as a straight-line extrapolation using the
+    polyline's tangent at the snapped GTFS position. The on-polyline portion
+    plus the extrapolated portion(s) together always total L metres, with
+    the GTFS coord at the geometric centre.
     """
     if len(polyline) < 2:
         return None
@@ -313,14 +366,55 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
     if L is None:
         return None
     dists = _cum_dist_m(polyline)
-    if dists[-1] <= 0:
+    poly_max = dists[-1]
+    if poly_max <= 0:
         return None
     t = _project_meters(stop_lon, stop_lat, polyline, dists)
-    if mode in ("train", "metro"):
-        t_start, t_end = t - L / 2.0, t + L / 2.0
-    else:
+
+    if mode not in ("train", "metro"):
         t_start, t_end = t - L, t
-    return _slice_polyline(polyline, dists, t_start, t_end)
+        return _slice_polyline(polyline, dists, t_start, t_end)
+
+    half_L = L / 2.0
+    t_start_ideal = t - half_L
+    t_end_ideal = t + half_L
+
+    on_start = max(0.0, t_start_ideal)
+    on_end = min(poly_max, t_end_ideal)
+    slice_pts = list(_slice_polyline(polyline, dists, on_start, on_end))
+
+    # Polyline tangent at the snapped GTFS position, expressed as a
+    # per-metre (lon, lat) rate. Computed from a chord over a ±20 m window
+    # around t rather than the single segment containing t, so pfaedle
+    # "stub" segments (sub-metre joining segments at line termini that
+    # carry normal-sized lon/lat deltas) don't blow up the per-metre ratio
+    # and fling the extrapolated endpoint hundreds of km away.
+    chord_lo_t = max(0.0, t - 20.0)
+    chord_hi_t = min(poly_max, t + 20.0)
+    chord_arc = chord_hi_t - chord_lo_t
+    if chord_arc <= 0:
+        return slice_pts
+
+    lo = _interp_at(polyline, dists, chord_lo_t)
+    hi = _interp_at(polyline, dists, chord_hi_t)
+    dx_per_m = (hi[0] - lo[0]) / chord_arc
+    dy_per_m = (hi[1] - lo[1]) / chord_arc
+
+    pts = []
+    if t_start_ideal < 0 and slice_pts:
+        # Extrapolate from polyline[0] backwards (against forward tangent)
+        missing_m = -t_start_ideal
+        wx = slice_pts[0][0] - dx_per_m * missing_m
+        wy = slice_pts[0][1] - dy_per_m * missing_m
+        pts.append((wx, wy))
+    pts.extend(slice_pts)
+    if t_end_ideal > poly_max and slice_pts:
+        # Extrapolate from polyline[-1] forward (with forward tangent)
+        missing_m = t_end_ideal - poly_max
+        ex = slice_pts[-1][0] + dx_per_m * missing_m
+        ey = slice_pts[-1][1] + dy_per_m * missing_m
+        pts.append((ex, ey))
+    return pts
 
 
 def _mean_unit_tangent(cluster: list):
@@ -352,14 +446,325 @@ def _mean_unit_tangent(cluster: list):
     return (ax / mag, ay / mag)
 
 
+def _stop_tangent(s):
+    """Unit tangent of one stop's extent (start → end), canonicalised to the
+    upper half-plane so opposite directions don't cancel out. Returns
+    (tx, ty) or None when the extent is degenerate.
+    """
+    ext = s.get("extent")
+    if not ext or len(ext) < 2:
+        return None
+    dx = ext[-1][0] - ext[0][0]
+    dy = ext[-1][1] - ext[0][1]
+    mag = sqrt(dx * dx + dy * dy)
+    if mag <= 0:
+        return None
+    if dx < 0 or (dx == 0 and dy < 0):
+        dx, dy = -dx, -dy
+    return (dx / mag, dy / mag)
+
+
+def _extent_intersect_axis(ext, tx, ty, sigma):
+    """Return the point on `ext` polyline whose tangent-coordinate equals
+    `sigma`, i.e. where x*tx + y*ty == sigma. None if no segment crosses.
+    For monotone-in-t polylines (typical short station extents) the first
+    crossing is the only one.
+    """
+    prev_d = None
+    for i, (x, y) in enumerate(ext):
+        d = x * tx + y * ty - sigma
+        if d == 0.0:
+            return (x, y)
+        if prev_d is not None and prev_d * d < 0:
+            px, py = ext[i - 1]
+            t = prev_d / (prev_d - d)
+            return (px + t * (x - px), py + t * (y - py))
+        prev_d = d
+    return None
+
+
+def _place_dot_on_extent(ext, tx, ty, sigma):
+    """Best point on `ext` for a bar at axial position σ. Uses the σ-line
+    intersection when it exists; otherwise snaps to the polyline endpoint
+    closest to σ in the tangent direction (so an asymmetric polyline whose
+    end is just past σ still places its dot at the polyline tip — visually
+    right next to the bar — rather than missing the bar entirely).
+    """
+    pt = _extent_intersect_axis(ext, tx, ty, sigma)
+    if pt is not None:
+        return pt
+    t_first = ext[0][0] * tx + ext[0][1] * ty
+    t_last = ext[-1][0] * tx + ext[-1][1] * ty
+    if abs(t_first - sigma) <= abs(t_last - sigma):
+        return (ext[0][0], ext[0][1])
+    return (ext[-1][0], ext[-1][1])
+
+
+def _smoothed_tangent_at(polyline, dists, t, window_m=40.0):
+    """Unit polyline tangent at arc-length `t`, averaged over a ±window_m/2
+    window. Returns (tx, ty) or None if the polyline is too short. Smoothing
+    reduces sensitivity to small pfaedle-routing kinks.
+    """
+    if not polyline or len(polyline) < 2:
+        return None
+    poly_max = dists[-1]
+    if poly_max <= 0:
+        return None
+    half = window_m / 2.0
+    t_lo = max(0.0, t - half)
+    t_hi = min(poly_max, t + half)
+    if t_hi - t_lo < 1e-9:
+        # Window collapsed (extremely short polyline) — fall back to the
+        # nearest segment's direction.
+        i = 0 if t <= 0 else len(polyline) - 2
+        dx = polyline[i + 1][0] - polyline[i][0]
+        dy = polyline[i + 1][1] - polyline[i][1]
+    else:
+        lo = _interp_at(polyline, dists, t_lo)
+        hi = _interp_at(polyline, dists, t_hi)
+        dx = hi[0] - lo[0]
+        dy = hi[1] - lo[1]
+    mag = sqrt(dx * dx + dy * dy)
+    if mag <= 0:
+        return None
+    return dx / mag, dy / mag
+
+
+def _angular_dist_mod_pi(a1, a2):
+    """Smallest angular distance between two angles on the half-circle
+    [0, π) (0 and π are the same orientation)."""
+    d = abs(a1 - a2) % pi
+    return min(d, pi - d)
+
+
+def _tangent_groups(platforms, max_angle_rad):
+    """Group platforms by extent tangent direction. Union-find with the
+    given angular tolerance (mod π) — two platforms are in the same group
+    if their tangents are within `max_angle_rad`. Transitive closure means
+    curved-but-coherent sets stay together. Returns list of groups."""
+    data = []
+    for p in platforms:
+        t = _stop_tangent(p)
+        if t is None:
+            continue
+        data.append((atan2(t[1], t[0]), p))
+    n = len(data)
+    if n == 0:
+        return []
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _angular_dist_mod_pi(data[i][0], data[j][0]) <= max_angle_rad:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups = {}
+    for i in range(n):
+        r = find(i)
+        groups.setdefault(r, []).append(data[i][1])
+    return list(groups.values())
+
+
+SWEEP_STEP_M = 10.0
+CENTRAL_INNER_FRACTION = 0.7
+
+
+def _perpendicular_sweep(group, angle_tol_rad):
+    """For a tangent group, find the best perpendicular bar by sweeping
+    along the central member's platform extent at SWEEP_STEP_M resolution.
+
+    The sweep walks the central member's extent (the same per-stop polyline
+    drawn as the debug overlay) — not the full line polyline. This keeps
+    the sweep bounded to the platform region and intrinsically fast.
+
+    The central member is picked from the inner CENTRAL_INNER_FRACTION of
+    the group (closest to the group centroid) — outer members are excluded
+    from central-member selection so an off-to-the-side member can't drag
+    the sweep away. Excluded members still count for stab scoring.
+
+    Returns (tx, ty, sigma, scoring_local, covered_local) or None.
+      • scoring_local — indices of members whose own tangent is within
+        angle_tol_rad (mod π) of the bar AND whose extent crosses it.
+        They drive both selection and the bar's drawn perpendicular span.
+      • covered_local — wrong-angle members whose extent crosses the bar
+        AND whose crossing point falls within the bar's drawn span (between
+        scoring dots). They are placed on the bar but had no influence on
+        which sweep position or how long the bar is.
+    """
+    n = len(group)
+    if n < 2:
+        return None
+
+    cx = sum(p["lon"] for p in group) / n
+    cy = sum(p["lat"] for p in group) / n
+
+    # Inner-fraction subset for central-member selection.
+    n_inner = max(1, n - int((1.0 - CENTRAL_INNER_FRACTION) * n))
+    inner_sorted = sorted(
+        group,
+        key=lambda p: (p["lon"] - cx) ** 2 + (p["lat"] - cy) ** 2,
+    )[:n_inner]
+    central = inner_sorted[0]
+    central_ext = central.get("extent")
+    if not central_ext or len(central_ext) < 2:
+        return None
+    central_dists = _cum_dist_m(central_ext)
+    ext_max = central_dists[-1]
+    if ext_max <= 0:
+        return None
+
+    # Dense sweep at SWEEP_STEP_M along the central extent.
+    n_steps = max(2, int(ext_max / SWEEP_STEP_M) + 1)
+    candidate_arcs = [i * ext_max / (n_steps - 1) for i in range(n_steps)]
+
+    # Per-member tangent angle (canonical [0, π) via atan2 of stop tangent).
+    member_angles = []
+    for p in group:
+        st = _stop_tangent(p)
+        member_angles.append(atan2(st[1], st[0]) if st is not None else None)
+
+    best = None  # (count, tx, ty, sigma, scoring_local)
+    for arc_d in candidate_arcs:
+        pos = _interp_at(central_ext, central_dists, arc_d)
+        tan = _smoothed_tangent_at(central_ext, central_dists, arc_d, 40.0)
+        if tan is None:
+            continue
+        tx, ty = tan
+        bar_angle = atan2(ty, tx)
+        sigma = pos[0] * tx + pos[1] * ty
+        scoring = []
+        for k, p in enumerate(group):
+            ma = member_angles[k]
+            if ma is None:
+                continue
+            if _angular_dist_mod_pi(ma, bar_angle) > angle_tol_rad:
+                continue
+            ext = p["extent"]
+            ts = [v[0] * tx + v[1] * ty for v in ext]
+            if min(ts) <= sigma <= max(ts):
+                scoring.append(k)
+        if len(scoring) < 2:
+            continue
+        if best is None or len(scoring) > best[0]:
+            best = (len(scoring), tx, ty, sigma, scoring)
+    if best is None:
+        return None
+    _, tx, ty, sigma, scoring = best
+
+    # Bar's drawn perpendicular span = min/max of scoring-stabbed dot
+    # perpendicular coords (no margin — that's just for the debug overlay).
+    nx, ny = -ty, tx
+    scoring_n = []
+    for k in scoring:
+        pt = _place_dot_on_extent(group[k]["extent"], tx, ty, sigma)
+        scoring_n.append(pt[0] * nx + pt[1] * ny)
+    n_min, n_max = min(scoring_n), max(scoring_n)
+
+    # Covered = wrong-angle members whose extent crosses σ AND whose crossing
+    # point's perpendicular coord lies within [n_min, n_max].
+    scoring_set = set(scoring)
+    covered = []
+    for k, p in enumerate(group):
+        if k in scoring_set:
+            continue
+        ext = p["extent"]
+        ts = [v[0] * tx + v[1] * ty for v in ext]
+        if not (min(ts) <= sigma <= max(ts)):
+            continue
+        cross_pt = _extent_intersect_axis(ext, tx, ty, sigma)
+        if cross_pt is None:
+            continue
+        n_val = cross_pt[0] * nx + cross_pt[1] * ny
+        if n_min <= n_val <= n_max:
+            covered.append(k)
+
+    return tx, ty, sigma, scoring, covered
+
+
+def _measure_pill_geometry(cluster_stops):
+    """Score a placement: total pill geometry length, with connectors counted
+    at half weight. Replicates make_pill_features's NN-path + largest-gap
+    split + MST connector logic without emitting features.
+    """
+    positions = list({(s["lon"], s["lat"]) for s in cluster_stops})
+    if len(positions) < 2:
+        return 0.0
+    _, _, max_wb, _ = dominant_line(cluster_stops)
+    path = nearest_neighbor_path(positions)
+    gap_threshold_km = max_wb * PILL_GAP_SCALE / 1000.0
+
+    split_indices = [
+        k for k in range(len(path) - 1)
+        if haversine_km(path[k][0], path[k][1],
+                        path[k + 1][0], path[k + 1][1]) > gap_threshold_km
+    ]
+
+    if not split_indices:
+        return sum(haversine_km(path[k][0], path[k][1],
+                                 path[k + 1][0], path[k + 1][1])
+                   for k in range(len(path) - 1))
+
+    groups = []
+    prev = 0
+    for idx in split_indices:
+        groups.append(path[prev:idx + 1])
+        prev = idx + 1
+    groups.append(path[prev:])
+
+    # Match make_pill_features: singleton groups are dropped, not drawn.
+    groups = [g for g in groups if len(g) >= 2]
+    if not groups:
+        return 0.0
+
+    pill_length = 0.0
+    for grp in groups:
+        for k in range(len(grp) - 1):
+            pill_length += haversine_km(grp[k][0], grp[k][1],
+                                         grp[k + 1][0], grp[k + 1][1])
+
+    n_g = len(groups)
+    mst_edges = []
+    for i in range(n_g):
+        for j in range(i + 1, n_g):
+            best_d = float("inf")
+            for p1 in groups[i]:
+                for p2 in groups[j]:
+                    d = haversine_km(p1[0], p1[1], p2[0], p2[1])
+                    if d < best_d:
+                        best_d = d
+            mst_edges.append((best_d, i, j))
+    mst_edges.sort()
+    parent = list(range(n_g))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    connector_length = 0.0
+    for d, i, j in mst_edges:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+            connector_length += d
+    return pill_length + 0.5 * connector_length
+
+
 def _closest_to_axis_line(polyline, cx, cy, ax, ay):
     """Closest point on `polyline` to the line through (cx, cy) with unit
     direction (ax, ay). Distance from (px, py) to that line equals
-    |(px-cx)*(-ay) + (py-cy)*ax| since (ax, ay) is unit.
-
-    Per segment: signed distance is linear in segment-parameter t. If the
-    signs flip across a segment, the zero crossing is the closest point; else
-    the closer endpoint of any segment wins overall.
+    |(px-cx)*(-ay) + (py-cy)*ax| since (ax, ay) is unit. If the signs flip
+    across a segment, the zero crossing is the closest point; otherwise
+    the closer endpoint of any segment wins.
     """
     def signed_d(x, y):
         return (x - cx) * (-ay) + (y - cy) * ax
@@ -372,13 +777,10 @@ def _closest_to_axis_line(polyline, cx, cy, ax, ay):
         d1 = signed_d(x1, y1)
         d2 = signed_d(x2, y2)
         if d1 == 0 and d2 == 0:
-            # segment lies on axis line — any point is closest
             return (x1, y1)
         if d1 * d2 < 0:
-            # signs differ → zero crossing is at t = d1 / (d1 - d2)
             t = d1 / (d1 - d2)
             return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-        # otherwise track closest endpoint seen so far
         if abs(d1) < best_abs:
             best_abs = abs(d1)
             best_pt = (x1, y1)
@@ -388,153 +790,20 @@ def _closest_to_axis_line(polyline, cx, cy, ax, ay):
     return best_pt
 
 
-def shift_sub_pills_toward_target(merged_cluster: list, sub_clusters: list) -> None:
-    """Stage 2 of the dot-placement pipeline (pill-rendering concept).
-
-    Translate each sub-pill along its mean tangent toward the common target —
-    the mean of all merged-cluster dot positions projected onto that
-    sub-cluster's tangent. The shift is uniform across every dot in the sub
-    (so the perpendicular extent — i.e. pill length and angle — is preserved)
-    and bounded by `min(free_range)` across the sub's dots. When any dot is
-    already at the range end on the side it would need to move toward, the
-    shift collapses to zero — correct, the pill is already as close to the
-    target as it can be without lengthening.
-
-    For Zürich HB the merged cluster's sub-pills (parallel platforms in
-    different sub-clusters) all shift toward a common along-track coordinate;
-    if every dot has enough free range, the sub-pills converge onto the same
-    perpendicular axis and merge visually into one big bar. For Eigerplatz
-    the per-sub shifts collapse to zero (each sub's dots already clamp to the
-    range end nearest the neighbour), so the two sub-pills stay where they
-    are and the connector stays at its natural geographic length.
+def _coordinate_dots_in_subcluster(sub: list) -> None:
+    """Old-algorithm stage 1: place each dot on the perpendicular axis line
+    anchored at the mean of range midpoints.
     """
-    if len(sub_clusters) < 2:
+    if len(sub) < 2:
         return
-    # Snapshot initial positions so all sub-clusters compute targets from the
-    # same starting state — otherwise a sub processed earlier moves the merged
-    # cluster's mean and the next sub aims at a different target.
-    snapshot = {id(s): (s["lon"], s["lat"]) for s in merged_cluster}
-
-    pending_shifts = []  # (sub, dx, dy)
-    for sub in sub_clusters:
-        if len(sub) < 1:
-            continue
-        tangent = _mean_unit_tangent(sub)
-        if tangent is None:
-            continue
-        tx, ty = tangent
-        # Target tangent-coord = mean projection of the WHOLE merged cluster's
-        # dot positions (from the snapshot) onto this sub's tangent.
-        t_target = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-                        for s in merged_cluster) / len(merged_cluster)
-        t_current = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-                         for s in sub) / len(sub)
-        delta = t_target - t_current
-        if abs(delta) < 1e-12:
-            continue
-        sign = 1.0 if delta > 0 else -1.0
-
-        # Per-dot free shift in the chosen direction.
-        free_shifts = []
-        for s in sub:
-            ext = s.get("extent")
-            if not ext or len(ext) < 2:
-                continue
-            t_dot = snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-            r_proj = [p[0] * tx + p[1] * ty for p in ext]
-            r_min = min(r_proj)
-            r_max = max(r_proj)
-            if sign > 0:
-                free = r_max - t_dot
-            else:
-                free = t_dot - r_min
-            free_shifts.append(max(0.0, free))
-        if not free_shifts:
-            continue
-        max_safe = min(free_shifts)
-        actual = sign * min(max_safe, abs(delta))
-        if abs(actual) < 1e-12:
-            continue
-        pending_shifts.append((sub, actual * tx, actual * ty))
-
-    # Apply all shifts after every target has been computed.
-    for sub, dx, dy in pending_shifts:
-        for s in sub:
-            ext = s.get("extent")
-            if not ext or len(ext) < 2:
-                continue
-            new_x = s["lon"] + dx
-            new_y = s["lat"] + dy
-            s["lon"], s["lat"] = snap_to_line(new_x, new_y, ext)
-
-
-def _spatial_subclusters(cluster: list, radius_km: float) -> list:
-    """Split a cluster into connected components by spatial proximity.
-
-    Two stops belong to the same component when they are within `radius_km`
-    of each other. Used after `merge_clusters_by_parent_station` to recover
-    the physically distinct platform groups inside a parent_station-merged
-    cluster (e.g. Eigerplatz Nord vs Süd), so axis projection can run per
-    sub-cluster instead of across the merged whole.
-    """
-    n = len(cluster)
-    if n <= 1:
-        return [list(cluster)]
-    visited = [False] * n
-    subs = []
-    for i in range(n):
-        if visited[i]:
-            continue
-        queue = [i]
-        comp = []
-        visited[i] = True
-        while queue:
-            k = queue.pop(0)
-            comp.append(cluster[k])
-            kx, ky = cluster[k]["lon"], cluster[k]["lat"]
-            for j in range(n):
-                if visited[j]:
-                    continue
-                if haversine_km(kx, ky,
-                                cluster[j]["lon"], cluster[j]["lat"]) <= radius_km:
-                    queue.append(j)
-                    visited[j] = True
-        subs.append(comp)
-    return subs
-
-
-def coordinate_dots_in_cluster(cluster: list) -> None:
-    """Place each stop's dot at the point on its allowed-range polyline closest
-    to the station axis line — the line perpendicular to the cluster's mean
-    polyline tangent, positioned at the mean of the ranges' tangent-projected
-    midpoints.
-
-    For parallel-line clusters where every range covers a common interval,
-    the axis lands inside all of them and every dot ends up on the axis line —
-    a clean perpendicular bar. For clusters where opposite-direction stops'
-    ranges don't overlap, each direction's dots clamp to the end of their
-    range closest to the axis, producing two aligned sub-bars; the existing
-    pill-split-on-NN-gap mechanism downstream emits two pills + a connector.
-
-    Single-stop clusters are left untouched. Range midpoints are preferred
-    over stop positions as the axis anchor because the stops' GTFS coords
-    sit at the platform front (tram/bus) or centre (rail), which biases a
-    stop-centroid toward the front and away from the range that the dot can
-    actually reach.
-    """
-    if len(cluster) < 2:
-        return
-    tangent = _mean_unit_tangent(cluster)
+    tangent = _mean_unit_tangent(sub)
     if tangent is None:
         return
     tx, ty = tangent
-    ax, ay = -ty, tx  # axis direction perpendicular to mean tangent
+    ax, ay = -ty, tx
 
-    # Target tangent-coord = mean projection of each range's midpoint.
-    # Range midpoint approximated by the average of its first and last vertices
-    # (good enough for the short, near-straight extents this concept produces).
     t_targets = []
-    for s in cluster:
+    for s in sub:
         ext = s.get("extent")
         if not ext or len(ext) < 2:
             continue
@@ -545,22 +814,270 @@ def coordinate_dots_in_cluster(cluster: list) -> None:
         return
     t_target = sum(t_targets) / len(t_targets)
 
-    # Centroid (just for the axis-orthogonal coordinate of the axis line).
-    cx = sum(s["lon"] for s in cluster) / len(cluster)
-    cy = sum(s["lat"] for s in cluster) / len(cluster)
+    cx = sum(s["lon"] for s in sub) / len(sub)
+    cy = sum(s["lat"] for s in sub) / len(sub)
     t_centroid = cx * tx + cy * ty
     shift = t_target - t_centroid
     ox, oy = cx + shift * tx, cy + shift * ty
 
-    for s in cluster:
+    for s in sub:
         ext = s.get("extent")
         if not ext or len(ext) < 2:
             continue
         s["lon"], s["lat"] = _closest_to_axis_line(ext, ox, oy, ax, ay)
 
 
+def _shift_subs_toward_anchor(anchor_set: list, sub_clusters: list) -> None:
+    """Old-algorithm stage 2: translate each sub-pill along its own tangent
+    toward the centroid of `anchor_set`, bounded by extent free range. With
+    `anchor_set` == all platforms (including any already-placed bar dots),
+    leftover sub-pills slide toward the bar, shortening connectors.
+    """
+    if not sub_clusters or not anchor_set:
+        return
+    snapshot = {id(s): (s["lon"], s["lat"]) for s in anchor_set}
+    # Sub-cluster members must also be in the anchor set for the projection
+    # snapshot lookup; build a fallback for any that aren't.
+    for sub in sub_clusters:
+        for s in sub:
+            snapshot.setdefault(id(s), (s["lon"], s["lat"]))
+
+    pending = []
+    for sub in sub_clusters:
+        if not sub:
+            continue
+        tangent = _mean_unit_tangent(sub)
+        if tangent is None:
+            continue
+        tx, ty = tangent
+        t_target = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+                       for s in anchor_set) / len(anchor_set)
+        t_current = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+                        for s in sub) / len(sub)
+        delta = t_target - t_current
+        if abs(delta) < 1e-12:
+            continue
+        sign = 1.0 if delta > 0 else -1.0
+
+        free_shifts = []
+        for s in sub:
+            ext = s.get("extent")
+            if not ext or len(ext) < 2:
+                continue
+            t_dot = snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
+            r_proj = [p[0] * tx + p[1] * ty for p in ext]
+            r_min = min(r_proj)
+            r_max = max(r_proj)
+            free = (r_max - t_dot) if sign > 0 else (t_dot - r_min)
+            free_shifts.append(max(0.0, free))
+        if not free_shifts:
+            continue
+        max_safe = min(free_shifts)
+        actual = sign * min(max_safe, abs(delta))
+        if abs(actual) < 1e-12:
+            continue
+        pending.append((sub, actual * tx, actual * ty))
+
+    for sub, dx, dy in pending:
+        for s in sub:
+            ext = s.get("extent")
+            if not ext or len(ext) < 2:
+                continue
+            new_x = s["lon"] + dx
+            new_y = s["lat"] + dy
+            s["lon"], s["lat"] = snap_to_line(new_x, new_y, ext)
+
+
+def _spatial_subclusters(platforms: list, radius_km: float) -> list:
+    """Split platforms into connected components by spatial proximity."""
+    n = len(platforms)
+    if n <= 1:
+        return [list(platforms)]
+    visited = [False] * n
+    subs = []
+    for i in range(n):
+        if visited[i]:
+            continue
+        queue = [i]
+        comp = []
+        visited[i] = True
+        while queue:
+            k = queue.pop(0)
+            comp.append(platforms[k])
+            kx, ky = platforms[k]["lon"], platforms[k]["lat"]
+            for j in range(n):
+                if visited[j]:
+                    continue
+                if haversine_km(kx, ky,
+                                platforms[j]["lon"],
+                                platforms[j]["lat"]) <= radius_km:
+                    queue.append(j)
+                    visited[j] = True
+        subs.append(comp)
+    return subs
+
+
+def _apply_baseline_algorithm(platforms: list, radius_km: float,
+                               anchor_set: list = None) -> None:
+    """Old algorithm: spatial sub-cluster → axis projection per sub →
+    translate each sub-pill toward `anchor_set`'s centroid. If `anchor_set`
+    is None, the platforms themselves are the anchor (original behaviour).
+    """
+    subs = _spatial_subclusters(platforms, radius_km)
+    for sub in subs:
+        _coordinate_dots_in_subcluster(sub)
+    _shift_subs_toward_anchor(anchor_set if anchor_set is not None else platforms, subs)
+
+
+def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
+    """Tangent-group + perpendicular-sweep dot placement.
+
+    Candidate A — for each tangent group of platforms (extent tangents
+    within ~10° of each other), pick a central member from the inner 70 %
+    of the group (closest to centroid) and sweep along that member's
+    platform extent at 10 m steps. At each step the bar is perpendicular
+    to the smoothed extent tangent; the position maximising scoring-stab
+    count wins. Scoring-stabbed platforms (≤10° aligned, extent crosses
+    bar) get their dots placed on the bar and drive its drawn span.
+    Wrong-angle members whose extent crosses the bar between scoring dots
+    are also placed on the bar ("covered"). Everything else runs through
+    the old algorithm anchored to the full platform set so leftover
+    sub-pills shift toward the bar.
+
+    Candidate B (baseline) — the old algorithm on every platform.
+
+    Whichever produces the shorter total pill geometry (pills + 0.5 ×
+    connectors) wins. The temporary fallback override is still disabled —
+    Candidate A is always applied at the moment for experimentation.
+    """
+    if len(cluster) < 2:
+        return
+    platforms = [s for s in cluster
+                 if s.get("extent") and len(s["extent"]) >= 2]
+    if len(platforms) < 2:
+        return
+
+    # --- Equal-distance scaling
+    # Tangents, perpendiculars, σ-lines and dot intersections are computed in
+    # 2-D Cartesian math, but raw (lon, lat) is not Cartesian: at Swiss
+    # latitudes 1° lon ≈ 76 km whereas 1° lat ≈ 111 km. Without a fix,
+    # "perpendicular in lon/lat" is not "perpendicular in real geography /
+    # Mercator display" — diagonal tracks (Zürich HB ≈ 135° azimuth) get
+    # bars ~20° off the real perpendicular. Scaling lon by cos(latitude)
+    # produces a coordinate system where 1 unit lon = 1 unit lat (in
+    # metres), so 2-D Cartesian perpendicular is also real perpendicular.
+    # All algorithm internals run on the scaled coords; we unscale lon back
+    # to real degrees before returning so the placed positions, extents,
+    # and recorded debug bars are in true lon/lat.
+    mean_lat = sum(s["lat"] for s in cluster) / len(cluster)
+    cos_lat = cos(radians(mean_lat))
+    if cos_lat <= 0:
+        return
+
+    for s in cluster:
+        s["lon"] *= cos_lat
+        ext = s.get("extent")
+        if ext:
+            s["extent"] = [(x * cos_lat, y) for x, y in ext]
+
+    diag_bars_start = len(_DIAG_BARS)
+
+    try:
+        # Snapshot raw (scaled) positions so we can swap between candidates.
+        raw = {id(s): (s["lon"], s["lat"]) for s in cluster}
+
+        # --- Candidate B: baseline (old algorithm on all)
+        _apply_baseline_algorithm(platforms, radius_km)
+        baseline_length = _measure_pill_geometry(cluster)
+        baseline_positions = {id(s): (s["lon"], s["lat"]) for s in cluster}
+
+        # Reset to raw positions for Candidate A.
+        for s in cluster:
+            s["lon"], s["lat"] = raw[id(s)]
+
+        # Tangent groups (union-find, 10° angular tolerance mod π).
+        angle_tol = radians(10.0)
+        groups = _tangent_groups(platforms, angle_tol)
+
+        # For each group, find a perpendicular bar via central-extent sweep.
+        # Track all platforms placed on a bar; the rest go through baseline.
+        placed_ids = set()
+        for group in groups:
+            if len(group) < 2:
+                continue
+            result = _perpendicular_sweep(group, angle_tol)
+            if result is None:
+                continue
+            tx, ty, sigma, scoring_local, covered_local = result
+            if len(scoring_local) < 2:
+                continue
+
+            # Place scoring-stabbed dots on σ-line. These drive the bar's
+            # drawn span.
+            for k in scoring_local:
+                p = group[k]
+                pt = _place_dot_on_extent(p["extent"], tx, ty, sigma)
+                p["lon"], p["lat"] = pt
+                placed_ids.add(id(p))
+                _STABBED_PAIRS.add((str(p.get("osm_id", "")),
+                                    str(p.get("stop_id", ""))))
+
+            # Place wrong-angle covered dots at the σ-line crossing of their
+            # extent — between two scoring dots they get absorbed into the
+            # bar rather than fall through to the leftover baseline pass.
+            for k in covered_local:
+                p = group[k]
+                pt = _extent_intersect_axis(p["extent"], tx, ty, sigma)
+                if pt is None:
+                    continue
+                p["lon"], p["lat"] = pt
+                placed_ids.add(id(p))
+                _STABBED_PAIRS.add((str(p.get("osm_id", "")),
+                                    str(p.get("stop_id", ""))))
+
+            # Debug bar geometry (perpendicular to t, spanning scoring dots
+            # plus a small margin on each side).
+            nx, ny = -ty, tx
+            n_values = [group[k]["lon"] * nx + group[k]["lat"] * ny
+                        for k in scoring_local]
+            if len(n_values) >= 2:
+                n_min, n_max = min(n_values), max(n_values)
+                margin = (n_max - n_min) * 0.05 + 1e-6
+                n_min -= margin
+                n_max += margin
+                ep1 = (sigma * tx + n_min * nx, sigma * ty + n_min * ny)
+                ep2 = (sigma * tx + n_max * nx, sigma * ty + n_max * ny)
+                _DIAG_BARS.append((ep1, ep2))
+
+        # Leftovers: every platform NOT placed on a bar.
+        leftovers = [p for p in platforms if id(p) not in placed_ids]
+        if len(leftovers) >= 2:
+            _apply_baseline_algorithm(leftovers, radius_km, anchor_set=platforms)
+
+        candidate_a_length = _measure_pill_geometry(cluster)
+
+        # TEMP: candidate-B fallback disabled for experiment
+        # if candidate_a_length >= baseline_length:
+        #     for s in cluster:
+        #         s["lon"], s["lat"] = baseline_positions[id(s)]
+    finally:
+        # Unscale lon back to real degrees on cluster stops, extents, and
+        # any debug bars added during this cluster's processing.
+        for s in cluster:
+            s["lon"] /= cos_lat
+            ext = s.get("extent")
+            if ext:
+                s["extent"] = [(x / cos_lat, y) for x, y in ext]
+        for i in range(diag_bars_start, len(_DIAG_BARS)):
+            ep1, ep2 = _DIAG_BARS[i]
+            _DIAG_BARS[i] = (
+                (ep1[0] / cos_lat, ep1[1]),
+                (ep2[0] / cos_lat, ep2[1]),
+            )
+
+
 def write_debug_platforms(line_stops: dict, line_lookup: dict,
-                           stop_attrs: dict) -> None:
+                           stop_attrs: dict, skip_first_oids: set) -> None:
     """Emit transit_debug_platforms.geojson — one LineString per stop tracing
     the platform's full allowed range along the line's polyline. Debug-only
     overlay; replaces the previous black-dot debug feature.
@@ -581,7 +1098,10 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
         polyline = flatten_coords(line["coords"])
         if len(polyline) < 2:
             continue
-        for trip in triplets:
+        skip_first_here = str(osm_id) in skip_first_oids
+        for idx, trip in enumerate(triplets):
+            if idx == 0 and skip_first_here:
+                continue
             if len(trip) < 3:
                 continue
             stop_lon, stop_lat, stop_id = trip[0], trip[1], trip[2]
@@ -605,7 +1125,8 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
 
 
 def write_debug_stops(line_stops: dict, line_lookup: dict,
-                       stop_attrs: dict, stop_meta: dict) -> None:
+                       stop_attrs: dict, stop_meta: dict,
+                       skip_first_oids: set) -> None:
     """Emit transit_debug_stops.geojson — one Point per (line, stop) pair,
     1:1 with the debug platform lines. The point sits at the GTFS coord
     snapped onto that line's polyline (the same snap-to-line used by the
@@ -642,6 +1163,7 @@ def write_debug_stops(line_stops: dict, line_lookup: dict,
             "color":       line.get("color", "#888888"),
             "origin":      origin_name,
             "destination": dest_name,
+            "osm_id":      str(osm_id),
         }
         for trip in triplets:
             if len(trip) < 3:
@@ -661,14 +1183,26 @@ def write_debug_stops(line_stops: dict, line_lookup: dict,
     per_stop_lines_json: dict = {}
     per_stop_name: dict = {}
     for sid, data in by_stop.items():
-        seen = set()
-        unique = []
+        by_key: dict = {}
+        order = []
         for v in data["visits"]:
             key = (v["ref"], v["origin"], v["destination"])
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(v)
+            if key not in by_key:
+                entry = {
+                    "ref":         v["ref"],
+                    "mode":        v["mode"],
+                    "color":       v["color"],
+                    "origin":      v["origin"],
+                    "destination": v["destination"],
+                    "osm_ids":     [v["osm_id"]],
+                }
+                by_key[key] = entry
+                order.append(key)
+            else:
+                osm_ids = by_key[key]["osm_ids"]
+                if v["osm_id"] not in osm_ids:
+                    osm_ids.append(v["osm_id"])
+        unique = [by_key[k] for k in order]
         per_stop_lines_json[sid] = json.dumps(unique, ensure_ascii=False)
         per_stop_name[sid] = data["name"]
 
@@ -686,32 +1220,62 @@ def write_debug_stops(line_stops: dict, line_lookup: dict,
         polyline = flatten_coords(line["coords"])
         if len(polyline) < 2:
             continue
-        for trip in triplets:
+        skip_first_here = str(osm_id) in skip_first_oids
+        for idx, trip in enumerate(triplets):
+            if idx == 0 and skip_first_here:
+                continue
             if len(trip) < 3:
                 continue
             lon, lat, sid = trip[0], trip[1], trip[2]
             if not sid:
                 continue
-            slon, slat = snap_to_line(lon, lat, polyline)
+            dot_lon, dot_lat = snap_to_line(lon, lat, polyline)
             attrs = stop_attrs.get(sid) or {}
             atlas_len = attrs.get("length") if isinstance(attrs, dict) else None
+            stabbed = (str(osm_id), str(sid)) in _STABBED_PAIRS
             feats.append({
                 "type": "Feature",
                 "tippecanoe": {"minzoom": MODE_MINZOOM.get(mode, 11)},
-                "geometry": {"type": "Point", "coordinates": [slon, slat]},
+                "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
                 "properties": {
                     "stop_id":          sid,
                     "stop_name":        per_stop_name.get(sid, ""),
                     "mode":             mode,
                     "platform_length":  atlas_len,
                     "lines_json":       per_stop_lines_json.get(sid, "[]"),
+                    "stabbed":          stabbed,
+                    "current_osm_id":   str(osm_id),
                 },
             })
     OUT_DEBUG_STOPS.write_text(json.dumps({
         "type": "FeatureCollection",
         "features": feats,
     }, ensure_ascii=False))
-    print(f"  Debug stops: {len(feats):,} features → {OUT_DEBUG_STOPS}")
+    stabbed_count = sum(1 for f in feats if f["properties"]["stabbed"])
+    print(f"  Debug stops: {len(feats):,} features ({stabbed_count:,} stabbed) "
+          f"→ {OUT_DEBUG_STOPS}")
+
+
+def write_debug_bars() -> None:
+    """Emit transit_debug_bars.geojson — one LineString per max-stab bar
+    found during cluster processing. Each line spans the perpendicular
+    extent of its stabbed dots (plus a small visual margin), so on the map
+    the line draws exactly where the bar "is" in 2D.
+    """
+    feats = []
+    for ep1, ep2 in _DIAG_BARS:
+        feats.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": 5},
+            "geometry": {"type": "LineString",
+                         "coordinates": [list(ep1), list(ep2)]},
+            "properties": {},
+        })
+    OUT_DEBUG_BARS.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": feats,
+    }, ensure_ascii=False))
+    print(f"  Debug bars: {len(feats):,} features → {OUT_DEBUG_BARS}")
 
 
 # =============================================================================
@@ -941,21 +1505,16 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
         prev = idx + 1
     groups.append(path[prev:])
 
-    def make_endpoint(pos):
-        return {
-            "type": "Feature",
-            "tippecanoe": {"minzoom": minzoom},
-            "geometry": {"type": "Point", "coordinates": list(pos)},
-            "properties": {**stop_props, "feature_type": "endpoint"},
-        }
+    # Drop single-point groups entirely — those dots are not pills and will
+    # be rendered by the regular per-stop circle layer instead. MST below
+    # then connects only multi-dot groups.
+    groups = [g for g in groups if len(g) >= 2]
+    if not groups:
+        return []
+    if len(groups) == 1:
+        return [make_feat(groups[0], "pill")]
 
-    # Pill for each group with ≥2 positions; single-point groups get an endpoint circle
-    feats = []
-    for grp in groups:
-        if len(grp) >= 2:
-            feats.append(make_feat(grp, "pill"))
-        else:
-            feats.append(make_endpoint(grp[0]))
+    feats = [make_feat(grp, "pill") for grp in groups]
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.
@@ -1017,6 +1576,8 @@ def cluster_rail_stops(rail_stops: list) -> list:
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for npt in grid.get((kx + dx, ky + dy), []):
+                        if id(npt) in visited:
+                            continue
                         if haversine_km(cx0, cy0, npt[0], npt[1]) < 0.3:
                             group.append(npt)
                             visited.add(id(npt))
@@ -1059,6 +1620,8 @@ def cluster_stops_for_pills(raw_stops, radius_km):
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for ns in grid.get((kx + dx, ky + dy), []):
+                        if id(ns) in visited:
+                            continue
                         if haversine_km(cx0, cy0, ns["lon"], ns["lat"]) < radius_km:
                             group.append(ns)
                             visited.add(id(ns))
@@ -1123,11 +1686,12 @@ def main():
     print("Loading atlas platform attributes...")
     stop_attrs = write_stop_attributes_diag(line_stops)
 
-    print("Emitting debug platform extents...")
-    write_debug_platforms(line_stops, line_lookup, stop_attrs)
+    skip_first_oids = compute_terminus_skip_oids(line_stops)
+    print(f"  Terminus dedup: {len(skip_first_oids):,} departure-side entries "
+          f"will be omitted from rendering (popup retains both directions)")
 
-    print("Emitting debug stop dots...")
-    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta)
+    print("Emitting debug platform extents...")
+    write_debug_platforms(line_stops, line_lookup, stop_attrs, skip_first_oids)
 
     print("Building stop dots and pill candidates...")
 
@@ -1172,8 +1736,12 @@ def main():
         minzoom    = MODE_MINZOOM.get(mode, 11)
         flat       = flatten_coords(coords)
 
+        skip_first_here = str(osm_id) in skip_first_oids
+
         if mode in RAIL_MODES:
-            for entry in stop_coords:
+            for idx, entry in enumerate(stop_coords):
+                if idx == 0 and skip_first_here:
+                    continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
@@ -1200,7 +1768,9 @@ def main():
 
         elif mode == "ferry":
             line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
-            for entry in stop_coords:
+            for idx, entry in enumerate(stop_coords):
+                if idx == 0 and skip_first_here:
+                    continue
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
                 meta     = stop_meta.get(sid, {})
@@ -1220,7 +1790,9 @@ def main():
                 })
 
         elif mode in PILL_MODES:
-            for entry in stop_coords:
+            for idx, entry in enumerate(stop_coords):
+                if idx == 0 and skip_first_here:
+                    continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
@@ -1248,7 +1820,9 @@ def main():
 
         else:
             line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
-            for entry in stop_coords:
+            for idx, entry in enumerate(stop_coords):
+                if idx == 0 and skip_first_here:
+                    continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
@@ -1275,16 +1849,13 @@ def main():
     rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
     rail_pill_clusters = merge_clusters_by_parent_station(rail_pill_clusters)
     print(f"  → {len(rail_pill_clusters):,} rail station clusters")
-    # Sub-cluster within each parent_station-merged cluster, run axis
-    # projection per sub-cluster (stage 1), then translate each sub-pill
-    # toward the common target along its mean tangent (stage 2). The merged
-    # cluster stays intact for the downstream NN-path + split-on-gap +
-    # connector logic.
+    # Place dots via tangent grouping + perpendicular sweep along the central
+    # member's platform extent (per-group). Stabbed dots get placed on the
+    # perpendicular bar; leftovers run through the old algorithm.
+    print(f"  Placing rail dots across {len(rail_pill_clusters):,} clusters...")
     for c in rail_pill_clusters:
-        subs = _spatial_subclusters(c, PILL_CLUSTER_RAIL_KM)
-        for sub in subs:
-            coordinate_dots_in_cluster(sub)
-        shift_sub_pills_toward_target(c, subs)
+        coordinate_dots_global_stab(c, PILL_CLUSTER_RAIL_KM)
+    print("  → rail dot placement done")
 
     rail_features = []
     pill_features_rail = []
@@ -1354,12 +1925,19 @@ def main():
           f"(tram+metro+bus+regional combined) → clustering...")
     nonrail_clusters = cluster_stops_for_pills(all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM)
     nonrail_clusters = merge_clusters_by_parent_station(nonrail_clusters)
-    # Same two-stage placement as rail (see pill-rendering concept).
+    # Same global stabbing placement as rail.
+    print(f"  Placing non-rail dots across {len(nonrail_clusters):,} clusters...")
     for c in nonrail_clusters:
-        subs = _spatial_subclusters(c, PILL_CLUSTER_NONRAIL_KM)
-        for sub in subs:
-            coordinate_dots_in_cluster(sub)
-        shift_sub_pills_toward_target(c, subs)
+        coordinate_dots_global_stab(c, PILL_CLUSTER_NONRAIL_KM)
+    print("  → non-rail dot placement done")
+
+    # Emit debug overlays now that all clusters have been processed and
+    # _STABBED_PAIRS / _DIAG_BARS are populated.
+    print("Emitting debug stop dots...")
+    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta, skip_first_oids)
+    print("Emitting debug max-stab bars...")
+    write_debug_bars()
+
     nonrail_pill_count = 0
     nonrail_dot_features = []
     for cluster in nonrail_clusters:

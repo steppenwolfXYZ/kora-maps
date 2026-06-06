@@ -94,7 +94,9 @@
 				if (p.lines_json) {
 					try {
 						const lines: { ref: string; color: string; mode: string;
-							origin: string; destination: string }[] = JSON.parse(String(p.lines_json));
+							origin: string; destination: string; osm_ids?: string[] }[] =
+							JSON.parse(String(p.lines_json));
+						const currentOsmId = p.current_osm_id != null ? String(p.current_osm_id) : '';
 						if (lines.length) {
 							const badges = lines.map(l => {
 								const label = l.ref || l.mode || '?';
@@ -106,7 +108,12 @@
 								const fg = lum > 140 ? '#000' : '#fff';
 								const route = `${l.origin || '?'} → ${l.destination || '?'}`;
 								const titleAttr = ` title="${route.replace(/"/g, '&quot;')}"`;
-								return `<span${titleAttr} style="display:inline-block;background:#${c};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em;cursor:default">${label}</span>`;
+								const isCurrent = currentOsmId !== '' && Array.isArray(l.osm_ids)
+									&& l.osm_ids.includes(currentOsmId);
+								const ring = isCurrent
+									? 'box-shadow:0 0 0 2px #000, 0 0 0 4px #fff;'
+									: '';
+								return `<span${titleAttr} style="display:inline-block;background:#${c};color:${fg};border-radius:3px;padding:1px 5px;margin:3px 4px 3px 0;font-size:10px;font-weight:600;letter-spacing:0.03em;cursor:default;${ring}">${label}</span>`;
 							}).join('');
 							linesHtml = `<div style="margin-top:6px">${badges}</div>`;
 						}

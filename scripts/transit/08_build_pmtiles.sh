@@ -10,7 +10,7 @@ STATIC="$ROOT/static"
 
 echo "=== Building transit_lines → tl_lines.pmtiles ==="
 tippecanoe -o "$STATIC/tl_lines.pmtiles" --force \
-  -z14 -Z4 \
+  -z14 -Z4 -d18 \
   --drop-densest-as-needed \
   --extend-zooms-if-still-dropping \
   "$DATA/transit_lines.geojson"
@@ -41,51 +41,58 @@ PYEOF
 echo ""
 echo "=== Building tl_stops_rail.pmtiles (minzoom 5) ==="
 tippecanoe -o "$STATIC/tl_stops_rail.pmtiles" --force \
-  -z14 -Z5 --layer transit_stops \
+  -z14 -Z5 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_rail.geojson"
 
 echo ""
 echo "=== Building tl_stops_tram.pmtiles (minzoom 10) ==="
 tippecanoe -o "$STATIC/tl_stops_tram.pmtiles" --force \
-  -z14 -Z10 --layer transit_stops \
+  -z14 -Z10 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_tram.geojson"
 
 echo ""
 echo "=== Building tl_stops_regional.pmtiles (minzoom 9) ==="
 tippecanoe -o "$STATIC/tl_stops_regional.pmtiles" --force \
-  -z14 -Z9 --layer transit_stops \
+  -z14 -Z9 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_regional.geojson"
 
 echo ""
 echo "=== Building tl_stops_bus.pmtiles (minzoom 11) ==="
 tippecanoe -o "$STATIC/tl_stops_bus.pmtiles" --force \
-  -z14 -Z11 --layer transit_stops \
+  -z14 -Z11 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_bus.geojson"
 
 echo ""
 echo "=== Building tl_stop_pills.pmtiles ==="
 tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
-  -z14 -Z11 --layer transit_stop_pills \
+  -z14 -Z11 -d18 --layer transit_stop_pills \
   --drop-densest-as-needed \
   "$DATA/transit_stop_pills.geojson"
 
 echo ""
 echo "=== Building tl_debug_platforms.pmtiles ==="
 tippecanoe -o "$STATIC/tl_debug_platforms.pmtiles" --force \
-  -z14 -Z5 --layer transit_debug_platforms \
+  -z14 -Z5 -d18 --layer transit_debug_platforms \
   --drop-densest-as-needed \
   "$DATA/transit_debug_platforms.geojson"
 
 echo ""
 echo "=== Building tl_debug_stops.pmtiles ==="
 tippecanoe -o "$STATIC/tl_debug_stops.pmtiles" --force \
-  -z14 -Z5 --layer transit_debug_stops \
+  -z14 -Z5 -d18 --layer transit_debug_stops \
   --drop-densest-as-needed \
   "$DATA/transit_debug_stops.geojson"
+
+echo ""
+echo "=== Building tl_debug_bars.pmtiles ==="
+tippecanoe -o "$STATIC/tl_debug_bars.pmtiles" --force \
+  -z14 -Z5 -d18 --layer transit_debug_bars \
+  --drop-densest-as-needed \
+  "$DATA/transit_debug_bars.geojson"
 
 echo ""
 echo "=== Done! ==="

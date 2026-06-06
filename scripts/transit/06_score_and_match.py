@@ -1073,7 +1073,13 @@ def main():
               f"{sorted(mountain_aids)}")
     print(f"  {len(svc_dates_full):,} service IDs with full-calendar coverage")
 
-    min_active_days = int(cfg.get("min_active_days", 150))
+    min_active_days_default = int(cfg.get("min_active_days", 150))
+    min_active_days_by_bucket = {
+        b: int(v) for b, v in (cfg.get("min_active_days_by_bucket") or {}).items()
+    }
+
+    def min_active_days_for(bucket: str) -> int:
+        return min_active_days_by_bucket.get(bucket, min_active_days_default)
 
     trip_frequencies = load_frequencies()
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries "
@@ -1203,11 +1209,12 @@ def main():
         if _gate_exempt(bucket, tg_mountain_origin.get(tg_key)):
             continue
         vmap = groups[tg_key]
+        threshold = min_active_days_for(bucket)
         to_drop = [
             var_key for var_key in vmap
             if variant_active_days.get(
                 (line_key, aid, tg_id_v, var_key[0], var_key[1]), 0
-            ) < min_active_days
+            ) < threshold
         ]
         if not to_drop:
             continue
@@ -1219,7 +1226,13 @@ def main():
             tg_keys_all_short_active.add(tg_key)
             del groups[tg_key]
     n_dropped_var = sum(len(s) for s in short_active_variants.values())
-    print(f"  {n_dropped_var:,} variants dropped by min_active_days={min_active_days} "
+    threshold_summary = f"default={min_active_days_default}"
+    if min_active_days_by_bucket:
+        overrides = ", ".join(f"{b}={v}" for b, v in
+                              sorted(min_active_days_by_bucket.items()))
+        threshold_summary += f"; {overrides}"
+    print(f"  {n_dropped_var:,} variants dropped by min_active_days "
+          f"({threshold_summary}) "
           f"(across {len(short_active_variants)} trip groups; "
           f"{len(tg_keys_all_short_active)} groups fully dropped)")
 
@@ -1727,7 +1740,7 @@ def main():
             variants_out.append(v_entry)
 
         threshold_field = (None if _gate_exempt(bucket, mountain_origin)
-                           else min_active_days)
+                           else min_active_days_for(bucket))
         diag_out.append({
             "ref": short_name,
             "long_name": long_name,

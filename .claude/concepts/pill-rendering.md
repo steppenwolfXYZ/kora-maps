@@ -20,34 +20,54 @@ This concept covers only the **medium-zoom** layer. Far and short are placeholde
 
 ### Platform extent (the dot's allowed range)
 
-Each platform has an **allowed range**: a contiguous interval along its line's polyline, within which its dot may be placed. The interval is anchored differently per mode, reflecting the GTFS coord's physical meaning:
+Each platform has an **allowed range** along its line's polyline, of length L: the snapped GTFS coordinate (the GTFS coord projected onto the polyline) is always at the geometric centre of this range. Anchoring per mode:
 
-- **Rail (train, metro)** — interval centred on the GTFS coordinate, extending half of the platform length in each direction along the polyline. The GTFS coordinate is the platform centre.
-- **Tram / bus / regional_bus** — interval starts at the GTFS coordinate and extends backwards along the polyline (against the direction of travel) by the platform length. The GTFS coordinate is the front of the stop.
+- **Rail (train, metro)** — range is `[snapped − L/2, snapped + L/2]` along the polyline. When the polyline does not extend ±L/2 around the snapped coord (e.g. a terminating-track polyline ending at the buffer), the missing portion on the clipped side is filled by a straight-line extrapolation in the polyline's tangent direction at the snapped coord. The total range length stays L unless the polyline as a whole is shorter than L.
+- **Tram / bus / regional_bus** — range is `[snapped − L, snapped]`: it starts at the snapped GTFS coord and extends backwards along the polyline (against the direction of travel). No extrapolation.
 
-`length` comes from atlas for rail (about 95% coverage); the remaining 5% use a per-mode default. Tram/bus get the per-mode default unconditionally — atlas does not carry `length` for those modes.
+`length` comes from atlas for rail (about 95% coverage); the remaining 5% use a per-mode default. Tram/bus use the per-mode default unconditionally — atlas does not carry `length` for those modes.
 
 Out-of-scope modes (ferry, mountain) render as today.
 
-### Dot placement (the decision variable)
+### Dot placement
 
-For each platform a single dot is placed somewhere within its allowed range. The position within the range is the decision variable.
+For each platform a single dot is placed somewhere within its allowed range. Within a station cluster the placement is computed as two parallel candidates and the shorter of the two layouts wins (where length is `sum(pill segments) + 0.5 × sum(connector segments)`):
 
-- A platform with no neighbouring platforms at the same station has its dot at the GTFS coordinate — no optimisation needed.
-- At a station with two or more platforms, dots are placed so the total pill length connecting them is as short as possible, subject to every dot staying within its platform's allowed range. The expected geometric outcome at typical multi-track stations is that dots line up across parallel polylines so pills run perpendicular to the lines, mimicking a real station's cross-platform layout.
-- When polylines at a station do not run parallel (cross-junctions, etc.), the optimisation still applies — it minimises total pill length — but the resulting geometry is whatever falls out, not necessarily aligned.
+**Equal-distance projection.** All algorithm internals — tangent computation, perpendicular construction, σ-line projection, dot intersection — are done after scaling the lon component of every coordinate by `cos(cluster_mean_lat)`, so a 2-D Cartesian perpendicular in that space corresponds to a real-geography perpendicular on the rendered Mercator map. Without this, diagonal tracks at Swiss latitudes display with up to ~20° of skew. The placed positions are unscaled back to true lon/lat before the function returns.
 
-### Pills (connections between dots)
+**Candidate A — perpendicular sweep per tangent group.**
 
-A pill is a line segment joining adjacent dots at the same station cluster. Pill length is a *consequence* of dot placement, not a primitive value. Pill rendering style (thickness, casing, mode-coloured stroke) is unchanged from today; only the endpoint positions change.
+- Platforms whose extent tangents are within ~10° of each other (mod π, union-find with transitive closure so curved-but-coherent sets stay together) form a tangent group.
+- For each group of ≥ 2 platforms, a perpendicular bar is found by sweeping along the **central member's platform extent** (the same per-stop polyline drawn as the debug overlay) at a fixed resolution of **10 m** over the extent's full length — not along the underlying full line polyline. Using the extent keeps the sweep anchored to the actual platform region: it can never walk off into the rest of the line's route, and its length is bounded by the per-mode platform length (so the sweep is intrinsically fast regardless of how long the underlying line is). The central member is the platform whose snapped GTFS position is closest to the group's spatial centroid, picked from the **inner 70 %** of the tangent group only: the 30 % of members lying furthest from the group's spatial centroid are excluded from the central-member pick so an off-to-the-side member cannot become central and drag the sweep away from the cluster middle. Excluded members still count for stab scoring; they are only excluded from being chosen as central.
+- At each sweep position the **local tangent** of the central extent is averaged over a 40 m window so small pfaedle-routing kinks do not tilt the bar. The bar at that position is the line perpendicular to that smoothed tangent passing through the position.
+- A group member counts as **scoring-stabbed** by a sweep position's bar only if **both** (a) its extent crosses the bar and (b) its own extent tangent is within ~10° (mod π) of the bar's tangent at that position. Only scoring-stabbed members contribute to the stab count that picks the winning sweep position, and only their dots determine the bar's drawn length (the bar spans the perpendicular extent of the scoring-stabbed dots plus a small margin). Wrong-angle members do not contribute to scoring or to bar length.
+- The sweep position that maximises the stab count wins. Each scoring-stabbed platform's dot is placed at the intersection of its extent with the bar; if the bar lies just past the polyline (e.g. the extrapolated portion of an asymmetric extent), the dot snaps to the extent endpoint closer to the bar.
+- After the winning bar's length is fixed by the scoring-stabbed dots, any wrong-angle member whose extent crosses the bar **and** whose crossing point falls within the bar's drawn span (i.e. between scoring-stabbed dots) is also placed on the bar at that crossing point. Such members are treated as covered by the bar — they are not handed to the leftover fill — but they had no influence on whether the bar was chosen or how long it was drawn.
+- Platforms not placed on any bar (singleton tangent groups, or members whose extent did not cross any candidate bar in their group at a good angle) are handed to Candidate B's algorithm and laid out alongside the bars, anchored to the full cluster so their sub-pills shift toward the bars and shorten the connectors.
 
-### Connectors
+**Candidate B — baseline (legacy algorithm).**
 
-Connectors (the joining lines between two physically separated pill groups within one station, e.g. surface tracks ↔ underground tracks at a multi-deck station) are unchanged in topology. Their endpoints are dots, so they automatically benefit from the same dot-placement optimisation.
+Spatial sub-clustering within the per-mode pill radius (300 m rail, 50 m non-rail). For each sub-cluster: mean polyline tangent, axis line at the mean of range midpoints, every dot placed at the closest point on its extent to that axis. Then each sub-pill is translated along its tangent toward the cluster centroid, bounded by free range so the sub-pill's shape and orientation are preserved.
+
+### Pills and connectors
+
+Pill geometry is built from the placed dots by the existing greedy nearest-neighbour path through every dot in the cluster, split at any segment longer than `PILL_GAP_SCALE × max_wb` metres (currently 20 m per unit of `width_base`). Each post-split group of ≥ 2 dots is emitted as a pill. **Single-dot groups are dropped** — those stops are not drawn as pill endpoints; the regular per-stop dot layer renders them. MST connectors (Kruskal's) join the remaining pill groups at their nearest dot pair.
+
+Pill rendering style (thickness, casing, mode-coloured stroke) is unchanged from today; only the dot positions change.
 
 ### Pill grouping (which dots a pill connects)
 
-Which dots a pill connects is determined by the existing clustering — rail by `parent_station`, others spatially within a per-mode radius — and the existing nearest-neighbour path within each cluster. This concept changes only *where* each dot sits, not which dots cluster.
+Which dots a pill connects is determined by the existing clustering — rail by `parent_station`, others spatially within a per-mode radius — and the nearest-neighbour path within each cluster. This concept changes only *where* each dot sits, not which dots cluster.
+
+### Terminus dedup
+
+At a terminus station, the same physical platform is visited by two distinct `(osm_id, stop_id)` entries: one line ends there (`stop_id` is the last entry of its trip — the **arrival** side) and another begins there (`stop_id` is the first entry of its trip — the **departure** side). Rendered naively this produces two dots and two platform extents on top of each other at every terminus, with the departure side's extent additionally always collapsed (the non-rail extent rule extends backward from the snapped coord, and the polyline starts at the snapped coord so there is nothing behind it).
+
+Whenever the same `stop_id` appears as the first entry of one `osm_id` **and** as the last entry of a different `osm_id`, and the two snapped positions are within `TERMINUS_DEDUP_RADIUS_M` (10 m) of each other, the **departure-side entry is omitted from all rendered outputs**: production stop dots, pill clusters, debug platform extents and debug dots. The arrival side remains as the single visible dot and the single visible extent.
+
+The popup data is built from a separate pass that ignores this filter, so clicking the surviving dot still lists both the arrival and the departure line in the badge list. The debug overlay's outline-ring marker therefore continues to identify which of the two listed lines produced the dot the user clicked.
+
+Loop trips (a line whose first and last entries are the same `stop_id` on the same `osm_id`) are not deduped against themselves — the self-match is excluded. A loop is only deduped if a different line's arrival also lands at that stop_id within the radius.
 
 ### Per-mode defaults and sanity ranges
 
@@ -67,19 +87,32 @@ The default applies when atlas does not provide a length (always for tram / bus 
 
 For each platform's allowed range:
 
-1. If atlas provides a sane `length` (within the per-mode sanity range), use it, anchored per the mode rule (centred for rail, backwards from front for tram/bus).
-2. Otherwise, use the per-mode default length with the same anchor rule.
-3. If the polyline at the GTFS coordinate is too short to support the resulting allowed range (degenerate geometry), clip the range to the available polyline.
-4. As a last resort, fall back to today's clustering-derived pill shape for that stop only.
+1. If atlas provides a sane `length` (within the per-mode sanity range), use it, anchored per the mode rule.
+2. Otherwise use the per-mode default length with the same anchor rule.
+3. For rail/metro: if the polyline does not symmetrically support ±L/2 around the snapped GTFS coord, the missing side is filled with a tangent-direction extrapolation so the total range stays L.
+4. If the polyline as a whole is shorter than the required length, the range is clipped to whatever polyline exists.
 
 ### Debug overlay
 
-Two debug elements render on top of the production style, both filtered to the modes in scope (train, metro, tram, bus, regional_bus):
+Three debug elements render on top of the production style, filtered to the modes in scope (train, metro, tram, bus, regional_bus):
 
-- A **thin black line** tracing each platform's full allowed range along its line's polyline — one per `(line, stop)` pair.
-- A **clickable white-filled, black-outlined dot** at the GTFS coordinate snapped onto each line's polyline — 1:1 with the debug lines (every line has a dot, every dot has a line). Clicking opens a popup with the stop name, mode, atlas platform length (or `– (default)` when atlas had none), and mode-coloured badges for each line stopping there. Hovering a badge shows the line's `origin → destination` as a tooltip.
+- A **thin black line** tracing each platform's full allowed range along its line's polyline — one per `(line, stop)` pair, including the extrapolated portions of any extent.
+- A **clickable circle** at the snapped GTFS coordinate. Filled black if that `(line, stop)` was placed on a perpendicular bar by Candidate A; hollow (white fill, black outline) otherwise. Clicking opens a popup with the stop name, mode, atlas platform length (or `– (default)` when atlas had none), and mode-coloured badges for each line stopping there. Hovering a badge shows the line's `origin → destination` as a tooltip. The badge for the specific `(line, direction)` whose polyline produced the clicked dot is outlined with a black-on-white ring, so that when multiple dots overlap the same stop (e.g. both directions of a terminus) the user can tell which one is selected.
+- A **thick white line** drawn over each perpendicular bar produced by Candidate A — spans the perpendicular extent of the bar's stabbed dots plus a small margin.
 
 These are development-time visual aids only; not part of the medium-zoom production style.
+
+**To remove before production:** the thick-white bar layer, the `stabbed` property + case-expression fill on debug stop dots, the `_STABBED_PAIRS` / `_DIAG_BARS` module-level state, and the `tl_debug_bars.pmtiles` source / layer / build step. The per-cluster console-log diag block has already been removed.
+
+## Open work
+
+Items deferred from the current pass, in roughly the order they should be addressed:
+
+- **Sweep is currently coarse, uses a too-wide central pick, and walks the wrong polyline.** The implementation tests only the projections of group members' snapped GTFS coords on the central member's full line polyline, and picks the central member from the full group. The current requirement is a 10 m sweep along the central member's **extent** (not the full line polyline), with the central member picked from only the inner 70 % of the group. Sulgenau (Bern) is the canonical case the old behaviour gets wrong: a bidirectional tram cluster whose snapped coords sit at the two cluster ends and miss the middle position that would stab all four platforms. Walking the line polyline instead of the extent also made the dense sweep prohibitively slow on rail (pfaedle-routed train lines are tens to hundreds of km long).
+- **Candidate A/B fallback comparison is overridden.** The `if candidate_a_length >= baseline_length: revert` block in the placement code is currently commented out, so Candidate A always wins regardless of length. To be re-enabled once the user has finished checking specific cases.
+- **Re-verification across the network after the duplicate-inclusion fix.** A bug in the spatial clustering caused stops to land in more than one cluster (a stop near a cell boundary was claimed by every group whose seed was within the radius). Roughly half of Zürich HB's "226 platforms" turned out to be duplicates; the same factor likely affected many other stations. Bern, the small clean-track stations, multi-deck stations, and the Stadtbahn-style mixed-orientation case all need a fresh visual pass — cluster sizes have changed materially.
+- **Tangent tolerance is 10°** (the gate threshold and the tangent-group union-find both use this). It's deliberately strict; depending on what the re-verification shows, may need to be loosened to ~15°.
+- **`PILL_GAP_SCALE = 20 m`** is the current largest-gap-split threshold. Worth re-tuning once the cluster contents above are correct.
 
 ## Constraints
 
@@ -87,39 +120,7 @@ These are development-time visual aids only; not part of the medium-zoom product
 - `compass_direction` from atlas is intentionally not consumed. The polyline tangent at the dot position is the orientation source for pill geometry.
 - Per-mode default lengths and atlas-`length` sanity ranges are configuration values.
 - Ferries and mountain modes are out of scope; they render as today.
-- Single-platform stops always render as just a dot. The cluster-wide optimisation runs only on clusters of at least two platforms.
+- The bar-finding sweep runs only on tangent groups of at least two platforms. Singletons and singleton tangent groups flow through Candidate B's legacy algorithm alongside the bars.
+- Single-dot groups produced by the gap-split step are dropped from pill rendering; those stops fall back to the regular per-stop dot layer rather than rendering as a "pill endpoint".
 - This concept depends on `prm-platform-positions` being implemented and `stop_attributes_sources.json` being emitted.
-- The implementation must not regress the rendering of stops without atlas data — the fallback chain guarantees a pill is always producible.
-
-## Algorithm note
-
-Dot placement runs in two stages on each merged cluster (the cluster produced by the existing spatial cluster pass followed by `parent_station` merge — both rail and non-rail). The merged cluster represents one logical station; its sub-groups are physically distinct platform groups within that station.
-
-### Stage 1 — Sub-cluster local axis projection
-
-Pills are drawn **as if each sub-group were a separate cluster**: the axis projection runs per sub-cluster, never across the whole merged cluster.
-
-1. Sub-cluster the merged cluster spatially (the same radius as the initial cluster pass: 300 m rail, 50 m non-rail). Each sub-cluster is a connected component of stops within the radius.
-2. For each sub-cluster:
-   - Compute the mean polyline tangent across that sub-cluster's stops, with direction canonicalised (so NB and SB versions of the same polyline don't cancel out).
-   - Anchor the **local station axis** at the centre of the **intersection of all per-stop range tangent-coords** when that intersection is non-empty (every range covers some common axis position); otherwise fall back to the mean of range midpoints.
-   - For each stop, place its dot at the point on its allowed-range polyline closest to that axis line.
-
-The intersection-center preference is what makes the sub-pill align cleanly when extents overlap: every dot lands on the axis line and the bar is perpendicular. For sub-clusters with non-overlapping ranges, the intersection is empty and the mean-midpoint fallback applies — dots clamp to the range end closest to the axis, producing the shortest possible sub-pill given the geometry.
-
-The single-axis-across-the-whole-merged-cluster approach used previously is explicitly **not** done: it muddles the mean tangent across physically distinct platform groups (e.g. Eigerplatz Nord on a N–S street vs Eigerplatz Süd curving east on Eigerstrasse), pulls each sub-pill toward the merged centroid, and stretches sub-pills toward each other along their line direction in order to shorten the connector — a trade-off explicitly disallowed by the rule "neither the angle nor the length of a pill changes to make the connector shorter."
-
-### Stage 2 — Shift toward neighbouring sub-clusters (translation only)
-
-Each sub-pill may then be translated along its mean tangent toward an adjacent sub-cluster, but only by a uniform amount that does not push any of its dots outside their allowed ranges. Because every dot in a sub-pill translates by the same arc length along its own polyline, the perpendicular extent (the pill's length) and orientation (its angle) are preserved: shape is rigid, position is free. The shift is bounded by `min(free range)` across the dots — if any dot is already at the range end on the side it would need to move toward, the shift collapses to zero and the sub-pill stays where stage 1 left it. This is correct: that sub-pill is already as close to its neighbour as it can be without lengthening.
-
-### Connectors
-
-The NN-path-through-all-dots and the split-on-largest-gap mechanism are unchanged. After the two stages above, adjacent sub-pills' inner dots are as close as their ranges allow; the inter-sub-cluster gap remains the largest segment in the NN path and the pill splits there into two pills plus a connector. The connector is the natural geographic gap between sub-pills.
-
-## Status
-
-The two-stage algorithm above plus the debug overlays are implemented in `07_extract_stops.py` (`coordinate_dots_in_cluster`, `shift_sub_pills_toward_target`, `_spatial_subclusters`, `write_debug_platforms`, `write_debug_stops`). Observed behaviour at the stations checked so far:
-
-- **Eigerplatz**: two clean perpendicular sub-pills (Nord, Süd) with a connector between them. Stage 2 shift collapses to zero — both sub-clusters' dots are already at their range ends.
-- **Zürich main station**: the approach does not yet produce the desired single-bar look across all rail platforms. Sub-clusters at different parts of the station end up with axes at different tangent-coords even with the intersection-center preference, and the platforms span more than the spatial sub-cluster radius. A different approach to global alignment across the merged cluster will likely be needed.
+- The implementation must not regress the rendering of stops without atlas data — the fallback chain guarantees an allowed range is always producible.

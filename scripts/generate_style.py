@@ -1222,7 +1222,9 @@ def build_station_layers() -> list:
 
     # Debug overlay: clickable dot at every stop's GTFS coordinate. Carries
     # the atlas platform length and the list of lines visiting that stop
-    # (with origin / destination); rendered as a popup on click.
+    # (with origin / destination); rendered as a popup on click. Stabbed
+    # dots (those placed onto a max-stab bar) render as solid black fill;
+    # non-stabbed dots stay hollow (white fill with black outline).
     layers.append({
         "id": "debug-stop-dot",
         "type": "circle",
@@ -1230,12 +1232,32 @@ def build_station_layers() -> list:
         "source-layer": "transit_debug_stops",
         "minzoom": 5,
         "paint": {
-            "circle-color": "#ffffff",
+            "circle-color": [
+                "case",
+                ["==", ["get", "stabbed"], True], "#000000",
+                "#ffffff"
+            ],
             "circle-stroke-color": "#000000",
             "circle-radius": 3,
             "circle-stroke-width": 1,
             "circle-opacity": 0.9,
             "circle-stroke-opacity": 0.9,
+        }
+    })
+
+    # Debug overlay: thick white line drawn over each max-stab bar so the
+    # bar's actual position and orientation are visible at a glance.
+    layers.append({
+        "id": "debug-max-stab-bar",
+        "type": "line",
+        "source": "transit_debug_bars",
+        "source-layer": "transit_debug_bars",
+        "minzoom": 5,
+        "layout": {"line-cap": "round"},
+        "paint": {
+            "line-color": "#ffffff",
+            "line-width": 4,
+            "line-opacity": 0.9,
         }
     })
 
@@ -1291,6 +1313,10 @@ def generate_style(cfg) -> dict:
             "transit_debug_stops": {
                 "type": "vector",
                 "url": "pmtiles:///tl_debug_stops.pmtiles"
+            },
+            "transit_debug_bars": {
+                "type": "vector",
+                "url": "pmtiles:///tl_debug_bars.pmtiles"
             }
         },
         "glyphs": g["glyphs"],

@@ -20,15 +20,14 @@ A question is a question. An exclamation, a swearword, a "WTF", a "that sounds d
 
 Answer the question or acknowledge the reaction. Do not edit code, do not propose code edits, do not write concepts. A change happens only when the user explicitly authorises it with one of the words listed under "Investigation and analysis". When unsure whether the user wants action, ask.
 
+## Don't fake agreement
+If you disagree with the user, say so directly at the top of the reply. Don't open with "yes, that makes sense" / "you're right" and then immediately argue the opposite point — that forces the reader to do the work of figuring out whether you actually agreed. State your read first ("I'd push back on X", "I don't think that's quite right because Y"), then explain. Disagreement is fine; faux agreement that flips into disagreement is not.
+
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
 ## Rebuild command
-After any transit pipeline change, suggest exactly:
-```
-./scripts/rebuild_transit.sh --start 4
-```
-Use a lower `--start` only when an earlier step's inputs have changed: `--start 3` to re-cut the OSM bbox (bbox config or OSM PBFs changed), `--start 2` to re-download OSM, `--start 1` to re-download GTFS. The flag-less default (`--start 3`) is reserved for OSM/bbox changes. Never suggest running individual Python scripts — the shell script handles the full pipeline.
+After any transit pipeline change, suggest `./scripts/rebuild_transit.sh --start N` where N is the lowest step whose inputs you actually changed (see the step list in `.claude/rules/transit.md`). Each step's output is the next step's input, so `--start N` runs steps N..8 contiguously — starting lower than needed just wastes time, especially on pfaedle. Never suggest running individual Python scripts.
 
 ## Fixing bugs
 Fix stop placement bugs by correcting the algorithm in `06_score_and_match.py`, not by tightening snap-distance thresholds in `07_extract_stops.py`. Tightening thresholds papers over a data quality problem instead of fixing it.

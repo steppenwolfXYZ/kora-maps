@@ -50,18 +50,66 @@ def in_bbox(lon: float, lat: float, bbox: dict) -> bool:
             and bbox["min_lat"] <= lat <= bbox["max_lat"])
 
 
-def load_stop_coords() -> dict:
-    """{stop_id: (lon, lat)}. Skips rows without coords."""
+def load_stop_overrides(cfg: dict) -> dict:
+    """{stop_id: (lon, lat)} from config.gtfs_stop_overrides.
+
+    Each configured stop_id also seeds the matching `Parent…` row so the
+    location_type=1 station entry stays consistent with the platform entry.
+    """
+    out: dict = {}
+    for entry in (cfg.get("gtfs_stop_overrides") or []):
+        sid = str(entry.get("stop_id", "")).strip()
+        if not sid:
+            continue
+        try:
+            lon = float(entry["lon"])
+            lat = float(entry["lat"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        out[sid] = (lon, lat)
+        out[f"Parent{sid}"] = (lon, lat)
+    return out
+
+
+def load_stop_coords(overrides: dict) -> dict:
+    """{stop_id: (lon, lat)}. Skips rows without coords. Applies overrides."""
     out = {}
     with open(GTFS_IN / "stops.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
+            sid = row["stop_id"]
+            if sid in overrides:
+                out[sid] = overrides[sid]
+                continue
             try:
                 lon = float(row["stop_lon"])
                 lat = float(row["stop_lat"])
             except (KeyError, ValueError):
                 continue
-            out[row["stop_id"]] = (lon, lat)
+            out[sid] = (lon, lat)
     return out
+
+
+def write_filtered_stops(overrides: dict) -> int:
+    """Copy stops.txt to GTFS_OUT, replacing stop_lon/stop_lat for any row
+    whose stop_id matches an override. Returns the count of overridden rows.
+    """
+    src = GTFS_IN / "stops.txt"
+    dst = GTFS_OUT / "stops.txt"
+    n = 0
+    with open(src, encoding="utf-8-sig", newline="") as fin, \
+         open(dst, "w", encoding="utf-8", newline="") as fout:
+        reader = csv.DictReader(fin)
+        writer = csv.DictWriter(fout, fieldnames=reader.fieldnames,
+                                quoting=csv.QUOTE_ALL)
+        writer.writeheader()
+        for row in reader:
+            ov = overrides.get(row["stop_id"])
+            if ov is not None:
+                row["stop_lon"] = f"{ov[0]:.8f}"
+                row["stop_lat"] = f"{ov[1]:.8f}"
+                n += 1
+            writer.writerow(row)
+    return n
 
 
 def identify_excluded_agencies(excluded_tokens: list) -> set:
@@ -346,8 +394,13 @@ def main() -> None:
     GTFS_OUT.mkdir(parents=True, exist_ok=True)
     DIAG_OUT.parent.mkdir(parents=True, exist_ok=True)
 
+    stop_overrides = load_stop_overrides(cfg)
+    if stop_overrides:
+        # Each entry seeds itself + its Parent… mirror, so divide by 2 for display.
+        print(f"Loaded {len(stop_overrides)//2} GTFS stop coordinate override(s)")
+
     print(f"Loading stops…")
-    stop_coords = load_stop_coords()
+    stop_coords = load_stop_coords(stop_overrides)
     print(f"  {len(stop_coords):,} stops with coords")
 
     print(f"Identifying excluded agencies (tokens: {excluded_tokens})…")
@@ -391,8 +444,12 @@ def main() -> None:
     n_agencies = write_filtered_agency(kept_agency_ids)
     print(f"  {n_agencies:,} agencies")
 
+    print(f"Writing filtered stops.txt …")
+    n_overridden = write_filtered_stops(stop_overrides)
+    print(f"  {n_overridden:,} stop rows overridden")
+
     print(f"Copying remaining GTFS files…")
-    for name in ("stops.txt", "calendar.txt", "calendar_dates.txt",
+    for name in ("calendar.txt", "calendar_dates.txt",
                  "feed_info.txt", "frequencies.txt"):
         copy_verbatim(name)
 

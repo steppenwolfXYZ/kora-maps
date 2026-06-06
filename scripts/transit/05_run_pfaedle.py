@@ -64,9 +64,20 @@ def main() -> None:
         "-D",                                       # drop existing shapes
         "-x", f"/work/{relpath(OSM_PBF)}",
         "-m", modes_str,
+    ]
+
+    spf = cfg.get("station_move_penalty_fac")
+    if spf is not None:
+        # The override must be scoped to a mode section — without one, pfaedle
+        # parses the value but never applies it during routing. [bus] is the
+        # section that hosts the default routing_station_move_penalty_fac in
+        # pfaedle.cfg, so a plain key under [bus] replaces it.
+        cmd.extend(["-P", f"[bus]\nrouting_station_move_penalty_fac: {spf}"])
+
+    cmd.extend([
         "--inplace",
         f"/work/{relpath(GTFS_OUT)}",
-    ]
+    ])
 
     print("Running pfaedle:")
     print("  $", " ".join(cmd))
