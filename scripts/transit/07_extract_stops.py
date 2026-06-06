@@ -578,8 +578,9 @@ CENTRAL_INNER_FRACTION = 0.7
 
 
 def _perpendicular_sweep(group, angle_tol_rad):
-    """For a tangent group, find the best perpendicular bar by sweeping
-    along the central member's platform extent at SWEEP_STEP_M resolution.
+    """For a tangent group, find every perpendicular bar tied at the max
+    scoring-stab count by sweeping along the central member's platform
+    extent at SWEEP_STEP_M resolution.
 
     The sweep walks the central member's extent (the same per-stop polyline
     drawn as the debug overlay) — not the full line polyline. This keeps
@@ -590,14 +591,12 @@ def _perpendicular_sweep(group, angle_tol_rad):
     from central-member selection so an off-to-the-side member can't drag
     the sweep away. Excluded members still count for stab scoring.
 
-    Returns (tx, ty, sigma, scoring_local, covered_local) or None.
-      • scoring_local — indices of members whose own tangent is within
-        angle_tol_rad (mod π) of the bar AND whose extent crosses it.
-        They drive both selection and the bar's drawn perpendicular span.
-      • covered_local — wrong-angle members whose extent crosses the bar
-        AND whose crossing point falls within the bar's drawn span (between
-        scoring dots). They are placed on the bar but had no influence on
-        which sweep position or how long the bar is.
+    Returns a non-empty list of option dicts, or None when no sweep position
+    scoring-stabs ≥ 2 members. Each option carries the bar geometry, the
+    scoring/covered member sets, the bar's perpendicular center (used by the
+    multi-group inter-bar-distance tie-break), and the gtfs-distance score
+    (used as final tie-break — sum of placed-dot to GTFS-snap distance in
+    scaled-coord units).
     """
     n = len(group)
     if n < 2:
@@ -631,7 +630,10 @@ def _perpendicular_sweep(group, angle_tol_rad):
         st = _stop_tangent(p)
         member_angles.append(atan2(st[1], st[0]) if st is not None else None)
 
-    best = None  # (count, tx, ty, sigma, scoring_local)
+    # First pass: find the max scoring-stab count and collect every (tx, ty,
+    # sigma, scoring) tied at that count.
+    best_count = 0
+    raw_tied = []  # list of (tx, ty, sigma, scoring_local)
     for arc_d in candidate_arcs:
         pos = _interp_at(central_ext, central_dists, arc_d)
         tan = _smoothed_tangent_at(central_ext, central_dists, arc_d, 40.0)
@@ -653,40 +655,158 @@ def _perpendicular_sweep(group, angle_tol_rad):
                 scoring.append(k)
         if len(scoring) < 2:
             continue
-        if best is None or len(scoring) > best[0]:
-            best = (len(scoring), tx, ty, sigma, scoring)
-    if best is None:
+        if len(scoring) > best_count:
+            best_count = len(scoring)
+            raw_tied = [(tx, ty, sigma, scoring)]
+        elif len(scoring) == best_count:
+            raw_tied.append((tx, ty, sigma, scoring))
+    if not raw_tied:
         return None
-    _, tx, ty, sigma, scoring = best
 
-    # Bar's drawn perpendicular span = min/max of scoring-stabbed dot
-    # perpendicular coords (no margin — that's just for the debug overlay).
+    # Second pass: enrich each tied position with covered set + bar center
+    # + gtfs-distance score.
+    options = []
+    for tx, ty, sigma, scoring in raw_tied:
+        nx, ny = -ty, tx
+        scoring_pts = [
+            _place_dot_on_extent(group[k]["extent"], tx, ty, sigma)
+            for k in scoring
+        ]
+        scoring_n = [pt[0] * nx + pt[1] * ny for pt in scoring_pts]
+        n_min, n_max = min(scoring_n), max(scoring_n)
+        bar_cx = sum(pt[0] for pt in scoring_pts) / len(scoring_pts)
+        bar_cy = sum(pt[1] for pt in scoring_pts) / len(scoring_pts)
+
+        scoring_set = set(scoring)
+        covered = []
+        covered_pts = []
+        for k, p in enumerate(group):
+            if k in scoring_set:
+                continue
+            ext = p["extent"]
+            ts = [v[0] * tx + v[1] * ty for v in ext]
+            if not (min(ts) <= sigma <= max(ts)):
+                continue
+            cross_pt = _extent_intersect_axis(ext, tx, ty, sigma)
+            if cross_pt is None:
+                continue
+            n_val = cross_pt[0] * nx + cross_pt[1] * ny
+            if n_min <= n_val <= n_max:
+                covered.append(k)
+                covered_pts.append(cross_pt)
+
+        gtfs_dist = 0.0
+        for k, pt in zip(scoring, scoring_pts):
+            p = group[k]
+            gtfs_dist += sqrt((pt[0] - p["lon"]) ** 2
+                              + (pt[1] - p["lat"]) ** 2)
+        for k, pt in zip(covered, covered_pts):
+            p = group[k]
+            gtfs_dist += sqrt((pt[0] - p["lon"]) ** 2
+                              + (pt[1] - p["lat"]) ** 2)
+
+        options.append({
+            "tx": tx, "ty": ty, "sigma": sigma,
+            "scoring": scoring,
+            "covered": covered,
+            "bar_center": (bar_cx, bar_cy),
+            "gtfs_dist": gtfs_dist,
+        })
+
+    return options
+
+
+def _apply_option(group, option, placed_ids, record_stabbed=True):
+    """Place this option's scoring + covered dots on their extents. When
+    `record_stabbed` is False (e.g. trial placements during single-group
+    measurement), the (osm_id, stop_id) pairs are NOT pushed to
+    _STABBED_PAIRS — that's reserved for the chosen option's final pass."""
+    tx, ty, sigma = option["tx"], option["ty"], option["sigma"]
+    for k in option["scoring"]:
+        p = group[k]
+        pt = _place_dot_on_extent(p["extent"], tx, ty, sigma)
+        p["lon"], p["lat"] = pt
+        placed_ids.add(id(p))
+        if record_stabbed:
+            _STABBED_PAIRS.add((str(p.get("osm_id", "")),
+                                str(p.get("stop_id", ""))))
+    for k in option["covered"]:
+        p = group[k]
+        pt = _extent_intersect_axis(p["extent"], tx, ty, sigma)
+        if pt is None:
+            continue
+        p["lon"], p["lat"] = pt
+        placed_ids.add(id(p))
+        if record_stabbed:
+            _STABBED_PAIRS.add((str(p.get("osm_id", "")),
+                                str(p.get("stop_id", ""))))
+
+
+def _record_diag_bar(group, option):
+    """Append this option's perpendicular debug-bar geometry to _DIAG_BARS."""
+    tx, ty, sigma = option["tx"], option["ty"], option["sigma"]
     nx, ny = -ty, tx
-    scoring_n = []
-    for k in scoring:
-        pt = _place_dot_on_extent(group[k]["extent"], tx, ty, sigma)
-        scoring_n.append(pt[0] * nx + pt[1] * ny)
-    n_min, n_max = min(scoring_n), max(scoring_n)
+    n_values = [group[k]["lon"] * nx + group[k]["lat"] * ny
+                for k in option["scoring"]]
+    if len(n_values) < 2:
+        return
+    n_min, n_max = min(n_values), max(n_values)
+    margin = (n_max - n_min) * 0.05 + 1e-6
+    n_min -= margin
+    n_max += margin
+    ep1 = (sigma * tx + n_min * nx, sigma * ty + n_min * ny)
+    ep2 = (sigma * tx + n_max * nx, sigma * ty + n_max * ny)
+    _DIAG_BARS.append((ep1, ep2))
 
-    # Covered = wrong-angle members whose extent crosses σ AND whose crossing
-    # point's perpendicular coord lies within [n_min, n_max].
-    scoring_set = set(scoring)
-    covered = []
-    for k, p in enumerate(group):
-        if k in scoring_set:
-            continue
-        ext = p["extent"]
-        ts = [v[0] * tx + v[1] * ty for v in ext]
-        if not (min(ts) <= sigma <= max(ts)):
-            continue
-        cross_pt = _extent_intersect_axis(ext, tx, ty, sigma)
-        if cross_pt is None:
-            continue
-        n_val = cross_pt[0] * nx + cross_pt[1] * ny
-        if n_min <= n_val <= n_max:
-            covered.append(k)
 
-    return tx, ty, sigma, scoring, covered
+def _pick_options_multi_group(per_group_options):
+    """Pick one option per group minimising the sum of pairwise distances
+    between groups' bar centers. Tie-break by total gtfs_dist across groups.
+    """
+    from itertools import product
+    best = None
+    best_key = None
+    for combo in product(*(opts for _, opts in per_group_options)):
+        total_dist = 0.0
+        m = len(combo)
+        for i in range(m):
+            bx, by = combo[i]["bar_center"]
+            for j in range(i + 1, m):
+                jx, jy = combo[j]["bar_center"]
+                total_dist += sqrt((bx - jx) ** 2 + (by - jy) ** 2)
+        gtfs_total = sum(o["gtfs_dist"] for o in combo)
+        key = (total_dist, gtfs_total)
+        if best_key is None or key < best_key:
+            best_key = key
+            best = combo
+    return list(best) if best else []
+
+
+def _pick_option_single_group_with_leftovers(group, options, cluster,
+                                              platforms, raw, radius_km):
+    """For each tied option: place its dots, run leftover baseline, measure
+    pill+0.5×connector length, pick shortest. Tie-break by gtfs_dist. Cluster
+    positions are reset to raw before returning so the outer caller can
+    apply the chosen option cleanly."""
+    best = None
+    best_key = None
+    for option in options:
+        for s in cluster:
+            s["lon"], s["lat"] = raw[id(s)]
+        placed_ids = set()
+        _apply_option(group, option, placed_ids, record_stabbed=False)
+        leftovers = [p for p in platforms if id(p) not in placed_ids]
+        if len(leftovers) >= 2:
+            _apply_baseline_algorithm(leftovers, radius_km,
+                                      anchor_set=platforms)
+        length = _measure_pill_geometry(cluster)
+        key = (length, option["gtfs_dist"])
+        if best_key is None or key < best_key:
+            best_key = key
+            best = option
+    for s in cluster:
+        s["lon"], s["lat"] = raw[id(s)]
+    return best
 
 
 def _measure_pill_geometry(cluster_stops):
@@ -719,13 +839,12 @@ def _measure_pill_geometry(cluster_stops):
         prev = idx + 1
     groups.append(path[prev:])
 
-    # Match make_pill_features: singleton groups are dropped, not drawn.
-    groups = [g for g in groups if len(g) >= 2]
-    if not groups:
-        return 0.0
-
+    # Singleton groups contribute no pill length, but stay in `groups` so
+    # the MST below mirrors make_pill_features (connector endpoints).
     pill_length = 0.0
     for grp in groups:
+        if len(grp) < 2:
+            continue
         for k in range(len(grp) - 1):
             pill_length += haversine_km(grp[k][0], grp[k][1],
                                          grp[k + 1][0], grp[k + 1][1])
@@ -999,59 +1118,52 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
         angle_tol = radians(10.0)
         groups = _tangent_groups(platforms, angle_tol)
 
-        # For each group, find a perpendicular bar via central-extent sweep.
-        # Track all platforms placed on a bar; the rest go through baseline.
-        placed_ids = set()
+        # For each group, collect every tied max-scoring-stab bar position.
+        per_group_options = []  # list of (group, [option, ...])
         for group in groups:
             if len(group) < 2:
                 continue
-            result = _perpendicular_sweep(group, angle_tol)
-            if result is None:
-                continue
-            tx, ty, sigma, scoring_local, covered_local = result
-            if len(scoring_local) < 2:
-                continue
+            options = _perpendicular_sweep(group, angle_tol)
+            if options:
+                per_group_options.append((group, options))
 
-            # Place scoring-stabbed dots on σ-line. These drive the bar's
-            # drawn span.
-            for k in scoring_local:
-                p = group[k]
-                pt = _place_dot_on_extent(p["extent"], tx, ty, sigma)
-                p["lon"], p["lat"] = pt
-                placed_ids.add(id(p))
-                _STABBED_PAIRS.add((str(p.get("osm_id", "")),
-                                    str(p.get("stop_id", ""))))
+        # Pick one option per group — see pill-rendering.md "Tie-breaking
+        # among equally-stabbing sweep positions":
+        #   • Multi-group: minimise sum of pairwise bar-center distances.
+        #     Tie-break by total gtfs_dist.
+        #   • Single-group with leftovers: enumerate options, run leftover
+        #     baseline per option, pick minimum pill+0.5×connector length.
+        #     Tie-break by gtfs_dist.
+        #   • Single-group without leftovers: pick minimum gtfs_dist.
+        chosen = []
+        if len(per_group_options) >= 2:
+            chosen = _pick_options_multi_group(per_group_options)
+        elif len(per_group_options) == 1:
+            group, options = per_group_options[0]
+            # A platform that's in some option's scoring or covered set will
+            # be placed by the bar regardless of which tied option wins;
+            # only platforms placed by no option fall to the leftover baseline.
+            potentially_placed = {
+                id(group[k]) for opt in options
+                for k in opt["scoring"] + opt["covered"]
+            }
+            leftover_count = sum(1 for p in platforms
+                                  if id(p) not in potentially_placed)
+            if leftover_count >= 2 and len(options) > 1:
+                chosen = [_pick_option_single_group_with_leftovers(
+                    group, options, cluster, platforms, raw, radius_km)]
+            else:
+                chosen = [min(options, key=lambda o: o["gtfs_dist"])]
 
-            # Place wrong-angle covered dots at the σ-line crossing of their
-            # extent — between two scoring dots they get absorbed into the
-            # bar rather than fall through to the leftover baseline pass.
-            for k in covered_local:
-                p = group[k]
-                pt = _extent_intersect_axis(p["extent"], tx, ty, sigma)
-                if pt is None:
-                    continue
-                p["lon"], p["lat"] = pt
-                placed_ids.add(id(p))
-                _STABBED_PAIRS.add((str(p.get("osm_id", "")),
-                                    str(p.get("stop_id", ""))))
-
-            # Debug bar geometry (perpendicular to t, spanning scoring dots
-            # plus a small margin on each side).
-            nx, ny = -ty, tx
-            n_values = [group[k]["lon"] * nx + group[k]["lat"] * ny
-                        for k in scoring_local]
-            if len(n_values) >= 2:
-                n_min, n_max = min(n_values), max(n_values)
-                margin = (n_max - n_min) * 0.05 + 1e-6
-                n_min -= margin
-                n_max += margin
-                ep1 = (sigma * tx + n_min * nx, sigma * ty + n_min * ny)
-                ep2 = (sigma * tx + n_max * nx, sigma * ty + n_max * ny)
-                _DIAG_BARS.append((ep1, ep2))
+        # Apply chosen options (record _STABBED_PAIRS + diag bar geometry).
+        placed_ids = set()
+        for (group, _), option in zip(per_group_options, chosen):
+            _apply_option(group, option, placed_ids, record_stabbed=True)
+            _record_diag_bar(group, option)
 
         # Leftovers: every platform NOT placed on a bar.
         leftovers = [p for p in platforms if id(p) not in placed_ids]
-        if len(leftovers) >= 2:
+        if leftovers:
             _apply_baseline_algorithm(leftovers, radius_km, anchor_set=platforms)
 
         candidate_a_length = _measure_pill_geometry(cluster)
@@ -1488,6 +1600,14 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
             "properties": {**stop_props, "feature_type": feature_type},
         }
 
+    def make_endpoint(pos):
+        return {
+            "type": "Feature",
+            "tippecanoe": {"minzoom": minzoom},
+            "geometry": {"type": "Point", "coordinates": list(pos)},
+            "properties": {**stop_props, "feature_type": "endpoint"},
+        }
+
     # Find all gaps above threshold — each is a split point between groups
     split_indices = [
         k for k in range(len(path) - 1)
@@ -1505,16 +1625,16 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
         prev = idx + 1
     groups.append(path[prev:])
 
-    # Drop single-point groups entirely — those dots are not pills and will
-    # be rendered by the regular per-stop circle layer instead. MST below
-    # then connects only multi-dot groups.
-    groups = [g for g in groups if len(g) >= 2]
-    if not groups:
-        return []
-    if len(groups) == 1:
-        return [make_feat(groups[0], "pill")]
-
-    feats = [make_feat(grp, "pill") for grp in groups]
+    # Singleton groups can't render as pill LineStrings, but they get an
+    # endpoint circle so the connector's white casing is hidden under a
+    # colored disc (drawn between connector-casing and connector-fill in
+    # the style layer stack). Singletons still participate in the MST.
+    feats = []
+    for grp in groups:
+        if len(grp) >= 2:
+            feats.append(make_feat(grp, "pill"))
+        else:
+            feats.append(make_endpoint(grp[0]))
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.
