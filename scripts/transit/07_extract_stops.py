@@ -578,6 +578,61 @@ def _tangent_groups(platforms, max_angle_rad):
 
 SWEEP_STEP_M = 10.0
 CENTRAL_INNER_FRACTION = 0.7
+SIGMA_CLUMP_SLACK_M = 5.0
+
+
+def _sigma_clumps(group, slack_m=SIGMA_CLUMP_SLACK_M):
+    """Split a tangent group into σ-clumps along the group's mean tangent.
+
+    The perpendicular sweep walks only the central member's extent, so a
+    tangent group spread across hundreds of metres of the same line — common
+    at large stations where multiple stop bays sit along one street — gets
+    only one bar near whichever sub-cluster contains the 2-D centroid; the
+    far-away sub-cluster is unreachable. Splitting by σ-interval overlap
+    along the group's mean tangent yields one sweep per clump.
+
+    Two members belong to the same clump iff their σ-intervals overlap
+    within `slack_m`. The slack absorbs the small mismatch between the
+    group's mean tangent (used here) and each member's own tangent (used in
+    `_perpendicular_sweep`'s sigma calc): 10° angular tolerance can shift a
+    30 m extent's σ endpoints by a couple of metres.
+    """
+    if len(group) < 2:
+        return [list(group)]
+    mean_tan = _mean_unit_tangent(group)
+    if mean_tan is None:
+        return [list(group)]
+    tx, ty = mean_tan
+
+    intervals = []
+    for p in group:
+        ext = p.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        sigmas = [v[0] * tx + v[1] * ty for v in ext]
+        intervals.append((min(sigmas), max(sigmas), p))
+    if not intervals:
+        return []
+
+    # Inside coordinate_dots_global_stab the cluster runs in scaled coords
+    # (lon × cos_lat), so 1° on either axis ≈ 111000 m.
+    slack = slack_m / 111000.0
+
+    intervals.sort(key=lambda iv: iv[0])
+    clumps = []
+    current = [intervals[0][2]]
+    current_hi = intervals[0][1]
+    for lo, hi, p in intervals[1:]:
+        if lo <= current_hi + slack:
+            current.append(p)
+            if hi > current_hi:
+                current_hi = hi
+        else:
+            clumps.append(current)
+            current = [p]
+            current_hi = hi
+    clumps.append(current)
+    return clumps
 
 
 def _perpendicular_sweep(group, angle_tol_rad):
@@ -1273,18 +1328,26 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
         for s in cluster:
             s["lon"], s["lat"] = raw[id(s)]
 
-        # Tangent groups (union-find, 10° angular tolerance mod π).
+        # Tangent groups (union-find, 10° angular tolerance mod π), then
+        # σ-clump each tangent group along its mean tangent so multi-clump
+        # groups (opposite ends of a long station) get a sweep per clump
+        # rather than one stuck near whichever clump contains the 2-D
+        # centroid.
         angle_tol = radians(10.0)
         groups = _tangent_groups(platforms, angle_tol)
 
-        # For each group, collect every tied max-scoring-stab bar position.
-        per_group_options = []  # list of (group, [option, ...])
+        # For each σ-clump of ≥ 2 members, collect every tied max-scoring-
+        # stab bar position.
+        per_group_options = []  # list of (clump, [option, ...])
         for group in groups:
             if len(group) < 2:
                 continue
-            options = _perpendicular_sweep(group, angle_tol)
-            if options:
-                per_group_options.append((group, options))
+            for clump in _sigma_clumps(group):
+                if len(clump) < 2:
+                    continue
+                options = _perpendicular_sweep(clump, angle_tol)
+                if options:
+                    per_group_options.append((clump, options))
 
         # Pick one option per group — see pill-rendering.md "Tie-breaking
         # among equally-stabbing sweep positions":
