@@ -182,6 +182,13 @@ labels:
   street_min_zoom: 15
   poi_min_zoom: 16
 
+# ── Transit ──────────────────────────────────────────────────────────────────
+transit:
+  # Debug overlay (pill-rendering concept): thin black platform-extent lines,
+  # clickable GTFS-coord dots, and thick white max-stab bars. Development-time
+  # visual aids — flip to false for production-style rendering.
+  debug_overlay: true
+
 # ── Borders ──────────────────────────────────────────────────────────────────
 borders:
   country_color: "#888888"

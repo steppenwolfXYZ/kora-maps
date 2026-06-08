@@ -85,9 +85,9 @@
 			const fmt = (v: unknown) => v == null ? '–' : String(v);
 
 			// Debug stop dot takes highest priority — these are the data probe.
-			const debugStopFeatures = map.queryRenderedFeatures(e.point, {
-				layers: [DEBUG_STOP_LAYER]
-			});
+			const debugStopFeatures = map.getLayer(DEBUG_STOP_LAYER)
+				? map.queryRenderedFeatures(e.point, { layers: [DEBUG_STOP_LAYER] })
+				: [];
 			if (debugStopFeatures.length) {
 				const p = debugStopFeatures[0].properties as Record<string, unknown>;
 				const lengthVal = typeof p.platform_length === 'number'

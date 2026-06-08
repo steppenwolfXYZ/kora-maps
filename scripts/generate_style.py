@@ -1004,7 +1004,7 @@ def build_transit_layers() -> list:
     return layers
 
 
-def build_station_layers() -> list:
+def build_station_layers(cfg) -> list:
     """
     Stop dots per mode group, each appearing at the same zoom as its line.
     Rail stations: larger, deduplicated, visible from zoom 5.
@@ -1202,6 +1202,9 @@ def build_station_layers() -> list:
         }
     })
 
+    if not cfg.get("transit", {}).get("debug_overlay", False):
+        return layers
+
     # Debug overlay (pill-rendering concept): thin black line tracing each
     # platform's full allowed range along the line's polyline. Replaces the
     # previous debug-dot. Per-mode minzooms are baked into the features via
@@ -1306,18 +1309,6 @@ def generate_style(cfg) -> dict:
                 "type": "vector",
                 "url": "pmtiles:///tl_stop_pills.pmtiles"
             },
-            "transit_debug_platforms": {
-                "type": "vector",
-                "url": "pmtiles:///tl_debug_platforms.pmtiles"
-            },
-            "transit_debug_stops": {
-                "type": "vector",
-                "url": "pmtiles:///tl_debug_stops.pmtiles"
-            },
-            "transit_debug_bars": {
-                "type": "vector",
-                "url": "pmtiles:///tl_debug_bars.pmtiles"
-            }
         },
         "glyphs": g["glyphs"],
         "center": g["center"],
@@ -1327,6 +1318,20 @@ def generate_style(cfg) -> dict:
 
     if g.get("sprite"):
         style["sprite"] = g["sprite"]
+
+    if cfg.get("transit", {}).get("debug_overlay", False):
+        style["sources"]["transit_debug_platforms"] = {
+            "type": "vector",
+            "url": "pmtiles:///tl_debug_platforms.pmtiles"
+        }
+        style["sources"]["transit_debug_stops"] = {
+            "type": "vector",
+            "url": "pmtiles:///tl_debug_stops.pmtiles"
+        }
+        style["sources"]["transit_debug_bars"] = {
+            "type": "vector",
+            "url": "pmtiles:///tl_debug_bars.pmtiles"
+        }
 
     style["layers"].append(build_background_layer(cfg))
     style["layers"].extend(build_landuse_layers(cfg))
@@ -1340,7 +1345,7 @@ def generate_style(cfg) -> dict:
     style["layers"].extend(build_road_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_path_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_transit_layers())
-    style["layers"].extend(build_station_layers())
+    style["layers"].extend(build_station_layers(cfg))
     style["layers"].extend(build_border_layers(cfg))
     style["layers"].extend(build_label_layers(cfg))
 

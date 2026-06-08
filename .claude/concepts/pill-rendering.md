@@ -119,9 +119,7 @@ Three debug elements render on top of the production style, filtered to the mode
 - A **clickable circle** at the snapped GTFS coordinate. Filled black if that `(line, stop)` was placed on a perpendicular bar by Candidate A; hollow (white fill, black outline) otherwise. Clicking opens a popup with the stop name, mode, atlas platform length (or `– (default)` when atlas had none), and mode-coloured badges for each line stopping there. Hovering a badge shows the line's `origin → destination` as a tooltip. The badge for the specific `(line, direction)` whose polyline produced the clicked dot is outlined with a black-on-white ring, so that when multiple dots overlap the same stop (e.g. both directions of a terminus) the user can tell which one is selected.
 - A **thick white line** drawn over each perpendicular bar produced by Candidate A — spans the perpendicular extent of the bar's stabbed dots plus a small margin.
 
-These are development-time visual aids only; not part of the medium-zoom production style.
-
-**To remove before production:** the thick-white bar layer, the `stabbed` property + case-expression fill on debug stop dots, the `_STABBED_PAIRS` / `_DIAG_BARS` module-level state, and the `tl_debug_bars.pmtiles` source / layer / build step. The per-cluster console-log diag block has already been removed.
+These are development-time visual aids only; not part of the medium-zoom production style. Gated by `transit.debug_overlay` in `scripts/config.yaml` so they can be flipped off without code changes — the overlay may survive past first install for in-the-wild diagnosis, but the whole thing (layers, debug sources, the `stabbed` property + case-expression fill, the `_STABBED_PAIRS` / `_DIAG_BARS` module-level state, the `tl_debug_*.pmtiles` build steps, and the `transit.debug_overlay` flag itself) is still to be removed before production.
 
 ## Open work
 
