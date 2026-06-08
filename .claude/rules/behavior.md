@@ -26,6 +26,9 @@ If you disagree with the user, say so directly at the top of the reply. Don't op
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
+## Python invocation
+This machine's Python 3 binary is `python3`. `python` is not on PATH and will fail with `command not found`. Use `python3` for any one-off invocation (parse-checks, ad-hoc scripts, REPL).
+
 ## Rebuild command
 After any transit pipeline change, suggest `./scripts/rebuild_transit.sh --start N` where N is the lowest step whose inputs you actually changed (see the step list in `.claude/rules/transit.md`). Each step's output is the next step's input, so `--start N` runs steps N..8 contiguously — starting lower than needed just wastes time, especially on pfaedle. Never suggest running individual Python scripts.
 

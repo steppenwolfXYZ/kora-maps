@@ -108,6 +108,8 @@ PILL_GAP_STRAIGHT_M = 50   # gap threshold when the NN-path continues dead
 PILL_GAP_ANGLED_M = 8      # gap threshold otherwise (gap is an angled /
                            # T-junction connector).
 
+PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
+
 
 # =============================================================================
 # GTFS stop metadata
@@ -331,6 +333,120 @@ def _slice_polyline(coords, dists, t_start, t_end):
     return pts
 
 
+def _directional_tangent_at(polyline, dists, t, window_m=20.0):
+    """Per-metre (dx, dy) tangent of `polyline` at arc-length `t`, directional
+    (forward in increasing-t direction). Chord computed over a ±window_m window
+    around t — so pfaedle "stub" segments at line termini that carry normal-sized
+    lon/lat deltas across sub-metre arc-lengths don't blow up the per-metre rate.
+    Returns None if the polyline is too short to compute a chord.
+    """
+    if len(polyline) < 2:
+        return None
+    poly_max = dists[-1]
+    if poly_max <= 0:
+        return None
+    lo_t = max(0.0, t - window_m)
+    hi_t = min(poly_max, t + window_m)
+    arc = hi_t - lo_t
+    if arc <= 0:
+        return None
+    lo = _interp_at(polyline, dists, lo_t)
+    hi = _interp_at(polyline, dists, hi_t)
+    return ((hi[0] - lo[0]) / arc, (hi[1] - lo[1]) / arc)
+
+
+# Missing-range fill (tram/bus/regional_bus): sibling-borrow gates.
+SIBLING_PROXIMITY_M = 2.0
+SIBLING_ANGLE_TOL_RAD = radians(15.0)
+
+
+def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
+                              my_dx, my_dy, t_on_self, L,
+                              siblings, self_oid):
+    """Try to borrow the missing `L - t_on_self` metres of backward extent from
+    a sibling line's polyline. Returns a list of (lon, lat) in backward→forward
+    order ending at (target_lon, target_lat), translated so the join with the
+    on-polyline portion is exact. Returns None if no sibling qualifies.
+
+    Gates per concept (pill-rendering, missing-range fill):
+      • ~2 m proximity at the snapped GTFS coord p (rejects parallel-street siblings)
+      • ~15° tangent agreement at the sibling's nearest point (rejects diverging
+        siblings — e.g. tram turning loops at termini)
+      • aligned vs reversed direction: handled via the tangent dot product, with
+        the sibling walk reversed to keep our backward direction consistent.
+
+    Circular lines are their own sibling (self_oid == sib_oid): the projection
+    starts from the polyline's far end so a loop's "return to start" geometry
+    fills its own first stop's backward extent.
+    """
+    if L <= t_on_self:
+        return None
+    fill_m = L - t_on_self
+
+    cos_lat = cos(radians(p_lat))
+    my_ex, my_ey = my_dx * cos_lat, my_dy
+    my_mag = sqrt(my_ex * my_ex + my_ey * my_ey)
+    if my_mag == 0:
+        return None
+    cos_tol = cos(SIBLING_ANGLE_TOL_RAD)
+
+    for sib_oid, sib_poly in siblings:
+        if len(sib_poly) < 2:
+            continue
+        sib_dists = _cum_dist_m(sib_poly)
+        sib_total = sib_dists[-1]
+        if sib_total <= 0:
+            continue
+
+        if sib_oid == self_oid:
+            q_t = sib_total
+            q_lon, q_lat = sib_poly[-1]
+        else:
+            q_t = _project_meters(p_lon, p_lat, sib_poly, sib_dists)
+            q_lon, q_lat = _interp_at(sib_poly, sib_dists, q_t)
+
+        if haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0 > SIBLING_PROXIMITY_M:
+            continue
+
+        sib_tan = _directional_tangent_at(sib_poly, sib_dists, q_t)
+        if sib_tan is None:
+            continue
+        sib_dx, sib_dy = sib_tan
+        sib_ex, sib_ey = sib_dx * cos_lat, sib_dy
+        sib_mag = sqrt(sib_ex * sib_ex + sib_ey * sib_ey)
+        if sib_mag == 0:
+            continue
+
+        cos_ang = (my_ex * sib_ex + my_ey * sib_ey) / (my_mag * sib_mag)
+        if abs(cos_ang) < cos_tol:
+            continue
+        aligned = cos_ang > 0
+
+        if aligned:
+            walk_end_t = q_t - t_on_self
+            walk_start_t = walk_end_t - fill_m
+            if walk_start_t < 0:
+                continue
+            seg = list(_slice_polyline(sib_poly, sib_dists, walk_start_t, walk_end_t))
+        else:
+            walk_start_t = q_t + t_on_self
+            walk_end_t = walk_start_t + fill_m
+            if walk_end_t > sib_total:
+                continue
+            seg = list(_slice_polyline(sib_poly, sib_dists, walk_start_t, walk_end_t))
+            seg.reverse()
+
+        if len(seg) < 2:
+            continue
+
+        end_lon, end_lat = seg[-1]
+        dlon = target_lon - end_lon
+        dlat = target_lat - end_lat
+        return [(x + dlon, y + dlat) for x, y in seg]
+
+    return None
+
+
 def _resolve_length(mode: str, atlas_length, cfg: dict):
     """Pick the platform length to use for a given mode and atlas value.
 
@@ -347,7 +463,8 @@ def _resolve_length(mode: str, atlas_length, cfg: dict):
     return cfg["default_length_m"][mode]
 
 
-def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
+def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
+                      osm_id=None, siblings=None):
     """Return the (lon, lat) sequence tracing the platform's allowed range
     along its polyline, or None for out-of-scope modes / degenerate geometry.
 
@@ -356,13 +473,11 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
                         → range = ±L/2.
       • tram, bus     — GTFS coord is FRONT of stop → range = [coord - L, coord].
 
-    For rail: the snapped GTFS coord is always at the centre of the extent.
-    When the polyline doesn't extend the full ±L/2 around it (e.g. a
-    terminating-track polyline that ends at the buffer), the missing length
-    on the clipped side is added as a straight-line extrapolation using the
-    polyline's tangent at the snapped GTFS position. The on-polyline portion
-    plus the extrapolated portion(s) together always total L metres, with
-    the GTFS coord at the geometric centre.
+    Missing-range fill differs by mode:
+      • rail (train, metro): straight-line tangent-direction extrapolation only.
+      • tram / bus / regional_bus: sibling-borrow first (passes through `siblings`
+        as a list of (osm_id, polyline) tuples in the same `(ref, agency_id, mode)`
+        group), straight-line tangent extrapolation as fallback.
     """
     if len(polyline) < 2:
         return None
@@ -376,8 +491,40 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
     t = _project_meters(stop_lon, stop_lat, polyline, dists)
 
     if mode not in ("train", "metro"):
-        t_start, t_end = t - L, t
-        return _slice_polyline(polyline, dists, t_start, t_end)
+        # Tram / bus / regional_bus: backward-anchored range [t-L, t].
+        if t >= L:
+            # Polyline supports the full backward range — slice and return.
+            return list(_slice_polyline(polyline, dists, t - L, t))
+
+        # On-polyline portion: polyline start to snapped point (length t).
+        on_slice = list(_slice_polyline(polyline, dists, 0.0, t))
+        if len(on_slice) >= 2 and on_slice[0] == on_slice[-1]:
+            on_slice = [on_slice[0]]
+
+        tan = _directional_tangent_at(polyline, dists, t)
+        if tan is None:
+            return on_slice  # no usable tangent → can't fill
+        dx_per_m, dy_per_m = tan
+
+        p = _interp_at(polyline, dists, t)
+        target = on_slice[0] if on_slice else (polyline[0][0], polyline[0][1])
+
+        if siblings:
+            borrowed = _borrow_backward_segment(
+                p[0], p[1], target[0], target[1],
+                dx_per_m, dy_per_m, t, L, siblings, osm_id)
+            if borrowed is not None:
+                if len(on_slice) <= 1:
+                    return borrowed
+                return borrowed[:-1] + on_slice
+
+        # Straight-line tangent extrapolation backward.
+        missing_m = L - t
+        extrap = (target[0] - dx_per_m * missing_m,
+                  target[1] - dy_per_m * missing_m)
+        if not on_slice:
+            return [extrap, (p[0], p[1])]
+        return [extrap] + on_slice
 
     half_L = L / 2.0
     t_start_ideal = t - half_L
@@ -387,22 +534,10 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg):
     on_end = min(poly_max, t_end_ideal)
     slice_pts = list(_slice_polyline(polyline, dists, on_start, on_end))
 
-    # Polyline tangent at the snapped GTFS position, expressed as a
-    # per-metre (lon, lat) rate. Computed from a chord over a ±20 m window
-    # around t rather than the single segment containing t, so pfaedle
-    # "stub" segments (sub-metre joining segments at line termini that
-    # carry normal-sized lon/lat deltas) don't blow up the per-metre ratio
-    # and fling the extrapolated endpoint hundreds of km away.
-    chord_lo_t = max(0.0, t - 20.0)
-    chord_hi_t = min(poly_max, t + 20.0)
-    chord_arc = chord_hi_t - chord_lo_t
-    if chord_arc <= 0:
+    tan = _directional_tangent_at(polyline, dists, t)
+    if tan is None:
         return slice_pts
-
-    lo = _interp_at(polyline, dists, chord_lo_t)
-    hi = _interp_at(polyline, dists, chord_hi_t)
-    dx_per_m = (hi[0] - lo[0]) / chord_arc
-    dy_per_m = (hi[1] - lo[1]) / chord_arc
+    dx_per_m, dy_per_m = tan
 
     pts = []
     if t_start_ideal < 0 and slice_pts:
@@ -580,6 +715,15 @@ def _tangent_groups(platforms, max_angle_rad):
 SWEEP_STEP_M = 10.0
 CENTRAL_INNER_FRACTION = 0.7
 SIGMA_CLUMP_SLACK_M = 5.0
+# Tolerance on the σ-projection scoring check. A member whose σ-range boundary
+# coincides with the sweep position can drop out by float-precision noise; this
+# slack keeps it in scoring. Sized larger than pure float noise so it also
+# absorbs minor pfaedle-routing jitter on the polyline tangent.
+SIGMA_BOUNDARY_TOL_M = 0.5
+# Minimum drawn span (perpendicular extent of scoring dots along the bar's
+# transverse axis) for a bar to be kept. Below this the "bar" reads as a dot,
+# not a bar — its would-be stabbed members fall through to leftover-fill.
+DEGENERATE_BAR_MIN_SPAN_M = 1.0
 PROTECTION_RADIUS_RAIL_M = 30.0
 PROTECTION_RADIUS_NONRAIL_M = 10.0
 
@@ -752,6 +896,10 @@ def _perpendicular_sweep(group, angle_tol_rad):
     # bar's drawn span are real placements and contribute. The bar's drawn
     # span is still determined by scoring members only (no extension for
     # wrong-angle members).
+    gap_thresh = PILL_GAP_STRAIGHT_M / 111000.0
+    dedup_tol = DEDUP_TOL_M / 111000.0
+    sigma_tol = SIGMA_BOUNDARY_TOL_M / 111000.0
+    min_span = DEGENERATE_BAR_MIN_SPAN_M / 111000.0
     best_count = 0
     raw_tied = []
     for arc_d in candidate_arcs:
@@ -774,7 +922,7 @@ def _perpendicular_sweep(group, angle_tol_rad):
                 continue
             ext = p["extent"]
             ts = [v[0] * tx + v[1] * ty for v in ext]
-            if min(ts) <= sigma <= max(ts):
+            if min(ts) - sigma_tol <= sigma <= max(ts) + sigma_tol:
                 scoring.append(k)
         if len(scoring) < 2:
             continue
@@ -793,7 +941,62 @@ def _perpendicular_sweep(group, angle_tol_rad):
             for k in scoring
         ]
         scoring_n = [pt[0] * nx + pt[1] * ny for pt in scoring_pts]
+
+        # Lone-outlier drop: any scoring member on a single-distinct-
+        # position side of a ≥ PILL_GAP_STRAIGHT_M gap along the bar axis
+        # is dropped from this candidate's scoring set. Repeats because
+        # removing a dot can expose a new wide gap. Dropped members re-
+        # enter the σ-clump's unplaced pool via the recursive rerun →
+        # leftover-fill path (where an isolated platform belongs).
+        while len(scoring) >= 2:
+            order = sorted(range(len(scoring)), key=lambda i: scoring_n[i])
+            sn = [scoring_n[i] for i in order]
+            # Cluster successive sorted entries within dedup_tol into one
+            # distinct bar-axis position.
+            pos_groups = [[order[0]]]
+            for j in range(1, len(order)):
+                if sn[j] - sn[j - 1] <= dedup_tol:
+                    pos_groups[-1].append(order[j])
+                else:
+                    pos_groups.append([order[j]])
+            drop = None
+            for gi in range(len(pos_groups) - 1):
+                gap = (scoring_n[pos_groups[gi + 1][0]]
+                       - scoring_n[pos_groups[gi][-1]])
+                if gap < gap_thresh:
+                    continue
+                # gi + 1 distinct positions on the left side of this gap;
+                # the remaining pos_groups on the right.
+                if gi + 1 == 1:
+                    drop = set(pos_groups[0])
+                    break
+                if len(pos_groups) - (gi + 1) == 1:
+                    drop = set(pos_groups[-1])
+                    break
+            if drop is None:
+                break
+            scoring = [s for i, s in enumerate(scoring) if i not in drop]
+            scoring_pts = [s for i, s in enumerate(scoring_pts)
+                           if i not in drop]
+            scoring_n = [s for i, s in enumerate(scoring_n) if i not in drop]
+
+        if len(scoring) < 2:
+            continue
+        # Re-check distinct platform positions on the post-drop scoring set.
+        distinct_positions = {
+            (round(group[k]["lon"], 6), round(group[k]["lat"], 6))
+            for k in scoring
+        }
+        if len(distinct_positions) < 2:
+            continue
+
         n_min, n_max = min(scoring_n), max(scoring_n)
+        # Degenerate-bar drop: a bar whose scoring dots span less than
+        # DEGENERATE_BAR_MIN_SPAN_M along the transverse axis renders as a
+        # dot, not a bar. Drop the candidate and let leftover-fill place its
+        # would-be members.
+        if n_max - n_min < min_span:
+            continue
 
         # Phase 2: wrong-angle members whose extent crosses the bar within
         # the scoring-set drawn span. These count toward the stab total but
@@ -813,7 +1016,7 @@ def _perpendicular_sweep(group, angle_tol_rad):
                 continue
             ext = p["extent"]
             ts = [v[0] * tx + v[1] * ty for v in ext]
-            if not (min(ts) <= sigma <= max(ts)):
+            if not (min(ts) - sigma_tol <= sigma <= max(ts) + sigma_tol):
                 continue
             cross_pt = _extent_intersect_axis(ext, tx, ty, sigma)
             if cross_pt is None:
@@ -1047,8 +1250,8 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
         line with the gap direction for at least the gap length (no angle
         tolerance; any bend at all breaks the walk).
       • OR (perpendicular-platforms rule) both gap-adjacent dots have at
-        least one platform whose extent tangent is 90° ±2° from the gap
-        direction — i.e. the gap lies along a bar's perpendicular axis,
+        least one platform whose extent tangent is 90° ±PERP_PLATFORM_TOL_DEG
+        from the gap direction — i.e. the gap lies along a bar's perpendicular axis,
         so the bar continues through the gap even though the surrounding
         NN-path is too sparse to prove it via the walk. Only one platform
         per stacked dot needs to satisfy the angle test.
@@ -1077,8 +1280,8 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
     gy = gap_dy / gnorm
 
     # Perpendicular-platforms rule: if both gap-adjacent dots have at least
-    # one platform whose extent tangent is 90° ±2° from the gap direction,
-    # the gap lies along a bar's perpendicular axis. Treat as in-line.
+    # one platform whose extent tangent is 90° ±PERP_PLATFORM_TOL_DEG from
+    # the gap direction, the gap lies along a bar's perpendicular axis. Treat as in-line.
     # The angle math is done in metric-equivalent space (lon × cos_lat) —
     # perpendicularity is not preserved under raw lon/lat scaling for
     # non-axis-aligned tracks (Zurich/Bern HB, etc.).
@@ -1090,7 +1293,7 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
             return False
         gx_m = gap_dx_m / gnorm_m
         gy_m = gap_dy_m / gnorm_m
-        perp_sin_tol = sin(radians(2.0))
+        perp_sin_tol = sin(radians(PERP_PLATFORM_TOL_DEG))
 
         def _has_perp_platform(pos):
             for p in pos_to_platforms.get(pos, ()):
@@ -1102,7 +1305,7 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
                 snorm_m = sqrt(dx_m * dx_m + dy_m * dy_m)
                 if snorm_m <= 0:
                     continue
-                # |cos(angle to gap)| ≤ sin(2°)  ⇔  perpendicular ±2°.
+                # |cos(angle to gap)| ≤ sin(tol)  ⇔  perpendicular ±tol.
                 if abs(dx_m * gx_m + dy_m * gy_m) / snorm_m <= perp_sin_tol:
                     return True
             return False
@@ -1475,7 +1678,8 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float) -> None:
 
 
 def write_debug_platforms(line_stops: dict, line_lookup: dict,
-                           stop_attrs: dict, skip_first_oids: set) -> None:
+                           stop_attrs: dict, skip_first_oids: set,
+                           sibling_groups: dict, oid_sibling_key: dict) -> None:
     """Emit transit_debug_platforms.geojson — one LineString per stop tracing
     the platform's full allowed range along the line's polyline. Debug-only
     overlay; replaces the previous black-dot debug feature.
@@ -1497,6 +1701,8 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
         if len(polyline) < 2:
             continue
         skip_first_here = str(osm_id) in skip_first_oids
+        sib_key = oid_sibling_key.get(str(osm_id))
+        siblings = sibling_groups.get(sib_key, []) if sib_key else []
         for idx, trip in enumerate(triplets):
             if idx == 0 and skip_first_here:
                 continue
@@ -1505,7 +1711,8 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
             stop_lon, stop_lat, stop_id = trip[0], trip[1], trip[2]
             atlas_length = (stop_attrs.get(stop_id, {}) or {}).get("length")
             extent = _platform_extent(stop_lon, stop_lat, polyline,
-                                       mode, atlas_length, cfg)
+                                       mode, atlas_length, cfg,
+                                       osm_id=str(osm_id), siblings=siblings)
             if extent is None or len(extent) < 2:
                 continue
             feats.append({
@@ -2145,10 +2352,24 @@ def main():
                 "coords":     feat["geometry"]["coordinates"],
                 "ref":        p.get("ref", ""),
                 "name":       p.get("name", ""),
+                "agency_id":  p.get("agency_id", ""),
             }
         if p.get("gtfs_stops"):
             gtfs_stop_features.append(feat)
     print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
+
+    # Sibling index for the missing-range fill rule (tram/bus/regional_bus):
+    # {(ref, agency_id, mode) → [(osm_id, flat_polyline)]}. The two-metre
+    # proximity gate inside _borrow_backward_segment does the real filtering;
+    # this index just bounds the search to same-line variants.
+    sibling_groups: dict = defaultdict(list)
+    oid_sibling_key: dict = {}
+    for oid_s, info in line_lookup.items():
+        key = (info.get("ref", ""), info.get("agency_id", ""), info.get("mode", ""))
+        flat_poly = flatten_coords(info["coords"])
+        if len(flat_poly) >= 2:
+            sibling_groups[key].append((oid_s, flat_poly))
+            oid_sibling_key[oid_s] = key
 
     print("Loading stop coordinates and metadata...")
     line_stops = json.loads(LINE_STOPS.read_text())
@@ -2163,7 +2384,8 @@ def main():
           f"will be omitted from rendering (popup retains both directions)")
 
     print("Emitting debug platform extents...")
-    write_debug_platforms(line_stops, line_lookup, stop_attrs, skip_first_oids)
+    write_debug_platforms(line_stops, line_lookup, stop_attrs, skip_first_oids,
+                          sibling_groups, oid_sibling_key)
 
     print("Building stop dots and pill candidates...")
 
@@ -2209,6 +2431,8 @@ def main():
         flat       = flatten_coords(coords)
 
         skip_first_here = str(osm_id) in skip_first_oids
+        sib_key = oid_sibling_key.get(str(osm_id))
+        siblings = sibling_groups.get(sib_key, []) if sib_key else []
 
         if mode in RAIL_MODES:
             for idx, entry in enumerate(stop_coords):
@@ -2224,7 +2448,8 @@ def main():
                 if not SNAP_GATE_DISABLED and snap_d > 0.300:
                     continue  # stop too far from this line's pfaedle geometry
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
-                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG)
+                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
+                                          osm_id=str(osm_id), siblings=siblings)
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
@@ -2275,7 +2500,8 @@ def main():
                 if not SNAP_GATE_DISABLED and gtfs_snap_d > 0.150:
                     continue  # stop too far from this line's pfaedle geometry
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
-                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG)
+                extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
+                                          osm_id=str(osm_id), siblings=siblings)
                 # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
                     "lon":            cx,

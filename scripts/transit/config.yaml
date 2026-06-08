@@ -104,6 +104,7 @@ pill_rendering:
     tram:         100
     bus:          100
     regional_bus: 100
+  perp_platform_tol_deg: 5.0
 
 # ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
 # Endpoints of the per-bucket frequency score curve. The line's weighted
