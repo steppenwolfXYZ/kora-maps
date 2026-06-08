@@ -22,10 +22,6 @@ A single dict maps `tg_key → {core_wd, eve_wd, we}`. It is populated in the sa
 
 The canonical trip already chosen per `tg_key` (highest `stop_count * len(active_dates)` within the group) yields the speed. Speed is stored per `tg_key` and read by `speed_to_color` at emission.
 
-### Stop-pair frequency
-
-The corridor stop-pair table is built by walking the canonical stop sequence of every drawable trip group and adding that trip group's per-trip-group frequency to each consecutive (UIC, UIC) pair. It aggregates across trip groups by design (trunk reinforcement) but every contributor brings its correctly-scoped trip-group frequency, never a cross-agency sum.
-
 ### Removal of parallel structures
 
 The following cease to exist:
@@ -35,7 +31,7 @@ The following cease to exist:
 - `line_speed` (the line_key-keyed speed dict)
 - `gtfs_index` and `gtfs_long_index` (the name-only fallback indexes built by `build_gtfs_index`)
 
-Their consumers — gate, emission, pair-freq builder, `gtfs_unmatched.json`, `gtfs_groups_full.json` — read directly from the per-trip-group dicts instead. No emission-time fallback by short_name or long_name exists.
+Their consumers — gate, emission, `gtfs_unmatched.json`, `gtfs_groups_full.json` — read directly from the per-trip-group dicts instead. No emission-time fallback by short_name or long_name exists.
 
 ### Diagnostics
 
@@ -46,5 +42,4 @@ Their consumers — gate, emission, pair-freq builder, `gtfs_unmatched.json`, `g
 - The trip-group partition itself (the union-find over shared merged stops within `(long_name_norm or short_name, agency_id, bucket)`) is unchanged. The `gtfs-line-grouping` concept stays the source of truth for how groups are formed.
 - Mountain (aerial/funicular) and ferry gate exemptions are unchanged. The mountain `freq_score` floor of 0.4 is unchanged. The CC-train exemption is unchanged.
 - The rare-group and rare-variant filters are unchanged; they already operate per trip group.
-- The corridor-boost rule in the emission loop (use corridor raw when its `core_wd` strictly exceeds the trip group's own) is unchanged in spirit; the comparison now uses trip-group frequency.
 - If a trip group has no canonical stops or no positive `core_wd`, no fallback recovers it. `compute_freq_score` returns 0, the gate drops it, the diagnostic records the reason. There is no name-based recovery anywhere.
