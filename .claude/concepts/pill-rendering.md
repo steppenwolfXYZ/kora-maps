@@ -70,6 +70,8 @@ If neither holds, the tighter `PILL_GAP_ANGLED_M` (12 m absolute) threshold appl
 
 Each post-split group of ≥ 2 dots is emitted as a pill; a singleton group is emitted as an `endpoint` Point feature whose dedicated style layer (drawn between connector-casing and connector-fill) renders it as a colored disc with a white stroke, so the connector's white casing is hidden under the disc rather than crossing the connecting stop's outline. Singletons also participate in MST connector selection. MST connectors (Kruskal's) join all groups — pill groups and singleton (endpoint) groups alike — at their nearest dot pair.
 
+Before the NN-path runs, stop positions within **`DEDUP_TOL_M` (0.5 m)** of each other are collapsed to a single position. Without this collapse, two stops that the bar coordination snaps onto the same logical spot — but which the `cos_lat` scale / unscale in `coordinate_dots_global_stab` leaves at slightly different float values — survive as two unique positions and emit as a 2-point near-degenerate pill. MapLibre cannot render such a pill reliably: with both vertices effectively coincident, the line direction vector is zero and the round caps that should form the disc fail to draw. The tolerance is set small enough to leave legitimate 3–6 m short pills intact and large enough to catch the observed twin spreads (sub-µm float noise up to ~11 cm bar-coordination drift).
+
 Pill rendering style (thickness, casing, mode-coloured stroke) is unchanged from today; only the dot positions change.
 
 ### Pill grouping (which dots a pill connects)

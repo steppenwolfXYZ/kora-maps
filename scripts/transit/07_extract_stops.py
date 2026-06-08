@@ -1023,7 +1023,7 @@ def _measure_pill_geometry(cluster_stops):
     at half weight. Replicates make_pill_features's NN-path + per-gap split
     + MST connector logic without emitting features.
     """
-    positions = list({(s["lon"], s["lat"]) for s in cluster_stops})
+    positions = _dedup_stop_positions(cluster_stops)
     if len(positions) < 2:
         return 0.0
     path = nearest_neighbor_path(positions)
@@ -1683,6 +1683,29 @@ def nearest_neighbor_path(positions):
     return path
 
 
+# Two stops within DEDUP_TOL_M are treated as the same position. Catches
+# float-noise twins (cos_lat round-trip in coordinate_dots_global_stab) and
+# platforms snapped onto the same logical spot but emitted at slightly
+# different floats (observed up to ~11 cm). Set small enough to leave real
+# sub-pill geometry (3-6 m short pills) intact.
+DEDUP_TOL_M = 0.5
+
+
+def _dedup_stop_positions(cluster_stops):
+    """Return unique (lon, lat) positions, collapsing any pair within
+    DEDUP_TOL_M of each other. First-seen wins; the survivor's exact float
+    is kept. Without this, near-coincident pairs emit as 2-point degenerate
+    pills that MapLibre cannot render reliably (zero direction vector)."""
+    tol_km = DEDUP_TOL_M / 1000.0
+    unique = []
+    for s in cluster_stops:
+        lon, lat = s["lon"], s["lat"]
+        if not any(haversine_km(lon, lat, u_lon, u_lat) < tol_km
+                   for u_lon, u_lat in unique):
+            unique.append((lon, lat))
+    return unique
+
+
 # =============================================================================
 # Pill logic
 # =============================================================================
@@ -1787,7 +1810,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
     4. MST connectors join the resulting groups at their nearest dot pair.
     """
     color, mode, max_wb, dom_stop = dominant_line(cluster_stops)
-    positions = list({(s["lon"], s["lat"]) for s in cluster_stops})  # deduplicate
+    positions = _dedup_stop_positions(cluster_stops)
     n = len(positions)
 
     if n < 2:
