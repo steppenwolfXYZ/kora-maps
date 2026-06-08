@@ -31,6 +31,7 @@ Pill rules:
 import csv
 import json
 import yaml
+from itertools import permutations
 from math import radians, cos, sin, sqrt, atan2, degrees, floor, pi
 from pathlib import Path
 from collections import defaultdict
@@ -864,14 +865,13 @@ def _pick_options_multi_group(per_group_options):
 
 
 def _pick_option_single_group(group, options, cluster,
-                               platforms, raw, radius_km):
-    """For each tied option: place its dots, run leftover baseline (if any
-    sub-cluster of ≥ 2 leftovers exists), measure pill+0.5×connector length,
-    pick shortest. Tie-break by gtfs_dist. Cluster positions are reset to
-    raw before returning so the outer caller can apply the chosen option
-    cleanly. Runs regardless of leftover count: a single leftover still
-    participates in the NN-path / MST connector, so the connector's length
-    is sensitive to the chosen bar position."""
+                               platforms, raw, gtfs_centroid):
+    """For each tied option: place its dots, run the leftover fill, measure
+    pill+0.5×connector length, pick shortest. Tie-break by gtfs_dist.
+    Cluster positions are reset to raw before returning so the outer caller
+    can apply the chosen option cleanly. Runs regardless of leftover count:
+    a single leftover still participates in the NN-path / MST connector,
+    so the connector's length is sensitive to the chosen bar position."""
     best = None
     best_key = None
     for option in options:
@@ -880,9 +880,9 @@ def _pick_option_single_group(group, options, cluster,
         placed_ids = set()
         _apply_option(group, option, placed_ids, record_stabbed=False)
         leftovers = [p for p in platforms if id(p) not in placed_ids]
-        if len(leftovers) >= 2:
-            _apply_baseline_algorithm(leftovers, radius_km,
-                                      anchor_set=platforms)
+        if leftovers:
+            _leftover_fill(platforms, leftovers, placed_ids, raw,
+                            gtfs_centroid)
         length = _measure_pill_geometry(cluster)
         key = (length, option["gtfs_dist"])
         if best_key is None or key < best_key:
@@ -1092,196 +1092,129 @@ def _measure_pill_geometry(cluster_stops):
     return pill_length + 0.5 * connector_length
 
 
-def _closest_to_axis_line(polyline, cx, cy, ax, ay):
-    """Closest point on `polyline` to the line through (cx, cy) with unit
-    direction (ax, ay). Distance from (px, py) to that line equals
-    |(px-cx)*(-ay) + (py-cy)*ax| since (ax, ay) is unit. If the signs flip
-    across a segment, the zero crossing is the closest point; otherwise
-    the closer endpoint of any segment wins.
+# Per-call cap on placement trials in _leftover_fill. The early picks
+# dominate the outcome (the first placement anchors the cluster, the
+# second relative to it, and by the fourth or fifth the geometry is mostly
+# fixed), so the budget is spent enumerating length-k prefixes of the
+# ordering — the deepest k whose prefix count stays within budget. At 50:
+# n ≤ 4 → full enumeration; n = 5–7 → first two picks; n ≥ 8 → first pick.
+LEFTOVER_TRIAL_BUDGET = 50
+
+
+def _snap_to_extent(p: dict, target_x: float, target_y: float) -> None:
+    """Move p's lon/lat to the point on its extent polyline closest to
+    (target_x, target_y). No-op if the extent is missing or degenerate
+    (fewer than two distinct vertices) — a degenerate leftover keeps
+    its raw snap because there is no extent to snap along.
     """
-    def signed_d(x, y):
-        return (x - cx) * (-ay) + (y - cy) * ax
-
-    best_abs = float("inf")
-    best_pt = (polyline[0][0], polyline[0][1])
-    for i in range(len(polyline) - 1):
-        x1, y1 = polyline[i]
-        x2, y2 = polyline[i + 1]
-        d1 = signed_d(x1, y1)
-        d2 = signed_d(x2, y2)
-        if d1 == 0 and d2 == 0:
-            return (x1, y1)
-        if d1 * d2 < 0:
-            t = d1 / (d1 - d2)
-            return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
-        if abs(d1) < best_abs:
-            best_abs = abs(d1)
-            best_pt = (x1, y1)
-        if abs(d2) < best_abs:
-            best_abs = abs(d2)
-            best_pt = (x2, y2)
-    return best_pt
+    ext = p.get("extent")
+    if not ext or len(ext) < 2:
+        return
+    if all(pt[0] == ext[0][0] and pt[1] == ext[0][1] for pt in ext):
+        return
+    p["lon"], p["lat"] = snap_to_line(target_x, target_y, ext)
 
 
-def _coordinate_dots_in_subcluster(sub: list) -> None:
-    """Old-algorithm stage 1: place each dot on the perpendicular axis line
-    anchored at the mean of range midpoints.
+def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
+                    raw_snapshot: dict, gtfs_centroid: tuple) -> None:
+    """Place each leftover platform at the point on its own extent closest
+    to the nearest already-placed dot in the cluster. The first leftover
+    in a cluster with no bar dots bootstraps to the GTFS centroid instead.
+
+    Order is decided by enumerating every length-k prefix of the leftover
+    list, where k is the deepest such that the prefix count stays within
+    LEFTOVER_TRIAL_BUDGET; the tail is completed in a deterministic
+    fallback order (width_base desc, osm_id asc). The trial that yields
+    the shortest pill + 0.5 × connector length wins.
+
+    Degenerate-extent leftovers stay at their raw snap and do not
+    participate in the ordering trial — there is no extent to snap along.
     """
-    if len(sub) < 2:
+    placeable = [
+        p for p in leftovers
+        if p.get("extent") and len(p["extent"]) >= 2
+        and any(pt[0] != p["extent"][0][0] or pt[1] != p["extent"][0][1]
+                for pt in p["extent"])
+    ]
+    if not placeable:
         return
-    tangent = _mean_unit_tangent(sub)
-    if tangent is None:
-        return
-    tx, ty = tangent
-    ax, ay = -ty, tx
 
-    t_targets = []
-    for s in sub:
-        ext = s.get("extent")
-        if not ext or len(ext) < 2:
-            continue
-        mx = (ext[0][0] + ext[-1][0]) / 2
-        my = (ext[0][1] + ext[-1][1]) / 2
-        t_targets.append(mx * tx + my * ty)
-    if not t_targets:
-        return
-    t_target = sum(t_targets) / len(t_targets)
+    bar_dot_positions = [(p["lon"], p["lat"]) for p in cluster
+                          if id(p) in placed_ids]
 
-    cx = sum(s["lon"] for s in sub) / len(sub)
-    cy = sum(s["lat"] for s in sub) / len(sub)
-    t_centroid = cx * tx + cy * ty
-    shift = t_target - t_centroid
-    ox, oy = cx + shift * tx, cy + shift * ty
+    n = len(placeable)
+    det_tail_order = sorted(
+        range(n),
+        key=lambda i: (-placeable[i].get("width_base", 0.0),
+                       str(placeable[i].get("osm_id", ""))))
 
-    for s in sub:
-        ext = s.get("extent")
-        if not ext or len(ext) < 2:
-            continue
-        s["lon"], s["lat"] = _closest_to_axis_line(ext, ox, oy, ax, ay)
+    # Deepest prefix length k such that n × (n-1) × ... × (n-k+1) ≤ budget.
+    k = 1
+    count = n
+    while k < n:
+        next_count = count * (n - k)
+        if next_count > LEFTOVER_TRIAL_BUDGET:
+            break
+        count = next_count
+        k += 1
 
+    best_length = None
+    best_positions = None
+    for prefix in permutations(range(n), k):
+        prefix_set = set(prefix)
+        order = list(prefix) + [i for i in det_tail_order
+                                 if i not in prefix_set]
 
-def _shift_subs_toward_anchor(anchor_set: list, sub_clusters: list) -> None:
-    """Old-algorithm stage 2: translate each sub-pill along its own tangent
-    toward the centroid of `anchor_set`, bounded by extent free range. With
-    `anchor_set` == all platforms (including any already-placed bar dots),
-    leftover sub-pills slide toward the bar, shortening connectors.
-    """
-    if not sub_clusters or not anchor_set:
-        return
-    snapshot = {id(s): (s["lon"], s["lat"]) for s in anchor_set}
-    # Sub-cluster members must also be in the anchor set for the projection
-    # snapshot lookup; build a fallback for any that aren't.
-    for sub in sub_clusters:
-        for s in sub:
-            snapshot.setdefault(id(s), (s["lon"], s["lat"]))
+        for p in placeable:
+            p["lon"], p["lat"] = raw_snapshot[id(p)]
+        placed_so_far = list(bar_dot_positions)
+        for idx in order:
+            p = placeable[idx]
+            if placed_so_far:
+                # Nearest-already-placed: try snapping each placed dot
+                # onto p's extent; keep the (extent-snap, placed) pair
+                # with smallest distance. The min of "closest extent
+                # point per placed dot" is the closest extent point to
+                # the nearest placed dot.
+                best_d_sq = float("inf")
+                best_pt = None
+                ext = p["extent"]
+                for px, py in placed_so_far:
+                    cx, cy = snap_to_line(px, py, ext)
+                    d_sq = (px - cx) ** 2 + (py - cy) ** 2
+                    if d_sq < best_d_sq:
+                        best_d_sq = d_sq
+                        best_pt = (cx, cy)
+                if best_pt is not None:
+                    p["lon"], p["lat"] = best_pt
+            else:
+                _snap_to_extent(p, gtfs_centroid[0], gtfs_centroid[1])
+            placed_so_far.append((p["lon"], p["lat"]))
+        length = _measure_pill_geometry(cluster)
+        if best_length is None or length < best_length:
+            best_length = length
+            best_positions = {id(p): (p["lon"], p["lat"]) for p in placeable}
 
-    pending = []
-    for sub in sub_clusters:
-        if not sub:
-            continue
-        tangent = _mean_unit_tangent(sub)
-        if tangent is None:
-            continue
-        tx, ty = tangent
-        t_target = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-                       for s in anchor_set) / len(anchor_set)
-        t_current = sum(snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-                        for s in sub) / len(sub)
-        delta = t_target - t_current
-        if abs(delta) < 1e-12:
-            continue
-        sign = 1.0 if delta > 0 else -1.0
-
-        free_shifts = []
-        for s in sub:
-            ext = s.get("extent")
-            if not ext or len(ext) < 2:
-                continue
-            t_dot = snapshot[id(s)][0] * tx + snapshot[id(s)][1] * ty
-            r_proj = [p[0] * tx + p[1] * ty for p in ext]
-            r_min = min(r_proj)
-            r_max = max(r_proj)
-            free = (r_max - t_dot) if sign > 0 else (t_dot - r_min)
-            free_shifts.append(max(0.0, free))
-        if not free_shifts:
-            continue
-        max_safe = min(free_shifts)
-        actual = sign * min(max_safe, abs(delta))
-        if abs(actual) < 1e-12:
-            continue
-        pending.append((sub, actual * tx, actual * ty))
-
-    for sub, dx, dy in pending:
-        for s in sub:
-            ext = s.get("extent")
-            if not ext or len(ext) < 2:
-                continue
-            new_x = s["lon"] + dx
-            new_y = s["lat"] + dy
-            s["lon"], s["lat"] = snap_to_line(new_x, new_y, ext)
+    if best_positions is not None:
+        for p in placeable:
+            p["lon"], p["lat"] = best_positions[id(p)]
 
 
-def _spatial_subclusters(platforms: list, radius_km: float) -> list:
-    """Split platforms into connected components by spatial proximity."""
-    n = len(platforms)
-    if n <= 1:
-        return [list(platforms)]
-    visited = [False] * n
-    subs = []
-    for i in range(n):
-        if visited[i]:
-            continue
-        queue = [i]
-        comp = []
-        visited[i] = True
-        while queue:
-            k = queue.pop(0)
-            comp.append(platforms[k])
-            kx, ky = platforms[k]["lon"], platforms[k]["lat"]
-            for j in range(n):
-                if visited[j]:
-                    continue
-                if haversine_km(kx, ky,
-                                platforms[j]["lon"],
-                                platforms[j]["lat"]) <= radius_km:
-                    queue.append(j)
-                    visited[j] = True
-        subs.append(comp)
-    return subs
-
-
-def _apply_baseline_algorithm(platforms: list, radius_km: float,
-                               anchor_set: list = None) -> None:
-    """Old algorithm: spatial sub-cluster → axis projection per sub →
-    translate each sub-pill toward `anchor_set`'s centroid. If `anchor_set`
-    is None, the platforms themselves are the anchor (original behaviour).
-    """
-    subs = _spatial_subclusters(platforms, radius_km)
-    for sub in subs:
-        _coordinate_dots_in_subcluster(sub)
-    _shift_subs_toward_anchor(anchor_set if anchor_set is not None else platforms, subs)
-
-
-def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
+def coordinate_dots_global_stab(cluster: list) -> None:
     """Tangent-group + perpendicular-sweep dot placement.
 
-    Candidate A — for each tangent group of platforms (extent tangents
-    within ~10° of each other), pick a central member from the inner 70 %
-    of the group (closest to centroid) and sweep along that member's
-    platform extent at 10 m steps. At each step the bar is perpendicular
-    to the smoothed extent tangent; the position maximising scoring-stab
-    count wins. Scoring-stabbed platforms (≤10° aligned, extent crosses
-    bar) get their dots placed on the bar and drive its drawn span.
-    Wrong-angle members whose extent crosses the bar between scoring dots
-    are also placed on the bar ("covered"). Everything else runs through
-    the old algorithm anchored to the full platform set so leftover
-    sub-pills shift toward the bar.
-
-    Candidate B (baseline) — the old algorithm on every platform.
-
-    Whichever produces the shorter total pill geometry (pills + 0.5 ×
-    connectors) wins. The temporary fallback override is still disabled —
-    Candidate A is always applied at the moment for experimentation.
+    For each tangent group of platforms (extent tangents within ~10° of
+    each other), pick a central member from the inner 70 % of the group
+    (closest to centroid) and sweep along that member's platform extent
+    at 10 m steps. At each step the bar is perpendicular to the smoothed
+    extent tangent; the position maximising scoring-stab count wins.
+    Scoring-stabbed platforms (≤10° aligned, extent crosses bar) get
+    their dots placed on the bar and drive its drawn span. Wrong-angle
+    members whose extent crosses the bar between scoring dots are also
+    placed on the bar ("covered"). Everything not placed on a bar is
+    handed to _leftover_fill, which snaps each leftover to the point
+    on its extent closest to the nearest already-placed dot (or to the
+    GTFS centroid if no bars were placed in the cluster).
     """
     if len(cluster) < 2:
         return
@@ -1316,17 +1249,15 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
     diag_bars_start = len(_DIAG_BARS)
 
     try:
-        # Snapshot raw (scaled) positions so we can swap between candidates.
+        # Snapshot raw (scaled) positions so the leftover fill can reset
+        # leftovers between permutation trials. Also used to compute the
+        # GTFS centroid bootstrap target.
         raw = {id(s): (s["lon"], s["lat"]) for s in cluster}
-
-        # --- Candidate B: baseline (old algorithm on all)
-        _apply_baseline_algorithm(platforms, radius_km)
-        baseline_length = _measure_pill_geometry(cluster)
-        baseline_positions = {id(s): (s["lon"], s["lat"]) for s in cluster}
-
-        # Reset to raw positions for Candidate A.
-        for s in cluster:
-            s["lon"], s["lat"] = raw[id(s)]
+        n_cluster = len(cluster)
+        gtfs_centroid = (
+            sum(raw[id(s)][0] for s in cluster) / n_cluster,
+            sum(raw[id(s)][1] for s in cluster) / n_cluster,
+        )
 
         # Tangent groups (union-find, 10° angular tolerance mod π), then
         # σ-clump each tangent group along its mean tangent so multi-clump
@@ -1353,10 +1284,10 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
         # among equally-stabbing sweep positions":
         #   • Multi-group: minimise sum of pairwise bar-center distances.
         #     Tie-break by total gtfs_dist.
-        #   • Single-group with leftovers: enumerate options, run leftover
-        #     baseline per option, pick minimum pill+0.5×connector length.
-        #     Tie-break by gtfs_dist.
-        #   • Single-group without leftovers: pick minimum gtfs_dist.
+        #   • Single-group with > 1 tied option: enumerate options, run
+        #     the leftover fill per option, pick minimum pill+0.5×connector
+        #     length. Tie-break by gtfs_dist.
+        #   • Single-group with one option: just take it.
         chosen = []
         if len(per_group_options) >= 2:
             chosen = _pick_options_multi_group(per_group_options)
@@ -1364,7 +1295,7 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
             group, options = per_group_options[0]
             if len(options) > 1:
                 chosen = [_pick_option_single_group(
-                    group, options, cluster, platforms, raw, radius_km)]
+                    group, options, cluster, platforms, raw, gtfs_centroid)]
             else:
                 chosen = [options[0]]
 
@@ -1377,14 +1308,8 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
         # Leftovers: every platform NOT placed on a bar.
         leftovers = [p for p in platforms if id(p) not in placed_ids]
         if leftovers:
-            _apply_baseline_algorithm(leftovers, radius_km, anchor_set=platforms)
-
-        candidate_a_length = _measure_pill_geometry(cluster)
-
-        # TEMP: candidate-B fallback disabled for experiment
-        # if candidate_a_length >= baseline_length:
-        #     for s in cluster:
-        #         s["lon"], s["lat"] = baseline_positions[id(s)]
+            _leftover_fill(platforms, leftovers, placed_ids, raw,
+                            gtfs_centroid)
     finally:
         # Unscale lon back to real degrees on cluster stops, extents, and
         # any debug bars added during this cluster's processing.
@@ -2225,7 +2150,7 @@ def main():
     # perpendicular bar; leftovers run through the old algorithm.
     print(f"  Placing rail dots across {len(rail_pill_clusters):,} clusters...")
     for c in rail_pill_clusters:
-        coordinate_dots_global_stab(c, PILL_CLUSTER_RAIL_KM)
+        coordinate_dots_global_stab(c)
     print("  → rail dot placement done")
 
     rail_features = []
@@ -2299,7 +2224,7 @@ def main():
     # Same global stabbing placement as rail.
     print(f"  Placing non-rail dots across {len(nonrail_clusters):,} clusters...")
     for c in nonrail_clusters:
-        coordinate_dots_global_stab(c, PILL_CLUSTER_NONRAIL_KM)
+        coordinate_dots_global_stab(c)
     print("  → non-rail dot placement done")
 
     # Emit debug overlays now that all clusters have been processed and
