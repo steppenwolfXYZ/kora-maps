@@ -53,6 +53,9 @@
 		// Compact attribution in the corner
 		map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
 
+		// Scale bar (metric) — shows real-world distance for the current zoom
+		map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
+
 		// Keep zoom indicator in sync
 		const updateZoom = () => {
 			zoom = parseFloat(map.getZoom().toFixed(2));

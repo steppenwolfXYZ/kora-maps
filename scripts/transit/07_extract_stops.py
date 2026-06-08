@@ -98,11 +98,14 @@ MODE_MINZOOM = {
 PILL_CLUSTER_RAIL_KM    = 0.300   # rail: 300 m (same as dot deduplication)
 PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
 
-# When a nearest-neighbor path segment exceeds (max_wb × this / 1000) km,
-# the cluster is split into two pills + a connector at that gap.
-# Tune this to separate distinct platform groups while keeping curved stops
-# in a single bent pill.
-PILL_GAP_SCALE = 20   # metres per unit of width_base
+# Absolute-metre gap thresholds for splitting the NN path into separate
+# pills + connectors. Not scaled by width_base — `wb` controls disc/pill
+# width, not gap length.
+PILL_GAP_STRAIGHT_M = 50   # gap threshold when the NN-path continues dead
+                           # straight into the gap on either side (gap is
+                           # an in-line pill continuation).
+PILL_GAP_ANGLED_M = 12     # gap threshold otherwise (gap is an angled /
+                           # T-junction connector).
 
 
 # =============================================================================
@@ -620,9 +623,23 @@ def _perpendicular_sweep(group, angle_tol_rad):
     if ext_max <= 0:
         return None
 
-    # Dense sweep at SWEEP_STEP_M along the central extent.
+    # Dense sweep at SWEEP_STEP_M along the central extent, plus the
+    # arc-length projections of every group member's extent endpoints. The
+    # 10 m grid alone can miss the optimal sigma by up to ±5 m; the
+    # endpoint projections are exactly the sub-metre-precise positions
+    # where a member transitions from stabbed to not-stabbed (or vice
+    # versa), so adding them snaps the candidate set to the transitions.
     n_steps = max(2, int(ext_max / SWEEP_STEP_M) + 1)
-    candidate_arcs = [i * ext_max / (n_steps - 1) for i in range(n_steps)]
+    candidate_arcs_set = {i * ext_max / (n_steps - 1) for i in range(n_steps)}
+    for p in group:
+        ext = p["extent"]
+        if not ext or len(ext) < 2:
+            continue
+        for endpoint in (ext[0], ext[-1]):
+            candidate_arcs_set.add(
+                _project_meters(endpoint[0], endpoint[1],
+                                central_ext, central_dists))
+    candidate_arcs = sorted(candidate_arcs_set)
 
     # Per-member tangent angle (canonical [0, π) via atan2 of stop tangent).
     member_angles = []
@@ -654,6 +671,15 @@ def _perpendicular_sweep(group, angle_tol_rad):
             if min(ts) <= sigma <= max(ts):
                 scoring.append(k)
         if len(scoring) < 2:
+            continue
+        # Require ≥ 2 distinct platform positions among the scoring members:
+        # multiple lines at the same snapped GTFS coord count as one platform,
+        # so a bar that only stacks N lines on a single spot is rejected.
+        distinct_positions = {
+            (round(group[k]["lon"], 6), round(group[k]["lat"], 6))
+            for k in scoring
+        }
+        if len(distinct_positions) < 2:
             continue
         if len(scoring) > best_count:
             best_count = len(scoring)
@@ -782,12 +808,15 @@ def _pick_options_multi_group(per_group_options):
     return list(best) if best else []
 
 
-def _pick_option_single_group_with_leftovers(group, options, cluster,
-                                              platforms, raw, radius_km):
-    """For each tied option: place its dots, run leftover baseline, measure
-    pill+0.5×connector length, pick shortest. Tie-break by gtfs_dist. Cluster
-    positions are reset to raw before returning so the outer caller can
-    apply the chosen option cleanly."""
+def _pick_option_single_group(group, options, cluster,
+                               platforms, raw, radius_km):
+    """For each tied option: place its dots, run leftover baseline (if any
+    sub-cluster of ≥ 2 leftovers exists), measure pill+0.5×connector length,
+    pick shortest. Tie-break by gtfs_dist. Cluster positions are reset to
+    raw before returning so the outer caller can apply the chosen option
+    cleanly. Runs regardless of leftover count: a single leftover still
+    participates in the NN-path / MST connector, so the connector's length
+    is sensitive to the chosen bar position."""
     best = None
     best_key = None
     for option in options:
@@ -809,22 +838,152 @@ def _pick_option_single_group_with_leftovers(group, options, cluster,
     return best
 
 
+def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
+                          cos_lat=1.0):
+    """Decide whether the NN-path segment path[k]→path[k+1] is a split
+    (separates two pills + connector) or a regular in-pill segment.
+
+    Two absolute-metre thresholds: PILL_GAP_STRAIGHT_M when the gap is a
+    dead-straight in-line continuation of the surrounding pill, and
+    PILL_GAP_ANGLED_M for angled / T-junction connectors. The straight
+    threshold applies when either of these holds:
+      • From each gap-adjacent dot, the NN-path continues dead straight in
+        line with the gap direction for at least the gap length (no angle
+        tolerance; any bend at all breaks the walk).
+      • OR (perpendicular-platforms rule) both gap-adjacent dots have at
+        least one platform whose extent tangent is 90° ±2° from the gap
+        direction — i.e. the gap lies along a bar's perpendicular axis,
+        so the bar continues through the gap even though the surrounding
+        NN-path is too sparse to prove it via the walk. Only one platform
+        per stacked dot needs to satisfy the angle test.
+    Otherwise the angled threshold applies.
+
+    cos_lat scales lon deltas to metric-equivalent space for the
+    perpendicular-platforms check. Perpendicularity (unlike colinearity)
+    is not preserved under non-uniform axis scaling, so the angle math
+    must be done in metric. Pass cos(mean_lat) when the input is true
+    (lon, lat); pass 1.0 when lon has already been pre-scaled. The
+    dead-straight walk uses colinearity only and is scale-invariant.
+    """
+    straight_threshold_km = PILL_GAP_STRAIGHT_M / 1000.0
+    angled_threshold_km = PILL_GAP_ANGLED_M / 1000.0
+    if gap_len_km <= angled_threshold_km:
+        return False
+    if gap_len_km > straight_threshold_km:
+        return True
+
+    gap_dx = path[k + 1][0] - path[k][0]
+    gap_dy = path[k + 1][1] - path[k][1]
+    gnorm = sqrt(gap_dx * gap_dx + gap_dy * gap_dy)
+    if gnorm <= 0:
+        return False
+    gx = gap_dx / gnorm
+    gy = gap_dy / gnorm
+
+    # Perpendicular-platforms rule: if both gap-adjacent dots have at least
+    # one platform whose extent tangent is 90° ±2° from the gap direction,
+    # the gap lies along a bar's perpendicular axis. Treat as in-line.
+    # The angle math is done in metric-equivalent space (lon × cos_lat) —
+    # perpendicularity is not preserved under raw lon/lat scaling for
+    # non-axis-aligned tracks (Zurich/Bern HB, etc.).
+    if pos_to_platforms is not None:
+        gap_dx_m = gap_dx * cos_lat
+        gap_dy_m = gap_dy
+        gnorm_m = sqrt(gap_dx_m * gap_dx_m + gap_dy_m * gap_dy_m)
+        if gnorm_m <= 0:
+            return False
+        gx_m = gap_dx_m / gnorm_m
+        gy_m = gap_dy_m / gnorm_m
+        perp_sin_tol = sin(radians(2.0))
+
+        def _has_perp_platform(pos):
+            for p in pos_to_platforms.get(pos, ()):
+                ext = p.get("extent")
+                if not ext or len(ext) < 2:
+                    continue
+                dx_m = (ext[-1][0] - ext[0][0]) * cos_lat
+                dy_m = ext[-1][1] - ext[0][1]
+                snorm_m = sqrt(dx_m * dx_m + dy_m * dy_m)
+                if snorm_m <= 0:
+                    continue
+                # |cos(angle to gap)| ≤ sin(2°)  ⇔  perpendicular ±2°.
+                if abs(dx_m * gx_m + dy_m * gy_m) / snorm_m <= perp_sin_tol:
+                    return True
+            return False
+
+        if (_has_perp_platform(path[k])
+                and _has_perp_platform(path[k + 1])):
+            return False
+
+    # "Dead straight" walk — only floating-point noise is tolerated. A
+    # segment whose cross product with the gap direction (= sin of the
+    # angle) is above ~1e-6 is treated as bent and breaks the walk.
+    sin_eps = 1e-6
+
+    def _is_aligned(seg_dx, seg_dy, snorm):
+        # Must point the same way as the gap (positive dot product) AND
+        # be colinear (cross product ≈ 0).
+        if seg_dx * gx + seg_dy * gy < 0:
+            return False
+        return abs(seg_dx * gy - seg_dy * gx) / snorm <= sin_eps
+
+    # Walk away from the gap on the left side: segments path[i-1]→path[i]
+    # for i = k, k-1, ..., 1. Direction is path[i] - path[i-1], which
+    # should match gap_dir for a straight continuation.
+    back_len_km = 0.0
+    for i in range(k, 0, -1):
+        ax, ay = path[i - 1]
+        bx, by = path[i]
+        seg_dx, seg_dy = bx - ax, by - ay
+        snorm = sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+        if snorm <= 0:
+            continue
+        if not _is_aligned(seg_dx, seg_dy, snorm):
+            break
+        back_len_km += haversine_km(ax, ay, bx, by)
+        if back_len_km >= gap_len_km:
+            return False
+
+    # Walk away from the gap on the right side: segments path[i]→path[i+1]
+    # for i = k+1, k+2, ..., len(path)-2. Direction is path[i+1] - path[i].
+    forward_len_km = 0.0
+    for i in range(k + 1, len(path) - 1):
+        ax, ay = path[i]
+        bx, by = path[i + 1]
+        seg_dx, seg_dy = bx - ax, by - ay
+        snorm = sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+        if snorm <= 0:
+            continue
+        if not _is_aligned(seg_dx, seg_dy, snorm):
+            break
+        forward_len_km += haversine_km(ax, ay, bx, by)
+        if forward_len_km >= gap_len_km:
+            return False
+
+    return True
+
+
 def _measure_pill_geometry(cluster_stops):
     """Score a placement: total pill geometry length, with connectors counted
-    at half weight. Replicates make_pill_features's NN-path + largest-gap
-    split + MST connector logic without emitting features.
+    at half weight. Replicates make_pill_features's NN-path + per-gap split
+    + MST connector logic without emitting features.
     """
     positions = list({(s["lon"], s["lat"]) for s in cluster_stops})
     if len(positions) < 2:
         return 0.0
-    _, _, max_wb, _ = dominant_line(cluster_stops)
     path = nearest_neighbor_path(positions)
-    gap_threshold_km = max_wb * PILL_GAP_SCALE / 1000.0
+
+    pos_to_platforms = {}
+    for s in cluster_stops:
+        pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
 
     split_indices = [
         k for k in range(len(path) - 1)
-        if haversine_km(path[k][0], path[k][1],
-                        path[k + 1][0], path[k + 1][1]) > gap_threshold_km
+        if _should_split_at_gap(
+            path, k,
+            haversine_km(path[k][0], path[k][1],
+                         path[k + 1][0], path[k + 1][1]),
+            pos_to_platforms)
     ]
 
     if not split_indices:
@@ -1140,20 +1299,11 @@ def coordinate_dots_global_stab(cluster: list, radius_km: float) -> None:
             chosen = _pick_options_multi_group(per_group_options)
         elif len(per_group_options) == 1:
             group, options = per_group_options[0]
-            # A platform that's in some option's scoring or covered set will
-            # be placed by the bar regardless of which tied option wins;
-            # only platforms placed by no option fall to the leftover baseline.
-            potentially_placed = {
-                id(group[k]) for opt in options
-                for k in opt["scoring"] + opt["covered"]
-            }
-            leftover_count = sum(1 for p in platforms
-                                  if id(p) not in potentially_placed)
-            if leftover_count >= 2 and len(options) > 1:
-                chosen = [_pick_option_single_group_with_leftovers(
+            if len(options) > 1:
+                chosen = [_pick_option_single_group(
                     group, options, cluster, platforms, raw, radius_km)]
             else:
-                chosen = [min(options, key=lambda o: o["gtfs_dist"])]
+                chosen = [options[0]]
 
         # Apply chosen options (record _STABBED_PAIRS + diag bar geometry).
         placed_ids = set()
@@ -1564,11 +1714,14 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
     Algorithm:
     1. Build a nearest-neighbor path through ALL dot positions — every dot
        ends up at a vertex of the pill, so no dot is left standalone.
-    2. Find the longest segment in the path (the biggest positional gap).
-    3. If the gap is small (< max_wb × PILL_GAP_SCALE metres): emit as a
-       single multi-point LineString. Round caps create a bent/curved capsule.
-    4. If the gap is large (two distinct platform groups): split at the gap,
-       emit two pills + a thin connector between the nearest endpoints.
+    2. Walk each NN-path segment as a candidate gap. The effective split
+       threshold for each gap depends on the local shape (see
+       _should_split_at_gap): dead-straight in-line continuations get the
+       generous PILL_GAP_STRAIGHT_M threshold; angled / T-junction
+       connectors get the tighter PILL_GAP_ANGLED_M threshold.
+    3. Gaps that exceed their threshold split the NN-path. Sub-paths of
+       ≥ 2 dots emit as pills; singletons emit as endpoint Points.
+    4. MST connectors join the resulting groups at their nearest dot pair.
     """
     color, mode, max_wb, dom_stop = dominant_line(cluster_stops)
     positions = list({(s["lon"], s["lat"]) for s in cluster_stops})  # deduplicate
@@ -1578,8 +1731,6 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
         return []
 
     path = nearest_neighbor_path(positions)
-
-    gap_threshold_km = max_wb * PILL_GAP_SCALE / 1000.0
 
     stop_props = {
         "color":          color,
@@ -1608,10 +1759,24 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
             "properties": {**stop_props, "feature_type": "endpoint"},
         }
 
-    # Find all gaps above threshold — each is a split point between groups
+    # Find every gap that splits the NN-path into separate pills.
+    # _should_split_at_gap applies the per-shape threshold (PILL_GAP_STRAIGHT_M
+    # for dead-straight in-line continuations or gaps along a bar's
+    # perpendicular axis; PILL_GAP_ANGLED_M for angled / T-junction
+    # connectors). Absolute metres — no width_base scaling.
+    pos_to_platforms = {}
+    for s in cluster_stops:
+        pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
+    mean_lat = sum(p[1] for p in positions) / len(positions)
+    cluster_cos_lat = cos(radians(mean_lat))
     split_indices = [
         k for k in range(len(path) - 1)
-        if haversine_km(path[k][0], path[k][1], path[k + 1][0], path[k + 1][1]) > gap_threshold_km
+        if _should_split_at_gap(
+            path, k,
+            haversine_km(path[k][0], path[k][1],
+                         path[k + 1][0], path[k + 1][1]),
+            pos_to_platforms,
+            cos_lat=cluster_cos_lat)
     ]
 
     if not split_indices:
