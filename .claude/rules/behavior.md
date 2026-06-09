@@ -30,7 +30,9 @@ Lead with the one-sentence answer. Stop there unless the user asks for more, or 
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
 ## Python invocation
-This machine's Python 3 binary is `python3`. `python` is not on PATH and will fail with `command not found`. Use `python3` for any one-off invocation (parse-checks, ad-hoc scripts, REPL).
+This machine's Python 3 binary is `python3` (Homebrew-managed, currently 3.12). `python` is not on PATH and will fail with `command not found`. Use `python3` for any one-off invocation (parse-checks, ad-hoc scripts, REPL). PEP 604 union syntax (`X | None`), `match/case`, walrus, and other 3.10+ features are available.
+
+Installing packages goes through `python3 -m pip install --user --break-system-packages <pkg>` because Homebrew Python enforces PEP 668. The only non-stdlib dependency the pipeline currently needs is `PyYAML`.
 
 ## Rebuild command
 After any transit pipeline change, suggest `./scripts/rebuild_transit.sh --start N` where N is the lowest step whose inputs you actually changed (see the step list in `.claude/rules/transit.md`). Each step's output is the next step's input, so `--start N` runs steps N..8 contiguously — starting lower than needed just wastes time, especially on pfaedle. Never suggest running individual Python scripts.

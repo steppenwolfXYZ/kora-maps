@@ -6,3 +6,5 @@ build/
 .env.*
 !.env.example
 data/
+__pycache__/
+*.pyc

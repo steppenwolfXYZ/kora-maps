@@ -126,11 +126,13 @@ PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
 # =============================================================================
 
 def load_stop_meta() -> dict:
-    """Return {stop_id: {"name": stop_name, "parent": parent_station}}.
+    """Return {stop_id: {"name": stop_name, "parent": parent_station,
+    "platform_code": platform_code}}.
 
     The official OTD GTFS feed prefixes parent_station values with `Parent`
     (e.g. `Parent8507000`); the prefix is stripped here so downstream
-    clustering and comparisons are format-agnostic.
+    clustering and comparisons are format-agnostic. `platform_code` is the
+    raw GTFS field (empty string when the feed omits it).
     """
     meta = {}
     if not GTFS_STOPS.exists():
@@ -139,7 +141,11 @@ def load_stop_meta() -> dict:
         for row in csv.DictReader(f):
             sid = row["stop_id"]
             parent = row.get("parent_station", "").removeprefix("Parent")
-            entry = {"name": row.get("stop_name", ""), "parent": parent}
+            entry = {
+                "name": row.get("stop_name", ""),
+                "parent": parent,
+                "platform_code": (row.get("platform_code") or "").strip(),
+            }
             meta[sid] = entry
             base = sid.split(":")[0]
             if base not in meta:
@@ -239,18 +245,34 @@ def write_stop_attributes_diag(line_stops: dict) -> dict:
 
 
 TERMINUS_DEDUP_RADIUS_M = 10.0
+ARRIVAL_DROP_MODES = {"tram", "bus", "regional_bus"}
 
 
 def compute_terminus_skip_oids(line_stops: dict,
-                                radius_m: float = TERMINUS_DEDUP_RADIUS_M) -> set:
-    """Return the set of osm_ids whose FIRST entry (departure terminus) should
-    be omitted from dot/pill/extent rendering because another line arrives at
-    the same stop_id within `radius_m`. Keeps the arrival side as the visible
-    dot+extent (its extent is the non-degenerate one for non-rail) and lets
-    the popup-aggregation pass surface both directions.
+                                line_lookup: dict | None = None,
+                                stop_meta: dict | None = None,
+                                radius_m: float = TERMINUS_DEDUP_RADIUS_M):
+    """Return `(skip_first_oids, skip_last_oids)`.
+
+    `skip_first_oids` — osm_ids whose FIRST entry (departure terminus) should
+    be omitted because another line arrives at the same stop_id within
+    `radius_m`. Keeps the arrival side as the visible dot+extent (its extent
+    is the non-degenerate one for non-rail) and lets the popup-aggregation
+    pass surface both directions.
+
+    `skip_last_oids` — tram / bus / regional_bus osm_ids whose LAST entry
+    (arrival terminus) is dropped because either (1) the rule above did NOT
+    pair it with any departure (layover ~100 m from the real terminus that
+    the same line never visits), OR (2) its stop_id has no `platform_code`
+    AND some other feature in the same sibling group (ref, agency_id, mode)
+    visits the same UIC at a stop_id WITH a `platform_code` — the
+    platform-coded entry is the real platform, the bare-numeric layover is
+    redundant. `line_lookup` is required to apply rule 1; `stop_meta` is
+    additionally required for rule 2.
     """
     arrivals_by_sid: dict = {}
     departures: list = []
+    arrivals_meta: list = []  # (osm_id, sid, lon, lat) for arrival-side rule
     for oid, entry in line_stops.items():
         triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
         if not triplets or len(triplets) < 2:
@@ -262,16 +284,76 @@ def compute_terminus_skip_oids(line_stops: dict,
         if len(last) >= 3 and last[2]:
             arrivals_by_sid.setdefault(last[2], []).append(
                 (str(oid), last[0], last[1]))
+            arrivals_meta.append((str(oid), last[2], last[0], last[1]))
 
-    skip: set = set()
+    skip_first: set = set()
+    departures_by_sid: dict = {}
     for oid_dep, sid, lon_d, lat_d in departures:
+        departures_by_sid.setdefault(sid, []).append((oid_dep, lon_d, lat_d))
         for oid_arr, lon_a, lat_a in arrivals_by_sid.get(sid, []):
             if oid_arr == oid_dep:
                 continue
             if haversine_km(lon_d, lat_d, lon_a, lat_a) * 1000.0 <= radius_m:
-                skip.add(oid_dep)
+                skip_first.add(oid_dep)
                 break
-    return skip
+
+    skip_last: set = set()
+    if line_lookup is None:
+        return skip_first, skip_last
+
+    # Sibling-group index: (ref, agency_id, mode) -> set of UICs visited at a
+    # stop_id with a non-empty platform_code. Used by rule 2.
+    sibling_platform_uics: dict = {}
+    if stop_meta is not None:
+        for oid, entry in line_stops.items():
+            info = line_lookup.get(str(oid)) or line_lookup.get(oid)
+            if not info or info.get("mode") not in ARRIVAL_DROP_MODES:
+                continue
+            key = (info.get("ref", ""), info.get("agency_id", ""),
+                   info.get("mode", ""))
+            triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
+            uics = sibling_platform_uics.setdefault(key, set())
+            for trip in triplets:
+                if len(trip) < 3:
+                    continue
+                sid = trip[2]
+                if not sid:
+                    continue
+                meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+                if not meta or not meta.get("platform_code"):
+                    continue
+                uics.add(sid.split(":")[0])
+
+    for oid_arr, sid, lon_a, lat_a in arrivals_meta:
+        info = line_lookup.get(oid_arr) or line_lookup.get(str(oid_arr))
+        if not info or info.get("mode") not in ARRIVAL_DROP_MODES:
+            continue
+
+        # Rule 1: unpaired arrival.
+        paired = False
+        for oid_dep, lon_d, lat_d in departures_by_sid.get(sid, []):
+            if oid_dep == oid_arr:
+                continue
+            if haversine_km(lon_d, lat_d, lon_a, lat_a) * 1000.0 <= radius_m:
+                paired = True
+                break
+        if not paired:
+            skip_last.add(oid_arr)
+            continue
+
+        # Rule 2: layover shadowed by same-line real-platform sibling.
+        if stop_meta is None:
+            continue
+        meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+        if meta and meta.get("platform_code"):
+            continue
+        key = (info.get("ref", ""), info.get("agency_id", ""),
+               info.get("mode", ""))
+        uic = sid.split(":")[0]
+        if uic in sibling_platform_uics.get(key, set()):
+            skip_last.add(oid_arr)
+
+    return skip_first, skip_last
 
 
 # =============================================================================
@@ -566,26 +648,55 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
     return pts
 
 
+# Window over which the per-stop polyline tangent is averaged. Sized to
+# stay inside the platform extent (per-mode default ≤ 35 m for non-rail,
+# 100 m for rail) so the averaged direction reflects what's happening at
+# the dot, not the chord of the whole extent. For 30 m bus/tram extents,
+# 40 m smoothing would spill past the extent into adjacent polyline and
+# pull the angle off — see Eigerplatz, where it puts C and D into
+# different tangent groups despite both running on the same OSM way.
+TANGENT_WINDOW_M = 10.0
+
+
+def _stop_tangent(s):
+    """Unit polyline tangent at the stop's snap position, averaged over a
+    ±TANGENT_WINDOW_M/2 window centred on (s["lon"], s["lat"]) projected
+    onto its extent. Canonicalised to the upper half-plane so opposite-
+    direction polylines don't cancel. Returns None when the extent is
+    degenerate or the polyline is too short to compute a tangent.
+    """
+    ext = s.get("extent")
+    if not ext or len(ext) < 2:
+        return None
+    dists = _cum_dist_m(ext)
+    if dists[-1] <= 0:
+        return None
+    t = _project_meters(s["lon"], s["lat"], ext, dists)
+    tan = _smoothed_tangent_at(ext, dists, t, window_m=TANGENT_WINDOW_M)
+    if tan is None:
+        return None
+    dx, dy = tan
+    mag = sqrt(dx * dx + dy * dy)
+    if mag <= 0:
+        return None
+    if dx < 0 or (dx == 0 and dy < 0):
+        dx, dy = -dx, -dy
+    return (dx / mag, dy / mag)
+
+
 def _mean_unit_tangent(cluster: list):
-    """Mean unit tangent across all extents in the cluster, with direction
-    canonicalised (positive x, then positive y) so opposite-direction polylines
-    don't cancel. Returns (tx, ty) or None if no usable extents.
+    """Mean unit tangent across stops in the cluster, computed at each
+    stop's snap position via _stop_tangent. Returns (tx, ty) or None if no
+    usable stops.
     """
     ax = ay = 0.0
     n = 0
     for s in cluster:
-        ext = s.get("extent")
-        if not ext or len(ext) < 2:
+        t = _stop_tangent(s)
+        if t is None:
             continue
-        dx = ext[-1][0] - ext[0][0]
-        dy = ext[-1][1] - ext[0][1]
-        mag = sqrt(dx*dx + dy*dy)
-        if mag <= 0:
-            continue
-        if dx < 0 or (dx == 0 and dy < 0):
-            dx, dy = -dx, -dy
-        ax += dx / mag
-        ay += dy / mag
+        ax += t[0]
+        ay += t[1]
         n += 1
     if n == 0:
         return None
@@ -593,24 +704,6 @@ def _mean_unit_tangent(cluster: list):
     if mag <= 0:
         return None
     return (ax / mag, ay / mag)
-
-
-def _stop_tangent(s):
-    """Unit tangent of one stop's extent (start → end), canonicalised to the
-    upper half-plane so opposite directions don't cancel out. Returns
-    (tx, ty) or None when the extent is degenerate.
-    """
-    ext = s.get("extent")
-    if not ext or len(ext) < 2:
-        return None
-    dx = ext[-1][0] - ext[0][0]
-    dy = ext[-1][1] - ext[0][1]
-    mag = sqrt(dx * dx + dy * dy)
-    if mag <= 0:
-        return None
-    if dx < 0 or (dx == 0 and dy < 0):
-        dx, dy = -dx, -dy
-    return (dx / mag, dy / mag)
 
 
 def _extent_intersect_axis(ext, tx, ty, sigma):
@@ -757,10 +850,6 @@ SIGMA_CLUMP_SLACK_M = 5.0
 # slack keeps it in scoring. Sized larger than pure float noise so it also
 # absorbs minor pfaedle-routing jitter on the polyline tangent.
 SIGMA_BOUNDARY_TOL_M = 0.5
-# Minimum drawn span (perpendicular extent of scoring dots along the bar's
-# transverse axis) for a bar to be kept. Below this the "bar" reads as a dot,
-# not a bar — its would-be stabbed members fall through to leftover-fill.
-DEGENERATE_BAR_MIN_SPAN_M = 1.0
 PROTECTION_RADIUS_RAIL_M = 30.0
 PROTECTION_RADIUS_NONRAIL_M = 5.0
 
@@ -946,7 +1035,6 @@ def _perpendicular_sweep(group, angle_tol_rad, lone_outlier_gap_m):
     gap_thresh = lone_outlier_gap_m / 111000.0
     dedup_tol = DEDUP_TOL_M / 111000.0
     sigma_tol = SIGMA_BOUNDARY_TOL_M / 111000.0
-    min_span = DEGENERATE_BAR_MIN_SPAN_M / 111000.0
     best_count = 0
     raw_tied = []
     for arc_d in candidate_arcs:
@@ -954,10 +1042,10 @@ def _perpendicular_sweep(group, angle_tol_rad, lone_outlier_gap_m):
 
         # Per-position consensus bar angle: each σ-clump member's local
         # tangent at the closest point on its own extent to `pos`,
-        # 40 m-smoothed, then circular median (mod π) across all members.
-        # Curvature-aware (each member contributes its local direction at
-        # the bar's location, not its overall extent chord) and robust to
-        # one outlier whose pfaedle shape is rotated.
+        # TANGENT_WINDOW_M-smoothed, then circular median (mod π) across
+        # all members. Curvature-aware (each member contributes its local
+        # direction at the bar's location, not its overall extent chord)
+        # and robust to one outlier whose pfaedle shape is rotated.
         member_angles = []
         for k in range(n):
             m_ext = member_exts[k]
@@ -966,7 +1054,8 @@ def _perpendicular_sweep(group, angle_tol_rad, lone_outlier_gap_m):
                 continue
             m_dists = member_dists_list[k]
             m_arc = _project_meters(pos[0], pos[1], m_ext, m_dists)
-            m_tan = _smoothed_tangent_at(m_ext, m_dists, m_arc, 40.0)
+            m_tan = _smoothed_tangent_at(m_ext, m_dists, m_arc,
+                                          TANGENT_WINDOW_M)
             if m_tan is None:
                 member_angles.append(None)
                 continue
@@ -1065,12 +1154,6 @@ def _perpendicular_sweep(group, angle_tol_rad, lone_outlier_gap_m):
             continue
 
         n_min, n_max = min(scoring_n), max(scoring_n)
-        # Degenerate-bar drop: a bar whose scoring dots span less than
-        # DEGENERATE_BAR_MIN_SPAN_M along the transverse axis renders as a
-        # dot, not a bar. Drop the candidate and let leftover-fill place its
-        # would-be members.
-        if n_max - n_min < min_span:
-            continue
 
         # Phase 2: wrong-angle members whose extent crosses the bar within
         # the scoring-set drawn span. These count toward the stab total but
@@ -1758,7 +1841,7 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
         # groups (opposite ends of a long station) get a sweep per clump
         # rather than one stuck near whichever clump contains the 2-D
         # centroid.
-        angle_tol = radians(10.0)
+        angle_tol = radians(12.0)
         groups = _tangent_groups(platforms, angle_tol)
 
         # For each σ-clump of ≥ 2 members, collect every tied max-scoring-
@@ -1830,6 +1913,7 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
 
 def write_debug_platforms(line_stops: dict, line_lookup: dict,
                            stop_attrs: dict, skip_first_oids: set,
+                           skip_last_oids: set,
                            sibling_groups: dict, oid_sibling_key: dict) -> None:
     """Emit transit_debug_platforms.geojson — one LineString per stop tracing
     the platform's full allowed range along the line's polyline. Debug-only
@@ -1852,10 +1936,14 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
         if len(polyline) < 2:
             continue
         skip_first_here = str(osm_id) in skip_first_oids
+        skip_last_here = str(osm_id) in skip_last_oids
+        last_idx = len(triplets) - 1
         sib_key = oid_sibling_key.get(str(osm_id))
         siblings = sibling_groups.get(sib_key, []) if sib_key else []
         for idx, trip in enumerate(triplets):
             if idx == 0 and skip_first_here:
+                continue
+            if idx == last_idx and skip_last_here:
                 continue
             if len(trip) < 3:
                 continue
@@ -1882,7 +1970,7 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
 
 def write_debug_stops(line_stops: dict, line_lookup: dict,
                        stop_attrs: dict, stop_meta: dict,
-                       skip_first_oids: set) -> None:
+                       skip_first_oids: set, skip_last_oids: set) -> None:
     """Emit transit_debug_stops.geojson — one Point per (line, stop) pair,
     1:1 with the debug platform lines. The point sits at the GTFS coord
     snapped onto that line's polyline (the same snap-to-line used by the
@@ -1977,8 +2065,12 @@ def write_debug_stops(line_stops: dict, line_lookup: dict,
         if len(polyline) < 2:
             continue
         skip_first_here = str(osm_id) in skip_first_oids
+        skip_last_here = str(osm_id) in skip_last_oids
+        last_idx = len(triplets) - 1
         for idx, trip in enumerate(triplets):
             if idx == 0 and skip_first_here:
+                continue
+            if idx == last_idx and skip_last_here:
                 continue
             if len(trip) < 3:
                 continue
@@ -2530,12 +2622,16 @@ def main():
     print("Loading atlas platform attributes...")
     stop_attrs = write_stop_attributes_diag(line_stops)
 
-    skip_first_oids = compute_terminus_skip_oids(line_stops)
+    skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
+        line_stops, line_lookup, stop_meta)
     print(f"  Terminus dedup: {len(skip_first_oids):,} departure-side entries "
           f"will be omitted from rendering (popup retains both directions)")
+    print(f"  Arrival drop (tram/bus/regional_bus): {len(skip_last_oids):,} "
+          f"unpaired or layover-shadowed arrival entries omitted from pill construction")
 
     print("Emitting debug platform extents...")
-    write_debug_platforms(line_stops, line_lookup, stop_attrs, skip_first_oids,
+    write_debug_platforms(line_stops, line_lookup, stop_attrs,
+                          skip_first_oids, skip_last_oids,
                           sibling_groups, oid_sibling_key)
 
     print("Building stop dots and pill candidates...")
@@ -2582,12 +2678,16 @@ def main():
         flat       = flatten_coords(coords)
 
         skip_first_here = str(osm_id) in skip_first_oids
+        skip_last_here = str(osm_id) in skip_last_oids
+        last_idx = len(stop_coords) - 1
         sib_key = oid_sibling_key.get(str(osm_id))
         siblings = sibling_groups.get(sib_key, []) if sib_key else []
 
         if mode in RAIL_MODES:
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
+                    continue
+                if idx == last_idx and skip_last_here:
                     continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
@@ -2619,6 +2719,8 @@ def main():
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
                     continue
+                if idx == last_idx and skip_last_here:
+                    continue
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
                 meta     = stop_meta.get(sid, {})
@@ -2640,6 +2742,8 @@ def main():
         elif mode in PILL_MODES:
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
+                    continue
+                if idx == last_idx and skip_last_here:
                     continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
@@ -2671,6 +2775,8 @@ def main():
             line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
+                    continue
+                if idx == last_idx and skip_last_here:
                     continue
                 lon, lat   = entry[0], entry[1]
                 sid        = entry[2] if len(entry) > 2 else ""
@@ -2789,7 +2895,8 @@ def main():
     # Emit debug overlays now that all clusters have been processed and
     # _STABBED_PAIRS / _DIAG_BARS are populated.
     print("Emitting debug stop dots...")
-    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta, skip_first_oids)
+    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta,
+                       skip_first_oids, skip_last_oids)
     print("Emitting debug max-stab bars...")
     write_debug_bars()
 

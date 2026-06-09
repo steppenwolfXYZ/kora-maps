@@ -1202,7 +1202,7 @@ def build_station_layers(cfg) -> list:
         }
     })
 
-    if not cfg.get("transit", {}).get("debug_overlay", False):
+    if not cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         return layers
 
     # Debug overlay (pill-rendering concept): thin black line tracing each
@@ -1319,7 +1319,7 @@ def generate_style(cfg) -> dict:
     if g.get("sprite"):
         style["sprite"] = g["sprite"]
 
-    if cfg.get("transit", {}).get("debug_overlay", False):
+    if cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         style["sources"]["transit_debug_platforms"] = {
             "type": "vector",
             "url": "pmtiles:///tl_debug_platforms.pmtiles"
@@ -1360,6 +1360,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    cfg["transit_pipeline"] = load_config(script_dir / "transit" / "config.yaml")
     style = generate_style(cfg)
 
     with open(args.output, "w") as f:
