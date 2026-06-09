@@ -81,6 +81,17 @@ Each platform the sweep did not place on a bar is a leftover. Leftovers are plac
 
 A leftover with a degenerate extent (fewer than two distinct points along its polyline) keeps its raw snap position regardless of which rule would otherwise apply — there is no extent to snap along.
 
+**Parallel-stub drop (rail clusters only).** Some long shared rail platforms host a small subset of trips that depart from only part of the platform, encoded as a separate `stop_id`. Naively, that stop's leftover-placed dot lands further down the same line, connected to the main pill by a connector running parallel to the track — a visual stub that does not correspond to a separate platform.
+
+After `_leftover_fill` returns on a rail (train) cluster, every leftover is checked. Let `p` be a leftover and `q` its nearest **non-coincident** other cluster member (within-`DEDUP_TOL_M` neighbors are skipped — they represent the same physical dot collapsed by `_dedup_stop_positions` later, and offer no useful gap). The leftover is **dropped from rendering** when both:
+
+- the gap `|p → q|` is < `PARALLEL_STUB_GAP_M` (100 m), and
+- the gap direction is within `PARALLEL_STUB_TOL_DEG` (15°, mod π) of either `p`'s or `q`'s extent tangent. `p`'s tangent is preferred; the fallback to `q`'s tangent handles **degenerate-extent leftovers** — sub-platform `stop_id`s sometimes land with no shapeable extent at all, so their own tangent is `None` but the neighbor's tangent (along the line direction) is still usable.
+
+The dropped stop's `lon`/`lat` is rewritten to `q`'s position so `_dedup_stop_positions` collapses it onto that dot. The dropped stop remains in `cluster`, so its line still surfaces in `lines_json` (popup) at the absorbing dot. After a drop, `_leftover_fill` is re-run on the remaining leftovers and the check repeats; this loop converges in at most one iteration per leftover. Non-rail clusters skip the check entirely.
+
+The 100 m gap covers typical sub-platform offsets within one long platform. The parallel-tangent check is what prevents false positives at multi-track stations: dots on adjacent parallel platforms separate **perpendicular** to the line direction (across tracks), so their gap vector is perpendicular to the extent tangent and fails the parallel test even when the dots sit < 100 m apart.
+
 ### Pills and connectors
 
 Pill geometry is built from the placed dots by the existing greedy nearest-neighbour path through every dot in the cluster. Each NN-path segment is a candidate gap; whether it actually splits the path into separate pills depends on the gap's length and the shape of the surrounding NN-path. The generous straight-threshold `PILL_GAP_STRAIGHT_M` (50 m absolute) applies when **either** of these holds:
@@ -102,21 +113,26 @@ Pill rendering style (thickness, casing, mode-coloured stroke) is unchanged from
 
 After pill placement and MST topology are final, each connector emitted by the step above is replaced with a curved polyline. Curving changes connector geometry only — it never changes which pills are connected, and pills themselves remain straight polylines through their dots.
 
-A curved connector has the shape `[A, stub, curve, stub, B]`: a straight stub at each end along that end's chosen tangent, then a symmetric curve in the middle. The two stubs may differ in length; only the curve between them is required to be symmetric.
+Two distinct constructions are used, depending on what sits at each end:
 
-**Tangent at each endpoint.**
+- **Pill ↔ pill** — symmetric arc with optional straight stubs at each end. Shape: `[A, stub, curve, stub, B]`. The two stubs may differ in length; only the curve between them is required to be symmetric.
+- **Pill ↔ disc** — asymmetric arc-then-straight. The curve begins at the pill tip with no pill-side stub and bends at the per-mode radius toward the disc until its forward tangent points at the disc; a straight segment then runs from that tangent point to the disc. Shape: `[A, curve, P, B]` (with P collapsing out when it coincides with B).
+- **Disc ↔ disc** — straight 2-point line. Neither tangent is constrained.
+
+**Tangent at each pill endpoint.**
 
 - **Pill tip** (connector leaves the first or last dot of a pill): default tangent is **axial** — the direction of the pill's terminal segment, extended outward. Also evaluate the two **perpendiculars** to that axis. A perpendicular replaces axial only when its resulting connector length is ≤ `CURVE_PERP_PREF_RATIO` (0.7) × the axial-tangent connector length; if both perpendiculars qualify, the shorter wins.
 - **Pill interior** (connector leaves an interior dot of a pill): tangent is **perpendicular** to the local pill direction at that dot, on whichever side faces the other endpoint. Local pill direction is the average of the incoming and outgoing segment directions at that dot. No alternatives are evaluated — the axial directions at an interior dot would run along the pill.
-- **Disc end** (singleton, rendered as an `endpoint` Point): no constraint. The disc has no axis; the disc-end tangent is set to whatever the curve's symmetry produces.
 
-Tangent selection is joint across the two ends — when both ends are pill tips and a perpendicular qualifies at one or both ends, the chosen `(tA, tB)` pair is the one minimising total connector length under the per-end rules above.
+For pill ↔ pill, tangent selection is joint across the two ends — when both ends are pill tips and a perpendicular qualifies at one or both ends, the chosen `(tA, tB)` pair is the one minimising total connector length under the per-end rules above.
 
-**Symmetric curve.** Given the chosen tangents `tA` (at A) and `tB` (at B), pick stub lengths `sA, sB ≥ 0` such that the curve drawn between `A' = A + sA·tA` and `B' = B + sB·(−tB)` is mirror-symmetric across the perpendicular bisector of `A'B'`. Mirror symmetry requires `tA` and `−tB` to make equal angles with the chord `A'B'`, which determines the stub-length ratio. When one endpoint is a disc, that end's tangent is set to the mirror of the constrained end's tangent across the bisector, which trivially satisfies symmetry.
+**Symmetric arc (pill ↔ pill).** Given the chosen tangents `tA` (at A) and `tB` (at B), pick stub lengths `sA, sB ≥ 0` such that the curve drawn between `A' = A + sA·tA` and `B' = B + sB·(−tB)` is mirror-symmetric across the perpendicular bisector of `A'B'`. Mirror symmetry requires `tA` and `−tB` to make equal angles with the chord `A'B'`, which determines the stub-length ratio.
 
-**Maximum curve radius.** The curve's radius of curvature is capped at `CURVE_MAX_RADIUS_M` (10 m). When the unconstrained symmetric solution would produce a gentler curve (radius > 10 m), the curve is tightened to the cap and the straight stubs absorb the remaining distance. The visual intent is "straight, then a visible turn, then straight" — near-straight gentle arcs are not allowed.
+**Pill-to-disc arc.** The arc starts at the pill tip A tangent to the chosen pill-end tangent `tA`, with the arc center placed on the side of `tA` that contains the disc B. The arc bends at the per-mode radius until the forward tangent at point `P` on the circle points at B (`CP ⊥ BP`). From `P`, a straight segment runs to B. When the disc lies inside the curve circle — which happens when the disc is closer than the radius forces the circle out toward — the axial tangent admits no valid arc; the picker falls back to the shortest valid perpendicular tangent rather than to a straight line, since the asymmetric pill-disc construction cannot produce L-shape detours.
 
-**Fallback.** When no valid symmetric construction exists at any tangent candidate — typically a pill ↔ pill connector where the two endpoints' cardinal tangents point in geometrically incompatible directions — the connector falls back to a straight 2-point line. Disc ↔ disc connectors (both endpoints are singletons) skip curving and emit straight, since neither tangent is constrained.
+**Maximum curve radius.** Capped per mode: `CURVE_MAX_RADIUS_M_BY_MODE` is `30 m` for train and metro, `20 m` for tram, bus, and regional_bus — so the curve scales with the physically larger rail pills. Tighter natural curves use the smaller natural radius; gentler natural curves are tightened to the cap and the straight stubs absorb the remaining distance.
+
+**Fallback to straight.** A pill ↔ pill connector falls back to a straight 2-point line when no valid symmetric arc exists at the default tangent combination (axial at every tip, the prescribed perp at every interior dot) — typical when the two tip axials are parallel or anti-parallel. A pill ↔ disc connector falls back to straight only when no tangent candidate at the pill end produces any valid arc (e.g. the disc lies on the pill's axis line). Disc ↔ disc connectors are always straight.
 
 ### Pill grouping (which dots a pill connects)
 

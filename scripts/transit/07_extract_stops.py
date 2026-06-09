@@ -32,7 +32,7 @@ import csv
 import json
 import yaml
 from itertools import permutations
-from math import radians, cos, sin, sqrt, atan2, degrees, floor, pi
+from math import radians, cos, sin, sqrt, atan2, acos, degrees, floor, pi
 from pathlib import Path
 from collections import defaultdict
 
@@ -117,7 +117,51 @@ PILL_GAP_ANGLED_M = 8      # gap threshold otherwise (gap is an angled /
 LONE_OUTLIER_GAP_RAIL_METRO_M = 50
 LONE_OUTLIER_GAP_BUS_TRAM_M = 20
 
+# Parallel-stub drop (rail clusters only). After leftover-fill, a placed
+# leftover whose distance to its nearest non-coincident other placed dot
+# is < this gap AND whose gap direction is within PARALLEL_STUB_TOL_DEG of
+# either the leftover's or the neighbor's extent tangent is treated as a
+# spurious "sub-platform" stop: a small subset of trips departs from one
+# end of a long shared platform, gets its own stop_id, and would otherwise
+# render as a short connector running along the line. The stop is dropped
+# from rendering (its position is snapped to the absorbing dot so
+# _dedup_stop_positions collapses it later, preserving its line in the
+# popup), and leftover-fill is re-run on the remaining leftovers.
+#
+# The 100 m gap covers typical sub-platform distances (Bern ~17 m,
+# Fribourg ~58 m measured). The parallel check is what protects against
+# false positives at multi-track stations: dots on parallel adjacent
+# platforms separate perpendicular to the line direction, so their gap
+# vector is perpendicular to the extent tangent and fails the parallel
+# test even when the dots are < 100 m apart.
+PARALLEL_STUB_GAP_M = 100.0
+PARALLEL_STUB_TOL_DEG = 15.0
+
 PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
+
+# Connector curving (see pill-rendering concept § Connector curving).
+# CURVE_PERP_PREF_RATIO: a perpendicular tangent at a pill tip replaces the
+# default axial tangent only if its connector length is ≤ this fraction of
+# the axial-tangent connector length. CURVE_MAX_RADIUS_M_BY_MODE: per-mode
+# arc radius. Rail / metro use a larger radius (30 m) than tram / bus / regional
+# bus (20 m) so the curve scales with the physically larger rail pills.
+CURVE_PERP_PREF_RATIO = 0.7
+CURVE_MAX_RADIUS_M_BY_MODE = {
+    "train":        30.0,
+    "metro":        30.0,
+    "tram":         20.0,
+    "bus":          20.0,
+    "regional_bus": 20.0,
+}
+CURVE_MAX_RADIUS_M_DEFAULT = 20.0
+CURVE_SAMPLES = 12  # interior arc subdivisions
+
+
+def _curve_max_radius(mode: str) -> float:
+    return CURVE_MAX_RADIUS_M_BY_MODE.get(mode, CURVE_MAX_RADIUS_M_DEFAULT)
+# Meters per degree at equator; lon component is additionally scaled by
+# cos(latitude) for equal-distance projection.
+_M_PER_DEG = 111319.49
 
 
 # =============================================================================
@@ -1775,6 +1819,63 @@ def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
             p["lon"], p["lat"] = best_positions[id(p)]
 
 
+def _find_parallel_stub_drop(cluster: list, placed_leftovers: list):
+    """Scan just-placed leftovers in a rail (train) cluster for one whose
+    nearest non-coincident placed dot is within PARALLEL_STUB_GAP_M AND
+    whose gap direction is parallel (within PARALLEL_STUB_TOL_DEG) to
+    either the leftover's own extent tangent OR the neighbor's. Returns
+    (stop_to_drop, absorbing_position) for the first match, or None.
+
+    Coincident neighbors (within DEDUP_TOL_M) are skipped because they
+    represent the same physical dot — a duplicate record collapsed by
+    _dedup_stop_positions later — and offer no useful gap. The neighbor-
+    tangent fallback handles degenerate-extent leftovers: at Bern, the
+    sub-platform stop_ids land with no extent at all (pfaedle didn't shape
+    them or the extent collapsed), so their own tangent is None but the
+    main pill bar dot they sit next to has a usable extent along the
+    line direction. Coordinates are in the scaled (cos_lat) cluster space;
+    distances convert via _M_PER_DEG.
+    """
+    tol_cos = cos(radians(PARALLEL_STUB_TOL_DEG))
+    gap_threshold_units = PARALLEL_STUB_GAP_M / _M_PER_DEG
+    gap_threshold_sq = gap_threshold_units * gap_threshold_units
+    coincident_units = DEDUP_TOL_M / _M_PER_DEG
+    coincident_sq = coincident_units * coincident_units
+
+    for p in placed_leftovers:
+        nearest = None  # (d_sq, lon, lat, stop_dict)
+        for q in cluster:
+            if q is p:
+                continue
+            dx = q["lon"] - p["lon"]
+            dy = q["lat"] - p["lat"]
+            d_sq = dx * dx + dy * dy
+            if d_sq <= coincident_sq:
+                continue
+            if nearest is None or d_sq < nearest[0]:
+                nearest = (d_sq, q["lon"], q["lat"], q)
+        if nearest is None:
+            continue
+        d_sq, q_lon, q_lat, q = nearest
+        if d_sq >= gap_threshold_sq:
+            continue
+
+        # Prefer p's own tangent; fall back to the neighbor's so degenerate-
+        # extent leftovers (no tangent of their own) can still be checked.
+        tan = _stop_tangent(p) or _stop_tangent(q)
+        if tan is None:
+            continue
+
+        gx = q_lon - p["lon"]
+        gy = q_lat - p["lat"]
+        gmag = sqrt(gx * gx + gy * gy)
+        cos_a = (gx * tan[0] + gy * tan[1]) / gmag
+        if abs(cos_a) < tol_cos:
+            continue
+        return p, (q_lon, q_lat)
+    return None
+
+
 def coordinate_dots_global_stab(cluster: list, protection_m: float,
                                   lone_outlier_gap_m: float) -> None:
     """Tangent-group + perpendicular-sweep dot placement.
@@ -1889,11 +1990,30 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
             _apply_option(group, option, placed_ids, record_stabbed=True)
             _record_diag_bar(group, option)
 
-        # Leftovers: every platform NOT placed on a bar.
+        # Leftovers: every platform NOT placed on a bar. For rail (train)
+        # clusters, repeatedly run leftover-fill and check each placed
+        # leftover for a short parallel "stub" connector to its nearest
+        # other placed dot; drop and re-run until nothing more matches.
         leftovers = [p for p in platforms if id(p) not in placed_ids]
         if leftovers:
-            _leftover_fill(platforms, leftovers, placed_ids, raw,
-                            gtfs_centroid, cos_lat=cos_lat)
+            _, dom_mode, _, _ = dominant_line(cluster)
+            is_rail_cluster = (dom_mode == "train")
+            remaining = list(leftovers)
+            while remaining:
+                _leftover_fill(platforms, remaining, placed_ids, raw,
+                                gtfs_centroid, cos_lat=cos_lat)
+                if not is_rail_cluster:
+                    break
+                dropped = _find_parallel_stub_drop(cluster, remaining)
+                if dropped is None:
+                    break
+                p, absorbing_pos = dropped
+                # Snap the dropped stop onto the absorbing dot; downstream
+                # _dedup_stop_positions collapses it into that dot, so the
+                # stop's line still surfaces in the cluster's lines_json
+                # (popup) but no extra dot/connector is rendered.
+                p["lon"], p["lat"] = absorbing_pos
+                remaining = [x for x in remaining if x is not p]
     finally:
         # Unscale lon back to real degrees on cluster stops, extents, and
         # any debug bars added during this cluster's processing.
@@ -2343,6 +2463,391 @@ def cluster_lines(cluster_stops, line_lookup):
     return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x.get("gtfs_ref") or x["ref"]))
 
 
+# =============================================================================
+# Connector curving — symmetric-arc geometry applied to MST connectors after
+# pill placement. See `.claude/concepts/pill-rendering.md` § Connector curving.
+# =============================================================================
+
+def _lonlat_to_xy(lon, lat, lon0, lat0, cos_lat):
+    """Equal-distance metric frame anchored at (lon0, lat0)."""
+    return ((lon - lon0) * cos_lat * _M_PER_DEG,
+            (lat - lat0) * _M_PER_DEG)
+
+
+def _xy_to_lonlat(x, y, lon0, lat0, cos_lat):
+    return (lon0 + x / (cos_lat * _M_PER_DEG),
+            lat0 + y / _M_PER_DEG)
+
+
+def _rotate2(v, ang):
+    c, s = cos(ang), sin(ang)
+    return (v[0] * c - v[1] * s, v[0] * s + v[1] * c)
+
+
+def _norm2(v):
+    m = sqrt(v[0] * v[0] + v[1] * v[1])
+    if m < 1e-12:
+        return None
+    return (v[0] / m, v[1] / m)
+
+
+def _polyline_length_xy(poly):
+    total = 0.0
+    for i in range(len(poly) - 1):
+        dx = poly[i + 1][0] - poly[i][0]
+        dy = poly[i + 1][1] - poly[i][1]
+        total += sqrt(dx * dx + dy * dy)
+    return total
+
+
+def _tangent_candidates(group, endpoint, other_endpoint, lon0, lat0, cos_lat):
+    """Candidate outward-pointing unit tangents at `endpoint` within `group`.
+
+    Returns a list of (tangent, is_default) tuples in metric (x, y) space:
+    - Singleton group (disc): [] — tangent is unconstrained, derived from
+      symmetry by the caller.
+    - Pill tip: [(axial, True), (perp_left, False), (perp_right, False)].
+    - Pill interior: [(perp_toward_other, True)] — the only sensible choice.
+    """
+    if len(group) <= 1:
+        return []
+
+    # Locate endpoint within group. Positions flow through unchanged from
+    # nearest_neighbor_path / split, so float-equality matches.
+    idx = None
+    for k, p in enumerate(group):
+        if p[0] == endpoint[0] and p[1] == endpoint[1]:
+            idx = k
+            break
+    if idx is None:
+        return []
+
+    xy = [_lonlat_to_xy(p[0], p[1], lon0, lat0, cos_lat) for p in group]
+
+    if idx == 0 or idx == len(group) - 1:
+        neighbor = 1 if idx == 0 else len(group) - 2
+        axial_raw = (xy[idx][0] - xy[neighbor][0], xy[idx][1] - xy[neighbor][1])
+        axial = _norm2(axial_raw)
+        if axial is None:
+            return []
+        return [
+            (axial, True),
+            (_rotate2(axial, pi / 2), False),
+            (_rotate2(axial, -pi / 2), False),
+        ]
+
+    # Interior: average of incoming/outgoing segment directions, then
+    # perpendicular on the side facing the other connector endpoint.
+    prev_dir = _norm2((xy[idx][0] - xy[idx - 1][0], xy[idx][1] - xy[idx - 1][1]))
+    next_dir = _norm2((xy[idx + 1][0] - xy[idx][0], xy[idx + 1][1] - xy[idx][1]))
+    if prev_dir is None and next_dir is None:
+        return []
+    if prev_dir is None:
+        avg = next_dir
+    elif next_dir is None:
+        avg = prev_dir
+    else:
+        avg = _norm2(((prev_dir[0] + next_dir[0]) / 2, (prev_dir[1] + next_dir[1]) / 2))
+        if avg is None:
+            avg = next_dir
+    perp_a = _rotate2(avg, pi / 2)
+    perp_b = _rotate2(avg, -pi / 2)
+    other_xy = _lonlat_to_xy(other_endpoint[0], other_endpoint[1], lon0, lat0, cos_lat)
+    towards = (other_xy[0] - xy[idx][0], other_xy[1] - xy[idx][1])
+    dot_a = perp_a[0] * towards[0] + perp_a[1] * towards[1]
+    dot_b = perp_b[0] * towards[0] + perp_b[1] * towards[1]
+    return [((perp_a if dot_a >= dot_b else perp_b), True)]
+
+
+def _build_symmetric_arc(A, B, tA, tB, r_max):
+    """Build a symmetric arc connector between A and B in metric (x, y) space.
+
+    tA, tB are unit tangents pointing OUT of each pill. Returns the polyline
+    `[A, A', interior arc samples, B', B]` (collapsing degenerate-length
+    stubs), or None if no valid construction exists.
+    """
+    neg_tB = (-tB[0], -tB[1])
+    cross = tA[0] * neg_tB[1] - tA[1] * neg_tB[0]
+    dot = tA[0] * neg_tB[0] + tA[1] * neg_tB[1]
+    turn = atan2(cross, dot)  # signed angle from tA to -tB, in (-π, π]
+
+    if abs(turn) < 1e-6 or abs(abs(turn) - pi) < 1e-6:
+        # Parallel or anti-parallel tangents — no clean symmetric arc.
+        return None
+
+    half = turn / 2.0
+    theta = abs(half)
+    chord_dir = _rotate2(tA, half)
+    # |chord| at which arc radius equals r_max.
+    L_target = 2.0 * r_max * sin(theta)
+
+    # Linear system in (sA, sB) for any given L:
+    #   sB*tB - sA*tA = L*chord_dir - (B - A)
+    # Solved via 2D Cramer's rule. det = tAy*tBx - tAx*tBy (= -(tA × tB)).
+    det = tA[1] * tB[0] - tA[0] * tB[1]
+    if abs(det) < 1e-9:
+        return None
+
+    def stubs(L):
+        qx = L * chord_dir[0] - (B[0] - A[0])
+        qy = L * chord_dir[1] - (B[1] - A[1])
+        # sB*tB - sA*tA = (qx, qy)
+        # [[-tAx, tBx], [-tAy, tBy]] [sA, sB]^T = [qx, qy]^T
+        sA = (qx * tB[1] - qy * tB[0]) / det
+        sB = (qx * tA[1] - qy * tA[0]) / det
+        return sA, sB
+
+    sA, sB = stubs(L_target)
+    chosen_L = L_target
+
+    if sA < -1e-6 or sB < -1e-6:
+        # Capped-radius arc would need negative stubs — shrink L (radius)
+        # until both come back to ≥ 0. sA(L), sB(L) are linear in L.
+        sA0, sB0 = stubs(0.0)
+        dsA = (sA - sA0) / L_target if L_target > 1e-9 else 0.0
+        dsB = (sB - sB0) / L_target if L_target > 1e-9 else 0.0
+        candidates = [0.0]
+        if abs(dsA) > 1e-12:
+            L_zero = -sA0 / dsA
+            if 0.0 <= L_zero <= L_target:
+                candidates.append(L_zero)
+        if abs(dsB) > 1e-12:
+            L_zero = -sB0 / dsB
+            if 0.0 <= L_zero <= L_target:
+                candidates.append(L_zero)
+        best = None
+        for L in candidates:
+            sa, sb = stubs(L)
+            if sa >= -1e-6 and sb >= -1e-6:
+                if best is None or L > best:
+                    best = L
+        if best is None:
+            return None
+        chosen_L = best
+        sA, sB = stubs(chosen_L)
+        sA = max(0.0, sA)
+        sB = max(0.0, sB)
+
+    radius = chosen_L / (2.0 * sin(theta)) if theta > 1e-9 else 0.0
+    if radius < 1e-6:
+        return None
+
+    A_prime = (A[0] + sA * tA[0], A[1] + sA * tA[1])
+    B_prime = (B[0] + sB * tB[0], B[1] + sB * tB[1])
+
+    # Arc center on the perpendicular to tA at A', on the side the curve bends toward.
+    perp_to_C = _rotate2(tA, pi / 2 if half > 0 else -pi / 2)
+    C = (A_prime[0] + radius * perp_to_C[0], A_prime[1] + radius * perp_to_C[1])
+
+    angle_A = atan2(A_prime[1] - C[1], A_prime[0] - C[0])
+    angle_B = atan2(B_prime[1] - C[1], B_prime[0] - C[0])
+    delta = angle_B - angle_A
+    if half > 0:
+        while delta < -1e-9:
+            delta += 2 * pi
+    else:
+        while delta > 1e-9:
+            delta -= 2 * pi
+
+    samples = []
+    for k in range(CURVE_SAMPLES + 1):
+        t = k / CURVE_SAMPLES
+        a = angle_A + t * delta
+        samples.append((C[0] + radius * cos(a), C[1] + radius * sin(a)))
+
+    # Compose final polyline, collapsing zero-length stub segments.
+    poly = [A]
+    if sA > 1e-3:
+        poly.append(samples[0])
+    poly.extend(samples[1:-1])
+    if sB > 1e-3:
+        poly.append(samples[-1])
+    poly.append(B)
+    return poly
+
+
+def _build_pill_disc_curve(A, tA, B, r_max):
+    """Pill-to-disc connector geometry in metric (x, y) space. The curve
+    begins at the pill tip A tangent to tA (no pill-side stub) and bends
+    at radius `r_max` toward B until the forward tangent points at B; from
+    that tangent point a straight segment connects to B.
+
+    Returns the polyline `[A, …arc samples…, P, B]` (P collapses out when
+    coincident with B). Returns None when the disc lies on the line of tA,
+    inside the arc circle, or otherwise admits no valid construction.
+    """
+    BA = (B[0] - A[0], B[1] - A[1])
+    if BA[0] * BA[0] + BA[1] * BA[1] < 1e-12:
+        return None  # disc coincident with pill tip
+
+    cross = tA[0] * BA[1] - tA[1] * BA[0]
+    if abs(cross) < 1e-9:
+        # Disc on the line of tA — bending does not help; caller falls
+        # back to a 2-point straight connector.
+        return None
+
+    # Arc center on the side of tA that contains B. Bend chirality matches.
+    if cross > 0:
+        perp_to_C = (-tA[1], tA[0])
+        ccw = True
+    else:
+        perp_to_C = (tA[1], -tA[0])
+        ccw = False
+    C = (A[0] + r_max * perp_to_C[0], A[1] + r_max * perp_to_C[1])
+
+    CB = (B[0] - C[0], B[1] - C[1])
+    d = sqrt(CB[0] * CB[0] + CB[1] * CB[1])
+    if d <= r_max + 1e-9:
+        # Disc inside (or on) the arc circle — no external tangent from B.
+        return None
+
+    # Two tangent points on the circle from B; pick the one we reach with
+    # the shorter forward sweep in the chirality direction whose tangent at
+    # P points toward B (not away around the long side).
+    theta_CB = atan2(CB[1], CB[0])
+    phi = acos(max(-1.0, min(1.0, r_max / d)))
+    theta_A = atan2(A[1] - C[1], A[0] - C[0])
+
+    best = None
+    for theta_p in (theta_CB + phi, theta_CB - phi):
+        Px = C[0] + r_max * cos(theta_p)
+        Py = C[1] + r_max * sin(theta_p)
+        if ccw:
+            tan_dir = (-sin(theta_p), cos(theta_p))
+        else:
+            tan_dir = (sin(theta_p), -cos(theta_p))
+        if tan_dir[0] * (B[0] - Px) + tan_dir[1] * (B[1] - Py) < 0:
+            continue
+        delta = theta_p - theta_A
+        if ccw:
+            while delta < -1e-9:
+                delta += 2 * pi
+        else:
+            while delta > 1e-9:
+                delta -= 2 * pi
+        sweep_mag = abs(delta)
+        if best is None or sweep_mag < best[0]:
+            best = (sweep_mag, delta)
+
+    if best is None or best[0] < 1e-6:
+        return None
+    _, delta = best
+
+    samples = []
+    for k in range(CURVE_SAMPLES + 1):
+        t = k / CURVE_SAMPLES
+        a = theta_A + t * delta
+        samples.append((C[0] + r_max * cos(a), C[1] + r_max * sin(a)))
+
+    # samples[0] == A by construction; build polyline as A + interior + P + B
+    # (collapse P when it coincides with B).
+    P = samples[-1]
+    poly = [A] + samples[1:]
+    if (P[0] - B[0]) * (P[0] - B[0]) + (P[1] - B[1]) * (P[1] - B[1]) > 1e-6:
+        poly.append(B)
+    return poly
+
+
+def _pill_disc_picker(pill_xy, pill_cands, disc_xy, r_max):
+    """Pick the best (tangent, polyline) for a pill-to-disc connector.
+
+    Tangent ranking: the axial-preferred rule applies when both axial and
+    perpendicular candidates produce a valid curve — a perpendicular wins
+    over the axial default only when its length is ≤ CURVE_PERP_PREF_RATIO ×
+    the default length. When the default tangent itself produces no valid
+    curve (typical when the disc is closer to the pill than r_max forces
+    the curve circle out toward), the shortest valid perpendicular is used
+    — the asymmetric pill-disc construction cannot produce the L-shape
+    detours that the strict default-or-straight rule guards against in the
+    pill-pill case. Returns None only when no tangent admits any valid
+    curve (disc on the pill's axis line, etc.), in which case the caller
+    falls back to a straight 2-point connector.
+    """
+    results = []
+    for ta, is_default in pill_cands:
+        poly = _build_pill_disc_curve(pill_xy, ta, disc_xy, r_max)
+        if poly is None:
+            continue
+        results.append((poly, _polyline_length_xy(poly), is_default))
+    if not results:
+        return None
+    default = next((r for r in results if r[2]), None)
+    if default is not None:
+        threshold = default[1] * CURVE_PERP_PREF_RATIO
+        qualifying = [r for r in results if r[1] <= threshold]
+        chosen = min(qualifying, key=lambda r: r[1]) if qualifying else default
+    else:
+        chosen = min(results, key=lambda r: r[1])
+    return chosen[0]
+
+
+def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode):
+    """Post-process an MST connector from `ca` (in group_a) to `cb` (in group_b)
+    into a curved (lon, lat) polyline. Returns [ca, cb] when no valid curve
+    exists at the default tangent combination — tangents incompatible, both
+    endpoints are discs, or the pill-end default fails for a pill-disc pair.
+    """
+    r_max = _curve_max_radius(mode)
+
+    lon0 = (ca[0] + cb[0]) / 2.0
+    lat0 = (ca[1] + cb[1]) / 2.0
+    A_xy = _lonlat_to_xy(ca[0], ca[1], lon0, lat0, cluster_cos_lat)
+    B_xy = _lonlat_to_xy(cb[0], cb[1], lon0, lat0, cluster_cos_lat)
+
+    cands_a = _tangent_candidates(group_a, ca, cb, lon0, lat0, cluster_cos_lat)
+    cands_b = _tangent_candidates(group_b, cb, ca, lon0, lat0, cluster_cos_lat)
+
+    # Disc ↔ disc: nothing constrains either tangent.
+    if not cands_a and not cands_b:
+        return [ca, cb]
+
+    # Pill ↔ disc: arc begins at the pill tip in the chosen tangent and bends
+    # until aligned with the disc direction; a straight segment then runs to
+    # the disc.
+    if cands_a and not cands_b:
+        poly_xy = _pill_disc_picker(A_xy, cands_a, B_xy, r_max)
+        if poly_xy is None:
+            return [ca, cb]
+        return [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
+    if cands_b and not cands_a:
+        poly_xy = _pill_disc_picker(B_xy, cands_b, A_xy, r_max)
+        if poly_xy is None:
+            return [ca, cb]
+        coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
+        coords.reverse()
+        return coords
+
+    # Pill ↔ pill: symmetric arc.
+    pairs = [(ta, tb, def_a, def_b)
+             for ta, def_a in cands_a
+             for tb, def_b in cands_b]
+
+    results = []
+    for ta, tb, def_a, def_b in pairs:
+        poly = _build_symmetric_arc(A_xy, B_xy, ta, tb, r_max)
+        if poly is None:
+            continue
+        results.append((poly, _polyline_length_xy(poly), def_a, def_b))
+
+    if not results:
+        return [ca, cb]
+
+    # Axial-preferred rule: the default tangent combination (axial at every
+    # tip, the prescribed perp at every interior dot) is the baseline. A
+    # perpendicular at a tip replaces axial only when its combination length
+    # is ≤ CURVE_PERP_PREF_RATIO × the default length. If the default itself
+    # produces no valid arc — typical when the two tip axials are parallel
+    # or anti-parallel — fall back to straight.
+    default_combo = next((r for r in results if r[2] and r[3]), None)
+    if default_combo is None:
+        return [ca, cb]
+    threshold = default_combo[1] * CURVE_PERP_PREF_RATIO
+    qualifying = [r for r in results if r[1] <= threshold]
+    chosen = min(qualifying, key=lambda r: r[1]) if qualifying else default_combo
+
+    return [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in chosen[0]]
+
+
 def make_pill_features(cluster_stops, minzoom, lines_json=""):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
@@ -2464,7 +2969,8 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
         ri, rj = find(i), find(j)
         if ri != rj:
             parent[ri] = rj
-            feats.append(make_feat([ca, cb], "connector"))
+            curve_coords = _curve_connector(ca, cb, groups[i], groups[j], cluster_cos_lat, mode)
+            feats.append(make_feat(curve_coords, "connector"))
 
     return feats
 
