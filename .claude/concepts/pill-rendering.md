@@ -113,26 +113,64 @@ Pill rendering style (thickness, casing, mode-coloured stroke) is unchanged from
 
 After pill placement and MST topology are final, each connector emitted by the step above is replaced with a curved polyline. Curving changes connector geometry only — it never changes which pills are connected, and pills themselves remain straight polylines through their dots.
 
-Two distinct constructions are used, depending on what sits at each end:
+Both constructions use the same symmetric-arc machinery, parameterised by what tangent candidates each end provides:
 
 - **Pill ↔ pill** — symmetric arc with optional straight stubs at each end. Shape: `[A, stub, curve, stub, B]`. The two stubs may differ in length; only the curve between them is required to be symmetric.
-- **Pill ↔ disc** — asymmetric arc-then-straight. The curve begins at the pill tip with no pill-side stub and bends at the per-mode radius toward the disc until its forward tangent points at the disc; a straight segment then runs from that tangent point to the disc. Shape: `[A, curve, P, B]` (with P collapsing out when it coincides with B).
-- **Disc ↔ disc** — straight 2-point line. Neither tangent is constrained.
+- **Pill ↔ disc** and **disc ↔ disc** — the same symmetric arc construction, with each disc supplying its tangent from a fixed N/E/S/W cardinal frame instead of pill geometry (see § Disc cardinal frame).
 
 **Tangent at each pill endpoint.**
 
-- **Pill tip** (connector leaves the first or last dot of a pill): default tangent is **axial** — the direction of the pill's terminal segment, extended outward. Also evaluate the two **perpendiculars** to that axis. A perpendicular replaces axial only when its resulting connector length is ≤ `CURVE_PERP_PREF_RATIO` (0.7) × the axial-tangent connector length; if both perpendiculars qualify, the shorter wins.
+- **Pill tip** (connector leaves the first or last dot of a pill): default tangent is **axial** — the direction of the pill's terminal segment, extended outward. Also evaluate the two **perpendiculars** to that axis. A perpendicular replaces axial only when its resulting connector length is ≤ `CURVE_PERP_PREF_RATIO` (0.75) × the axial-tangent connector length; if both perpendiculars qualify, the shorter wins.
 - **Pill interior** (connector leaves an interior dot of a pill): tangent is **perpendicular** to the local pill direction at that dot, on whichever side faces the other endpoint. Local pill direction is the average of the incoming and outgoing segment directions at that dot. No alternatives are evaluated — the axial directions at an interior dot would run along the pill.
 
 For pill ↔ pill, tangent selection is joint across the two ends — when both ends are pill tips and a perpendicular qualifies at one or both ends, the chosen `(tA, tB)` pair is the one minimising total connector length under the per-end rules above.
 
-**Symmetric arc (pill ↔ pill).** Given the chosen tangents `tA` (at A) and `tB` (at B), pick stub lengths `sA, sB ≥ 0` such that the curve drawn between `A' = A + sA·tA` and `B' = B + sB·(−tB)` is mirror-symmetric across the perpendicular bisector of `A'B'`. Mirror symmetry requires `tA` and `−tB` to make equal angles with the chord `A'B'`, which determines the stub-length ratio.
+**Symmetric arc (pill ↔ pill).** Given the chosen tangents `tA` (at A) and `tB` (at B), pick stub lengths `sA, sB ≥ 0` such that the curve drawn between `A' = A + sA·tA` and `B' = B + sB·(−tB)` is mirror-symmetric across the perpendicular bisector of `A'B'`. Mirror symmetry requires `tA` and `−tB` to make equal angles with the chord `A'B'`, which determines the stub-length ratio. The chord length `L` (and hence the arc radius `R = L / (2 sin θ)` where `θ = ½ · turn`) is picked at the **largest value for which both stubs stay ≥ 0** — the curve is as wide as the (tA, tB) geometry admits while keeping the symmetric-arc property. `sA(L)` and `sB(L)` are linear in `L`, so the valid range is a single interval `[L_lo, L_hi]`; the chosen `L = L_hi`. When neither stub has a slope that drives it back to 0 (no natural upper bound), the per-mode `CURVE_MAX_RADIUS_M_BY_MODE` cap is used as a fallback so the stubs don't extend forever.
 
-**Pill-to-disc arc.** The arc starts at the pill tip A tangent to the chosen pill-end tangent `tA`, with the arc center placed on the side of `tA` that contains the disc B. The arc bends at the per-mode radius until the forward tangent at point `P` on the circle points at B (`CP ⊥ BP`). From `P`, a straight segment runs to B. When the disc lies inside the curve circle — which happens when the disc is closer than the radius forces the circle out toward — the axial tangent admits no valid arc; the picker falls back to the shortest valid perpendicular tangent rather than to a straight line, since the asymmetric pill-disc construction cannot produce L-shape detours.
+**Parallel-tangent combo (pill ↔ pill).** When `tA` and `−tB` are parallel (`turn ≈ 0`) — the natural shape of the "both tips face each other" perp-perp combo — there is no arc to construct, but the combo is still a valid connector candidate: a straight line in direction `tA`. The arc builder returns the 2-point line `[A, B]` directly when the chord `B − A` is within ~2.5° of `tA`, and `None` otherwise (a misaligned straight line would have hard kinks at both ends and isn't tangent-consistent). The picker then compares the straight's chord length against the default-combo's full arc length under the same 0.7 ratio rule, so a wildly wide axial-axial arc loses to a short perp-perp chord whenever a tangent-aligned chord exists.
 
-**Maximum curve radius.** Capped per mode: `CURVE_MAX_RADIUS_M_BY_MODE` is `30 m` for train and metro, `20 m` for tram, bus, and regional_bus — so the curve scales with the physically larger rail pills. Tighter natural curves use the smaller natural radius; gentler natural curves are tightened to the cap and the straight stubs absorb the remaining distance.
+**Curve radius cap.** `CURVE_MAX_RADIUS_M_BY_MODE` is `30 m` for train and metro, `20 m` for tram, bus, and regional_bus. The per-mode value only kicks in as the fallback cap when the stub geometry has no natural upper bound; otherwise the natural max — which can be much wider — wins. `CURVE_MIN_RADIUS_M` (`5 m`) is the floor: an arc whose recovery-shrunk radius drops below it is dropped, and the connector falls back to straight.
 
-**Fallback to straight.** A pill ↔ pill connector falls back to a straight 2-point line when no valid symmetric arc exists at the default tangent combination (axial at every tip, the prescribed perp at every interior dot) — typical when the two tip axials are parallel or anti-parallel. A pill ↔ disc connector falls back to straight only when no tangent candidate at the pill end produces any valid arc (e.g. the disc lies on the pill's axis line). Disc ↔ disc connectors are always straight.
+**Fallback to straight.** A connector falls back to a straight 2-point line when no valid symmetric arc exists at the default tangent combination (axial at every pill tip, the prescribed perp at every pill interior dot, any cardinal at every disc end) — typical when the two tip axials are parallel or anti-parallel — or when the resulting radius is below `CURVE_MIN_RADIUS_M`.
+
+**Arc sampling.** Each arc's chord pitch is derived from its radius so the chord-to-arc sagitta stays near `CURVE_TARGET_SAGITTA_M` (`0.05 m`) regardless of radius: `chord ≈ sqrt(8 · r · CURVE_TARGET_SAGITTA_M)`. Tight 5 m arcs sample at ~1.4 m chords, 30 m rail arcs at ~3.5 m chords, and the very widest pill-pill arcs at coarser chords still. Sample count is hard-capped at `CURVE_MAX_SAMPLES` (`64`) to keep PMTile vertex counts bounded; in practice only multi-hundred-metre arcs approach the cap. Short arcs that fall below `n_samples = 2` are emitted straight.
+
+**Polyline dedup.** After sampling, adjacent vertices within `CURVE_DEDUP_TOL_M` (`0.5 m`) are collapsed. A near-zero `sA` no longer adds an `A_prime` vertex within micrometres of `A`; degenerate-radius arcs whose samples all land inside the dedup tolerance reduce to fewer vertices. A curve that deduplicates below 3 vertices is dropped to straight — MapLibre's line tessellation otherwise produces visible wobble at z18+ where adjacent line-join anchors overlap.
+
+### Disc anchoring
+
+A disc — a singleton group emitted as an endpoint Point — has no intrinsic direction, so by default a pill ↔ disc curve can arrive at the disc at any angle. When three or more lines converge on the same disc, this produces a visually random fan of arrival angles. The disc-anchoring rule constrains every connector after the disc's first to arrive from one of **4 cardinal directions** in a frame the first connector defined.
+
+**Anchor frame.** Each anchored disc carries an OUT-direction unit vector `t` — the disc's "south" tangent, analogous to a pill tip's outward tangent. Its 4 cardinals are `{t, rotate90(t), -t, rotate(-90)(t)}`. A connector to an anchored disc must pick one of these as its disc-end tangent, exactly as the pill-end picks from its axial / perpendicular candidates.
+
+**First arrival defines the frame.** The first connector reaching a disc runs unconstrained (pill ↔ unanchored-disc uses the existing asymmetric construction; unanchored ↔ unanchored is a straight chord). Its arrival direction at the disc — the unit vector from the polyline's penultimate vertex to the disc — becomes the disc's anchor `t`. For a disc-disc straight chord, both discs anchor simultaneously: each disc's `t` points along the chord away from the other disc. For a pill ↔ unanchored-disc curve whose final segment is `P → B`, the disc B anchors with `t = (B − P) / |B − P|`.
+
+Anchoring fires for every "first" connector regardless of shape — chosen curve, parallel-tangent straight, or unconditional fallback. The frame is set once and never re-anchored.
+
+**Constrained-end picker.** With one or both ends carrying a 4-cardinal frame, the picker enumerates `(pill-or-cardinal-A × pill-or-cardinal-B)` combinations through `_build_symmetric_arc` (both ends constrained) or the existing asymmetric `_build_pill_disc_curve` (one end constrained, other free). The pill-end axial preference still applies: a pill ↔ anchored-disc combo where the pill uses its axial default is the baseline, and a perpendicular pill candidate replaces it only when its combo length is ≤ `CURVE_PERP_PREF_RATIO` × the axial baseline. The 4 disc cardinals have no preference order — among combos that share the same pill tangent, the shortest wins.
+
+The constrained-both-ends symmetric arc inherits the pill ↔ pill widest-natural-radius rule: the radius grows to whatever `L_hi` the stub geometry allows, with `CURVE_MAX_RADIUS_M_BY_MODE` only kicking in when the stubs are unbounded. Anchored-disc arcs can therefore be visibly wider than the unanchored pill ↔ disc curves they replace at the same disc.
+
+**Fallback when no cardinal works.** If no `(pill-cand, disc-cardinal)` combo produces a valid arc (e.g. all 4 cardinals leave the disc inside the would-be arc circle), the connector falls back to the **unconstrained** logic for that connector only — `_pill_disc_picker` with the disc free, or a straight chord for disc-disc. The disc's anchor stays as it was; the fallback does not re-anchor.
+
+**Connector processing order.** Disc anchoring is order-dependent: whichever connector reaches a disc first defines the frame for every later one. MST connectors are therefore sorted before curving with three keys:
+
+1. **Pill ↔ pill connectors are processed first** in any order — they don't touch disc state.
+2. **Disc-incident connectors** are sorted by `max(line_count(A), line_count(B))` descending — the most heavily-served stop dictates the orientation it sees most often. Line count is the number of platforms collapsed to that placed-dot position.
+3. **Tie-break: pill ↔ disc before disc ↔ disc** — a pill end carries a real geometric direction, so a pill-disc connector gives the disc a more authoritative frame than a disc-disc chord chosen from raw positions.
+4. **Final tie-break: deterministic by endpoint coordinates** — sort lexicographically so the same input produces the same anchor state every run.
+
+### Pill polyline simplification
+
+After the NN-path through the placed dots produces a pill polyline, each pill is passed through Douglas-Peucker simplification with tolerance `PILL_SIMPLIFY_TOL_M` (`0.1 m`). Bar-placed dots are intended to be exactly collinear on the perpendicular bar, but float-precision noise (`cos_lat` scale/unscale round-trips) and the occasional off-bar leftover dot landing in the same pill polyline leave interior vertices a few centimetres off the chord. The deviation is sub-line-width at native zoom but visible as a wobble or kink at z18+. Vertices whose perpendicular distance from the chord through their kept neighbours is below `PILL_SIMPLIFY_TOL_M` are dropped; pills with genuine multi-bar / curved-track geometry deviate well above the tolerance and survive intact.
+
+### Per-platform dots vs the pill at pill zoom
+
+At a multi-line stop cluster, only the **cluster centroid dot** is emitted (`minzoom 5` for rail, per-mode minzoom otherwise; `maxzoom: mz - 1` so it disappears once the pill takes over). Individual per-platform dots are **not** emitted: at high zoom the dot's diameter and the pill casing's width are scaled to match exactly, and any float / anti-aliasing margin lets a dot bulge out from under the pill — a visible artefact along an otherwise straight pill. The pill itself is the visual marker for every platform inside the cluster, and the click handler resolves popups against the pill feature using the same `lines_json` payload that the dots would have carried. Future close-zoom additions (per-platform details, etc.) are out of scope for this concept.
+
+### Tippecanoe encoding
+
+`tl_stop_pills.pmtiles` is built with `-z18 -Z11 -d18` (other transit pmtiles stay at `-z14`). The bump to native z18 maxzoom is what allows densely-sampled curved connectors to render without visible wobble at z18+ — at the prior `-z14` maxzoom each high-zoom view was a 16× upscale of the z14 tile, magnifying every sub-tile vertex layout into something visibly wavy. Curved-connector samples and the per-mode pill widths now render at native resolution where MapLibre's line tessellation is well-behaved.
 
 ### Pill grouping (which dots a pill connects)
 

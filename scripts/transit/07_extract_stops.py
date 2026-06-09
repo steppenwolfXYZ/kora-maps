@@ -94,6 +94,15 @@ MODE_MINZOOM = {
     "mountain":    11,
 }
 
+# Zoom at which pill-mode stops switch from simple cluster dots
+# (`transit-stop-fill-*`) to disc rendering via `transit-stop-pill-endpoint`.
+# Must match `PILL_MINZOOM` in `generate_style.py`. Below this zoom, pill-mode
+# cluster dots render; at and above it, every cluster is represented by either
+# its pill (`make_pill_features`) or a centroid endpoint disc. Mountain and
+# ferry stops bypass pill clustering entirely and keep their dot rendering at
+# all zooms.
+PILL_MINZOOM = 11
+
 # Spatial clustering radius for pill grouping
 PILL_CLUSTER_RAIL_KM    = 0.300   # rail: 300 m (same as dot deduplication)
 PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
@@ -145,7 +154,7 @@ PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
 # the axial-tangent connector length. CURVE_MAX_RADIUS_M_BY_MODE: per-mode
 # arc radius. Rail / metro use a larger radius (30 m) than tram / bus / regional
 # bus (20 m) so the curve scales with the physically larger rail pills.
-CURVE_PERP_PREF_RATIO = 0.7
+CURVE_PERP_PREF_RATIO = 0.75
 CURVE_MAX_RADIUS_M_BY_MODE = {
     "train":        30.0,
     "metro":        30.0,
@@ -154,11 +163,50 @@ CURVE_MAX_RADIUS_M_BY_MODE = {
     "regional_bus": 20.0,
 }
 CURVE_MAX_RADIUS_M_DEFAULT = 20.0
-CURVE_SAMPLES = 12  # interior arc subdivisions
+# Adaptive arc sampling: chord pitch is derived from the arc radius so the
+# chord-to-arc sagitta stays near `CURVE_TARGET_SAGITTA_M` regardless of
+# radius — tight 5 m arcs get ~1.4 m chords, 30 m arcs get ~3.5 m chords,
+# wide pill-pill arcs get coarser chords still. Hard-capped at
+# `CURVE_MAX_SAMPLES` to keep PMTile vertex counts bounded.
+CURVE_TARGET_SAGITTA_M = 0.05
+CURVE_MAX_SAMPLES = 64
+# Below this arc radius the construction degenerates: 12 samples on a
+# sub-metre circle land within line-width of each other, and MapLibre's
+# line tessellation produces visible wobble where the round-join bulges
+# overlap. Below the floor the caller falls back to the straight 2-point
+# connector.
+CURVE_MIN_RADIUS_M = 5.0
+# Minimum inter-vertex spacing for a curved connector polyline. Catches the
+# pathological recovery-shrunk arcs (sub-millimetre chords clustering all 13
+# samples at a point) but stays close to the stop dedup so genuine curves
+# keep their shape. The remaining MapLibre wobble at z18+ is a render-side
+# issue (line-join bulge interaction with casing+fill), addressed by the
+# style's `line-join` choice, not by collapsing samples further.
+CURVE_DEDUP_TOL_M = 0.5
+# Douglas-Peucker tolerance for pill polylines. A pill represents the line
+# through several platform dots; when the dot placement intends a straight
+# line on a perpendicular bar but float precision or an off-bar leftover
+# leaves a dot a few centimetres off-axis, the resulting pill has a
+# visible micro-kink at high zoom that reads as "wobble". Vertices whose
+# perpendicular deviation from the chord through their neighbours is below
+# this tolerance are dropped; genuine curved pills (real curved tracks)
+# deviate well above 0.1 m and are preserved.
+PILL_SIMPLIFY_TOL_M = 0.1
 
 
 def _curve_max_radius(mode: str) -> float:
     return CURVE_MAX_RADIUS_M_BY_MODE.get(mode, CURVE_MAX_RADIUS_M_DEFAULT)
+
+
+def _arc_chord_samples(radius: float, arc_length: float) -> int:
+    """Number of chord segments to sample an arc at. Chord pitch is picked
+    so the chord sagitta stays near `CURVE_TARGET_SAGITTA_M` regardless of
+    radius (`chord ≈ sqrt(8·r·sagitta)`). Capped at `CURVE_MAX_SAMPLES`.
+    Minimum 2 — single-chord arcs would render as straight lines.
+    """
+    chord = sqrt(8.0 * radius * CURVE_TARGET_SAGITTA_M)
+    return max(2, min(CURVE_MAX_SAMPLES,
+                      int(arc_length / chord + 0.999)))
 # Meters per degree at equator; lon component is additionally scaled by
 # cos(latitude) for equal-distance projection.
 _M_PER_DEG = 111319.49
@@ -2500,6 +2548,80 @@ def _polyline_length_xy(poly):
     return total
 
 
+def _simplify_pill_lonlat(coords, cos_lat, tol_m=PILL_SIMPLIFY_TOL_M):
+    """Iterative Douglas-Peucker simplification on a pill polyline. An
+    interior vertex is kept only if its perpendicular deviation from the
+    chord through the nearest retained neighbours exceeds `tol_m`. Works in
+    metric (x, y) space anchored at the first vertex so the tolerance is in
+    true metres. Bar-placed dots fall onto a single line in design, so
+    sub-line-width deviations are float / leftover-dot noise; genuine
+    bent pills deviate well above `tol_m` and survive.
+    """
+    if len(coords) <= 2:
+        return list(coords)
+    lon0 = coords[0][0]
+    lat0 = coords[0][1]
+    xy = [_lonlat_to_xy(p[0], p[1], lon0, lat0, cos_lat) for p in coords]
+    n = len(xy)
+    keep = [False] * n
+    keep[0] = True
+    keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        s, e = stack.pop()
+        if e - s < 2:
+            continue
+        A = xy[s]
+        B = xy[e]
+        dx = B[0] - A[0]
+        dy = B[1] - A[1]
+        L2 = dx * dx + dy * dy
+        max_d = 0.0
+        max_i = -1
+        if L2 < 1e-12:
+            for i in range(s + 1, e):
+                px = xy[i][0] - A[0]
+                py = xy[i][1] - A[1]
+                d = sqrt(px * px + py * py)
+                if d > max_d:
+                    max_d = d
+                    max_i = i
+        else:
+            inv_L = 1.0 / sqrt(L2)
+            for i in range(s + 1, e):
+                cross = (xy[i][0] - A[0]) * dy - (xy[i][1] - A[1]) * dx
+                d = abs(cross) * inv_L
+                if d > max_d:
+                    max_d = d
+                    max_i = i
+        if max_d > tol_m and max_i >= 0:
+            keep[max_i] = True
+            stack.append((s, max_i))
+            stack.append((max_i, e))
+    return [coords[i] for i in range(n) if keep[i]]
+
+
+def _dedup_polyline_xy(poly, tol_m=DEDUP_TOL_M):
+    """Collapse adjacent metric-space vertices closer than `tol_m` to a
+    single vertex (first-seen wins). MapLibre's line tessellation produces
+    visible wobble artifacts at z18+ when adjacent polyline vertices sit
+    within line-width of each other — any curve that ends up with
+    micrometre-spaced or exact-duplicate samples (recovery-shrunk arc with
+    tiny chosen_L, a sub-half-metre `sA` stub that straddles the include
+    threshold, etc.) is cleaned up before reaching tippecanoe.
+    """
+    if len(poly) < 2:
+        return list(poly)
+    out = [poly[0]]
+    tol_sq = tol_m * tol_m
+    for p in poly[1:]:
+        dx = p[0] - out[-1][0]
+        dy = p[1] - out[-1][1]
+        if dx * dx + dy * dy > tol_sq:
+            out.append(p)
+    return out
+
+
 def _tangent_candidates(group, endpoint, other_endpoint, lon0, lat0, cos_lat):
     """Candidate outward-pointing unit tangents at `endpoint` within `group`.
 
@@ -2559,6 +2681,38 @@ def _tangent_candidates(group, endpoint, other_endpoint, lon0, lat0, cos_lat):
     return [((perp_a if dot_a >= dot_b else perp_b), True)]
 
 
+def _cardinal_tangents(t):
+    """4 cardinal OUT tangents for an anchored disc with anchor direction `t`.
+    All 4 are tagged as default (is_default=True) since no cardinal is
+    preferred over the others — the picker picks shortest among them.
+    """
+    return [
+        (t, True),
+        ((-t[1], t[0]), True),
+        ((-t[0], -t[1]), True),
+        ((t[1], -t[0]), True),
+    ]
+
+
+def _arrival_tangent_lonlat(coords, at_start, cos_lat):
+    """OUT tangent at one end of a (lon, lat) polyline, as a unit vector in
+    cluster-xy space (with cos_lat scaling). `at_start=True` returns the
+    tangent at coords[0] pointing away from coords[1]; `at_start=False`
+    returns the tangent at coords[-1] pointing away from coords[-2]. Direction
+    is invariant across origin shifts, so this is usable across per-connector
+    xy frames so long as the cluster's cos_lat is constant.
+    """
+    if len(coords) < 2:
+        return None
+    if at_start:
+        p_to, p_from = coords[0], coords[1]
+    else:
+        p_to, p_from = coords[-1], coords[-2]
+    dx = (p_to[0] - p_from[0]) * cos_lat * _M_PER_DEG
+    dy = (p_to[1] - p_from[1]) * _M_PER_DEG
+    return _norm2((dx, dy))
+
+
 def _build_symmetric_arc(A, B, tA, tB, r_max):
     """Build a symmetric arc connector between A and B in metric (x, y) space.
 
@@ -2571,8 +2725,28 @@ def _build_symmetric_arc(A, B, tA, tB, r_max):
     dot = tA[0] * neg_tB[0] + tA[1] * neg_tB[1]
     turn = atan2(cross, dot)  # signed angle from tA to -tB, in (-π, π]
 
-    if abs(turn) < 1e-6 or abs(abs(turn) - pi) < 1e-6:
-        # Parallel or anti-parallel tangents — no clean symmetric arc.
+    if abs(turn) < 1e-6:
+        # Parallel forward tangents (tA aligns with -tB): the only
+        # tangent-consistent connector is a straight line in direction tA. This
+        # is the "both tips face each other" case — the symmetric-arc
+        # construction has no work to do, but the combo is still a legitimate
+        # connector candidate and must surface to the picker so a much shorter
+        # straight line can win against a wildly wider axial-axial arc on the
+        # 0.7-ratio rule. Only emit when the chord actually aligns with tA —
+        # otherwise a "straight line" between A and B has hard kinks at both
+        # ends and the combo is geometrically inconsistent.
+        BAx = B[0] - A[0]
+        BAy = B[1] - A[1]
+        BA_len = sqrt(BAx * BAx + BAy * BAy)
+        if BA_len < 1e-9:
+            return None
+        cos_BA_tA = (BAx * tA[0] + BAy * tA[1]) / BA_len
+        if cos_BA_tA > 0.999:  # within ~2.5° of tA direction
+            return [A, B]
+        return None
+    if abs(abs(turn) - pi) < 1e-6:
+        # Anti-parallel tangents — would require a U-turn semicircle, not
+        # handled by the symmetric-arc construction.
         return None
 
     half = turn / 2.0
@@ -2597,39 +2771,57 @@ def _build_symmetric_arc(A, B, tA, tB, r_max):
         sB = (qx * tA[1] - qy * tA[0]) / det
         return sA, sB
 
-    sA, sB = stubs(L_target)
-    chosen_L = L_target
+    # Pick the largest L for which both stubs stay non-negative — that gives
+    # the widest symmetric arc the (tA, tB) geometry admits. sA(L), sB(L)
+    # are linear in L, so the valid range is a single interval [L_lo, L_hi].
+    # The per-mode `r_max` (via L_target) is only a soft fallback for the
+    # rare case where neither stub has a slope that drives it back to 0 (no
+    # natural upper bound).
+    if L_target <= 1e-9:
+        return None
+    sA_at_target, sB_at_target = stubs(L_target)
+    sA0, sB0 = stubs(0.0)
+    dsA = (sA_at_target - sA0) / L_target
+    dsB = (sB_at_target - sB0) / L_target
 
-    if sA < -1e-6 or sB < -1e-6:
-        # Capped-radius arc would need negative stubs — shrink L (radius)
-        # until both come back to ≥ 0. sA(L), sB(L) are linear in L.
-        sA0, sB0 = stubs(0.0)
-        dsA = (sA - sA0) / L_target if L_target > 1e-9 else 0.0
-        dsB = (sB - sB0) / L_target if L_target > 1e-9 else 0.0
-        candidates = [0.0]
-        if abs(dsA) > 1e-12:
-            L_zero = -sA0 / dsA
-            if 0.0 <= L_zero <= L_target:
-                candidates.append(L_zero)
-        if abs(dsB) > 1e-12:
-            L_zero = -sB0 / dsB
-            if 0.0 <= L_zero <= L_target:
-                candidates.append(L_zero)
-        best = None
-        for L in candidates:
-            sa, sb = stubs(L)
-            if sa >= -1e-6 and sb >= -1e-6:
-                if best is None or L > best:
-                    best = L
-        if best is None:
-            return None
-        chosen_L = best
-        sA, sB = stubs(chosen_L)
-        sA = max(0.0, sA)
-        sB = max(0.0, sB)
+    L_lo = 0.0
+    L_hi = float("inf")
+    for s0, ds in ((sA0, dsA), (sB0, dsB)):
+        if abs(ds) < 1e-12:
+            if s0 < -1e-6:
+                return None  # constant negative stub
+            continue
+        L_zero = -s0 / ds
+        if ds > 0:
+            if s0 < -1e-6:
+                # Stub starts negative and grows — needs L ≥ L_zero.
+                L_lo = max(L_lo, L_zero)
+        else:
+            if s0 < -1e-6:
+                # Stub starts negative and shrinks further.
+                return None
+            # Stub starts ≥ 0 and shrinks — needs L ≤ L_zero (= 0 when s0 = 0).
+            L_hi = min(L_hi, L_zero)
+    if L_lo > L_hi + 1e-6:
+        return None
+
+    if L_hi == float("inf"):
+        # Unbounded above — both stubs grow with L without ever shrinking
+        # to 0. Fall back to the per-mode r_max so the curve doesn't
+        # extend its stubs forever.
+        chosen_L = max(L_lo, L_target)
+    else:
+        chosen_L = L_hi
+
+    sA, sB = stubs(chosen_L)
+    sA = max(0.0, sA)
+    sB = max(0.0, sB)
 
     radius = chosen_L / (2.0 * sin(theta)) if theta > 1e-9 else 0.0
-    if radius < 1e-6:
+    if radius < CURVE_MIN_RADIUS_M:
+        # Sub-floor radius would land all 13 arc samples inside line-width of
+        # each other → MapLibre wobble. Drop the curve entirely; the caller
+        # will emit a straight 2-point connector instead.
         return None
 
     A_prime = (A[0] + sA * tA[0], A[1] + sA * tA[1])
@@ -2649,35 +2841,46 @@ def _build_symmetric_arc(A, B, tA, tB, r_max):
         while delta > 1e-9:
             delta -= 2 * pi
 
+    arc_length = radius * abs(delta)
+    n_samples = _arc_chord_samples(radius, arc_length)
     samples = []
-    for k in range(CURVE_SAMPLES + 1):
-        t = k / CURVE_SAMPLES
+    for k in range(n_samples + 1):
+        t = k / n_samples
         a = angle_A + t * delta
         samples.append((C[0] + radius * cos(a), C[1] + radius * sin(a)))
 
-    # Compose final polyline, collapsing zero-length stub segments.
+    # Compose final polyline, dropping stubs whose length sits within the
+    # dedup tolerance so a near-zero `sA` doesn't add an `A_prime` vertex
+    # within micrometres of `A` (same for `B`).
     poly = [A]
-    if sA > 1e-3:
+    if sA > CURVE_DEDUP_TOL_M:
         poly.append(samples[0])
     poly.extend(samples[1:-1])
-    if sB > 1e-3:
+    if sB > CURVE_DEDUP_TOL_M:
         poly.append(samples[-1])
     poly.append(B)
+    poly = _dedup_polyline_xy(poly, tol_m=CURVE_DEDUP_TOL_M)
+    if len(poly) < 3:
+        return None
     return poly
 
 
 def _build_pill_disc_curve(A, tA, B, r_max):
     """Pill-to-disc connector geometry in metric (x, y) space. The curve
     begins at the pill tip A tangent to tA (no pill-side stub) and bends
-    at radius `r_max` toward B until the forward tangent points at B; from
-    that tangent point a straight segment connects to B.
+    toward B until the forward tangent points at B; from that tangent
+    point a straight segment connects to B.
 
-    Returns the polyline `[A, …arc samples…, P, B]` (P collapses out when
-    coincident with B). Returns None when the disc lies on the line of tA,
-    inside the arc circle, or otherwise admits no valid construction.
+    Radius is the per-mode `r_max` when the disc lies outside the curve
+    circle that radius would draw; otherwise the radius is shrunk to fit,
+    floored at `CURVE_MIN_RADIUS_M`. Returns the polyline
+    `[A, …arc samples…, P, B]` (P collapses out when coincident with B).
+    Returns None when the disc lies on the line of tA or the fitted radius
+    falls below the floor.
     """
     BA = (B[0] - A[0], B[1] - A[1])
-    if BA[0] * BA[0] + BA[1] * BA[1] < 1e-12:
+    BA_sq = BA[0] * BA[0] + BA[1] * BA[1]
+    if BA_sq < 1e-12:
         return None  # disc coincident with pill tip
 
     cross = tA[0] * BA[1] - tA[1] * BA[0]
@@ -2693,25 +2896,32 @@ def _build_pill_disc_curve(A, tA, B, r_max):
     else:
         perp_to_C = (tA[1], -tA[0])
         ccw = False
-    C = (A[0] + r_max * perp_to_C[0], A[1] + r_max * perp_to_C[1])
 
+    # The disc-outside-circle condition |CB| > r reduces to r < BA² / (2h),
+    # where h = |cross| is the perpendicular distance from B to tA's line
+    # (tA is unit). Shrink r_max to fit when the disc is too close, floored
+    # at CURVE_MIN_RADIUS_M so sub-floor radii fall back to straight.
+    h = abs(cross)
+    r_fit_max = BA_sq / (2.0 * h)
+    r = min(r_max, r_fit_max - 1e-6)
+    if r < CURVE_MIN_RADIUS_M:
+        return None
+
+    C = (A[0] + r * perp_to_C[0], A[1] + r * perp_to_C[1])
     CB = (B[0] - C[0], B[1] - C[1])
     d = sqrt(CB[0] * CB[0] + CB[1] * CB[1])
-    if d <= r_max + 1e-9:
-        # Disc inside (or on) the arc circle — no external tangent from B.
-        return None
 
     # Two tangent points on the circle from B; pick the one we reach with
     # the shorter forward sweep in the chirality direction whose tangent at
     # P points toward B (not away around the long side).
     theta_CB = atan2(CB[1], CB[0])
-    phi = acos(max(-1.0, min(1.0, r_max / d)))
+    phi = acos(max(-1.0, min(1.0, r / d)))
     theta_A = atan2(A[1] - C[1], A[0] - C[0])
 
     best = None
     for theta_p in (theta_CB + phi, theta_CB - phi):
-        Px = C[0] + r_max * cos(theta_p)
-        Py = C[1] + r_max * sin(theta_p)
+        Px = C[0] + r * cos(theta_p)
+        Py = C[1] + r * sin(theta_p)
         if ccw:
             tan_dir = (-sin(theta_p), cos(theta_p))
         else:
@@ -2733,18 +2943,25 @@ def _build_pill_disc_curve(A, tA, B, r_max):
         return None
     _, delta = best
 
+    arc_length = r * abs(delta)
+    n_samples = _arc_chord_samples(r, arc_length)
     samples = []
-    for k in range(CURVE_SAMPLES + 1):
-        t = k / CURVE_SAMPLES
+    for k in range(n_samples + 1):
+        t = k / n_samples
         a = theta_A + t * delta
-        samples.append((C[0] + r_max * cos(a), C[1] + r_max * sin(a)))
+        samples.append((C[0] + r * cos(a), C[1] + r * sin(a)))
 
     # samples[0] == A by construction; build polyline as A + interior + P + B
-    # (collapse P when it coincides with B).
+    # (collapse P when it coincides with B), then dedup adjacent vertices
+    # within line-width to avoid MapLibre wobble where a small sweep packs
+    # the arc samples into a sub-metre region.
     P = samples[-1]
     poly = [A] + samples[1:]
-    if (P[0] - B[0]) * (P[0] - B[0]) + (P[1] - B[1]) * (P[1] - B[1]) > 1e-6:
+    if (P[0] - B[0]) * (P[0] - B[0]) + (P[1] - B[1]) * (P[1] - B[1]) > CURVE_DEDUP_TOL_M * CURVE_DEDUP_TOL_M:
         poly.append(B)
+    poly = _dedup_polyline_xy(poly, tol_m=CURVE_DEDUP_TOL_M)
+    if len(poly) < 3:
+        return None
     return poly
 
 
@@ -2781,11 +2998,22 @@ def _pill_disc_picker(pill_xy, pill_cands, disc_xy, r_max):
     return chosen[0]
 
 
-def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode):
+def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
+                     anchor_a=None, anchor_b=None):
     """Post-process an MST connector from `ca` (in group_a) to `cb` (in group_b)
-    into a curved (lon, lat) polyline. Returns [ca, cb] when no valid curve
-    exists at the default tangent combination — tangents incompatible, both
-    endpoints are discs, or the pill-end default fails for a pill-disc pair.
+    into a curved (lon, lat) polyline.
+
+    `anchor_a` / `anchor_b`: optional OUT tangent unit vectors (in cluster-xy
+    space) for an anchored disc — only meaningful when the corresponding side
+    is a singleton group. A None anchor on a singleton means the disc is
+    unanchored and the connector is unconstrained at that end. Pills always
+    derive their tangents from their own geometry (anchors on the pill side
+    are ignored).
+
+    Returns `(coords, anchor_out_a, anchor_out_b)`. Each `anchor_out_*` is
+    the OUT tangent at that end of the final polyline in cluster-xy space, or
+    None if the polyline is too short to derive one. The caller decides
+    whether to use it as a new anchor.
     """
     r_max = _curve_max_radius(mode)
 
@@ -2794,30 +3022,47 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode):
     A_xy = _lonlat_to_xy(ca[0], ca[1], lon0, lat0, cluster_cos_lat)
     B_xy = _lonlat_to_xy(cb[0], cb[1], lon0, lat0, cluster_cos_lat)
 
-    cands_a = _tangent_candidates(group_a, ca, cb, lon0, lat0, cluster_cos_lat)
-    cands_b = _tangent_candidates(group_b, cb, ca, lon0, lat0, cluster_cos_lat)
+    if len(group_a) > 1:
+        cands_a = _tangent_candidates(group_a, ca, cb, lon0, lat0, cluster_cos_lat)
+    elif anchor_a is not None:
+        cands_a = _cardinal_tangents(anchor_a)
+    else:
+        cands_a = []
+    if len(group_b) > 1:
+        cands_b = _tangent_candidates(group_b, cb, ca, lon0, lat0, cluster_cos_lat)
+    elif anchor_b is not None:
+        cands_b = _cardinal_tangents(anchor_b)
+    else:
+        cands_b = []
 
-    # Disc ↔ disc: nothing constrains either tangent.
+    def finalize(coords):
+        anchor_out_a = _arrival_tangent_lonlat(coords, True, cluster_cos_lat)
+        anchor_out_b = _arrival_tangent_lonlat(coords, False, cluster_cos_lat)
+        return coords, anchor_out_a, anchor_out_b
+
+    # Both ends unconstrained (e.g. unanchored disc ↔ unanchored disc): straight.
     if not cands_a and not cands_b:
-        return [ca, cb]
+        return finalize([ca, cb])
 
-    # Pill ↔ disc: arc begins at the pill tip in the chosen tangent and bends
-    # until aligned with the disc direction; a straight segment then runs to
-    # the disc.
+    # Constrained one side only: asymmetric arc-then-straight with the
+    # constrained side playing the pill role. Same construction whether the
+    # constrained side is a real pill or an anchored disc.
     if cands_a and not cands_b:
         poly_xy = _pill_disc_picker(A_xy, cands_a, B_xy, r_max)
         if poly_xy is None:
-            return [ca, cb]
-        return [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
+            return finalize([ca, cb])
+        coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
+        return finalize(coords)
     if cands_b and not cands_a:
         poly_xy = _pill_disc_picker(B_xy, cands_b, A_xy, r_max)
         if poly_xy is None:
-            return [ca, cb]
+            return finalize([ca, cb])
         coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
         coords.reverse()
-        return coords
+        return finalize(coords)
 
-    # Pill ↔ pill: symmetric arc.
+    # Both ends constrained: symmetric arc. Covers pill ↔ pill, pill ↔
+    # anchored-disc, and anchored ↔ anchored.
     pairs = [(ta, tb, def_a, def_b)
              for ta, def_a in cands_a
              for tb, def_b in cands_b]
@@ -2830,22 +3075,39 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode):
         results.append((poly, _polyline_length_xy(poly), def_a, def_b))
 
     if not results:
-        return [ca, cb]
+        # No valid (cardinal × cardinal) combo: fall back to the unconstrained
+        # logic so an anchored-disc end with no working cardinals doesn't lose
+        # its connector entirely. The disc's anchor stays as it was.
+        if anchor_a is not None or anchor_b is not None:
+            return _curve_connector(ca, cb, group_a, group_b,
+                                    cluster_cos_lat, mode,
+                                    anchor_a=None, anchor_b=None)
+        return finalize([ca, cb])
 
-    # Axial-preferred rule: the default tangent combination (axial at every
-    # tip, the prescribed perp at every interior dot) is the baseline. A
-    # perpendicular at a tip replaces axial only when its combination length
-    # is ≤ CURVE_PERP_PREF_RATIO × the default length. If the default itself
-    # produces no valid arc — typical when the two tip axials are parallel
-    # or anti-parallel — fall back to straight.
-    default_combo = next((r for r in results if r[2] and r[3]), None)
-    if default_combo is None:
-        return [ca, cb]
+    # Axial-preferred rule: the default tangent combination is the baseline
+    # (axial at every pill tip; any cardinal at an anchored disc, all of which
+    # are tagged default). A perpendicular at a pill tip replaces the baseline
+    # only when its combination length is ≤ CURVE_PERP_PREF_RATIO × the
+    # baseline length. Multiple combos may share the default tag (4 cardinals
+    # × 1 axial-pill = 4 default combos for pill ↔ anchored-disc; 16 for
+    # anchored ↔ anchored) — the shortest among them is the baseline.
+    defaults = [r for r in results if r[2] and r[3]]
+    if not defaults:
+        # No combo with the preferred-default tangents — typical for pill ↔
+        # pill when both axials are parallel/anti-parallel. Fall back to
+        # straight as the existing logic does.
+        if anchor_a is not None or anchor_b is not None:
+            return _curve_connector(ca, cb, group_a, group_b,
+                                    cluster_cos_lat, mode,
+                                    anchor_a=None, anchor_b=None)
+        return finalize([ca, cb])
+    default_combo = min(defaults, key=lambda r: r[1])
     threshold = default_combo[1] * CURVE_PERP_PREF_RATIO
     qualifying = [r for r in results if r[1] <= threshold]
     chosen = min(qualifying, key=lambda r: r[1]) if qualifying else default_combo
 
-    return [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in chosen[0]]
+    coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in chosen[0]]
+    return finalize(coords)
 
 
 def make_pill_features(cluster_stops, minzoom, lines_json=""):
@@ -2921,7 +3183,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
     ]
 
     if not split_indices:
-        return [make_feat(path, "pill")]
+        return [make_feat(_simplify_pill_lonlat(path, cluster_cos_lat), "pill")]
 
     # Split path at every large gap → N groups
     groups = []
@@ -2938,7 +3200,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
     feats = []
     for grp in groups:
         if len(grp) >= 2:
-            feats.append(make_feat(grp, "pill"))
+            feats.append(make_feat(_simplify_pill_lonlat(grp, cluster_cos_lat), "pill"))
         else:
             feats.append(make_endpoint(grp[0]))
 
@@ -2965,12 +3227,53 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
             x = parent[x]
         return x
 
+    # First pass: run Kruskal to pick the MST edges without curving them.
+    chosen_edges = []
     for best_d, ca, cb, i, j in mst_edges:
         ri, rj = find(i), find(j)
         if ri != rj:
             parent[ri] = rj
-            curve_coords = _curve_connector(ca, cb, groups[i], groups[j], cluster_cos_lat, mode)
-            feats.append(make_feat(curve_coords, "connector"))
+            chosen_edges.append((ca, cb, i, j))
+
+    # Sort chosen edges by disc-anchoring priority. Pill ↔ pill connectors
+    # touch no disc state and run first in any order. Disc-incident connectors
+    # follow, sorted by:
+    #   - max line count at either endpoint (descending) — the more heavily
+    #     served stop dictates the orientation it sees most often;
+    #   - pill ↔ disc before disc ↔ disc — a pill end carries a real geometric
+    #     direction, more authoritative than a chord between two free discs;
+    #   - lexicographic on endpoint coords for a stable final tiebreak.
+    def line_count_at(pos):
+        return len(pos_to_platforms.get((pos[0], pos[1]), ()))
+
+    def edge_sort_key(edge):
+        _ca, _cb, i, j = edge
+        disc_a = len(groups[i]) == 1
+        disc_b = len(groups[j]) == 1
+        if not (disc_a or disc_b):
+            return (0, 0, 0, _ca, _cb)  # pill ↔ pill — process first
+        line_max = max(line_count_at(_ca), line_count_at(_cb))
+        type_key = 1 if (disc_a and disc_b) else 0  # 0 = pill-disc, 1 = disc-disc
+        return (1, -line_max, type_key, _ca, _cb)
+
+    chosen_edges.sort(key=edge_sort_key)
+
+    disc_anchors = {}  # (lon, lat) → cluster-xy OUT tangent unit vector
+
+    for ca, cb, i, j in chosen_edges:
+        grp_a, grp_b = groups[i], groups[j]
+        pos_a = (ca[0], ca[1])
+        pos_b = (cb[0], cb[1])
+        anchor_a = disc_anchors.get(pos_a) if len(grp_a) == 1 else None
+        anchor_b = disc_anchors.get(pos_b) if len(grp_b) == 1 else None
+        curve_coords, arrival_a, arrival_b = _curve_connector(
+            ca, cb, grp_a, grp_b, cluster_cos_lat, mode,
+            anchor_a=anchor_a, anchor_b=anchor_b)
+        feats.append(make_feat(curve_coords, "connector"))
+        if len(grp_a) == 1 and pos_a not in disc_anchors and arrival_a is not None:
+            disc_anchors[pos_a] = arrival_a
+        if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
+            disc_anchors[pos_b] = arrival_b
 
     return feats
 
@@ -3330,38 +3633,50 @@ def main():
             "lines_json":     lines_json_str,
         }
 
+        # Cluster dot renders below PILL_MINZOOM; at PILL_MINZOOM and above
+        # the cluster is represented by its pill (multi-line) or by a
+        # centroid endpoint disc (single-line, or multi-line collapsed by
+        # dedup to one position). Tippecanoe maxzoom caps the dot so it
+        # doesn't double-render under the disc/pill.
+        rail_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": 5, "maxzoom": PILL_MINZOOM - 1},
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": centroid_props,
+        })
+        endpoint_props = {**centroid_props,
+                          "stop_count": len(cluster),
+                          "feature_type": "endpoint"}
         if mz is None:
-            # Single-line station: one cluster dot at all zooms
-            rail_features.append({
+            # Single-line station — centroid endpoint disc at PILL_MINZOOM+.
+            pill_features_rail.append({
                 "type": "Feature",
-                "tippecanoe": {"minzoom": 5},
+                "tippecanoe": {"minzoom": PILL_MINZOOM},
                 "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": centroid_props,
+                "properties": endpoint_props,
             })
         else:
-            # Multi-line station: cluster dot at low zoom, individual platform dots at pill zoom+
-            rail_features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": 5, "maxzoom": mz - 1},
-                "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": centroid_props,
-            })
-            for lon_d, lat_d, dom_color, dom_mode, wb, s in _dedup_cluster_members_by_position(cluster):
-                rail_features.append({
+            feats = make_pill_features(cluster, mz, lines_json_str)
+            if feats:
+                # Pill takes over at mz; bridge PILL_MINZOOM..mz-1 with a
+                # centroid disc so the cluster stays visible in that gap.
+                if mz > PILL_MINZOOM:
+                    pill_features_rail.append({
+                        "type": "Feature",
+                        "tippecanoe": {"minzoom": PILL_MINZOOM, "maxzoom": mz - 1},
+                        "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                        "properties": endpoint_props,
+                    })
+                pill_features_rail.extend(feats)
+            else:
+                # Pill collapsed (all cluster positions deduped to one point)
+                # — keep showing the cluster as a centroid disc at PILL_MINZOOM+.
+                pill_features_rail.append({
                     "type": "Feature",
-                    "tippecanoe": {"minzoom": mz},
-                    "geometry": {"type": "Point", "coordinates": [lon_d, lat_d]},
-                    "properties": {
-                        "color":          dom_color,
-                        "mode":           dom_mode,
-                        "width_base":     wb,
-                        "stop_id":        s.get("stop_id", ""),
-                        "stop_name":      s.get("stop_name", ""),
-                        "parent_station": s.get("parent_station", ""),
-                        "lines_json":     lines_json_str,
-                    },
+                    "tippecanoe": {"minzoom": PILL_MINZOOM},
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": endpoint_props,
                 })
-            pill_features_rail.extend(make_pill_features(cluster, mz, lines_json_str))
 
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
@@ -3418,40 +3733,46 @@ def main():
             "lines_json":     lines_json_str,
         }
 
+        # See the rail-side comment above for the dot/disc/pill cutover.
+        # tippecanoe maxzoom can be < minzoom for modes whose own minzoom
+        # already sits at PILL_MINZOOM (e.g. bus = 11); tippecanoe simply
+        # drops the feature from all tiles in that case, leaving only the
+        # endpoint disc.
+        nonrail_dot_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": PILL_MINZOOM - 1},
+            "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+            "properties": centroid_props,
+        })
+        endpoint_props = {**centroid_props,
+                          "stop_count": len(cluster),
+                          "feature_type": "endpoint"}
         if mz is None:
-            # Single-line stop: one cluster dot at all zooms
-            nonrail_dot_features.append({
+            pill_features.append({
                 "type": "Feature",
-                "tippecanoe": {"minzoom": mode_minzoom},
+                "tippecanoe": {"minzoom": PILL_MINZOOM},
                 "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-                "properties": centroid_props,
+                "properties": endpoint_props,
             })
         else:
-            # Multi-line stop: cluster dot at low zoom, individual platform dots at pill zoom+
-            nonrail_dot_features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
-                "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-                "properties": centroid_props,
-            })
-            for lon_d, lat_d, _dc, dom_mode, wb, s in _dedup_cluster_members_by_position(cluster):
-                nonrail_dot_features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": mz},
-                    "geometry": {"type": "Point", "coordinates": [lon_d, lat_d]},
-                    "properties": {
-                        "color":          color,  # dominant color so pills/dots match
-                        "mode":           dom_mode,
-                        "width_base":     wb,
-                        "stop_id":        s.get("stop_id", ""),
-                        "stop_name":      s.get("stop_name", ""),
-                        "parent_station": s.get("parent_station", ""),
-                        "lines_json":     lines_json_str,
-                    },
-                })
             feats = make_pill_features(cluster, mz, lines_json_str)
-            pill_features.extend(feats)
-            nonrail_pill_count += len(feats)
+            if feats:
+                if mz > PILL_MINZOOM:
+                    pill_features.append({
+                        "type": "Feature",
+                        "tippecanoe": {"minzoom": PILL_MINZOOM, "maxzoom": mz - 1},
+                        "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                        "properties": endpoint_props,
+                    })
+                pill_features.extend(feats)
+                nonrail_pill_count += len(feats)
+            else:
+                pill_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": PILL_MINZOOM},
+                    "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                    "properties": endpoint_props,
+                })
 
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
           f"from {len(nonrail_clusters):,} clusters")

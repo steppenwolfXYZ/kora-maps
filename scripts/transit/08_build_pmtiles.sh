@@ -68,8 +68,14 @@ tippecanoe -o "$STATIC/tl_stops_bus.pmtiles" --force \
 
 echo ""
 echo "=== Building tl_stop_pills.pmtiles ==="
+# maxzoom z18 so the high-zoom viewing range renders natively instead of
+# upscaling z14 tiles 16×. Densely-sampled curved connectors hit a
+# MapLibre line-tessellation artifact (visible wobble at z18+) when the
+# native tile is upscaled — see pill-rendering concept § Connector
+# curving. The remaining transit layers stay at -z14 because they are
+# straight-segment polylines or points where upscaling is fine.
 tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
-  -z14 -Z11 -d18 --layer transit_stop_pills \
+  -z18 -Z11 -d18 --layer transit_stop_pills \
   --drop-densest-as-needed \
   "$DATA/transit_stop_pills.geojson"
 
