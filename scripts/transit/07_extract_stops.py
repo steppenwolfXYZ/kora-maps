@@ -39,7 +39,6 @@ from collections import defaultdict
 ROOT       = Path(__file__).resolve().parents[2]
 
 _transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").read_text())
-SNAP_GATE_DISABLED = _transit_cfg.get("debug", {}).get("disable_snap_gate", False)
 
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
@@ -2695,9 +2694,6 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
-                snap_d = haversine_km(lon, lat, slon, slat)
-                if not SNAP_GATE_DISABLED and snap_d > 0.300:
-                    continue  # stop too far from this line's pfaedle geometry
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
                                           osm_id=str(osm_id), siblings=siblings)
@@ -2751,9 +2747,6 @@ def main():
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
                 cx, cy = snap_to_line(lon, lat, flat)
-                gtfs_snap_d = haversine_km(lon, lat, cx, cy)
-                if not SNAP_GATE_DISABLED and gtfs_snap_d > 0.150:
-                    continue  # stop too far from this line's pfaedle geometry
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
                                           osm_id=str(osm_id), siblings=siblings)
@@ -2782,8 +2775,6 @@ def main():
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 slon, slat = snap_to_line(lon, lat, flat)
-                if not SNAP_GATE_DISABLED and haversine_km(lon, lat, slon, slat) > 0.150:
-                    continue  # stop misassigned to this line — GTFS bbox margin too generous
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},

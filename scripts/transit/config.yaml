@@ -4,9 +4,6 @@
 
 # ── Debug ────────────────────────────────────────────────────────────────────
 debug:
-  # Set true to include stops regardless of snap distance (shows all connectors).
-  # Requires ./scripts/rebuild_transit.sh --start 4 to take effect.
-  disable_snap_gate: true
   # Debug overlay (pill-rendering concept): thin black platform-extent lines,
   # clickable GTFS-coord dots, and thick white max-stab bars. Development-time
   # visual aids — flip to false for production-style rendering. Read by

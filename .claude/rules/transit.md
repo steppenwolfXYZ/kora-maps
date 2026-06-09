@@ -44,7 +44,6 @@ Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --f
 - `line_width` — per-mode `min` / `max` width_base endpoints. Score 0 maps to `min`, score 1 to `max`. Mountain has `min = max = 0.75` (mountain width is mode-driven, not frequency-driven).
 - `pfaedle.image` / `pfaedle.modes` — image tag and routed modes.
 - `pfaedle.station_move_penalty_fac` — seconds-per-metre cost of moving a stop's matched edge away from its GTFS coord. Overrides pfaedle's built-in default (0.0039) via `-P`. Currently `0.05`. Boosting it makes pfaedle prefer closer-to-the-platform snaps even when that costs extra route distance. The canonical case it fixes is a terminal stop on a oneway curb (Bern Bahnhof platform H on BernMobil bus 21 outbound): pfaedle's default would snap the trip's first node onto the bidirectional main road ~22 m east of the platform rather than route the legal ~50 m loop south down the bus-only sideroad and back up Bahnhofplatz. The override **must** be scoped to a mode section (`[bus]`) — `-P` accepts unscoped overrides syntactically but silently never applies them during routing. Currently only the `[bus]` section is overridden; if a tram/rail terminal exhibits the same symptom, add the section there too.
-- `debug.disable_snap_gate` — when true, step 07 (`07_extract_stops.py`) keeps stops whose snap distance to the line exceeds the (rail 300 m / non-rail 150 m) threshold. Currently true so misplaced stops stay visible for diagnosis.
 
 ## Identity model
 
