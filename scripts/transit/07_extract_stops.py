@@ -108,6 +108,16 @@ PILL_GAP_STRAIGHT_M = 50   # gap threshold when the NN-path continues dead
 PILL_GAP_ANGLED_M = 8      # gap threshold otherwise (gap is an angled /
                            # T-junction connector).
 
+# Bar-axis gap above which a single-distinct-position scoring member on one
+# side of the bar is dropped (kicked to leftover-fill). Distinct from
+# PILL_GAP_STRAIGHT_M, which is the post-placement pill split-vs-connector
+# threshold and stays at 50 m for every mode. Rail and metro keep the
+# legacy 50 m radius; bus/tram/regional_bus drop sooner because their
+# platforms are physically shorter and a 20 m off-axis member is already
+# clearly a separate bay.
+LONE_OUTLIER_GAP_RAIL_METRO_M = 50
+LONE_OUTLIER_GAP_BUS_TRAM_M = 20
+
 PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
 
 
@@ -676,6 +686,33 @@ def _angular_dist_mod_pi(a1, a2):
     return min(d, pi - d)
 
 
+def _circular_median_mod_pi(angles, reference):
+    """Median of angles on the half-circle [0, π), computed as signed offsets
+    from `reference` in [-π/2, π/2). Robust to a single outlier angle.
+    `None` entries are skipped; if nothing remains, returns `reference`.
+
+    Caller ensures inputs lie within π/2 of `reference` — true for σ-clump
+    members, which the tangent-group gate keeps within ~10° of each other.
+    """
+    offsets = []
+    for a in angles:
+        if a is None:
+            continue
+        d = (a - reference) % pi
+        if d > pi / 2:
+            d -= pi
+        offsets.append(d)
+    if not offsets:
+        return reference
+    offsets.sort()
+    n = len(offsets)
+    if n % 2 == 1:
+        med = offsets[n // 2]
+    else:
+        med = 0.5 * (offsets[n // 2 - 1] + offsets[n // 2])
+    return (reference + med) % pi
+
+
 def _tangent_groups(platforms, max_angle_rad):
     """Group platforms by extent tangent direction. Union-find with the
     given angular tolerance (mod π) — two platforms are in the same group
@@ -725,7 +762,7 @@ SIGMA_BOUNDARY_TOL_M = 0.5
 # not a bar — its would-be stabbed members fall through to leftover-fill.
 DEGENERATE_BAR_MIN_SPAN_M = 1.0
 PROTECTION_RADIUS_RAIL_M = 30.0
-PROTECTION_RADIUS_NONRAIL_M = 10.0
+PROTECTION_RADIUS_NONRAIL_M = 5.0
 
 
 def _sigma_clumps(group, slack_m=SIGMA_CLUMP_SLACK_M):
@@ -782,7 +819,7 @@ def _sigma_clumps(group, slack_m=SIGMA_CLUMP_SLACK_M):
     return clumps
 
 
-def _expand_sigma_clump(clump, angle_tol_rad, raw):
+def _expand_sigma_clump(clump, angle_tol_rad, raw, lone_outlier_gap_m):
     """Recursively run the perpendicular sweep on a σ-clump, peeling off the
     matched members after each pass and re-σ-clumping the rest. Yields one
     (sub_clump, options) pair per discovered bar.
@@ -808,7 +845,7 @@ def _expand_sigma_clump(clump, angle_tol_rad, raw):
         return
     if len({raw[id(p)] for p in clump}) < 2:
         return
-    options = _perpendicular_sweep(clump, angle_tol_rad)
+    options = _perpendicular_sweep(clump, angle_tol_rad, lone_outlier_gap_m)
     if not options:
         return
 
@@ -820,10 +857,10 @@ def _expand_sigma_clump(clump, angle_tol_rad, raw):
     remaining = [p for p in clump if id(p) not in matched_ids]
 
     for sub in _sigma_clumps(remaining):
-        yield from _expand_sigma_clump(sub, angle_tol_rad, raw)
+        yield from _expand_sigma_clump(sub, angle_tol_rad, raw, lone_outlier_gap_m)
 
 
-def _perpendicular_sweep(group, angle_tol_rad):
+def _perpendicular_sweep(group, angle_tol_rad, lone_outlier_gap_m):
     """For a tangent group, find every perpendicular bar tied at the max
     scoring-stab count by sweeping along the central member's platform
     extent at SWEEP_STEP_M resolution.
@@ -884,11 +921,21 @@ def _perpendicular_sweep(group, angle_tol_rad):
                                 central_ext, central_dists))
     candidate_arcs = sorted(candidate_arcs_set)
 
-    # Per-member tangent angle (canonical [0, π) via atan2 of stop tangent).
-    member_angles = []
-    for p in group:
-        st = _stop_tangent(p)
-        member_angles.append(atan2(st[1], st[0]) if st is not None else None)
+    # Per-member extent + cum-dist cache (used per sweep step for the
+    # closest-point projection and local tangent computation).
+    member_exts = []
+    member_dists_list = []
+    central_idx = None
+    for k, p in enumerate(group):
+        ext = p.get("extent")
+        if ext and len(ext) >= 2:
+            member_exts.append(ext)
+            member_dists_list.append(_cum_dist_m(ext))
+        else:
+            member_exts.append(None)
+            member_dists_list.append(None)
+        if p is central:
+            central_idx = k
 
     # Single pass: compute scoring (≤10°-aligned members crossing bar) AND
     # accidentally-covered members (wrong-angle, crossing within scoring-set
@@ -896,7 +943,7 @@ def _perpendicular_sweep(group, angle_tol_rad):
     # bar's drawn span are real placements and contribute. The bar's drawn
     # span is still determined by scoring members only (no extension for
     # wrong-angle members).
-    gap_thresh = PILL_GAP_STRAIGHT_M / 111000.0
+    gap_thresh = lone_outlier_gap_m / 111000.0
     dedup_tol = DEDUP_TOL_M / 111000.0
     sigma_tol = SIGMA_BOUNDARY_TOL_M / 111000.0
     min_span = DEGENERATE_BAR_MIN_SPAN_M / 111000.0
@@ -904,11 +951,38 @@ def _perpendicular_sweep(group, angle_tol_rad):
     raw_tied = []
     for arc_d in candidate_arcs:
         pos = _interp_at(central_ext, central_dists, arc_d)
-        tan = _smoothed_tangent_at(central_ext, central_dists, arc_d, 40.0)
-        if tan is None:
+
+        # Per-position consensus bar angle: each σ-clump member's local
+        # tangent at the closest point on its own extent to `pos`,
+        # 40 m-smoothed, then circular median (mod π) across all members.
+        # Curvature-aware (each member contributes its local direction at
+        # the bar's location, not its overall extent chord) and robust to
+        # one outlier whose pfaedle shape is rotated.
+        member_angles = []
+        for k in range(n):
+            m_ext = member_exts[k]
+            if m_ext is None:
+                member_angles.append(None)
+                continue
+            m_dists = member_dists_list[k]
+            m_arc = _project_meters(pos[0], pos[1], m_ext, m_dists)
+            m_tan = _smoothed_tangent_at(m_ext, m_dists, m_arc, 40.0)
+            if m_tan is None:
+                member_angles.append(None)
+                continue
+            member_angles.append(atan2(m_tan[1], m_tan[0]))
+        ref_angle = (member_angles[central_idx]
+                     if central_idx is not None
+                     else None)
+        if ref_angle is None:
+            for a in member_angles:
+                if a is not None:
+                    ref_angle = a
+                    break
+        if ref_angle is None:
             continue
-        tx, ty = tan
-        bar_angle = atan2(ty, tx)
+        bar_angle = _circular_median_mod_pi(member_angles, ref_angle)
+        tx, ty = cos(bar_angle), sin(bar_angle)
         sigma = pos[0] * tx + pos[1] * ty
         nx, ny = -ty, tx
 
@@ -943,7 +1017,7 @@ def _perpendicular_sweep(group, angle_tol_rad):
         scoring_n = [pt[0] * nx + pt[1] * ny for pt in scoring_pts]
 
         # Lone-outlier drop: any scoring member on a single-distinct-
-        # position side of a ≥ PILL_GAP_STRAIGHT_M gap along the bar axis
+        # position side of a ≥ lone_outlier_gap_m gap along the bar axis
         # is dropped from this candidate's scoring set. Repeats because
         # removing a dot can expose a new wide gap. Dropped members re-
         # enter the σ-clump's unplaced pool via the recursive rerun →
@@ -1190,7 +1264,8 @@ def _pick_options_multi_group(per_group_options, protection_m):
 
 
 def _pick_option_single_group(group, options, cluster,
-                               platforms, raw, gtfs_centroid):
+                               platforms, raw, gtfs_centroid,
+                               cos_lat=1.0):
     """Pick a tied option from a single-group cluster.
 
     With ≥ 1 leftover: enumerate options, run leftover-fill per option,
@@ -1226,8 +1301,8 @@ def _pick_option_single_group(group, options, cluster,
         leftovers = [p for p in platforms if id(p) not in placed_ids]
         if leftovers:
             _leftover_fill(platforms, leftovers, placed_ids, raw,
-                            gtfs_centroid)
-        length = _measure_pill_geometry(cluster)
+                            gtfs_centroid, cos_lat=cos_lat)
+        length = _measure_pill_geometry(cluster, cos_lat=cos_lat)
         key = (length, option["gtfs_dist"])
         if best_key is None or key < best_key:
             best_key = key
@@ -1362,11 +1437,57 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
     return True
 
 
-def _measure_pill_geometry(cluster_stops):
-    """Score a placement: total pill geometry length, with connectors counted
-    at half weight. Replicates make_pill_features's NN-path + per-gap split
-    + MST connector logic without emitting features.
+# Platform-overlap penalty: a pill or connector segment with both endpoints
+# within ON_PLATFORM_TOL_M of the SAME platform extent has its base factor
+# (1.0 for pills, 0.5 for connectors) scaled by ON_PLATFORM_PENALTY. The
+# penalty discourages routing a pill or connector along a platform extent
+# when an alternative configuration reaches the same dots without overlap.
+ON_PLATFORM_TOL_M = 0.5
+ON_PLATFORM_PENALTY = 2.0
+
+
+def _segment_on_platform(p1, p2, extents, tol_sq):
+    """True if both endpoints of segment (p1, p2) are within sqrt(tol_sq) of
+    the same platform extent polyline. tol_sq is the squared tolerance in the
+    same coordinate space as the points and extents (scaled-degree space).
     """
+    for ext in extents:
+        if len(ext) < 2:
+            continue
+        s1 = snap_to_line(p1[0], p1[1], ext)
+        if (p1[0] - s1[0]) ** 2 + (p1[1] - s1[1]) ** 2 > tol_sq:
+            continue
+        s2 = snap_to_line(p2[0], p2[1], ext)
+        if (p2[0] - s2[0]) ** 2 + (p2[1] - s2[1]) ** 2 > tol_sq:
+            continue
+        return True
+    return False
+
+
+def _measure_pill_geometry(cluster_stops, cos_lat=1.0):
+    """Score a placement: total pill geometry length, with connectors counted
+    at half weight, plus a platform-overlap penalty (segments running along a
+    platform extent are scaled by ON_PLATFORM_PENALTY). Replicates
+    make_pill_features's NN-path + per-gap split + MST connector logic without
+    emitting features.
+
+    Inside coordinate_dots_global_stab the cluster runs in equal-distance
+    space (lon × cos_lat). haversine_km expects true lon/lat and applies its
+    own cos(lat) on the longitude term, so feeding it scaled coords would
+    double-apply the factor (cos⁴ instead of cos²) and under-weight east-west
+    distance — enough to flip the option ranking on real clusters. Pass that
+    same cos_lat here and the function builds a local-unscaled view before
+    measuring; callers in true lon/lat space leave cos_lat at the 1.0 default.
+    """
+    if cos_lat != 1.0:
+        cluster_stops = [
+            {**s,
+             "lon": s["lon"] / cos_lat,
+             "extent": ([(x / cos_lat, y) for x, y in s["extent"]]
+                        if s.get("extent") else s.get("extent"))}
+            for s in cluster_stops
+        ]
+
     positions = _dedup_stop_positions(cluster_stops)
     if len(positions) < 2:
         return 0.0
@@ -1376,18 +1497,40 @@ def _measure_pill_geometry(cluster_stops):
     for s in cluster_stops:
         pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
 
+    # Unique platform extents in this cluster (dedupe by object identity —
+    # the same per-(line, stop) extent isn't shared, but we don't need to
+    # care since the on-platform predicate stops at the first hit).
+    extents = []
+    seen = set()
+    for s in cluster_stops:
+        ext = s.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        if id(ext) in seen:
+            continue
+        seen.add(id(ext))
+        extents.append(ext)
+    tol_sq = (ON_PLATFORM_TOL_M / 111000.0) ** 2
+
+    def weighted(p1, p2, base_factor):
+        d = haversine_km(p1[0], p1[1], p2[0], p2[1])
+        if _segment_on_platform(p1, p2, extents, tol_sq):
+            return d * base_factor * ON_PLATFORM_PENALTY
+        return d * base_factor
+
     split_indices = [
         k for k in range(len(path) - 1)
         if _should_split_at_gap(
             path, k,
             haversine_km(path[k][0], path[k][1],
                          path[k + 1][0], path[k + 1][1]),
-            pos_to_platforms)
+            pos_to_platforms,
+            cos_lat=cos_lat)
     ]
 
     if not split_indices:
-        return sum(haversine_km(path[k][0], path[k][1],
-                                 path[k + 1][0], path[k + 1][1])
+        # Whole path is one pill — no connectors.
+        return sum(weighted(path[k], path[k + 1], 1.0)
                    for k in range(len(path) - 1))
 
     groups = []
@@ -1397,28 +1540,32 @@ def _measure_pill_geometry(cluster_stops):
         prev = idx + 1
     groups.append(path[prev:])
 
-    # Singleton groups contribute no pill length, but stay in `groups` so
-    # the MST below mirrors make_pill_features (connector endpoints).
-    pill_length = 0.0
+    # Pill segments — internal edges of each group.
+    pill_total = 0.0
     for grp in groups:
         if len(grp) < 2:
             continue
         for k in range(len(grp) - 1):
-            pill_length += haversine_km(grp[k][0], grp[k][1],
-                                         grp[k + 1][0], grp[k + 1][1])
+            pill_total += weighted(grp[k], grp[k + 1], 1.0)
 
+    # Connector segments — MST between groups (singletons kept as own group
+    # so make_pill_features's connector geometry is mirrored). Retain the
+    # actual (p1, p2) chosen per edge so the on-platform check sees the same
+    # segment that would be drawn.
     n_g = len(groups)
     mst_edges = []
     for i in range(n_g):
         for j in range(i + 1, n_g):
             best_d = float("inf")
+            best_pair = None
             for p1 in groups[i]:
                 for p2 in groups[j]:
                     d = haversine_km(p1[0], p1[1], p2[0], p2[1])
                     if d < best_d:
                         best_d = d
-            mst_edges.append((best_d, i, j))
-    mst_edges.sort()
+                        best_pair = (p1, p2)
+            mst_edges.append((best_d, i, j, best_pair))
+    mst_edges.sort(key=lambda e: e[0])
     parent = list(range(n_g))
 
     def find(x):
@@ -1427,13 +1574,14 @@ def _measure_pill_geometry(cluster_stops):
             x = parent[x]
         return x
 
-    connector_length = 0.0
-    for d, i, j in mst_edges:
+    connector_total = 0.0
+    for _, i, j, pair in mst_edges:
         ri, rj = find(i), find(j)
         if ri != rj:
             parent[ri] = rj
-            connector_length += d
-    return pill_length + 0.5 * connector_length
+            connector_total += weighted(pair[0], pair[1], 0.5)
+
+    return pill_total + connector_total
 
 
 # Per-call cap on placement trials in _leftover_fill. The early picks
@@ -1460,7 +1608,8 @@ def _snap_to_extent(p: dict, target_x: float, target_y: float) -> None:
 
 
 def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
-                    raw_snapshot: dict, gtfs_centroid: tuple) -> None:
+                    raw_snapshot: dict, gtfs_centroid: tuple,
+                    cos_lat: float = 1.0) -> None:
     """Place each leftover platform at the point on its own extent closest
     to the nearest already-placed dot in the cluster. The first leftover
     in a cluster with no bar dots bootstraps to the GTFS centroid instead.
@@ -1534,7 +1683,7 @@ def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
             else:
                 _snap_to_extent(p, gtfs_centroid[0], gtfs_centroid[1])
             placed_so_far.append((p["lon"], p["lat"]))
-        length = _measure_pill_geometry(cluster)
+        length = _measure_pill_geometry(cluster, cos_lat=cos_lat)
         if best_length is None or length < best_length:
             best_length = length
             best_positions = {id(p): (p["lon"], p["lat"]) for p in placeable}
@@ -1544,7 +1693,8 @@ def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
             p["lon"], p["lat"] = best_positions[id(p)]
 
 
-def coordinate_dots_global_stab(cluster: list, protection_m: float) -> None:
+def coordinate_dots_global_stab(cluster: list, protection_m: float,
+                                  lone_outlier_gap_m: float) -> None:
     """Tangent-group + perpendicular-sweep dot placement.
 
     For each tangent group of platforms (extent tangents within ~10° of
@@ -1627,7 +1777,7 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float) -> None:
                 continue
             for clump in _sigma_clumps(group):
                 for sub, options in _expand_sigma_clump(
-                        clump, angle_tol, raw):
+                        clump, angle_tol, raw, lone_outlier_gap_m):
                     per_group_options.append((sub, options, tgroup_id))
 
         # Pick one option per group — see pill-rendering.md "Tie-breaking
@@ -1646,7 +1796,8 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float) -> None:
             group, options, _ = per_group_options[0]
             if len(options) > 1:
                 chosen = [_pick_option_single_group(
-                    group, options, cluster, platforms, raw, gtfs_centroid)]
+                    group, options, cluster, platforms, raw, gtfs_centroid,
+                    cos_lat=cos_lat)]
             else:
                 chosen = [options[0]]
 
@@ -1660,7 +1811,7 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float) -> None:
         leftovers = [p for p in platforms if id(p) not in placed_ids]
         if leftovers:
             _leftover_fill(platforms, leftovers, placed_ids, raw,
-                            gtfs_centroid)
+                            gtfs_centroid, cos_lat=cos_lat)
     finally:
         # Unscale lon back to real degrees on cluster stops, extents, and
         # any debug bars added during this cluster's processing.
@@ -2552,7 +2703,8 @@ def main():
     # perpendicular bar; leftovers run through the old algorithm.
     print(f"  Placing rail dots across {len(rail_pill_clusters):,} clusters...")
     for c in rail_pill_clusters:
-        coordinate_dots_global_stab(c, PROTECTION_RADIUS_RAIL_M)
+        coordinate_dots_global_stab(c, PROTECTION_RADIUS_RAIL_M,
+                                    LONE_OUTLIER_GAP_RAIL_METRO_M)
     print("  → rail dot placement done")
 
     rail_features = []
@@ -2626,7 +2778,12 @@ def main():
     # Same global stabbing placement as rail.
     print(f"  Placing non-rail dots across {len(nonrail_clusters):,} clusters...")
     for c in nonrail_clusters:
-        coordinate_dots_global_stab(c, PROTECTION_RADIUS_NONRAIL_M)
+        _, dom_mode, _, _ = dominant_line(c)
+        lone_outlier_m = (LONE_OUTLIER_GAP_RAIL_METRO_M
+                          if dom_mode == "metro"
+                          else LONE_OUTLIER_GAP_BUS_TRAM_M)
+        coordinate_dots_global_stab(c, PROTECTION_RADIUS_NONRAIL_M,
+                                    lone_outlier_m)
     print("  → non-rail dot placement done")
 
     # Emit debug overlays now that all clusters have been processed and

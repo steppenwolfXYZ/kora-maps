@@ -23,6 +23,9 @@ Answer the question or acknowledge the reaction. Do not edit code, do not propos
 ## Don't fake agreement
 If you disagree with the user, say so directly at the top of the reply. Don't open with "yes, that makes sense" / "you're right" and then immediately argue the opposite point — that forces the reader to do the work of figuring out whether you actually agreed. State your read first ("I'd push back on X", "I don't think that's quite right because Y"), then explain. Disagreement is fine; faux agreement that flips into disagreement is not.
 
+## Answer length
+Lead with the one-sentence answer. Stop there unless the user asks for more, or the extra detail is load-bearing for the answer itself. Do not pre-emptively walk through reasoning, list adjacent observations, or restate the user's question back in fuller form. If the user wants depth they will ask; defaulting to long answers wastes their time. A correct one-line answer beats a correct three-paragraph one.
+
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
