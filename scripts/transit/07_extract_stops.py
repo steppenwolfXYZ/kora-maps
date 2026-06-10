@@ -119,24 +119,23 @@ LONE_OUTLIER_GAP_RAIL_METRO_M = 50
 LONE_OUTLIER_GAP_BUS_TRAM_M = 20
 
 # Parallel-stub drop (rail clusters only). After leftover-fill, a placed
-# leftover whose distance to its nearest non-coincident other placed dot
-# is < this gap AND whose gap direction is within PARALLEL_STUB_TOL_DEG of
-# either the leftover's or the neighbor's extent tangent is treated as a
-# spurious "sub-platform" stop: a small subset of trips departs from one
-# end of a long shared platform, gets its own stop_id, and would otherwise
-# render as a short connector running along the line. The stop is dropped
-# from rendering (its position is snapped to the absorbing dot so
-# _dedup_stop_positions collapses it later, preserving its line in the
-# popup), and leftover-fill is re-run on the remaining leftovers.
-#
-# The 100 m gap covers typical sub-platform distances (Bern ~17 m,
-# Fribourg ~58 m measured). The parallel check is what protects against
-# false positives at multi-track stations: dots on parallel adjacent
-# platforms separate perpendicular to the line direction, so their gap
-# vector is perpendicular to the extent tangent and fails the parallel
-# test even when the dots are < 100 m apart.
-PARALLEL_STUB_GAP_M = 100.0
-PARALLEL_STUB_TOL_DEG = 15.0
+# leftover is treated as a spurious "sub-platform" stop — a small subset
+# of trips appears to terminate alongside an already-placed dot and
+# would otherwise render as a short connector running along the line —
+# when either of these holds against another cluster member:
+#   (a) their `platform_code`s share the same leading-digit run (e.g.
+#       "12A-C" and "12D-F" both reduce to "12"); or
+#   (b) the two extents geometrically coincide within SAME_TRACK_PERP_M
+#       perpendicular — pfaedle has routed both trips onto the same OSM
+#       rail way, so the dots overlap on the rendered map even though
+#       GTFS gives them different platform codes.
+# Standard Swiss inter-track spacing is ~4.5 m, so a 2 m perpendicular
+# threshold cleanly distinguishes same-track from adjacent-track.
+# The stop is dropped from rendering (its position is snapped to the
+# absorbing dot so _dedup_stop_positions collapses it later, preserving
+# its line in the popup), and leftover-fill is re-run on the remaining
+# leftovers.
+SAME_TRACK_PERP_M = 2.0
 
 PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
 
@@ -2359,60 +2358,91 @@ def _leftover_fill(cluster: list, leftovers: list, placed_ids: set,
             p["lon"], p["lat"] = best_positions[id(p)]
 
 
-def _find_parallel_stub_drop(cluster: list, placed_leftovers: list):
-    """Scan just-placed leftovers in a rail (train) cluster for one whose
-    nearest non-coincident placed dot is within PARALLEL_STUB_GAP_M AND
-    whose gap direction is parallel (within PARALLEL_STUB_TOL_DEG) to
-    either the leftover's own extent tangent OR the neighbor's. Returns
-    (stop_to_drop, absorbing_position) for the first match, or None.
+def _platform_number(code: str) -> str:
+    """Leading digit run of a GTFS platform_code. Strips any sector suffix
+    so "12", "12A-C", "12D-F", "13AB" all reduce to their bare numeric
+    platform identifier. Returns "" if the code is empty or starts with a
+    non-digit."""
+    n = 0
+    while n < len(code) and code[n].isdigit():
+        n += 1
+    return code[:n]
 
-    Coincident neighbors (within DEDUP_TOL_M) are skipped because they
-    represent the same physical dot — a duplicate record collapsed by
-    _dedup_stop_positions later — and offer no useful gap. The neighbor-
-    tangent fallback handles degenerate-extent leftovers: at Bern, the
-    sub-platform stop_ids land with no extent at all (pfaedle didn't shape
-    them or the extent collapsed), so their own tangent is None but the
-    main pill bar dot they sit next to has a usable extent along the
-    line direction. Coordinates are in the scaled (cos_lat) cluster space;
-    distances convert via _M_PER_DEG.
+
+def _on_same_track(p: dict, q: dict, threshold_sq: float) -> bool:
+    """True when p's snap position lies within sqrt(threshold_sq) of q's
+    extent polyline, or symmetrically q's snap onto p's extent. Catches
+    the pfaedle-snap-error case where a stop is routed onto a different
+    platform's OSM rail way: its snap position then sits on that other
+    extent even though the two GTFS platform_codes disagree. Symmetric
+    so a degenerate extent on one side doesn't blind the test — the
+    side with a usable extent still answers. Coordinates are in the
+    scaled (cos_lat) cluster space.
     """
-    tol_cos = cos(radians(PARALLEL_STUB_TOL_DEG))
-    gap_threshold_units = PARALLEL_STUB_GAP_M / _M_PER_DEG
-    gap_threshold_sq = gap_threshold_units * gap_threshold_units
+    p_ext = p.get("extent")
+    q_ext = q.get("extent")
+    if q_ext and len(q_ext) >= 2:
+        sx, sy = snap_to_line(p["lon"], p["lat"], q_ext)
+        dx, dy = p["lon"] - sx, p["lat"] - sy
+        if dx * dx + dy * dy <= threshold_sq:
+            return True
+    if p_ext and len(p_ext) >= 2:
+        sx, sy = snap_to_line(q["lon"], q["lat"], p_ext)
+        dx, dy = q["lon"] - sx, q["lat"] - sy
+        if dx * dx + dy * dy <= threshold_sq:
+            return True
+    return False
+
+
+def _find_parallel_stub_drop(cluster: list, placed_leftovers: list):
+    """Scan just-placed leftovers in a rail (train) cluster for one that
+    is co-located with another cluster member, by either of two tests
+    (see the SAME_TRACK_PERP_M block at the top of the file for the
+    full rationale):
+      (a) `platform_code` numeric prefixes match — same physical platform
+          per GTFS, different sectors;
+      (b) the two extents geometrically coincide within SAME_TRACK_PERP_M
+          — pfaedle has put both stops onto the same OSM rail way, so
+          the dots overlap on the rendered map regardless of what GTFS
+          says.
+    Returns (stop_to_drop, absorbing_position) for the first leftover
+    that finds such a partner, or None. The absorbing position is the
+    matching cluster member nearest to the leftover; coincident
+    neighbours (within DEDUP_TOL_M) are skipped because they represent
+    the same physical dot that _dedup_stop_positions will collapse
+    later. Coordinates are in the scaled (cos_lat) cluster space.
+
+    Leftovers whose platform_code is missing or non-numeric AND whose
+    extent doesn't overlap any other member's are never dropped:
+    without either signal we cannot decide whether the leftover is a
+    redundant sector or a genuinely separate platform, and leaving a
+    possibly-redundant dot visible beats hiding a real platform.
+    """
     coincident_units = DEDUP_TOL_M / _M_PER_DEG
     coincident_sq = coincident_units * coincident_units
+    same_track_units = SAME_TRACK_PERP_M / _M_PER_DEG
+    same_track_sq = same_track_units * same_track_units
 
     for p in placed_leftovers:
-        nearest = None  # (d_sq, lon, lat, stop_dict)
+        p_num = _platform_number(p.get("platform_code", ""))
+        best = None  # (d_sq, q_lon, q_lat)
         for q in cluster:
             if q is p:
+                continue
+            q_num = _platform_number(q.get("platform_code", ""))
+            same_platform = bool(p_num) and bool(q_num) and p_num == q_num
+            if not same_platform and not _on_same_track(p, q, same_track_sq):
                 continue
             dx = q["lon"] - p["lon"]
             dy = q["lat"] - p["lat"]
             d_sq = dx * dx + dy * dy
             if d_sq <= coincident_sq:
                 continue
-            if nearest is None or d_sq < nearest[0]:
-                nearest = (d_sq, q["lon"], q["lat"], q)
-        if nearest is None:
+            if best is None or d_sq < best[0]:
+                best = (d_sq, q["lon"], q["lat"])
+        if best is None:
             continue
-        d_sq, q_lon, q_lat, q = nearest
-        if d_sq >= gap_threshold_sq:
-            continue
-
-        # Prefer p's own tangent; fall back to the neighbor's so degenerate-
-        # extent leftovers (no tangent of their own) can still be checked.
-        tan = _stop_tangent(p) or _stop_tangent(q)
-        if tan is None:
-            continue
-
-        gx = q_lon - p["lon"]
-        gy = q_lat - p["lat"]
-        gmag = sqrt(gx * gx + gy * gy)
-        cos_a = (gx * tan[0] + gy * tan[1]) / gmag
-        if abs(cos_a) < tol_cos:
-            continue
-        return p, (q_lon, q_lat)
+        return p, (best[1], best[2])
     return None
 
 
@@ -4163,6 +4193,7 @@ def main():
                     "stop_id":        sid,
                     "stop_name":      stop_name,
                     "parent_station": parent_sta,
+                    "platform_code":  meta.get("platform_code", ""),
                     "extent":         extent,
                 })
 
