@@ -107,6 +107,17 @@ pill_rendering:
     bus:          100
     regional_bus: 100
   perp_platform_tol_deg: 5.0
+  # ── Rail-only missing-range fill (terminal train stops) ─────────────────
+  # See pill-rendering concept § "Missing-range fill (rail only)". When the
+  # pfaedle polyline ends at the platform centre (terminal train stop), step 07
+  # walks an OSM rail way under the snap point to produce the missing-side
+  # extent + line extension. Fallback A (no matching way) uses a capped
+  # straight extrapolation. Fallback B (way runs out) treats the stop as
+  # end-of-platform — extent absorbs full L on the polyline side, no line
+  # extension.
+  osm_match_radius_m: 5.0
+  osm_match_max_tangent_diff_deg: 15.0
+  osm_fallback_max_straight_m: 50.0
 
 # ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
 # Endpoints of the per-bucket frequency score curve. The line's weighted

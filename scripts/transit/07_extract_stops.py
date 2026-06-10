@@ -42,6 +42,7 @@ _transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").rea
 
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
+RAIL_WAYS_GEOJSON = ROOT / "data" / "osm" / "rail_ways.geojson"
 GTFS_STOPS   = ROOT / "data" / "gtfs_routed" / "stops.txt"
 # pfaedle rewrites stops.txt to a canonical schema and drops `original_stop_id`,
 # so the SLOID lookup reads from the pre-pfaedle filtered feed where the
@@ -138,6 +139,23 @@ PARALLEL_STUB_GAP_M = 100.0
 PARALLEL_STUB_TOL_DEG = 15.0
 
 PERP_PLATFORM_TOL_DEG = float(PILL_CFG.get("perp_platform_tol_deg", 2.0))
+
+# Rail-only missing-range fill (pill-rendering concept § "Missing-range fill
+# (rail only)"): at train terminals where the pfaedle polyline ends at the
+# platform-centre GTFS coord, the missing-side extent + line extension follow
+# an OSM rail way under the snap point. Gates: proximity within
+# OSM_MATCH_RADIUS_M and tangent within OSM_MATCH_MAX_TANGENT_DIFF_DEG of the
+# polyline's last-segment tangent. Fallback A (no match) caps a straight
+# extension at OSM_FALLBACK_MAX_STRAIGHT_M. Fallback B (way runs out) marks
+# the stop as end-of-platform — the polyline-side absorbs the full L, no
+# line extension.
+OSM_MATCH_RADIUS_M             = float(PILL_CFG.get("osm_match_radius_m", 5.0))
+OSM_MATCH_MAX_TANGENT_DIFF_DEG = float(PILL_CFG.get("osm_match_max_tangent_diff_deg", 15.0))
+OSM_FALLBACK_MAX_STRAIGHT_M    = float(PILL_CFG.get("osm_fallback_max_straight_m", 50.0))
+# How close a stop's snap must be to a polyline endpoint to count as a
+# terminal eligible for OSM-walk extension. pfaedle puts polyline endpoints
+# within ~metres of the snap; 20 m is comfortable headroom.
+TERMINAL_SNAP_TOLERANCE_M      = 20.0
 
 # Connector curving (see pill-rendering concept § Connector curving).
 # CURVE_PERP_PREF_RATIO: a perpendicular tangent at a pill tip replaces the
@@ -529,6 +547,447 @@ def _directional_tangent_at(polyline, dists, t, window_m=20.0):
     return ((hi[0] - lo[0]) / arc, (hi[1] - lo[1]) / arc)
 
 
+# =============================================================================
+# OSM rail walk (pill-rendering concept § "Missing-range fill (rail only)")
+# =============================================================================
+
+class _RailIndex:
+    """Spatial grid + endpoint adjacency over OSM rail-way LineStrings, loaded
+    once from data/osm/rail_ways.geojson. Used by `_osm_rail_walk` to extend
+    train-line polylines at terminal stops along the actual rail track.
+    """
+
+    def __init__(self, cell_size_deg: float = 0.001):
+        self.ways: list = []
+        self.way_dists: list = []
+        self.cells: dict = defaultdict(list)
+        self.endpoint_to_ways: dict = defaultdict(list)
+        self.cell_size = cell_size_deg
+
+    def query_radius(self, lon: float, lat: float, radius_m: float):
+        """Way indices whose bbox grid cell could contain points within
+        radius_m of (lon, lat). Conservative — caller does the precise
+        distance check."""
+        deg = radius_m / 111000.0
+        cs = self.cell_size
+        cx_lo = int((lon - deg) / cs)
+        cx_hi = int((lon + deg) / cs)
+        cy_lo = int((lat - deg) / cs)
+        cy_hi = int((lat + deg) / cs)
+        seen: set = set()
+        for cx in range(cx_lo, cx_hi + 1):
+            for cy in range(cy_lo, cy_hi + 1):
+                for w_idx in self.cells.get((cx, cy), ()):
+                    seen.add(w_idx)
+        return seen
+
+
+def _load_rail_index(path):
+    """Load OSM rail ways from a FeatureCollection GeoJSON into a _RailIndex.
+    Returns None if the file is missing — terminal extension then falls back
+    to the capped-straight (Fallback A) path for every stop."""
+    if not path.exists():
+        print(f"  WARNING: {path.name} not found — rail walk disabled, "
+              f"terminal extensions fall back to capped-straight")
+        return None
+    data = json.loads(path.read_text())
+    idx = _RailIndex()
+    n_skip = 0
+    for feat in data.get("features", []):
+        geom = feat.get("geometry") or {}
+        if geom.get("type") != "LineString":
+            continue
+        raw = geom.get("coordinates") or []
+        # Drop z components if present; collapse consecutive duplicates so
+        # cumulative distances strictly increase.
+        coords = []
+        for c in raw:
+            t = (c[0], c[1])
+            if not coords or coords[-1] != t:
+                coords.append(t)
+        if len(coords) < 2:
+            n_skip += 1
+            continue
+        dists = _cum_dist_m(coords)
+        if dists[-1] <= 0:
+            n_skip += 1
+            continue
+        w_idx = len(idx.ways)
+        idx.ways.append(coords)
+        idx.way_dists.append(dists)
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        cs = idx.cell_size
+        cx_lo = int(min(xs) / cs)
+        cx_hi = int(max(xs) / cs)
+        cy_lo = int(min(ys) / cs)
+        cy_hi = int(max(ys) / cs)
+        for cx in range(cx_lo, cx_hi + 1):
+            for cy in range(cy_lo, cy_hi + 1):
+                idx.cells[(cx, cy)].append(w_idx)
+        idx.endpoint_to_ways[coords[0]].append((w_idx, 0))
+        idx.endpoint_to_ways[coords[-1]].append((w_idx, len(coords) - 1))
+    print(f"  Loaded {len(idx.ways):,} rail ways from {path.name} "
+          f"({n_skip:,} skipped)")
+    return idx
+
+
+def _osm_rail_find_best_match(rail_idx, p_lon, p_lat,
+                                walk_dx_per_m, walk_dy_per_m,
+                                radius_m, max_tangent_diff_deg):
+    """Pick the OSM rail way under (p_lon, p_lat) whose tangent at its
+    projection of P best matches the walk direction. Returns
+    (way_idx, t_on_way, walk_forward) or None.
+
+    Proximity gate: projection distance ≤ radius_m. Tangent gate: angle
+    between way tangent and walk direction ≤ max_tangent_diff_deg (mod π).
+    Among candidates passing both gates, smallest distance wins; tangent
+    quality breaks ties.
+    """
+    candidates = rail_idx.query_radius(p_lon, p_lat, radius_m)
+    if not candidates:
+        return None
+
+    cos_lat = cos(radians(p_lat))
+    walk_ex = walk_dx_per_m * cos_lat
+    walk_ey = walk_dy_per_m
+    walk_mag = sqrt(walk_ex * walk_ex + walk_ey * walk_ey)
+    if walk_mag <= 0:
+        return None
+    cos_tol = cos(radians(max_tangent_diff_deg))
+    radius_sq_m = radius_m * radius_m
+
+    best = None  # (sort_key, way_idx, t_on_way, walk_forward)
+    for w_idx in candidates:
+        coords = rail_idx.ways[w_idx]
+        dists = rail_idx.way_dists[w_idx]
+        t_proj = _project_meters(p_lon, p_lat, coords, dists)
+        proj_lon, proj_lat = _interp_at(coords, dists, t_proj)
+        dx_m = (proj_lon - p_lon) * cos_lat * 111000.0
+        dy_m = (proj_lat - p_lat) * 111000.0
+        d_sq_m = dx_m * dx_m + dy_m * dy_m
+        if d_sq_m > radius_sq_m:
+            continue
+        way_tan = _directional_tangent_at(coords, dists, t_proj, window_m=5.0)
+        if way_tan is None:
+            continue
+        wdx, wdy = way_tan
+        way_ex = wdx * cos_lat
+        way_ey = wdy
+        way_mag = sqrt(way_ex * way_ex + way_ey * way_ey)
+        if way_mag <= 0:
+            continue
+        cos_a = (way_ex * walk_ex + way_ey * walk_ey) / (way_mag * walk_mag)
+        if abs(cos_a) < cos_tol:
+            continue
+        key = (sqrt(d_sq_m), -abs(cos_a))
+        if best is None or key < best[0]:
+            best = (key, w_idx, t_proj, cos_a > 0)
+
+    if best is None:
+        return None
+    _, w_idx, t_proj, walk_forward = best
+    return (w_idx, t_proj, walk_forward)
+
+
+def _osm_rail_find_continuation(rail_idx, exit_node, exit_dir,
+                                  excl_way_idx, max_tangent_diff_deg):
+    """At a way endpoint shared between ways, pick the continuation way whose
+    outgoing direction (from `exit_node` into that way) best matches the
+    incoming `exit_dir`. Returns (way_idx, start_t, forward) or None.
+
+    `exit_node` is the (lon, lat) tuple of the shared endpoint; matched against
+    `rail_idx.endpoint_to_ways` keyed on exact coords.
+    """
+    candidates = rail_idx.endpoint_to_ways.get(exit_node, ())
+    if not candidates:
+        return None
+
+    cos_lat = cos(radians(exit_node[1]))
+    ex = exit_dir[0] * cos_lat
+    ey = exit_dir[1]
+    e_mag = sqrt(ex * ex + ey * ey)
+    if e_mag <= 0:
+        return None
+    cos_tol = cos(radians(max_tangent_diff_deg))
+
+    best = None  # (cos_a, way_idx, vert_idx, forward)
+    for w_idx, vert_idx in candidates:
+        if w_idx == excl_way_idx:
+            continue
+        coords = rail_idx.ways[w_idx]
+        if len(coords) < 2:
+            continue
+        if vert_idx == 0:
+            other = coords[1]
+            forward = True
+        else:
+            other = coords[vert_idx - 1]
+            forward = False
+        out_dx = other[0] - exit_node[0]
+        out_dy = other[1] - exit_node[1]
+        ox = out_dx * cos_lat
+        oy = out_dy
+        o_mag = sqrt(ox * ox + oy * oy)
+        if o_mag <= 0:
+            continue
+        cos_a = (ex * ox + ey * oy) / (e_mag * o_mag)
+        if cos_a < cos_tol:
+            # Reject reversed or sharply turning continuations.
+            continue
+        if best is None or cos_a > best[0]:
+            best = (cos_a, w_idx, vert_idx, forward)
+
+    if best is None:
+        return None
+    _, w_idx, vert_idx, _ = best
+    dists = rail_idx.way_dists[w_idx]
+    start_t = 0.0 if vert_idx == 0 else dists[-1]
+    forward = (vert_idx == 0)
+    return (w_idx, start_t, forward)
+
+
+def _walk_along_way(coords, dists, t_start, forward, max_len_m):
+    """Walk one way from arc-length t_start in direction `forward` for up to
+    max_len_m metres. Returns (seg_coords, exit_pt, exit_dir, used_m, hit_end).
+
+    seg_coords starts at (interpolated) t_start and ends at (interpolated)
+    t_end. exit_dir is the last segment's (dx, dy) direction (in raw lon/lat
+    units) — the direction the walk was travelling at the exit, used by
+    `_osm_rail_find_continuation` to pick the next way.
+    """
+    way_max = dists[-1]
+    if forward:
+        t_end = min(way_max, t_start + max_len_m)
+        used = t_end - t_start
+        seg = [_interp_at(coords, dists, t_start)]
+        for i, d in enumerate(dists):
+            if t_start < d < t_end:
+                seg.append((coords[i][0], coords[i][1]))
+        last = _interp_at(coords, dists, t_end)
+        if seg[-1] != last:
+            seg.append(last)
+        hit_end = (t_end >= way_max) and (used + 1e-6 < max_len_m)
+    else:
+        t_end = max(0.0, t_start - max_len_m)
+        used = t_start - t_end
+        seg = [_interp_at(coords, dists, t_start)]
+        for i in range(len(coords) - 1, -1, -1):
+            if t_end < dists[i] < t_start:
+                seg.append((coords[i][0], coords[i][1]))
+        last = _interp_at(coords, dists, t_end)
+        if seg[-1] != last:
+            seg.append(last)
+        hit_end = (t_end <= 0.0) and (used + 1e-6 < max_len_m)
+    exit_pt = (seg[-1][0], seg[-1][1])
+    if len(seg) >= 2:
+        exit_dir = (seg[-1][0] - seg[-2][0], seg[-1][1] - seg[-2][1])
+    else:
+        exit_dir = (0.0, 0.0)
+    return (seg, exit_pt, exit_dir, used, hit_end)
+
+
+def _osm_rail_walk(rail_idx, p_lon, p_lat,
+                    walk_dx_per_m, walk_dy_per_m, target_length_m):
+    """Walk an OSM rail way (with junction continuation) from a point P in
+    the given walk direction for `target_length_m` metres.
+
+    `walk_dx_per_m`, `walk_dy_per_m`: per-metre tangent components in
+    (lon, lat) units pointing in the desired walk direction (the missing
+    side at a terminal stop).
+
+    Returns (status, coords):
+      'walk'     — coords is the extension polyline starting at (p_lon, p_lat)
+                   (translated so the first vertex equals P exactly) and
+                   reaching `target_length_m` of OSM-rail geometry.
+      'ran_out'  — coords is a partial walk (way chain ended early); caller
+                   applies Fallback B (end-of-platform anchoring).
+      'no_match' — coords is None; caller applies Fallback A (capped straight).
+    """
+    if rail_idx is None:
+        return ("no_match", None)
+
+    start = _osm_rail_find_best_match(
+        rail_idx, p_lon, p_lat,
+        walk_dx_per_m, walk_dy_per_m,
+        OSM_MATCH_RADIUS_M, OSM_MATCH_MAX_TANGENT_DIFF_DEG)
+    if start is None:
+        return ("no_match", None)
+    way_idx, t_proj, walk_forward = start
+
+    out_coords: list = []
+    remaining = target_length_m
+    visited: set = set()
+    ran_out = False
+    while remaining > 1e-6:
+        if way_idx in visited:
+            ran_out = True
+            break
+        visited.add(way_idx)
+        coords = rail_idx.ways[way_idx]
+        dists = rail_idx.way_dists[way_idx]
+        seg, exit_pt, exit_dir, used, hit_end = _walk_along_way(
+            coords, dists, t_proj, walk_forward, remaining)
+        if not out_coords:
+            out_coords.extend(seg)
+        else:
+            # First seg vertex coincides with the previous exit point.
+            out_coords.extend(seg[1:])
+        remaining -= used
+        if remaining <= 1e-6:
+            break
+        if not hit_end:
+            # Defensive: walked less than max_len but didn't hit the end —
+            # treat as ran_out so we don't loop forever.
+            ran_out = True
+            break
+        cont = _osm_rail_find_continuation(
+            rail_idx, exit_pt, exit_dir, way_idx,
+            OSM_MATCH_MAX_TANGENT_DIFF_DEG)
+        if cont is None:
+            ran_out = True
+            break
+        way_idx, t_proj, walk_forward = cont
+
+    if not out_coords:
+        return ("no_match", None)
+
+    # Translate so first vertex sits exactly at P (projection-distance shift,
+    # bounded by OSM_MATCH_RADIUS_M).
+    ox, oy = out_coords[0]
+    shift_x = p_lon - ox
+    shift_y = p_lat - oy
+    translated = [(x + shift_x, y + shift_y) for x, y in out_coords]
+    return ("ran_out" if ran_out else "walk", translated)
+
+
+def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
+                                     pill_cfg, stop_attrs):
+    """Extend train-line polylines at terminal stops via OSM rail walk
+    (Fallback A's capped straight when no way matches). Modifies
+    `line_lookup[oid]["coords"]` in place.
+
+    Returns the set of (osm_id, stop_id) pairs that hit Fallback B — the OSM
+    walk matched a way but the way chain ran out before reaching L/2. These
+    stops use asymmetric anchoring in `_platform_extent` (polyline side
+    absorbs the full L; no polyline extension).
+    """
+    end_of_platform_pairs: set = set()
+    if not pill_cfg.get("default_length_m"):
+        return end_of_platform_pairs
+
+    n_walk = n_straight = n_eop = 0
+
+    for oid, info in line_lookup.items():
+        if info.get("mode") != "train":
+            continue
+        coords = info.get("coords")
+        if not coords:
+            continue
+        flat = flatten_coords(coords)
+        if len(flat) < 2:
+            continue
+        flat = [(c[0], c[1]) for c in flat]
+        dists = _cum_dist_m(flat)
+        poly_max = dists[-1]
+        if poly_max <= 0:
+            continue
+
+        ls_entry = line_stops.get(str(oid))
+        if ls_entry is None:
+            ls_entry = line_stops.get(oid)
+        if not ls_entry:
+            continue
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        if not triplets:
+            continue
+
+        terminals = []
+        first_trip = triplets[0]
+        if len(first_trip) >= 3:
+            terminals.append(("start", first_trip))
+        if len(triplets) > 1:
+            last_trip = triplets[-1]
+            if len(last_trip) >= 3:
+                terminals.append(("end", last_trip))
+
+        prepend_coords = None
+        append_coords = None
+
+        for which, trip in terminals:
+            stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
+            t_snap = _project_meters(stop_lon, stop_lat, flat, dists)
+            if which == "start":
+                if t_snap > TERMINAL_SNAP_TOLERANCE_M:
+                    continue
+                t_endpoint = 0.0
+                ep_lon, ep_lat = flat[0]
+            else:
+                if poly_max - t_snap > TERMINAL_SNAP_TOLERANCE_M:
+                    continue
+                t_endpoint = poly_max
+                ep_lon, ep_lat = flat[-1]
+
+            tan = _directional_tangent_at(flat, dists, t_endpoint, window_m=20.0)
+            if tan is None:
+                continue
+            sign = +1.0 if which == "end" else -1.0
+            # Normalise tangent to per-metre units (already per-metre in
+            # _directional_tangent_at), apply sign to flip for start-end.
+            walk_dx = tan[0] * sign
+            walk_dy = tan[1] * sign
+
+            atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+            L = _resolve_length("train", atlas_len, pill_cfg)
+            if L is None or L <= 0:
+                continue
+            target_m = L / 2.0
+
+            status, walk_coords = _osm_rail_walk(
+                rail_idx, ep_lon, ep_lat, walk_dx, walk_dy, target_m)
+
+            if status == "walk":
+                ext = walk_coords
+                n_walk += 1
+            elif status == "ran_out":
+                end_of_platform_pairs.add((str(oid), sid))
+                n_eop += 1
+                continue
+            else:
+                # Fallback A: capped straight extension.
+                cap_m = min(target_m, OSM_FALLBACK_MAX_STRAIGHT_M)
+                ext_end_lon = ep_lon + walk_dx * cap_m
+                ext_end_lat = ep_lat + walk_dy * cap_m
+                ext = [(ep_lon, ep_lat), (ext_end_lon, ext_end_lat)]
+                n_straight += 1
+
+            if which == "start":
+                # Extension goes from ep outward; for prepending we want it
+                # to end at ep, so reverse.
+                prepend_coords = list(reversed(ext))
+            else:
+                append_coords = ext
+
+        if prepend_coords is None and append_coords is None:
+            continue
+
+        new_flat = []
+        if prepend_coords is not None:
+            new_flat.extend(prepend_coords[:-1])
+        new_flat.extend(flat)
+        if append_coords is not None:
+            new_flat.extend(append_coords[1:])
+        info["coords"] = new_flat
+
+    print(f"  Terminal rail extension: walk={n_walk}, "
+          f"straight={n_straight}, end-of-platform={n_eop}")
+    return end_of_platform_pairs
+
+
+# =============================================================================
+# Platform extent (continued) — see pill-rendering concept § Platform extent
+# =============================================================================
+
 # Missing-range fill (tram/bus/regional_bus): sibling-borrow gates.
 SIBLING_PROXIMITY_M = 2.0
 SIBLING_ANGLE_TOL_RAD = radians(15.0)
@@ -638,7 +1097,7 @@ def _resolve_length(mode: str, atlas_length, cfg: dict):
 
 
 def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
-                      osm_id=None, siblings=None):
+                      osm_id=None, siblings=None, end_of_platform=False):
     """Return the (lon, lat) sequence tracing the platform's allowed range
     along its polyline, or None for out-of-scope modes / degenerate geometry.
 
@@ -648,10 +1107,19 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
       • tram, bus     — GTFS coord is FRONT of stop → range = [coord - L, coord].
 
     Missing-range fill differs by mode:
-      • rail (train, metro): straight-line tangent-direction extrapolation only.
-      • tram / bus / regional_bus: sibling-borrow first (passes through `siblings`
-        as a list of (osm_id, polyline) tuples in the same `(ref, agency_id, mode)`
-        group), straight-line tangent extrapolation as fallback.
+      • train: handled UPSTREAM by `_extend_polylines_at_terminals` — the
+        polyline is pre-extended at terminal stops along the OSM rail track
+        (Fallback A's capped straight when no way matches), so the
+        ±L/2 slice fits within the polyline. `end_of_platform=True` flips
+        the anchoring to asymmetric (Fallback B): the polyline side absorbs
+        the full L and no extrapolation is performed.
+      • metro: straight-line tangent-direction extrapolation, unchanged from
+        the pre-OSM-walk behaviour (subway tracks are outside the rail-walk
+        filter list).
+      • tram / bus / regional_bus: sibling-borrow first (passes through
+        `siblings` as a list of (osm_id, polyline) tuples in the same
+        `(ref, agency_id, mode)` group), straight-line tangent extrapolation
+        as fallback.
     """
     if len(polyline) < 2:
         return None
@@ -700,6 +1168,19 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
             return [extrap, (p[0], p[1])]
         return [extrap] + on_slice
 
+    if end_of_platform:
+        # Fallback B (train only): polyline side absorbs full L; snap sits
+        # at one end of the range. The polyline is NOT extended in this case,
+        # so the range slices whatever pfaedle geometry is available on the
+        # polyline side. Pick the side with more polyline as the anchor side.
+        if poly_max - t >= t:
+            t_start_ideal = t
+            t_end_ideal = min(poly_max, t + L)
+        else:
+            t_start_ideal = max(0.0, t - L)
+            t_end_ideal = t
+        return list(_slice_polyline(polyline, dists, t_start_ideal, t_end_ideal))
+
     half_L = L / 2.0
     t_start_ideal = t - half_L
     t_end_ideal = t + half_L
@@ -708,6 +1189,15 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
     on_end = min(poly_max, t_end_ideal)
     slice_pts = list(_slice_polyline(polyline, dists, on_start, on_end))
 
+    if mode == "train":
+        # Train extents rely on the polyline being pre-extended at terminals
+        # (OSM walk or capped 50 m straight) by
+        # `_extend_polylines_at_terminals`. Don't re-extrapolate here — the
+        # concept caps Fallback A at osm_fallback_max_straight_m, so any
+        # remaining clip on the missing side must stay clipped.
+        return slice_pts
+
+    # Metro: keep the symmetric straight-line extrapolation behaviour.
     tan = _directional_tangent_at(polyline, dists, t)
     if tan is None:
         return slice_pts
@@ -1714,17 +2204,21 @@ def _measure_pill_geometry(cluster_stops, cos_lat=1.0):
             pill_total += weighted(grp[k], grp[k + 1], 1.0)
 
     # Connector segments — MST between groups (singletons kept as own group
-    # so make_pill_features's connector geometry is mirrored). Retain the
-    # actual (p1, p2) chosen per edge so the on-platform check sees the same
-    # segment that would be drawn.
+    # so make_pill_features's connector geometry is mirrored). Connectors
+    # attach only at pill endpoints, so the candidate set per group is the
+    # two ends (one point for singletons). Retain the actual (p1, p2) chosen
+    # per edge so the on-platform check sees the same segment that would
+    # be drawn.
     n_g = len(groups)
     mst_edges = []
     for i in range(n_g):
         for j in range(i + 1, n_g):
+            ea = [groups[i][0]] if len(groups[i]) == 1 else [groups[i][0], groups[i][-1]]
+            eb = [groups[j][0]] if len(groups[j]) == 1 else [groups[j][0], groups[j][-1]]
             best_d = float("inf")
             best_pair = None
-            for p1 in groups[i]:
-                for p2 in groups[j]:
+            for p1 in ea:
+                for p2 in eb:
                     d = haversine_km(p1[0], p1[1], p2[0], p2[1])
                     if d < best_d:
                         best_d = d
@@ -2072,7 +2566,8 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
 def write_debug_platforms(line_stops: dict, line_lookup: dict,
                            stop_attrs: dict, skip_first_oids: set,
                            skip_last_oids: set,
-                           sibling_groups: dict, oid_sibling_key: dict) -> None:
+                           sibling_groups: dict, oid_sibling_key: dict,
+                           end_of_platform_pairs: set | None = None) -> None:
     """Emit transit_debug_platforms.geojson — one LineString per stop tracing
     the platform's full allowed range along the line's polyline. Debug-only
     overlay; replaces the previous black-dot debug feature.
@@ -2081,6 +2576,7 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
     if not cfg.get("default_length_m"):
         print("  No pill_rendering config — debug platforms skipped.")
         return
+    eop = end_of_platform_pairs or set()
     feats = []
     for osm_id, ls_entry in line_stops.items():
         triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
@@ -2107,9 +2603,11 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
                 continue
             stop_lon, stop_lat, stop_id = trip[0], trip[1], trip[2]
             atlas_length = (stop_attrs.get(stop_id, {}) or {}).get("length")
+            is_eop = (str(osm_id), stop_id) in eop
             extent = _platform_extent(stop_lon, stop_lat, polyline,
                                        mode, atlas_length, cfg,
-                                       osm_id=str(osm_id), siblings=siblings)
+                                       osm_id=str(osm_id), siblings=siblings,
+                                       end_of_platform=is_eop)
             if extent is None or len(extent) < 2:
                 continue
             feats.append({
@@ -2613,63 +3111,35 @@ def _dedup_polyline_xy(poly, tol_m=DEDUP_TOL_M):
     return out
 
 
-def _tangent_candidates(group, endpoint, other_endpoint, lon0, lat0, cos_lat):
+def _tangent_candidates(group, endpoint, lon0, lat0, cos_lat):
     """Candidate outward-pointing unit tangents at `endpoint` within `group`.
+
+    Connectors attach only at pill endpoints, so `endpoint` is always the
+    first or last dot of a pill group, never an interior dot.
 
     Returns a list of (tangent, is_default) tuples in metric (x, y) space:
     - Singleton group (disc): [] — tangent is unconstrained, derived from
       symmetry by the caller.
     - Pill tip: [(axial, True), (perp_left, False), (perp_right, False)].
-    - Pill interior: [(perp_toward_other, True)] — the only sensible choice.
     """
     if len(group) <= 1:
         return []
 
-    # Locate endpoint within group. Positions flow through unchanged from
-    # nearest_neighbor_path / split, so float-equality matches.
-    idx = None
-    for k, p in enumerate(group):
-        if p[0] == endpoint[0] and p[1] == endpoint[1]:
-            idx = k
-            break
-    if idx is None:
-        return []
-
-    xy = [_lonlat_to_xy(p[0], p[1], lon0, lat0, cos_lat) for p in group]
-
-    if idx == 0 or idx == len(group) - 1:
-        neighbor = 1 if idx == 0 else len(group) - 2
-        axial_raw = (xy[idx][0] - xy[neighbor][0], xy[idx][1] - xy[neighbor][1])
-        axial = _norm2(axial_raw)
-        if axial is None:
-            return []
-        return [
-            (axial, True),
-            (_rotate2(axial, pi / 2), False),
-            (_rotate2(axial, -pi / 2), False),
-        ]
-
-    # Interior: average of incoming/outgoing segment directions, then
-    # perpendicular on the side facing the other connector endpoint.
-    prev_dir = _norm2((xy[idx][0] - xy[idx - 1][0], xy[idx][1] - xy[idx - 1][1]))
-    next_dir = _norm2((xy[idx + 1][0] - xy[idx][0], xy[idx + 1][1] - xy[idx][1]))
-    if prev_dir is None and next_dir is None:
-        return []
-    if prev_dir is None:
-        avg = next_dir
-    elif next_dir is None:
-        avg = prev_dir
+    if endpoint[0] == group[0][0] and endpoint[1] == group[0][1]:
+        idx, neighbor = 0, 1
     else:
-        avg = _norm2(((prev_dir[0] + next_dir[0]) / 2, (prev_dir[1] + next_dir[1]) / 2))
-        if avg is None:
-            avg = next_dir
-    perp_a = _rotate2(avg, pi / 2)
-    perp_b = _rotate2(avg, -pi / 2)
-    other_xy = _lonlat_to_xy(other_endpoint[0], other_endpoint[1], lon0, lat0, cos_lat)
-    towards = (other_xy[0] - xy[idx][0], other_xy[1] - xy[idx][1])
-    dot_a = perp_a[0] * towards[0] + perp_a[1] * towards[1]
-    dot_b = perp_b[0] * towards[0] + perp_b[1] * towards[1]
-    return [((perp_a if dot_a >= dot_b else perp_b), True)]
+        idx, neighbor = len(group) - 1, len(group) - 2
+
+    xy_e = _lonlat_to_xy(group[idx][0], group[idx][1], lon0, lat0, cos_lat)
+    xy_n = _lonlat_to_xy(group[neighbor][0], group[neighbor][1], lon0, lat0, cos_lat)
+    axial = _norm2((xy_e[0] - xy_n[0], xy_e[1] - xy_n[1]))
+    if axial is None:
+        return []
+    return [
+        (axial, True),
+        (_rotate2(axial, pi / 2), False),
+        (_rotate2(axial, -pi / 2), False),
+    ]
 
 
 # Within this tolerance of a geographic cardinal (N / E / S / W in cluster-xy
@@ -2743,11 +3213,13 @@ def _build_symmetric_arc(A, B, tA, tB, r_max):
         # tangent-consistent connector is a straight line in direction tA. This
         # is the "both tips face each other" case — the symmetric-arc
         # construction has no work to do, but the combo is still a legitimate
-        # connector candidate and must surface to the picker so a much shorter
-        # straight line can win against a wildly wider axial-axial arc on the
-        # 0.7-ratio rule. Only emit when the chord actually aligns with tA —
-        # otherwise a "straight line" between A and B has hard kinks at both
-        # ends and the combo is geometrically inconsistent.
+        # connector candidate and must surface to the picker as a 2-point
+        # result so that, when no combo produces a real curve, the picker has
+        # a last-resort straight to fall back on. Real curves at other tangent
+        # combos outrank this chord in the picker. Only emit when the chord
+        # actually aligns with tA — otherwise a "straight line" between A and
+        # B has hard kinks at both ends and the combo is geometrically
+        # inconsistent.
         BAx = B[0] - A[0]
         BAy = B[1] - A[1]
         BA_len = sqrt(BAx * BAx + BAy * BAy)
@@ -3023,10 +3495,16 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     derive their tangents from their own geometry (anchors on the pill side
     are ignored).
 
-    Returns `(coords, anchor_out_a, anchor_out_b)`. Each `anchor_out_*` is
-    the OUT tangent at that end of the final polyline in cluster-xy space, or
-    None if the polyline is too short to derive one. The caller decides
-    whether to use it as a new anchor.
+    Returns `(coords, anchor_out_a, anchor_out_b, is_fallback)`. Each
+    `anchor_out_*` is the OUT tangent at that end of the final polyline in
+    cluster-xy space, or None if the polyline is too short to derive one.
+    The caller decides whether to use it as a new anchor. `is_fallback` is
+    True only when the function hit an explicit "no valid curve" return-chord
+    path; False when the picker selected a chosen result (curve or aligned
+    chord) from `_build_symmetric_arc` / `_pill_disc_picker`. A 2-point
+    polyline can be either: an intentional parallel-tangent chord that the
+    picker chose as the best valid result is `is_fallback=False`; the
+    return-chord path used when every candidate failed is `is_fallback=True`.
     """
     r_max = _curve_max_radius(mode)
 
@@ -3036,26 +3514,26 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     B_xy = _lonlat_to_xy(cb[0], cb[1], lon0, lat0, cluster_cos_lat)
 
     if len(group_a) > 1:
-        cands_a = _tangent_candidates(group_a, ca, cb, lon0, lat0, cluster_cos_lat)
+        cands_a = _tangent_candidates(group_a, ca, lon0, lat0, cluster_cos_lat)
     elif anchor_a is not None:
         cands_a = _cardinal_tangents(anchor_a)
     else:
         cands_a = []
     if len(group_b) > 1:
-        cands_b = _tangent_candidates(group_b, cb, ca, lon0, lat0, cluster_cos_lat)
+        cands_b = _tangent_candidates(group_b, cb, lon0, lat0, cluster_cos_lat)
     elif anchor_b is not None:
         cands_b = _cardinal_tangents(anchor_b)
     else:
         cands_b = []
 
-    def finalize(coords):
+    def finalize(coords, is_fallback):
         anchor_out_a = _arrival_tangent_lonlat(coords, True, cluster_cos_lat)
         anchor_out_b = _arrival_tangent_lonlat(coords, False, cluster_cos_lat)
-        return coords, anchor_out_a, anchor_out_b
+        return coords, anchor_out_a, anchor_out_b, is_fallback
 
     # Both ends unconstrained (e.g. unanchored disc ↔ unanchored disc): straight.
     if not cands_a and not cands_b:
-        return finalize([ca, cb])
+        return finalize([ca, cb], True)
 
     # Constrained one side only: asymmetric arc-then-straight with the
     # constrained side playing the pill role. Same construction whether the
@@ -3063,16 +3541,16 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     if cands_a and not cands_b:
         poly_xy = _pill_disc_picker(A_xy, cands_a, B_xy, r_max)
         if poly_xy is None:
-            return finalize([ca, cb])
+            return finalize([ca, cb], True)
         coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
-        return finalize(coords)
+        return finalize(coords, False)
     if cands_b and not cands_a:
         poly_xy = _pill_disc_picker(B_xy, cands_b, A_xy, r_max)
         if poly_xy is None:
-            return finalize([ca, cb])
+            return finalize([ca, cb], True)
         coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in poly_xy]
         coords.reverse()
-        return finalize(coords)
+        return finalize(coords, False)
 
     # Both ends constrained: symmetric arc. Covers pill ↔ pill, pill ↔
     # anchored-disc, and anchored ↔ anchored.
@@ -3090,34 +3568,139 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     if not results:
         # No valid (cardinal × cardinal) combo: fall back to the unconstrained
         # logic so an anchored-disc end with no working cardinals doesn't lose
-        # its connector entirely. The disc's anchor stays as it was.
+        # its connector entirely. The disc's anchor stays as it was. The
+        # recursion's own is_fallback flag propagates up.
         if anchor_a is not None or anchor_b is not None:
             return _curve_connector(ca, cb, group_a, group_b,
                                     cluster_cos_lat, mode,
                                     anchor_a=None, anchor_b=None)
-        return finalize([ca, cb])
+        return finalize([ca, cb], True)
 
-    # Axial-preferred rule: the default tangent combination is the baseline
-    # (axial at every pill tip; any cardinal at an anchored disc, all of which
-    # are tagged default). A perpendicular at a pill tip replaces the baseline
-    # only when its combination length is ≤ CURVE_PERP_PREF_RATIO × the
-    # baseline length. Multiple combos may share the default tag (4 cardinals
-    # × 1 axial-pill = 4 default combos for pill ↔ anchored-disc; 16 for
-    # anchored ↔ anchored) — the shortest among them is the baseline.
-    defaults = [r for r in results if r[2] and r[3]]
-    if not defaults:
-        if anchor_a is not None or anchor_b is not None:
-            return _curve_connector(ca, cb, group_a, group_b,
-                                    cluster_cos_lat, mode,
-                                    anchor_a=None, anchor_b=None)
-        return finalize([ca, cb])
-    default_combo = min(defaults, key=lambda r: r[1])
-    threshold = default_combo[1] * CURVE_PERP_PREF_RATIO
-    qualifying = [r for r in results if r[1] <= threshold]
-    chosen = min(qualifying, key=lambda r: r[1]) if qualifying else default_combo
+    # Curves outrank 2-point straight results. _build_symmetric_arc returns a
+    # 2-point chord only for the parallel-forward (turn ≈ 0) case where the
+    # chord happens to align with tA; visually that is indistinguishable from
+    # the explicit no-curve fallback, so it must not gate a real curve via
+    # the 0.75 ratio. Among curves the axial-preferred rule still holds: a
+    # perpendicular combo replaces the default only when its length is ≤
+    # CURVE_PERP_PREF_RATIO × the default. Multiple combos may share the
+    # default tag (4 cardinals × 1 axial-pill = 4 default combos for pill ↔
+    # anchored-disc; 16 for anchored ↔ anchored) — the shortest among them
+    # is the baseline. A 2-point straight is only accepted when no combo
+    # produced a curve at all.
+    curves = [r for r in results if len(r[0]) >= 3]
+    if curves:
+        defaults = [r for r in curves if r[2] and r[3]]
+        if defaults:
+            default_combo = min(defaults, key=lambda r: r[1])
+            threshold = default_combo[1] * CURVE_PERP_PREF_RATIO
+            qualifying = [r for r in curves if r[1] <= threshold]
+            chosen = min(qualifying, key=lambda r: r[1]) if qualifying else default_combo
+        else:
+            chosen = min(curves, key=lambda r: r[1])
+    else:
+        defaults = [r for r in results if r[2] and r[3]]
+        if not defaults:
+            if anchor_a is not None or anchor_b is not None:
+                return _curve_connector(ca, cb, group_a, group_b,
+                                        cluster_cos_lat, mode,
+                                        anchor_a=None, anchor_b=None)
+            return finalize([ca, cb], True)
+        chosen = min(defaults, key=lambda r: r[1])
 
     coords = [_xy_to_lonlat(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in chosen[0]]
-    return finalize(coords)
+    return finalize(coords, False)
+
+
+# Disc-strategy comparison: anchoring vs fixed-cardinal. See `.claude/concepts/
+# pill-rendering.md` § Disc anchoring → Per-cluster strategy choice.
+SCORE_ON_PLATFORM_TOL_M = 1.0
+SCORE_ON_PLATFORM_FRAC = 0.5
+_FIXED_CARDINAL_SEED = (0.0, 1.0)
+
+
+def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal,
+                     snap_anchors=True):
+    """Run the per-connector emission loop with a chosen disc-tangent strategy.
+
+    `fixed_cardinal=False` — anchoring strategy: discs start unanchored; each
+    one anchors from its first connector's arrival.
+    `fixed_cardinal=True` — fixed-cardinal strategy: every disc is pre-seeded
+    with the same anchor (`_FIXED_CARDINAL_SEED`) so its 4 `_cardinal_tangents`
+    rotations are exactly N / E / S / W on the geographic frame for every
+    disc on the map. Anchors are immutable across the run.
+    `snap_anchors` — only consulted in the anchoring strategy. When True, each
+    newly-derived anchor is passed through `_snap_to_cardinal` so near-cardinal
+    arrivals lock to the compass grid. Set False for rail clusters: tracks
+    routinely run at arbitrary angles and snapping would distort the frame.
+
+    Returns list of `(coords, is_fallback)` aligned with `chosen_edges`.
+    """
+    disc_anchors = {}
+    if fixed_cardinal:
+        for grp in groups:
+            if len(grp) == 1:
+                disc_anchors[(grp[0][0], grp[0][1])] = _FIXED_CARDINAL_SEED
+
+    out = []
+    for ca, cb, i, j in chosen_edges:
+        grp_a, grp_b = groups[i], groups[j]
+        pos_a = (ca[0], ca[1])
+        pos_b = (cb[0], cb[1])
+        anchor_a = disc_anchors.get(pos_a) if len(grp_a) == 1 else None
+        anchor_b = disc_anchors.get(pos_b) if len(grp_b) == 1 else None
+        coords, arrival_a, arrival_b, is_fallback = _curve_connector(
+            ca, cb, grp_a, grp_b, cluster_cos_lat, mode,
+            anchor_a=anchor_a, anchor_b=anchor_b)
+        out.append((coords, is_fallback))
+        if not fixed_cardinal:
+            store = _snap_to_cardinal if snap_anchors else (lambda t: t)
+            if len(grp_a) == 1 and pos_a not in disc_anchors and arrival_a is not None:
+                disc_anchors[pos_a] = store(arrival_a)
+            if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
+                disc_anchors[pos_b] = store(arrival_b)
+    return out
+
+
+def _score_connectors(connectors, extents, tol_sq):
+    """Sum of two per-connector counts (lower is better):
+    - on-platform: connectors with >SCORE_ON_PLATFORM_FRAC of their polyline
+      length running within SCORE_ON_PLATFORM_TOL_M of a single platform extent.
+    - fallback-straight: connectors emitted as an explicit "no valid curve"
+      chord (is_fallback=True). An intentional parallel-tangent chord chosen
+      by the picker has is_fallback=False and does NOT count here.
+    """
+    on_platform = 0
+    straight = 0
+    for coords, is_fallback in connectors:
+        if is_fallback:
+            straight += 1
+        total = 0.0
+        on_plat = 0.0
+        for k in range(len(coords) - 1):
+            p1, p2 = coords[k], coords[k + 1]
+            seg = haversine_km(p1[0], p1[1], p2[0], p2[1])
+            total += seg
+            if _segment_on_platform(p1, p2, extents, tol_sq):
+                on_plat += seg
+        if total > 0.0 and on_plat > SCORE_ON_PLATFORM_FRAC * total:
+            on_platform += 1
+    return on_platform + straight
+
+
+def _collect_cluster_extents(cluster_stops):
+    """Unique platform extent polylines in the cluster (dedupe by object
+    identity, same convention as `_measure_pill_geometry`)."""
+    extents = []
+    seen = set()
+    for s in cluster_stops:
+        ext = s.get("extent")
+        if not ext or len(ext) < 2:
+            continue
+        if id(ext) in seen:
+            continue
+        seen.add(id(ext))
+        extents.append(ext)
+    return extents
 
 
 def make_pill_features(cluster_stops, minzoom, lines_json=""):
@@ -3134,7 +3717,8 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
        connectors get the tighter PILL_GAP_ANGLED_M threshold.
     3. Gaps that exceed their threshold split the NN-path. Sub-paths of
        ≥ 2 dots emit as pills; singletons emit as endpoint Points.
-    4. MST connectors join the resulting groups at their nearest dot pair.
+    4. MST connectors join the resulting groups at their nearest endpoint
+       pair — only a pill's first or last dot can host a connector.
     """
     color, mode, max_wb, dom_stop = dominant_line(cluster_stops)
     positions = _dedup_stop_positions(cluster_stops)
@@ -3216,14 +3800,19 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.
+    # Connectors attach only at pill endpoints (first / last NN-path dot), so
+    # the candidate set per group is the two ends — or the sole point for a
+    # singleton.
     n_g = len(groups)
     mst_edges = []   # (dist, ca, cb) for all candidate edges, sorted
     for i in range(n_g):
         for j in range(i + 1, n_g):
+            ea = [groups[i][0]] if len(groups[i]) == 1 else [groups[i][0], groups[i][-1]]
+            eb = [groups[j][0]] if len(groups[j]) == 1 else [groups[j][0], groups[j][-1]]
             best_d = float("inf")
-            ca, cb = groups[i][0], groups[j][0]
-            for p1 in groups[i]:
-                for p2 in groups[j]:
+            ca, cb = ea[0], eb[0]
+            for p1 in ea:
+                for p2 in eb:
                     d = haversine_km(p1[0], p1[1], p2[0], p2[1])
                     if d < best_d:
                         best_d, ca, cb = d, p1, p2
@@ -3268,22 +3857,34 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
 
     chosen_edges.sort(key=edge_sort_key)
 
-    disc_anchors = {}  # (lon, lat) → cluster-xy OUT tangent unit vector
+    # Per-cluster strategy choice: only worth doing when there's at least one
+    # disc — pure pill ↔ pill clusters produce identical output under both
+    # strategies. The fixed-cardinal run ignores `chosen_edges` ordering since
+    # its anchors are pre-set and never change. Rail clusters skip the
+    # fixed-cardinal alternative entirely and disable the cardinal snap in
+    # the anchoring run — rail tracks frequently run at arbitrary angles
+    # where compass alignment would distort the frame.
+    any_disc = any(len(grp) == 1 for grp in groups)
+    is_rail_cluster = mode in RAIL_MODES
+    if any_disc and not is_rail_cluster:
+        extents = _collect_cluster_extents(cluster_stops)
+        tol_sq = (SCORE_ON_PLATFORM_TOL_M / 111000.0) ** 2
+        connectors_anchor = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
+                                             fixed_cardinal=False)
+        connectors_cardinal = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
+                                               fixed_cardinal=True)
+        score_anchor = _score_connectors(connectors_anchor, extents, tol_sq)
+        score_cardinal = _score_connectors(connectors_cardinal, extents, tol_sq)
+        chosen_connectors = (connectors_cardinal
+                             if score_cardinal <= score_anchor
+                             else connectors_anchor)
+    else:
+        chosen_connectors = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
+                                             fixed_cardinal=False,
+                                             snap_anchors=not is_rail_cluster)
 
-    for ca, cb, i, j in chosen_edges:
-        grp_a, grp_b = groups[i], groups[j]
-        pos_a = (ca[0], ca[1])
-        pos_b = (cb[0], cb[1])
-        anchor_a = disc_anchors.get(pos_a) if len(grp_a) == 1 else None
-        anchor_b = disc_anchors.get(pos_b) if len(grp_b) == 1 else None
-        curve_coords, arrival_a, arrival_b = _curve_connector(
-            ca, cb, grp_a, grp_b, cluster_cos_lat, mode,
-            anchor_a=anchor_a, anchor_b=anchor_b)
-        feats.append(make_feat(curve_coords, "connector"))
-        if len(grp_a) == 1 and pos_a not in disc_anchors and arrival_a is not None:
-            disc_anchors[pos_a] = _snap_to_cardinal(arrival_a)
-        if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
-            disc_anchors[pos_b] = _snap_to_cardinal(arrival_b)
+    for coords, _ in chosen_connectors:
+        feats.append(make_feat(coords, "connector"))
 
     return feats
 
@@ -3440,6 +4041,32 @@ def main():
     print("Loading atlas platform attributes...")
     stop_attrs = write_stop_attributes_diag(line_stops)
 
+    print("Loading OSM rail ways for terminal extension...")
+    rail_idx = _load_rail_index(RAIL_WAYS_GEOJSON)
+
+    print("Extending train polylines at terminal stops...")
+    end_of_platform_pairs = _extend_polylines_at_terminals(
+        line_lookup, line_stops, rail_idx, PILL_CFG, stop_attrs)
+
+    # Sync extended train polylines back into lines_data so transit_lines.geojson
+    # on disk reflects the new geometry — step 08's pmtile build reads the file,
+    # not the in-memory line_lookup.
+    n_synced = 0
+    for feat in lines_data["features"]:
+        if (feat.get("properties") or {}).get("mode") != "train":
+            continue
+        oid = str(feat["properties"].get("osm_id", ""))
+        if not oid:
+            continue
+        info = line_lookup.get(oid)
+        if not info or "coords" not in info:
+            continue
+        feat["geometry"]["type"] = "LineString"
+        feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]
+        n_synced += 1
+    LINES.write_text(json.dumps(lines_data, ensure_ascii=False))
+    print(f"  Wrote {n_synced:,} extended train polylines back to {LINES.name}")
+
     skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
         line_stops, line_lookup, stop_meta)
     print(f"  Terminus dedup: {len(skip_first_oids):,} departure-side entries "
@@ -3450,7 +4077,8 @@ def main():
     print("Emitting debug platform extents...")
     write_debug_platforms(line_stops, line_lookup, stop_attrs,
                           skip_first_oids, skip_last_oids,
-                          sibling_groups, oid_sibling_key)
+                          sibling_groups, oid_sibling_key,
+                          end_of_platform_pairs)
 
     print("Building stop dots and pill candidates...")
 
@@ -3514,8 +4142,10 @@ def main():
                 parent_sta = meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                is_eop = (str(osm_id), sid) in end_of_platform_pairs
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
-                                          osm_id=str(osm_id), siblings=siblings)
+                                          osm_id=str(osm_id), siblings=siblings,
+                                          end_of_platform=is_eop)
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
