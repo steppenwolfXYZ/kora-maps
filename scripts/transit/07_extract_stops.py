@@ -1980,7 +1980,8 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
         line with the gap direction for at least the gap length (no angle
         tolerance; any bend at all breaks the walk).
       • OR (perpendicular-platforms rule) both gap-adjacent dots have at
-        least one platform whose extent tangent is 90° ±PERP_PLATFORM_TOL_DEG
+        least one platform whose local extent tangent (averaged over
+        TANGENT_WINDOW_M at the dot position) is 90° ±PERP_PLATFORM_TOL_DEG
         from the gap direction — i.e. the gap lies along a bar's perpendicular axis,
         so the bar continues through the gap even though the surrounding
         NN-path is too sparse to prove it via the walk. Only one platform
@@ -2010,8 +2011,9 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
     gy = gap_dy / gnorm
 
     # Perpendicular-platforms rule: if both gap-adjacent dots have at least
-    # one platform whose extent tangent is 90° ±PERP_PLATFORM_TOL_DEG from
-    # the gap direction, the gap lies along a bar's perpendicular axis. Treat as in-line.
+    # one platform whose local extent tangent (TANGENT_WINDOW_M-averaged at
+    # the dot position) is 90° ±PERP_PLATFORM_TOL_DEG from the gap direction,
+    # the gap lies along a bar's perpendicular axis. Treat as in-line.
     # The angle math is done in metric-equivalent space (lon × cos_lat) —
     # perpendicularity is not preserved under raw lon/lat scaling for
     # non-axis-aligned tracks (Zurich/Bern HB, etc.).
@@ -2027,16 +2029,21 @@ def _should_split_at_gap(path, k, gap_len_km, pos_to_platforms=None,
 
         def _has_perp_platform(pos):
             for p in pos_to_platforms.get(pos, ()):
-                ext = p.get("extent")
-                if not ext or len(ext) < 2:
+                # Local tangent at the dot position over a TANGENT_WINDOW_M
+                # window — the full-extent chord can deviate several degrees
+                # from the local direction on long curved approaches (Bern HB
+                # western platforms), and the bar was placed using the local
+                # tangent, so the perp test must use it too.
+                tan = _stop_tangent(p)
+                if tan is None:
                     continue
-                dx_m = (ext[-1][0] - ext[0][0]) * cos_lat
-                dy_m = ext[-1][1] - ext[0][1]
-                snorm_m = sqrt(dx_m * dx_m + dy_m * dy_m)
-                if snorm_m <= 0:
+                tx_m = tan[0] * cos_lat
+                ty_m = tan[1]
+                tmag_m = sqrt(tx_m * tx_m + ty_m * ty_m)
+                if tmag_m <= 0:
                     continue
                 # |cos(angle to gap)| ≤ sin(tol)  ⇔  perpendicular ±tol.
-                if abs(dx_m * gx_m + dy_m * gy_m) / snorm_m <= perp_sin_tol:
+                if abs(tx_m * gx_m + ty_m * gy_m) / tmag_m <= perp_sin_tol:
                     return True
             return False
 
