@@ -94,15 +94,6 @@ MODE_MINZOOM = {
     "mountain":    11,
 }
 
-# Zoom at which pill-mode stops switch from simple cluster dots
-# (`transit-stop-fill-*`) to disc rendering via `transit-stop-pill-endpoint`.
-# Must match `PILL_MINZOOM` in `generate_style.py`. Below this zoom, pill-mode
-# cluster dots render; at and above it, every cluster is represented by either
-# its pill (`make_pill_features`) or a centroid endpoint disc. Mountain and
-# ferry stops bypass pill clustering entirely and keep their dot rendering at
-# all zooms.
-PILL_MINZOOM = 11
-
 # Spatial clustering radius for pill grouping
 PILL_CLUSTER_RAIL_KM    = 0.300   # rail: 300 m (same as dot deduplication)
 PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
@@ -2681,6 +2672,13 @@ def _tangent_candidates(group, endpoint, other_endpoint, lon0, lat0, cos_lat):
     return [((perp_a if dot_a >= dot_b else perp_b), True)]
 
 
+# Within this tolerance of a geographic cardinal (N / E / S / W in cluster-xy
+# space), a newly-derived disc anchor is snapped to the cardinal — lines that
+# happen to run almost cardinally anchor an exactly compass-aligned frame; a
+# diagonal tram through the station keeps its actual direction.
+DISC_ANCHOR_CARDINAL_SNAP_DEG = 10.0
+
+
 def _cardinal_tangents(t):
     """4 cardinal OUT tangents for an anchored disc with anchor direction `t`.
     All 4 are tagged as default (is_default=True) since no cardinal is
@@ -2711,6 +2709,21 @@ def _arrival_tangent_lonlat(coords, at_start, cos_lat):
     dx = (p_to[0] - p_from[0]) * cos_lat * _M_PER_DEG
     dy = (p_to[1] - p_from[1]) * _M_PER_DEG
     return _norm2((dx, dy))
+
+
+def _snap_to_cardinal(t, tol_deg=DISC_ANCHOR_CARDINAL_SNAP_DEG):
+    """If `t` is within `tol_deg` of a geographic cardinal (N / E / S / W),
+    snap to that cardinal as an exact unit vector. Otherwise return `t`
+    unchanged. `t` is a unit vector in cluster-xy space; cardinals are
+    `(0, 1)`, `(1, 0)`, `(0, -1)`, `(-1, 0)`.
+    """
+    if t is None:
+        return None
+    ang = atan2(t[1], t[0])
+    ang_q = round(ang / (pi / 2)) * (pi / 2)
+    if abs(ang - ang_q) <= radians(tol_deg):
+        return (cos(ang_q), sin(ang_q))
+    return t
 
 
 def _build_symmetric_arc(A, B, tA, tB, r_max):
@@ -3093,9 +3106,6 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     # anchored ↔ anchored) — the shortest among them is the baseline.
     defaults = [r for r in results if r[2] and r[3]]
     if not defaults:
-        # No combo with the preferred-default tangents — typical for pill ↔
-        # pill when both axials are parallel/anti-parallel. Fall back to
-        # straight as the existing logic does.
         if anchor_a is not None or anchor_b is not None:
             return _curve_connector(ca, cb, group_a, group_b,
                                     cluster_cos_lat, mode,
@@ -3271,9 +3281,9 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
             anchor_a=anchor_a, anchor_b=anchor_b)
         feats.append(make_feat(curve_coords, "connector"))
         if len(grp_a) == 1 and pos_a not in disc_anchors and arrival_a is not None:
-            disc_anchors[pos_a] = arrival_a
+            disc_anchors[pos_a] = _snap_to_cardinal(arrival_a)
         if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
-            disc_anchors[pos_b] = arrival_b
+            disc_anchors[pos_b] = _snap_to_cardinal(arrival_b)
 
     return feats
 
@@ -3633,49 +3643,39 @@ def main():
             "lines_json":     lines_json_str,
         }
 
-        # Cluster dot renders below PILL_MINZOOM; at PILL_MINZOOM and above
-        # the cluster is represented by its pill (multi-line) or by a
-        # centroid endpoint disc (single-line, or multi-line collapsed by
-        # dedup to one position). Tippecanoe maxzoom caps the dot so it
-        # doesn't double-render under the disc/pill.
-        rail_features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": 5, "maxzoom": PILL_MINZOOM - 1},
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
-            "properties": centroid_props,
-        })
-        endpoint_props = {**centroid_props,
-                          "stop_count": len(cluster),
-                          "feature_type": "endpoint"}
         if mz is None:
-            # Single-line station — centroid endpoint disc at PILL_MINZOOM+.
-            pill_features_rail.append({
+            # Single-line station: one cluster dot at all zooms.
+            rail_features.append({
                 "type": "Feature",
-                "tippecanoe": {"minzoom": PILL_MINZOOM},
+                "tippecanoe": {"minzoom": 5},
                 "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                "properties": endpoint_props,
+                "properties": centroid_props,
             })
         else:
             feats = make_pill_features(cluster, mz, lines_json_str)
             if feats:
-                # Pill takes over at mz; bridge PILL_MINZOOM..mz-1 with a
-                # centroid disc so the cluster stays visible in that gap.
-                if mz > PILL_MINZOOM:
-                    pill_features_rail.append({
-                        "type": "Feature",
-                        "tippecanoe": {"minzoom": PILL_MINZOOM, "maxzoom": mz - 1},
-                        "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                        "properties": endpoint_props,
-                    })
+                # Multi-line station with a real pill: cluster dot at low
+                # zoom, pill takes over at mz. The per-platform dots that
+                # used to render alongside the pill caused visible wobble
+                # along the pill casing — `make_pill_features` now emits
+                # endpoint Points for singletons inside the cluster, and
+                # the pill itself stands in for every other platform.
+                rail_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": 5, "maxzoom": mz - 1},
+                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "properties": centroid_props,
+                })
                 pill_features_rail.extend(feats)
             else:
-                # Pill collapsed (all cluster positions deduped to one point)
-                # — keep showing the cluster as a centroid disc at PILL_MINZOOM+.
-                pill_features_rail.append({
+                # Multi-line cluster whose pill collapsed (all positions
+                # deduped to one point) — no pill is emitted, so the
+                # cluster dot stays visible at all zooms.
+                rail_features.append({
                     "type": "Feature",
-                    "tippecanoe": {"minzoom": PILL_MINZOOM},
+                    "tippecanoe": {"minzoom": 5},
                     "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                    "properties": endpoint_props,
+                    "properties": centroid_props,
                 })
 
     rail_pill_count = len(pill_features_rail)
@@ -3733,45 +3733,36 @@ def main():
             "lines_json":     lines_json_str,
         }
 
-        # See the rail-side comment above for the dot/disc/pill cutover.
-        # tippecanoe maxzoom can be < minzoom for modes whose own minzoom
-        # already sits at PILL_MINZOOM (e.g. bus = 11); tippecanoe simply
-        # drops the feature from all tiles in that case, leaving only the
-        # endpoint disc.
-        nonrail_dot_features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": PILL_MINZOOM - 1},
-            "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-            "properties": centroid_props,
-        })
-        endpoint_props = {**centroid_props,
-                          "stop_count": len(cluster),
-                          "feature_type": "endpoint"}
         if mz is None:
-            pill_features.append({
+            # Single-line stop: one cluster dot at all zooms.
+            nonrail_dot_features.append({
                 "type": "Feature",
-                "tippecanoe": {"minzoom": PILL_MINZOOM},
+                "tippecanoe": {"minzoom": mode_minzoom},
                 "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-                "properties": endpoint_props,
+                "properties": centroid_props,
             })
         else:
             feats = make_pill_features(cluster, mz, lines_json_str)
             if feats:
-                if mz > PILL_MINZOOM:
-                    pill_features.append({
-                        "type": "Feature",
-                        "tippecanoe": {"minzoom": PILL_MINZOOM, "maxzoom": mz - 1},
-                        "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-                        "properties": endpoint_props,
-                    })
+                # Multi-line stop with a real pill: cluster dot at low
+                # zoom, pill from `mz` up. See the matching rail-side
+                # comment above.
+                nonrail_dot_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
+                    "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                    "properties": centroid_props,
+                })
                 pill_features.extend(feats)
                 nonrail_pill_count += len(feats)
             else:
-                pill_features.append({
+                # Pill collapsed — cluster dot stays at all zooms in place
+                # of the missing pill.
+                nonrail_dot_features.append({
                     "type": "Feature",
-                    "tippecanoe": {"minzoom": PILL_MINZOOM},
+                    "tippecanoe": {"minzoom": mode_minzoom},
                     "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
-                    "properties": endpoint_props,
+                    "properties": centroid_props,
                 })
 
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
