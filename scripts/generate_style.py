@@ -1010,8 +1010,8 @@ def build_transit_layers() -> list:
             "paint": {
                 "line-color": casing_color,
                 "line-width": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,     ["*", ["get", "width_base"], 0.4 + 0.6],
-                    14,          ["+", ["get", "width_base"], 1.5],
+                    minzoom,     ["+", ["*", ["get", "width_base"], 0.4], 2.0],
+                    14,          ["+", ["get", "width_base"], 2.0],
                     18,          ["+", ["*", ["get", "width_base"], 4.0], 2.0]
                 ],
                 "line-opacity": ["interpolate", ["linear"], ["zoom"],
@@ -1061,9 +1061,9 @@ def build_station_layers(cfg) -> list:
 
     def dot_radius(minzoom):
         return ["interpolate", ["linear"], ["zoom"],
-            minzoom, ["max", ["*", ["get", "width_base"], 0.4], 1.0],
-            14,      ["max", ["get", "width_base"], 1.5],
-            18,      ["*", ["get", "width_base"], 4.0],
+            minzoom, ["*", ["get", "width_base"], 0.3],
+            14,      ["*", ["get", "width_base"], 0.75],
+            20,      ["*", ["get", "width_base"], 6.0],
         ]
 
     stop_groups = [
@@ -1077,22 +1077,6 @@ def build_station_layers(cfg) -> list:
         extra_filter = [["!=", ["get", "mode"], "ferry"]] if source == "transit_stops_regional" else []
         layer_filter = ["all"] + extra_filter if extra_filter else None
 
-        if source == "transit_stops_rail":
-            stroke_width = ["interpolate", ["linear"], ["zoom"],
-                10, 0.0,
-                11, ["case", ["==", ["get", "mode"], "train"], 0.75, 0.0],
-                12, 0.75,
-                14, 0.75,
-                18, 1.0,
-            ]
-        else:
-            stroke_width = ["interpolate", ["linear"], ["zoom"],
-                11, 0.0,
-                12, 0.75,
-                14, 0.75,
-                18, 1.0,
-            ]
-
         layer = {
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
@@ -1100,14 +1084,14 @@ def build_station_layers(cfg) -> list:
             "source-layer": "transit_stops",
             "minzoom": minzoom,
             "paint": {
-                "circle-color": ["get", "color"],
+                "circle-color": "#ffffff",
                 "circle-radius": dot_radius(minzoom),
                 "circle-opacity": ["interpolate", ["linear"], ["zoom"],
                     minzoom,       0.0,
                     minzoom + 1.0, 1.0,
                 ],
-                "circle-stroke-color": "#ffffff",
-                "circle-stroke-width": stroke_width,
+                "circle-stroke-color": "#000000",
+                "circle-stroke-width": 1.0,
             }
         }
         if layer_filter:
@@ -1122,28 +1106,30 @@ def build_station_layers(cfg) -> list:
         "minzoom": 9,
         "filter": ["==", ["get", "mode"], "ferry"],
         "paint": {
-            "circle-color": ["get", "color"],
+            "circle-color": "#ffffff",
             "circle-radius": dot_radius(9),
             "circle-opacity": ["interpolate", ["linear"], ["zoom"],
                 9, 0.0, 10.0, 1.0
             ],
-            "circle-stroke-color": "#ffffff",
-            "circle-stroke-width": ["interpolate", ["linear"], ["zoom"],
-                11, 0.0,
-                12, 0.75,
-                14, 0.75,
-                18, 1.0,
-            ],
+            "circle-stroke-color": "#000000",
+            "circle-stroke-width": 1.0,
         }
     })
 
     PILL_MINZOOM = 11
 
-    def pill_width(multiplier):
+    def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM,     ["*", ["get", "width_base"], multiplier * 0.4],
-            14,               ["*", ["get", "width_base"], multiplier],
-            18,               ["*", ["get", "width_base"], multiplier * 4.0],
+            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.6],
+            14,            ["*", ["get", "width_base"], 1.5],
+            20,            ["*", ["get", "width_base"], 12.0],
+        ]
+
+    def connector_width():
+        return ["interpolate", ["linear"], ["zoom"],
+            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.3],
+            14,            ["*", ["get", "width_base"], 0.75],
+            18,            ["*", ["get", "width_base"], 3.0],
         ]
 
     def pill_opacity(appear_zoom):
@@ -1161,11 +1147,11 @@ def build_station_layers(cfg) -> list:
         "filter": ["==", ["get", "feature_type"], "pill"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
-            "line-color": "#ffffff",
+            "line-color": "#000000",
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["*", ["get", "width_base"], 0.4 * 2 + 1.5],
-                14,            ["+", ["*", ["get", "width_base"], 2], 1.5],
-                18,            ["+", ["*", ["get", "width_base"], 8.0], 2.0],
+                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.6], 2.0],
+                14,            ["+", ["*", ["get", "width_base"], 1.5], 2.0],
+                20,            ["+", ["*", ["get", "width_base"], 12.0], 2.0],
             ],
             "line-opacity": pill_opacity(PILL_MINZOOM),
         }
@@ -1181,11 +1167,11 @@ def build_station_layers(cfg) -> list:
         "filter": ["==", ["get", "feature_type"], "connector"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
-            "line-color": "#ffffff",
+            "line-color": "#000000",
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.4], 1.5],
-                14,            ["+", ["*", ["get", "width_base"], 1.0], 1.5],
-                18,            ["+", ["*", ["get", "width_base"], 4.0], 2.0],
+                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.3], 2.0],
+                14,            ["+", ["*", ["get", "width_base"], 0.75], 2.0],
+                18,            ["+", ["*", ["get", "width_base"], 3.0], 2.0],
             ],
             "line-opacity": pill_opacity(PILL_MINZOOM),
         }
@@ -1200,8 +1186,8 @@ def build_station_layers(cfg) -> list:
         "filter": ["==", ["get", "feature_type"], "pill"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
-            "line-color": ["get", "color"],
-            "line-width": pill_width(2),
+            "line-color": "#ffffff",
+            "line-width": pill_disc_width(),
             "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
@@ -1216,20 +1202,15 @@ def build_station_layers(cfg) -> list:
         "minzoom": PILL_MINZOOM,
         "filter": ["==", ["get", "feature_type"], "endpoint"],
         "paint": {
-            "circle-color": ["get", "color"],
+            "circle-color": "#ffffff",
             "circle-radius": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM, ["max", ["*", ["get", "width_base"], 0.4], 1.0],
-                14,           ["max", ["get", "width_base"], 1.5],
-                18,           ["*", ["get", "width_base"], 4.0],
+                PILL_MINZOOM, ["*", ["get", "width_base"], 0.3],
+                14,           ["*", ["get", "width_base"], 0.75],
+                20,           ["*", ["get", "width_base"], 6.0],
             ],
             "circle-opacity": pill_opacity(PILL_MINZOOM),
-            "circle-stroke-color": "#ffffff",
-            "circle-stroke-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,       0.0,
-                PILL_MINZOOM + 1.0, 0.75,
-                14,                 0.75,
-                18,                 1.0,
-            ],
+            "circle-stroke-color": "#000000",
+            "circle-stroke-width": 1.0,
         }
     })
 
@@ -1242,8 +1223,8 @@ def build_station_layers(cfg) -> list:
         "filter": ["==", ["get", "feature_type"], "connector"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
-            "line-color": ["get", "color"],
-            "line-width": pill_width(1),
+            "line-color": "#ffffff",
+            "line-width": connector_width(),
             "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
@@ -1391,9 +1372,9 @@ def generate_style(cfg) -> dict:
     style["layers"].extend(build_road_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_path_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_transit_layers())
-    style["layers"].extend(build_station_layers(cfg))
     style["layers"].extend(build_border_layers(cfg))
     style["layers"].extend(build_label_layers(cfg))
+    style["layers"].extend(build_station_layers(cfg))
 
     return style
 

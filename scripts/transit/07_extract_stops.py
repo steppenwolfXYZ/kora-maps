@@ -105,7 +105,7 @@ PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
 PILL_GAP_STRAIGHT_M = 50   # gap threshold when the NN-path continues dead
                            # straight into the gap on either side (gap is
                            # an in-line pill continuation).
-PILL_GAP_ANGLED_M = 8      # gap threshold otherwise (gap is an angled /
+PILL_GAP_ANGLED_M = 15      # gap threshold otherwise (gap is an angled /
                            # T-junction connector).
 
 # Bar-axis gap above which a single-distinct-position scoring member on one
@@ -3415,9 +3415,11 @@ def _build_pill_disc_curve(A, tA, B, r_max):
 
     cross = tA[0] * BA[1] - tA[1] * BA[0]
     if abs(cross) < 1e-9:
-        # Disc on the line of tA — bending does not help; caller falls
-        # back to a 2-point straight connector.
-        return None
+        # Disc exactly on the line of tA: the chord IS the tangent-continuous
+        # connector. Emit it directly so the picker sees a valid candidate at
+        # the right length instead of dropping axial and falling through to a
+        # swooping perpendicular arc.
+        return [A, B]
 
     # Arc center on the side of tA that contains B. Bend chirality matches.
     if cross > 0:
@@ -3469,8 +3471,14 @@ def _build_pill_disc_curve(A, tA, B, r_max):
         if best is None or sweep_mag < best[0]:
             best = (sweep_mag, delta)
 
-    if best is None or best[0] < 1e-6:
+    if best is None:
         return None
+    if best[0] < 1e-6:
+        # Sweep is essentially zero — tA is already aligned with the chord A→B
+        # to within float precision. The chord IS the tangent-continuous answer;
+        # emit it directly so the picker sees a valid candidate instead of
+        # falling through to a perpendicular arc.
+        return [A, B]
     _, delta = best
 
     # Sub-degree sweep: tA is essentially aligned with the chord A→B, so the
@@ -3955,9 +3963,33 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                                                fixed_cardinal=True)
         score_anchor = _score_connectors(connectors_anchor, lines, tol_sq)
         score_cardinal = _score_connectors(connectors_cardinal, lines, tol_sq)
-        chosen_connectors = (connectors_cardinal
-                             if score_cardinal <= score_anchor
-                             else connectors_anchor)
+        if score_cardinal < score_anchor:
+            chosen_connectors = connectors_cardinal
+        elif score_anchor < score_cardinal:
+            chosen_connectors = connectors_anchor
+        else:
+            # Tie: prefer anchoring only when cardinal has an overshooting
+            # connector (length > 1.5 × straight-line chord) and anchoring
+            # doesn't. Keeps cardinal as the visual default but escapes its
+            # near-semicircle detours when anchoring offers a tighter path.
+            def _has_overshoot(connectors):
+                for coords, _ in connectors:
+                    if len(coords) < 2:
+                        continue
+                    chord = haversine_km(coords[0][0], coords[0][1],
+                                         coords[-1][0], coords[-1][1])
+                    if chord <= 0:
+                        continue
+                    length = sum(haversine_km(coords[k-1][0], coords[k-1][1],
+                                              coords[k][0],   coords[k][1])
+                                 for k in range(1, len(coords)))
+                    if length > 1.5 * chord:
+                        return True
+                return False
+            if _has_overshoot(connectors_cardinal) and not _has_overshoot(connectors_anchor):
+                chosen_connectors = connectors_anchor
+            else:
+                chosen_connectors = connectors_cardinal
     else:
         chosen_connectors = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
                                              fixed_cardinal=False,
