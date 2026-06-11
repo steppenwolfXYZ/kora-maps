@@ -139,6 +139,9 @@ paths:
   width: 1.2
   min_zoom: 14
   unpaved_dasharray: [3, 2]
+  tunnel_color: "#404040"
+  tunnel_width: 6.0
+  tunnel_opacity: 0.15
 
 # ── Land use ─────────────────────────────────────────────────────────────────
 landuse:

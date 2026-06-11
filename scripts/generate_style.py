@@ -546,7 +546,48 @@ def build_path_layers(cfg, modes=None):
     for mode in modes:
         bf = brunnel_filter(mode)
         suffix = "" if mode == "normal" else f"-{mode}"
-        opacity = p["tunnel_opacity"] if mode == "tunnel" else 1.0
+
+        if mode == "tunnel":
+            layers.append({
+                "id": f"path-paved{suffix}",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "transportation",
+                "minzoom": pc["min_zoom"],
+                "filter": ["all",
+                    path_filter_base,
+                    bf,
+                    ["<", ["coalesce", ["get", "layer"], 0], 0]
+                ],
+                "layout": {"line-cap": "round", "line-join": "round"},
+                "paint": {
+                    "line-color": pc["tunnel_color"],
+                    "line-width": pc["tunnel_width"],
+                    "line-opacity": pc["tunnel_opacity"]
+                }
+            })
+            layers.append({
+                "id": f"path-passage{suffix}",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "transportation",
+                "minzoom": pc["min_zoom"],
+                "filter": ["all",
+                    path_filter_base,
+                    bf,
+                    [">=", ["coalesce", ["get", "layer"], 0], 0]
+                ],
+                "layout": {"line-cap": "round", "line-join": "round"},
+                "paint": {
+                    "line-color": pc["color"],
+                    "line-width": pc["width"],
+                    "line-opacity": ["interpolate", ["linear"], ["zoom"],
+                        pc["min_zoom"], 0.4,
+                        16, 0.8
+                    ]
+                }
+            })
+            continue
 
         layers.append({
             "id": f"path-paved{suffix}",
@@ -567,8 +608,8 @@ def build_path_layers(cfg, modes=None):
                 "line-color": pc["color"],
                 "line-width": pc["width"],
                 "line-opacity": ["interpolate", ["linear"], ["zoom"],
-                    pc["min_zoom"], 0.4 * opacity,
-                    16, 0.8 * opacity
+                    pc["min_zoom"], 0.4,
+                    16, 0.8
                 ]
             }
         })
@@ -590,8 +631,8 @@ def build_path_layers(cfg, modes=None):
                 "line-width": pc["width"],
                 "line-dasharray": pc["unpaved_dasharray"],
                 "line-opacity": ["interpolate", ["linear"], ["zoom"],
-                    pc["min_zoom"], 0.4 * opacity,
-                    16, 0.8 * opacity
+                    pc["min_zoom"], 0.4,
+                    16, 0.8
                 ]
             }
         })
@@ -694,7 +735,12 @@ def build_label_layers(cfg):
         "source": "openmaptiles",
         "source-layer": "poi",
         "minzoom": l["poi_min_zoom"],
-        "filter": ["<=", ["get", "rank"], 14],
+        "filter": ["all",
+            ["<=", ["get", "rank"], 14],
+            ["!", ["match", ["get", "class"],
+                ["railway", "bus", "aerialway", "ferry_terminal"], True, False
+            ]]
+        ],
         "layout": {
             "text-field": ["coalesce", ["get", "name:latin"], ["get", "name"]],
             "text-font": [l["font"]],
