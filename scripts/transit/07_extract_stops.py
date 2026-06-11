@@ -3650,8 +3650,8 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
 
 # Disc-strategy comparison: anchoring vs fixed-cardinal. See `.claude/concepts/
 # pill-rendering.md` § Disc anchoring → Per-cluster strategy choice.
-SCORE_ON_PLATFORM_TOL_M = 1.0
-SCORE_ON_PLATFORM_FRAC = 0.5
+SCORE_ON_LINE_TOL_M = 3.0
+SCORE_ON_LINE_FRAC = 0.5
 _FIXED_CARDINAL_SEED = (0.0, 1.0)
 
 
@@ -3698,49 +3698,77 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
     return out
 
 
-def _score_connectors(connectors, extents, tol_sq):
+def _segment_on_any_line(p1, p2, lines, tol_sq):
+    """True if BOTH endpoints of segment (p1, p2) are each within sqrt(tol_sq)
+    of SOME line in `lines` — not necessarily the same one. tol_sq is the
+    squared tolerance in lon/lat-degree space (same convention as
+    `_segment_on_platform`).
+    """
+    def near_any(pt):
+        for ln in lines:
+            if len(ln) < 2:
+                continue
+            s = snap_to_line(pt[0], pt[1], ln)
+            if (pt[0] - s[0]) ** 2 + (pt[1] - s[1]) ** 2 <= tol_sq:
+                return True
+        return False
+    return near_any(p1) and near_any(p2)
+
+
+def _score_connectors(connectors, lines, tol_sq):
     """Sum of two per-connector counts (lower is better):
-    - on-platform: connectors with >SCORE_ON_PLATFORM_FRAC of their polyline
-      length running within SCORE_ON_PLATFORM_TOL_M of a single platform extent.
+    - on-line: connectors with >SCORE_ON_LINE_FRAC of their polyline length
+      running within SCORE_ON_LINE_TOL_M of any transit line serving the
+      cluster (the lines don't have to be the same along the run).
     - fallback-straight: connectors emitted as an explicit "no valid curve"
       chord (is_fallback=True). An intentional parallel-tangent chord chosen
       by the picker has is_fallback=False and does NOT count here.
     """
-    on_platform = 0
+    on_line = 0
     straight = 0
     for coords, is_fallback in connectors:
         if is_fallback:
             straight += 1
         total = 0.0
-        on_plat = 0.0
+        on_ln = 0.0
         for k in range(len(coords) - 1):
             p1, p2 = coords[k], coords[k + 1]
             seg = haversine_km(p1[0], p1[1], p2[0], p2[1])
             total += seg
-            if _segment_on_platform(p1, p2, extents, tol_sq):
-                on_plat += seg
-        if total > 0.0 and on_plat > SCORE_ON_PLATFORM_FRAC * total:
-            on_platform += 1
-    return on_platform + straight
+            if _segment_on_any_line(p1, p2, lines, tol_sq):
+                on_ln += seg
+        if total > 0.0 and on_ln > SCORE_ON_LINE_FRAC * total:
+            on_line += 1
+    return on_line + straight
 
 
-def _collect_cluster_extents(cluster_stops):
-    """Unique platform extent polylines in the cluster (dedupe by object
-    identity, same convention as `_measure_pill_geometry`)."""
-    extents = []
+def _collect_cluster_line_polylines(cluster_stops, line_lookup):
+    """Unique transit-line polylines (flattened to a single coord list) for
+    every distinct osm_id appearing in the cluster. Used by the cardinal-vs-
+    anchor scorer to check whether a connector runs along an actual transit
+    line."""
+    if not line_lookup:
+        return []
+    lines = []
     seen = set()
     for s in cluster_stops:
-        ext = s.get("extent")
-        if not ext or len(ext) < 2:
+        oid = s.get("osm_id")
+        if not oid or oid in seen:
             continue
-        if id(ext) in seen:
+        seen.add(oid)
+        info = line_lookup.get(oid) or line_lookup.get(str(oid))
+        if not info:
             continue
-        seen.add(id(ext))
-        extents.append(ext)
-    return extents
+        coords = info.get("coords")
+        if not coords:
+            continue
+        flat = flatten_coords(coords)
+        if len(flat) >= 2:
+            lines.append(flat)
+    return lines
 
 
-def make_pill_features(cluster_stops, minzoom, lines_json=""):
+def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
 
@@ -3904,14 +3932,14 @@ def make_pill_features(cluster_stops, minzoom, lines_json=""):
     any_disc = any(len(grp) == 1 for grp in groups)
     is_rail_cluster = mode in RAIL_MODES
     if any_disc and not is_rail_cluster:
-        extents = _collect_cluster_extents(cluster_stops)
-        tol_sq = (SCORE_ON_PLATFORM_TOL_M / 111000.0) ** 2
+        lines = _collect_cluster_line_polylines(cluster_stops, line_lookup)
+        tol_sq = (SCORE_ON_LINE_TOL_M / 111000.0) ** 2
         connectors_anchor = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
                                              fixed_cardinal=False)
         connectors_cardinal = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
                                                fixed_cardinal=True)
-        score_anchor = _score_connectors(connectors_anchor, extents, tol_sq)
-        score_cardinal = _score_connectors(connectors_cardinal, extents, tol_sq)
+        score_anchor = _score_connectors(connectors_anchor, lines, tol_sq)
+        score_cardinal = _score_connectors(connectors_cardinal, lines, tol_sq)
         chosen_connectors = (connectors_cardinal
                              if score_cardinal <= score_anchor
                              else connectors_anchor)
@@ -4320,7 +4348,7 @@ def main():
                 "properties": centroid_props,
             })
         else:
-            feats = make_pill_features(cluster, mz, lines_json_str)
+            feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
                 # Multi-line station with a real pill: cluster dot at low
                 # zoom, pill takes over at mz. The per-platform dots that
@@ -4410,7 +4438,7 @@ def main():
                 "properties": centroid_props,
             })
         else:
-            feats = make_pill_features(cluster, mz, lines_json_str)
+            feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
                 # Multi-line stop with a real pill: cluster dot at low
                 # zoom, pill from `mz` up. See the matching rail-side
