@@ -1229,6 +1229,75 @@ def build_station_layers(cfg) -> list:
         }
     })
 
+    # --- Color indicators (z15+) ---------------------------------------------
+    # Mini per-color-group dots inside stop dots, endpoint discs, and pills.
+    # See `.claude/concepts/stop-color-indicators.md`.
+    #
+    # Layout: centered row of up to 6 indicators. Each indicator carries
+    # `slot_units` (integer in [-5, +5]; n=1 → {0}; n=2 → {-1, +1}; ...;
+    # n=6 → {-5, -3, -1, +1, +3, +5}) and `tangent_deg` (0 for dots/discs,
+    # pill tangent for pill indicators).
+    #
+    # A symbol layer renders each indicator as a "●" glyph. `text-rotate`
+    # uses the feature's `tangent_deg` with `text-rotation-alignment: map`,
+    # so the row is screen-horizontal for dots/discs and pill-aligned for
+    # pills. `text-offset` (em-based) is set via a `match` on `slot_units`,
+    # so the gap scales with text-size (and therefore with width_base+zoom)
+    # automatically.
+    INDICATOR_MINZOOM = 15
+    INDICATOR_FADE_END = 15.3
+
+    # text-size depends on zoom only (not on the parent's width_base), so
+    # indicator dots are the same size at every stop, large or small.
+    text_size_expr = ["interpolate", ["linear"], ["zoom"],
+        INDICATOR_MINZOOM, 7.5,
+        20,                18.0,
+    ]
+
+    # text-offset is in em. Half-spacing per slot_unit; tight (just enough
+    # for a small visible gap between adjacent dots).
+    # vert_em compensates for the "●" glyph's vertical asymmetry inside its
+    # em-box — Noto Sans's bullet sits slightly below bbox center, so we
+    # nudge the anchor up by a small constant in glyph-local space (which,
+    # under text-rotation-alignment: map + text-rotate, rotates with the
+    # parent's tangent — so the compensation stays aligned to the row).
+    half_spacing_em = 0.28
+    vert_em = -0.1
+    text_offset_expr = ["match", ["get", "slot_units"]]
+    for k in range(-5, 6):
+        text_offset_expr.append(k)
+        text_offset_expr.append(["literal", [k * half_spacing_em, vert_em]])
+    text_offset_expr.append(["literal", [0.0, vert_em]])  # default
+
+    text_opacity_expr = ["interpolate", ["linear"], ["zoom"],
+        INDICATOR_MINZOOM,  0.0,
+        INDICATOR_FADE_END, 1.0,
+    ]
+
+    layers.append({
+        "id": "transit-stop-indicator",
+        "type": "symbol",
+        "source": "transit_stop_pills",
+        "source-layer": "transit_stop_pills",
+        "minzoom": INDICATOR_MINZOOM,
+        "filter": ["==", ["get", "feature_type"], "indicator"],
+        "layout": {
+            "text-field": "●",
+            "text-font": ["Noto Sans Regular"],
+            "text-size": text_size_expr,
+            "text-offset": text_offset_expr,
+            "text-rotate": ["coalesce", ["get", "tangent_deg"], 0],
+            "text-rotation-alignment": "map",
+            "text-allow-overlap": True,
+            "text-ignore-placement": True,
+            "text-padding": 0,
+        },
+        "paint": {
+            "text-color": ["get", "color"],
+            "text-opacity": text_opacity_expr,
+        }
+    })
+
     if not cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         return layers
 

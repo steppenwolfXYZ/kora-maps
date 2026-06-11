@@ -95,6 +95,24 @@ MODE_MINZOOM = {
     "mountain":    11,
 }
 
+# Color-indicator zoom (mini per-group dots inside stop dots/discs/pills).
+INDICATOR_MIN_ZOOM = 15
+
+# Mode → color-group key. Ferry collapses into the bus group (shared color);
+# modes outside this dict produce no indicator.
+MODE_TO_COLOR_GROUP = {
+    "train":        "train",
+    "metro":        "metro",
+    "tram":         "tram",
+    "bus":          "bus",
+    "ferry":        "bus",
+    "regional_bus": "regional_bus",
+    "mountain":     "mountain",
+}
+
+# Stable iteration order for the color-group set at a location.
+COLOR_GROUP_ORDER = ["train", "metro", "tram", "bus", "regional_bus", "mountain"]
+
 # Spatial clustering radius for pill grouping
 PILL_CLUSTER_RAIL_KM    = 0.300   # rail: 300 m (same as dot deduplication)
 PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
@@ -2860,6 +2878,74 @@ def flatten_coords(coords):
     return coords
 
 
+def _polyline_midpoint(coords):
+    """Return the (lon, lat) midpoint of a polyline by arc length."""
+    if not coords:
+        return (0.0, 0.0)
+    if len(coords) == 1:
+        return (coords[0][0], coords[0][1])
+    seg_lens = []
+    total = 0.0
+    for i in range(len(coords) - 1):
+        a, b = coords[i], coords[i + 1]
+        d = haversine_km(a[0], a[1], b[0], b[1])
+        seg_lens.append(d)
+        total += d
+    half = total / 2.0
+    acc = 0.0
+    for i, d in enumerate(seg_lens):
+        if acc + d >= half:
+            t = (half - acc) / d if d > 0 else 0.0
+            a, b = coords[i], coords[i + 1]
+            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+        acc += d
+    return (coords[-1][0], coords[-1][1])
+
+
+def _polyline_midpoint_and_tangent_deg(coords):
+    """
+    Return ((lon, lat), tangent_deg) for the polyline midpoint by arc length.
+
+    The tangent angle is in degrees clockwise from east (MapLibre
+    `text-rotate` convention with `text-rotation-alignment: map`).
+    Returns 0° tangent for degenerate polylines.
+    """
+    if not coords or len(coords) < 2:
+        if coords:
+            return (coords[0][0], coords[0][1]), 0.0
+        return (0.0, 0.0), 0.0
+    seg_lens = []
+    total = 0.0
+    for i in range(len(coords) - 1):
+        a, b = coords[i], coords[i + 1]
+        d = haversine_km(a[0], a[1], b[0], b[1])
+        seg_lens.append(d)
+        total += d
+    half = total / 2.0
+    acc = 0.0
+    seg_idx = len(coords) - 2
+    t = 1.0
+    for i, d in enumerate(seg_lens):
+        if acc + d >= half:
+            seg_idx = i
+            t = (half - acc) / d if d > 0 else 0.0
+            break
+        acc += d
+    a, b = coords[seg_idx], coords[seg_idx + 1]
+    mid_lon = a[0] + (b[0] - a[0]) * t
+    mid_lat = a[1] + (b[1] - a[1]) * t
+    # Tangent in metric local frame, so angle is in real geography.
+    cl = cos(radians(mid_lat)) or 1.0
+    dx_m = (b[0] - a[0]) * 111320.0 * cl
+    dy_m = (b[1] - a[1]) * 111320.0
+    # MapLibre y-axis on screen is down; `text-rotate` with
+    # `text-rotation-alignment: map` rotates clockwise from east in map
+    # space (north up). atan2(-dy, dx) converts our north-up tangent
+    # vector into that clockwise convention.
+    tangent_deg = degrees(atan2(-dy_m, dx_m))
+    return (mid_lon, mid_lat), tangent_deg
+
+
 # =============================================================================
 # Pill geometry — nearest-neighbor path through dot positions
 # =============================================================================
@@ -3035,6 +3121,70 @@ def cluster_lines(cluster_stops, line_lookup):
                     "name":     info.get("name", ""),
                 }
     return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x.get("gtfs_ref") or x["ref"]))
+
+
+def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_deg=0.0):
+    """
+    Emit color-indicator Point features for a single rendered location.
+
+    Groups the stops by color-group (per MODE_TO_COLOR_GROUP), picks the
+    fastest line (highest freq_score) within each group, and yields one
+    Point feature per group at the parent's center coordinate.
+
+    `tangent_deg` is the orientation of the indicator row in degrees
+    (clockwise from east in map space, MapLibre `text-rotate` convention).
+    Pass the pill's local tangent angle for pill indicators; leave 0 for
+    dot / disc indicators (screen-horizontal row).
+
+    Each feature carries `color`, `slot_units`, `tangent_deg`, `width_base`;
+    the row offset is applied paint-side per concept
+    `.claude/concepts/stop-color-indicators.md`.
+    """
+    by_group: dict = {}
+    for s in stops_at_location:
+        oid = str(s.get("osm_id", ""))
+        line = line_lookup.get(oid)
+        if not line:
+            continue
+        group = MODE_TO_COLOR_GROUP.get(line.get("mode", ""))
+        if not group:
+            continue
+        fs = line.get("freq_score", 0.0)
+        ref = line.get("gtfs_ref") or line.get("ref", "")
+        cur = by_group.get(group)
+        cand = (fs, ref, line.get("color", "#888888"))
+        if cur is None or (fs > cur[0]) or (fs == cur[0] and ref < cur[1]):
+            by_group[group] = cand
+
+    if not by_group:
+        return []
+
+    groups_present = [g for g in COLOR_GROUP_ORDER if g in by_group]
+    n = len(groups_present)
+    wb = max((s.get("width_base", 1.0) for s in stops_at_location), default=1.0)
+
+    feats = []
+    # slot_units = 2*i - (n-1) gives a centered, integer-stepped sequence
+    # that's symmetric around 0: e.g. n=2 → {-1, +1}; n=3 → {-2, 0, +2};
+    # n=6 → {-5, -3, -1, +1, +3, +5}. The style layer applies
+    # text-offset = slot_units × half_spacing_em and text-rotate = tangent_deg
+    # in map-aligned space, so the row rotates with the parent's tangent.
+    for i, group in enumerate(groups_present):
+        _fs, _ref, color = by_group[group]
+        slot_units = 2 * i - (n - 1)
+        feats.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": INDICATOR_MIN_ZOOM},
+            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "properties": {
+                "feature_type": "indicator",
+                "color":        color,
+                "slot_units":   slot_units,
+                "tangent_deg":  round(tangent_deg, 2),
+                "width_base":   wb,
+            },
+        })
+    return feats
 
 
 # =============================================================================
@@ -3864,8 +4014,20 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
             cos_lat=cluster_cos_lat)
     ]
 
+    def _stops_at_positions(grp_positions):
+        out = []
+        for pos in grp_positions:
+            out.extend(pos_to_platforms.get((pos[0], pos[1]), []))
+        return out
+
     if not split_indices:
-        return [make_feat(_simplify_pill_lonlat(path, cluster_cos_lat), "pill")]
+        simp = _simplify_pill_lonlat(path, cluster_cos_lat)
+        (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
+        feats = [make_feat(simp, "pill")]
+        if line_lookup is not None:
+            feats.extend(build_indicator_features(
+                cluster_stops, mid_lon, mid_lat, line_lookup, tangent_deg=tan_deg))
+        return feats
 
     # Split path at every large gap → N groups
     groups = []
@@ -3882,9 +4044,20 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     feats = []
     for grp in groups:
         if len(grp) >= 2:
-            feats.append(make_feat(_simplify_pill_lonlat(grp, cluster_cos_lat), "pill"))
+            simp = _simplify_pill_lonlat(grp, cluster_cos_lat)
+            feats.append(make_feat(simp, "pill"))
+            if line_lookup is not None:
+                (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
+                feats.extend(build_indicator_features(
+                    _stops_at_positions(grp), mid_lon, mid_lat, line_lookup,
+                    tangent_deg=tan_deg))
         else:
-            feats.append(make_endpoint(grp[0]))
+            pos = grp[0]
+            feats.append(make_endpoint(pos))
+            if line_lookup is not None:
+                feats.extend(build_indicator_features(
+                    pos_to_platforms.get((pos[0], pos[1]), []),
+                    pos[0], pos[1], line_lookup))
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.
@@ -4123,6 +4296,7 @@ def main():
                 "color":      p["color"],
                 "mode":       p["mode"],
                 "width_base": p.get("width_base", 3.0),
+                "freq_score": p.get("freq_score", 0.0),
                 "coords":     feat["geometry"]["coordinates"],
                 "ref":        p.get("ref", ""),
                 "name":       p.get("name", ""),
@@ -4197,6 +4371,7 @@ def main():
     rail_pill_raw     = []   # dicts for rail pill clustering (also used for dots)
     all_nonrail_pills = []   # ALL non-rail pill modes combined (tram+bus+metro+regional_bus)
     other_features    = []   # dot features for non-rail, ferry, mountain
+    indicator_features = []  # mini per-color-group dots inside stop dots/discs/pills (z16+)
 
     # --- Mountain / straight-line features with embedded gtfs_stops ---
     for feat in gtfs_stop_features:
@@ -4206,6 +4381,7 @@ def main():
         wb      = p.get("width_base", 3.0)
         coords  = feat["geometry"]["coordinates"]
         minzoom = MODE_MINZOOM.get(mode, 11)
+        oid     = str(p.get("osm_id", ""))
         for lon, lat in p["gtfs_stops"]:
             slon, slat = snap_to_line(lon, lat, coords)
             other_features.append({
@@ -4214,6 +4390,8 @@ def main():
                 "geometry": {"type": "Point", "coordinates": [slon, slat]},
                 "properties": {"color": color, "mode": mode, "width_base": wb},
             })
+            indicator_features.extend(build_indicator_features(
+                [{"osm_id": oid, "width_base": wb}], slon, slat, line_lookup))
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
@@ -4296,6 +4474,9 @@ def main():
                         "lines_json":     line_lines_json,
                     },
                 })
+                indicator_features.extend(build_indicator_features(
+                    [{"osm_id": str(osm_id), "width_base": width_base}],
+                    lon, lat, line_lookup))
 
         elif mode in PILL_MODES:
             for idx, entry in enumerate(stop_coords):
@@ -4351,6 +4532,9 @@ def main():
                         "lines_json":     line_lines_json,
                     },
                 })
+                indicator_features.extend(build_indicator_features(
+                    [{"osm_id": str(osm_id), "width_base": width_base}],
+                    slon, slat, line_lookup))
 
     # --- Rail dots + pills (unified pass) ---
     print(f"  {len(rail_pill_raw):,} raw rail stop positions → clustering...")
@@ -4394,6 +4578,8 @@ def main():
                 "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 "properties": centroid_props,
             })
+            indicator_features.extend(build_indicator_features(
+                cluster, lon, lat, line_lookup))
         else:
             feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
@@ -4420,6 +4606,8 @@ def main():
                     "geometry": {"type": "Point", "coordinates": [lon, lat]},
                     "properties": centroid_props,
                 })
+                indicator_features.extend(build_indicator_features(
+                    cluster, lon, lat, line_lookup))
 
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
@@ -4484,6 +4672,8 @@ def main():
                 "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
                 "properties": centroid_props,
             })
+            indicator_features.extend(build_indicator_features(
+                cluster, lon_c, lat_c, line_lookup))
         else:
             feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
@@ -4507,6 +4697,8 @@ def main():
                     "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
                     "properties": centroid_props,
                 })
+                indicator_features.extend(build_indicator_features(
+                    cluster, lon_c, lat_c, line_lookup))
 
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
           f"from {len(nonrail_clusters):,} clusters")
@@ -4518,6 +4710,7 @@ def main():
     dot_features = rail_features + other_features + nonrail_dot_features
     OUT_DOTS.parent.mkdir(parents=True, exist_ok=True)
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
+    pill_features.extend(indicator_features)
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
 
     # Summary
