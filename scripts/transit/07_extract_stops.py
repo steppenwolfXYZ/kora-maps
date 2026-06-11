@@ -3162,13 +3162,21 @@ def _tangent_candidates(group, endpoint, lon0, lat0, cos_lat):
     if len(group) <= 1:
         return []
 
-    if endpoint[0] == group[0][0] and endpoint[1] == group[0][1]:
+    # Compute OUT from the simplified polyline (what the renderer draws), not
+    # the raw NN-path group. The path can zig-zag through pill vertices (e.g.
+    # disc → middle → south → north at Bethlehem Kirche), which makes the raw
+    # next-vertex point into the pill body instead of away from it.
+    simplified = _simplify_pill_lonlat(group, cos_lat)
+    if len(simplified) < 2:
+        return []
+
+    if endpoint[0] == simplified[0][0] and endpoint[1] == simplified[0][1]:
         idx, neighbor = 0, 1
     else:
-        idx, neighbor = len(group) - 1, len(group) - 2
+        idx, neighbor = len(simplified) - 1, len(simplified) - 2
 
-    xy_e = _lonlat_to_xy(group[idx][0], group[idx][1], lon0, lat0, cos_lat)
-    xy_n = _lonlat_to_xy(group[neighbor][0], group[neighbor][1], lon0, lat0, cos_lat)
+    xy_e = _lonlat_to_xy(simplified[idx][0], simplified[idx][1], lon0, lat0, cos_lat)
+    xy_n = _lonlat_to_xy(simplified[neighbor][0], simplified[neighbor][1], lon0, lat0, cos_lat)
     axial = _norm2((xy_e[0] - xy_n[0], xy_e[1] - xy_n[1]))
     if axial is None:
         return []
@@ -3464,6 +3472,13 @@ def _build_pill_disc_curve(A, tA, B, r_max):
     if best is None or best[0] < 1e-6:
         return None
     _, delta = best
+
+    # Sub-degree sweep: tA is essentially aligned with the chord A→B, so the
+    # straight chord is the right answer. Emitting it here avoids the arc
+    # samples collapsing under dedup and triggering the degenerate-curve
+    # rejection below. The tangent error at A stays under ~1.5° (invisible).
+    if abs(delta) < radians(1.5):
+        return [A, B]
 
     arc_length = r * abs(delta)
     n_samples = _arc_chord_samples(r, arc_length)
