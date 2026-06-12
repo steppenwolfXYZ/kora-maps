@@ -56,7 +56,7 @@ Pills use the same layout at the pill's midpoint. At the indicator's small size 
 
 ### Sizing
 
-Indicator diameter depends on **zoom only** — every indicator is the same pixel size at a given zoom regardless of which parent stop family member (small bus stop dot, large train pill) it sits inside. The size grows with zoom from z15 to z20, matching the rest of the stop family's natural growth.
+Indicator diameter scales with the parent's `width_base` AND with zoom, so indicators on a large train pill look proportionally large and those on a small bus dot look proportionally small. The size grows with zoom from z15 to z20, matching the rest of the stop family's natural growth.
 
 A new identifier introduced by this concept:
 
@@ -82,7 +82,7 @@ A single location can yield up to 6 indicator features (one per color group pres
 Indicators render via a **single symbol style layer** `transit-stop-indicator` in `build_station_layers`, sourced from `transit_stop_pills` with `feature_type=indicator`:
 
 - `text-field = "●"` (Unicode U+25CF BLACK CIRCLE) in `Noto Sans Regular`. The glyph's visible diameter is approximately 0.7 em.
-- `text-size` depends on **zoom only**, ramping from `7.5 px` at z15 to `18 px` at z20. The parent's `width_base` is **not** referenced — indicators are the same size at every stop.
+- `text-size` is data-driven on `width_base` and zoom-interpolated: `5 × width_base` px at z15 and `12 × width_base` px at z20. Indicators scale with both zoom and the parent's frequency-driven width.
 - `text-offset` is in em (so it auto-scales with `text-size`) via a `match` on `slot_units` returning literal pairs. Each unit corresponds to `0.28 em` horizontally, with a constant `-0.1 em` vertical compensation for the "●" glyph's vertical asymmetry inside its em-box (Noto Sans renders the bullet slightly below bbox center; the compensation nudges the anchor up in glyph-local space and rotates with the row).
 - `text-rotate` reads `tangent_deg` from the feature; combined with `text-rotation-alignment: map`, the entire row (offsets + glyphs) rotates with the parent's tangent.
 - `text-allow-overlap` / `text-ignore-placement` are true so all indicators always render, regardless of collisions.

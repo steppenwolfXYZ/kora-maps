@@ -1247,11 +1247,15 @@ def build_station_layers(cfg) -> list:
     INDICATOR_MINZOOM = 15
     INDICATOR_FADE_END = 15.3
 
-    # text-size depends on zoom only (not on the parent's width_base), so
-    # indicator dots are the same size at every stop, large or small.
+    # text-size tracks the parent's own diameter curve (z14: 1.5 × wb,
+    # z20: 12 × wb — same anchors the dot radius and pill line-width
+    # interpolations use). text-size == parent_diameter; the "●" glyph
+    # then visually fills ~0.5 × parent_diameter. Indicators stay at the
+    # same fraction of parent width at every zoom, instead of drifting
+    # bigger relative to the pill at low zoom.
     text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        INDICATOR_MINZOOM, 7.5,
-        20,                18.0,
+        14, ["*", ["get", "width_base"], 1.5],
+        20, ["*", ["get", "width_base"], 12.0],
     ]
 
     # text-offset is in em. Half-spacing per slot_unit; tight (just enough
