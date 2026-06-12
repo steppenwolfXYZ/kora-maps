@@ -58,6 +58,8 @@ Pills use the same layout at the pill's midpoint. At the indicator's small size 
 
 Indicator diameter scales with the parent's `width_base` AND with zoom, so indicators on a large train pill look proportionally large and those on a small bus dot look proportionally small. The size grows with zoom from z15 to z20, matching the rest of the stop family's natural growth.
 
+The indicator-to-parent size ratio is **not exactly constant across zooms** — at low zoom the indicators are slightly larger relative to the parent than at high zoom. The mismatch comes from the gap between `text-size` (an MapLibre font-size value) and the actual visible "●" glyph diameter inside the em-box, which doesn't scale strictly linearly with `text-size` the way circle radii do. Anchoring `text-size` to the parent's own diameter curve (`1.5 × wb` at z14, `12 × wb` at z20) keeps the proportions close enough to look right at every zoom from z15 onward, and that's where the trade-off was left.
+
 A new identifier introduced by this concept:
 
 - `INDICATOR_MIN_ZOOM = 15` — appearance zoom.
