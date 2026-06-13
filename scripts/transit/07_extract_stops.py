@@ -4021,7 +4021,23 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
     arrivals lock to the compass grid. Set False for rail clusters: tracks
     routinely run at arbitrary angles and snapping would distort the frame.
 
-    Returns list of `(coords, is_fallback)` aligned with `chosen_edges`.
+    Edge processing order:
+      1. Pill-pill edges (no anchoring effect).
+      2. Pill-disc edges (each anchors its disc end from the pill's tangent).
+      3. Disc-disc edges, iteratively: process every edge with at least one
+         already-anchored endpoint, then refresh and repeat. A both-unanchored
+         disc-disc edge can only fire as a one-shot bootstrap at the very
+         start of the cluster's processing — only reachable when the cluster
+         has no pill-pill or pill-disc edges (a pure-disc cluster). After
+         bootstrap, every remaining edge in the MST tree must touch the
+         anchored subtree, so propagation continues normally without ever
+         needing another both-unanchored chord. Bootstrap picks the first
+         disc-disc edge by the existing sort order (line_max desc, lex
+         coords). Within each tier the intra-tier order from `chosen_edges`
+         is preserved.
+
+    Returns list of `(coords, is_fallback)`. Order follows processing order,
+    not `chosen_edges` order; callers iterate without index dependence.
     """
     disc_anchors = {}
     if fixed_cardinal:
@@ -4030,7 +4046,9 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
                 disc_anchors[(grp[0][0], grp[0][1])] = _FIXED_CARDINAL_SEED
 
     out = []
-    for ca, cb, i, j in chosen_edges:
+
+    def _process(edge):
+        ca, cb, i, j = edge
         grp_a, grp_b = groups[i], groups[j]
         pos_a = (ca[0], ca[1])
         pos_b = (cb[0], cb[1])
@@ -4059,6 +4077,58 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
                 disc_anchors[pos_a] = store(arrival_a)
             if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
                 disc_anchors[pos_b] = store(arrival_b)
+
+    # Partition by tier; intra-tier order is preserved from chosen_edges.
+    pill_pill = []
+    pill_disc = []
+    disc_disc = []
+    for edge in chosen_edges:
+        _ca, _cb, i, j = edge
+        da = len(groups[i]) == 1
+        db = len(groups[j]) == 1
+        if not (da or db):
+            pill_pill.append(edge)
+        elif da and db:
+            disc_disc.append(edge)
+        else:
+            pill_disc.append(edge)
+
+    # Tier 1: pill-pill.
+    for edge in pill_pill:
+        _process(edge)
+    # Tier 2: pill-disc — anchors each disc end from its pill's tangent.
+    for edge in pill_disc:
+        _process(edge)
+
+    # Tier 3: disc-disc, iteratively. Process every edge with at least one
+    # anchored endpoint; refresh; repeat. The one-shot bootstrap fires only
+    # if nothing has been processed yet (pure-disc cluster).
+    remaining = list(disc_disc)
+    processed_any = bool(pill_pill or pill_disc)
+    while remaining:
+        eligible_mask = [
+            (e[0][0], e[0][1]) in disc_anchors or (e[1][0], e[1][1]) in disc_anchors
+            for e in remaining
+        ]
+        if any(eligible_mask):
+            new_remaining = []
+            for edge, eligible in zip(remaining, eligible_mask):
+                if eligible:
+                    _process(edge)
+                else:
+                    new_remaining.append(edge)
+            remaining = new_remaining
+            processed_any = True
+        elif not processed_any:
+            # Bootstrap: pure-disc cluster, no anchors yet. First disc-disc
+            # edge in sort order seeds the cluster's anchor frame.
+            _process(remaining.pop(0))
+            processed_any = True
+        else:
+            # Unreachable in a connected MST tree once any node has been
+            # anchored. Safety break to avoid an infinite loop.
+            break
+
     return out
 
 
