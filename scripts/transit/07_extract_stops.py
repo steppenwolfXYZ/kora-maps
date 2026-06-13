@@ -3235,21 +3235,15 @@ def pill_minzoom(mode, stop_count):
     """
     Return the zoom level at which pills appear for a stop cluster,
     or None if the cluster should not get a pill (single line).
+
+    Hard cut at z12 for train, z13 for every other mode — uniform per
+    mode regardless of stop_count. The earlier stop-count-banded
+    appear-zooms (11/13 for train, 12/13/14 for non-rail) read as
+    random to a viewer because the bands aren't visible.
     """
-    if mode == "train":
-        if stop_count >= 5:
-            return 11
-        if stop_count >= 2:
-            return 13
+    if stop_count < 2:
         return None
-    else:
-        if stop_count >= 10:
-            return 12
-        if stop_count >= 5:
-            return 13
-        if stop_count >= 2:
-            return 14
-        return None
+    return 12 if mode == "train" else 13
 
 
 def color_luminance(hex_color: str) -> float:
@@ -3890,11 +3884,15 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     cluster-xy space, or None if the polyline is too short to derive one.
     The caller decides whether to use it as a new anchor. `is_fallback` is
     True only when the function hit an explicit "no valid curve" return-chord
-    path; False when the picker selected a chosen result (curve or aligned
-    chord) from `_build_symmetric_arc` / `_pill_disc_picker`. A 2-point
-    polyline can be either: an intentional parallel-tangent chord that the
-    picker chose as the best valid result is `is_fallback=False`; the
-    return-chord path used when every candidate failed is `is_fallback=True`.
+    path after a curve construction failed; False when the picker selected a
+    chosen result (curve or aligned chord) from `_build_symmetric_arc` /
+    `_pill_disc_picker`, and also False for the both-unanchored-discs straight
+    chord — that chord is the natural answer with no construction attempted,
+    not a recovery. A 2-point polyline can be either: an intentional
+    parallel-tangent chord that the picker chose as the best valid result is
+    `is_fallback=False`; the natural both-unanchored straight is
+    `is_fallback=False`; the return-chord path used when every candidate
+    failed is `is_fallback=True`.
     """
     r_max = _curve_max_radius(mode)
 
@@ -3921,9 +3919,15 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
         anchor_out_b = _arrival_tangent_lonlat(coords, False, cluster_cos_lat)
         return coords, anchor_out_a, anchor_out_b, is_fallback
 
-    # Both ends unconstrained (e.g. unanchored disc ↔ unanchored disc): straight.
+    # Both ends unconstrained (e.g. unanchored disc ↔ unanchored disc):
+    # straight chord. This is the natural answer with no construction
+    # attempted, not a recovery from a failed curve — is_fallback=False. The
+    # cardinal snap is intentionally NOT applied here; see `_emit_connectors`
+    # for the paired rule that suppresses the on-store snap for both-
+    # unanchored edges, so subsequent connectors at either end see the
+    # actual chord direction rather than a snapped cardinal.
     if not cands_a and not cands_b:
-        return finalize([ca, cb], True)
+        return finalize([ca, cb], False)
 
     # Constrained one side only: asymmetric arc-then-straight with the
     # constrained side playing the pill role. Same construction whether the
@@ -3956,14 +3960,12 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
         results.append((poly, _polyline_length_xy(poly), def_a, def_b))
 
     if not results:
-        # No valid (cardinal × cardinal) combo: fall back to the unconstrained
-        # logic so an anchored-disc end with no working cardinals doesn't lose
-        # its connector entirely. The disc's anchor stays as it was. The
-        # recursion's own is_fallback flag propagates up.
-        if anchor_a is not None or anchor_b is not None:
-            return _curve_connector(ca, cb, group_a, group_b,
-                                    cluster_cos_lat, mode,
-                                    anchor_a=None, anchor_b=None)
+        # No valid (cardinal × cardinal) combo. Fall back to a straight chord
+        # so an anchored-disc end with no working cardinals doesn't lose its
+        # connector entirely. The disc's anchor stays as it was — anchors are
+        # written in `_emit_connectors`, not here. This is a real fallback
+        # (a curve was attempted and could not be built), so is_fallback=True
+        # regardless of whether anchors were present.
         return finalize([ca, cb], True)
 
     # Curves outrank 2-point straight results. _build_symmetric_arc returns a
@@ -3990,10 +3992,6 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     else:
         defaults = [r for r in results if r[2] and r[3]]
         if not defaults:
-            if anchor_a is not None or anchor_b is not None:
-                return _curve_connector(ca, cb, group_a, group_b,
-                                        cluster_cos_lat, mode,
-                                        anchor_a=None, anchor_b=None)
             return finalize([ca, cb], True)
         chosen = min(defaults, key=lambda r: r[1])
 
@@ -4038,12 +4036,25 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
         pos_b = (cb[0], cb[1])
         anchor_a = disc_anchors.get(pos_a) if len(grp_a) == 1 else None
         anchor_b = disc_anchors.get(pos_b) if len(grp_b) == 1 else None
+        # Two unanchored singletons get a straight chord (see _curve_connector's
+        # both-empty branch). The arrival tangents of that chord ARE the
+        # chord direction, so cardinal-snapping them on store would force
+        # subsequent connectors at either end onto a different frame than
+        # the chord they continue — visible as a kink at the disc. Skip the
+        # snap for this case; store the raw tangents.
+        skip_snap = (
+            len(grp_a) == 1 and anchor_a is None and
+            len(grp_b) == 1 and anchor_b is None
+        )
         coords, arrival_a, arrival_b, is_fallback = _curve_connector(
             ca, cb, grp_a, grp_b, cluster_cos_lat, mode,
             anchor_a=anchor_a, anchor_b=anchor_b)
         out.append((coords, is_fallback))
         if not fixed_cardinal:
-            store = _snap_to_cardinal if snap_anchors else (lambda t: t)
+            if skip_snap or not snap_anchors:
+                store = lambda t: t
+            else:
+                store = _snap_to_cardinal
             if len(grp_a) == 1 and pos_a not in disc_anchors and arrival_a is not None:
                 disc_anchors[pos_a] = store(arrival_a)
             if len(grp_b) == 1 and pos_b not in disc_anchors and arrival_b is not None:
@@ -4321,11 +4332,14 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         elif score_anchor < score_cardinal:
             chosen_connectors = connectors_anchor
         else:
-            # Tie: prefer anchoring only when cardinal has an overshooting
-            # connector (length > 1.5 × straight-line chord) and anchoring
-            # doesn't. Keeps cardinal as the visual default but escapes its
-            # near-semicircle detours when anchoring offers a tighter path.
-            def _has_overshoot(connectors):
+            # Tie on the primary score. Three-level tie-break:
+            #   1. Fewer overshooting connectors (length > 1.5 × straight-line
+            #      chord) wins — penalises near-semicircle detours.
+            #   2. If still tied, fewer straight-fallback connectors wins —
+            #      penalises strategies that couldn't build a curve.
+            #   3. If still tied, cardinal wins (default visual bias).
+            def _count_overshoots(connectors):
+                n = 0
                 for coords, _ in connectors:
                     if len(coords) < 2:
                         continue
@@ -4337,12 +4351,21 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                                               coords[k][0],   coords[k][1])
                                  for k in range(1, len(coords)))
                     if length > 1.5 * chord:
-                        return True
-                return False
-            if _has_overshoot(connectors_cardinal) and not _has_overshoot(connectors_anchor):
-                chosen_connectors = connectors_anchor
+                        n += 1
+                return n
+            def _count_fallbacks(connectors):
+                return sum(1 for _, is_fb in connectors if is_fb)
+            ov_a = _count_overshoots(connectors_anchor)
+            ov_c = _count_overshoots(connectors_cardinal)
+            if ov_a != ov_c:
+                chosen_connectors = connectors_anchor if ov_a < ov_c else connectors_cardinal
             else:
-                chosen_connectors = connectors_cardinal
+                fb_a = _count_fallbacks(connectors_anchor)
+                fb_c = _count_fallbacks(connectors_cardinal)
+                if fb_a != fb_c:
+                    chosen_connectors = connectors_anchor if fb_a < fb_c else connectors_cardinal
+                else:
+                    chosen_connectors = connectors_cardinal
     else:
         chosen_connectors = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
                                              fixed_cardinal=False,
@@ -4755,23 +4778,27 @@ def main():
     # run the closest-vertex medoid to find the pier's canonical OSM node,
     # and emit pill endpoint / connector features only. No separate dot
     # circle in transit_stops.geojson — every ferry stop renders through
-    # the non-rail pill paint stack, so the connector seam handling and
-    # PILL_MINZOOM = 11 gating come for free. Ferry stops are therefore
-    # invisible below z11 (same as bus stops), with the lines themselves
-    # still appearing from z9.
+    # the non-rail pill paint stack, so the connector seam handling comes
+    # for free. Ferry stops are invisible below z11 (same as bus stops);
+    # ferry lines themselves still appear from z9.
     #
-    # Three branches:
+    # Two-tier zoom split per pier:
     #
-    #   Convergent + collapsed (max-vertex-distance ≤ convergence_threshold_m
-    #     AND GTFS↔canonical < collapse_threshold_m):
-    #       one endpoint at the canonical vertex.
+    #   z11–z12  (FERRY_PILL_MZ): every pier shows EXACTLY ONE endpoint
+    #     at the canonical-vertex medoid — same "one dot per pier" pattern
+    #     bus / tram stops follow at their own PILL_MINZOOM. No GTFS-side
+    #     dot, no connector, no per-line detail.
     #
-    #   Convergent + split (same convergence test, GTFS↔canonical ≥ threshold):
-    #       endpoint at canonical + endpoint at GTFS + connector between.
-    #
-    #   Non-convergent (vertices spread beyond convergence_threshold_m):
-    #     One endpoint per visiting line at that line's individual closest-
-    #     point snap to GTFS. No shared disc, no connector.
+    #   z13+     (FERRY_PAIR_MZ): pier detail appears in addition to the
+    #     canonical dot:
+    #       * Convergent + split (GTFS↔canonical ≥ collapse_threshold_m):
+    #           a GTFS-side endpoint + connector between the two dots.
+    #       * Non-convergent (max-vertex-distance > convergence_threshold_m):
+    #           per-line endpoints, one at each line's individual closest-
+    #           point snap to GTFS. The canonical medoid emitted at z11
+    #           still sits on (or very near) one of these — a small
+    #           acceptable overlap.
+    #       * Convergent + collapsed: nothing extra.
     #
     # See pill-rendering.md § "Ferry stops".
     ferry_by_pier: dict = {}
@@ -4783,7 +4810,8 @@ def main():
     n_ferry_collapsed = 0
     n_ferry_split = 0
     n_ferry_diverged = 0
-    FERRY_PILL_MZ = 11
+    FERRY_PILL_MZ = 11        # convergence-point endpoint, per-line endpoints
+    FERRY_PAIR_MZ = 13        # split-case GTFS endpoint + connector
     for pier_key, cands in ferry_by_pier.items():
         gtfs_repr = (cands[0]["gtfs_lon"], cands[0]["gtfs_lat"])
 
@@ -4833,15 +4861,35 @@ def main():
 
         canon, max_vertex_dist_m = _ferry_canonical_snap(polylines, gtfs_repr)
 
+        # Every pier — convergent or not, split or collapsed — gets one
+        # canonical-vertex endpoint at FERRY_PILL_MZ. This is the only ferry
+        # feature visible between z11 and z13: same "one dot per pier below
+        # the pill detail threshold" rule that tram/bus stops follow at their
+        # own PILL_MINZOOM. The connector + GTFS endpoint pair (split case)
+        # and the per-line endpoints (non-convergent case) are detail layers
+        # that only appear from FERRY_PAIR_MZ upward.
+        ferry_pill_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "geometry": {"type": "Point", "coordinates": [canon[0], canon[1]]},
+            "properties": {**base_props, "feature_type": "endpoint"},
+        })
+        indicator_features.extend(build_indicator_features(
+            indicator_stubs, canon[0], canon[1], line_lookup))
+
         if max_vertex_dist_m > FERRY_CONVERGE_M:
-            # Non-convergent fallback: per-line endpoint at each line's own snap.
+            # Non-convergent: per-line endpoints at each line's own snap, as
+            # detail above FERRY_PAIR_MZ. The canonical-vertex endpoint
+            # emitted above is the medoid of the per-line closest-vertices,
+            # so at z13+ it sits on (or very near) one of the per-line
+            # endpoints — a small acceptable overlap.
             n_ferry_diverged += 1
             for c in cands:
                 slon, slat = snap_to_line(c["gtfs_lon"], c["gtfs_lat"],
                                           c["polyline"])
                 ferry_pill_features.append({
                     "type": "Feature",
-                    "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+                    "tippecanoe": {"minzoom": FERRY_PAIR_MZ},
                     "geometry": {"type": "Point", "coordinates": [slon, slat]},
                     "properties": {**base_props,
                                    "stop_id":      c["stop_id"],
@@ -4853,37 +4901,28 @@ def main():
                     slon, slat, line_lookup))
             continue
 
-        # Convergent: one canonical pier vertex shared across lines.
-        ferry_pill_features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
-            "geometry": {"type": "Point", "coordinates": [canon[0], canon[1]]},
-            "properties": {**base_props, "feature_type": "endpoint"},
-        })
-        indicator_features.extend(build_indicator_features(
-            indicator_stubs, canon[0], canon[1], line_lookup))
-
         dist_m = haversine_km(gtfs_repr[0], gtfs_repr[1],
                               canon[0], canon[1]) * 1000.0
         if dist_m < FERRY_COLLAPSE_M:
             n_ferry_collapsed += 1
             continue
 
-        # Split: GTFS-side endpoint + connector. The on-line endpoint above
+        # Convergent + split: add GTFS-side endpoint + connector at the pill
+        # detail threshold. The canonical-vertex endpoint (emitted above)
         # plus this GTFS endpoint give the connector a disc at each end; the
         # existing pill paint stack (connector casing → connector fill →
         # endpoint disc) handles the dot↔connector seam at both joints.
         n_ferry_split += 1
         ferry_pill_features.append({
             "type": "Feature",
-            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "tippecanoe": {"minzoom": FERRY_PAIR_MZ},
             "geometry": {"type": "Point",
                          "coordinates": [gtfs_repr[0], gtfs_repr[1]]},
             "properties": {**base_props, "feature_type": "endpoint"},
         })
         ferry_pill_features.append({
             "type": "Feature",
-            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "tippecanoe": {"minzoom": FERRY_PAIR_MZ},
             "geometry": {"type": "LineString",
                          "coordinates": [
                              [gtfs_repr[0], gtfs_repr[1]],

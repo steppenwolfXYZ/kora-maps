@@ -1100,13 +1100,17 @@ def build_station_layers(cfg) -> list:
 
     # Ferry stops render entirely through the non-rail pill paint stack
     # (endpoints + connector from transit_stop_pills, minzoom PILL_MINZOOM
-    # = 11), so the disc, the optional connector, and the optional GTFS-
+    # = 12), so the disc, the optional connector, and the optional GTFS-
     # side endpoint all share one set of style layers and the connector
     # seam handling that comes with them. Ferry stops are therefore
-    # invisible at z9–z10 (same as bus stops); ferry lines themselves
-    # still appear from z9. See pill-rendering.md § "Ferry stops".
+    # invisible until z13 (same as every non-train pill); ferry lines
+    # themselves still appear from z9. See pill-rendering.md § "Ferry stops".
 
-    PILL_MINZOOM = 11
+    # Hard cut at the appear-zoom — no opacity fade. Train pills appear
+    # at z12 and every other mode at z13; the per-feature tippecanoe
+    # minzoom baked in by 07_extract_stops.py keeps non-train pills out
+    # of z12 tiles, so a single layer minzoom of 12 is sufficient.
+    PILL_MINZOOM = 12
 
     def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
@@ -1120,12 +1124,6 @@ def build_station_layers(cfg) -> list:
             PILL_MINZOOM,  ["*", ["get", "width_base"], 0.3],
             14,            ["*", ["get", "width_base"], 0.75],
             18,            ["*", ["get", "width_base"], 3.0],
-        ]
-
-    def pill_opacity(appear_zoom):
-        return ["interpolate", ["linear"], ["zoom"],
-            appear_zoom,        0.0,
-            appear_zoom + 1.0,  1.0,
         ]
 
     layers.append({
@@ -1143,7 +1141,6 @@ def build_station_layers(cfg) -> list:
                 14,            ["+", ["*", ["get", "width_base"], 1.5], 2.0],
                 20,            ["+", ["*", ["get", "width_base"], 12.0], 2.0],
             ],
-            "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
 
@@ -1163,7 +1160,6 @@ def build_station_layers(cfg) -> list:
                 14,            ["+", ["*", ["get", "width_base"], 0.75], 2.0],
                 18,            ["+", ["*", ["get", "width_base"], 3.0], 2.0],
             ],
-            "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
 
@@ -1178,7 +1174,6 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "line-color": "#ffffff",
             "line-width": pill_disc_width(),
-            "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
 
@@ -1198,7 +1193,6 @@ def build_station_layers(cfg) -> list:
                 14,           ["*", ["get", "width_base"], 0.75],
                 20,           ["*", ["get", "width_base"], 6.0],
             ],
-            "circle-opacity": pill_opacity(PILL_MINZOOM),
             "circle-stroke-color": "#000000",
             "circle-stroke-width": 1.0,
         }
@@ -1215,7 +1209,6 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "line-color": "#ffffff",
             "line-width": connector_width(),
-            "line-opacity": pill_opacity(PILL_MINZOOM),
         }
     })
 
