@@ -155,6 +155,19 @@ ferry_stops:
   # other 4 sit at a terminal node ~17 m away stay under 20 m.
   convergence_threshold_m: 20
 
+# ── Far-zoom stop-marker placement ───────────────────────────────────────────
+# Far-zoom dot positioning for non-rail clusters (metro, tram, bus,
+# regional_bus, ferry). At a crossroads the dot should sit at the service
+# node — where the lines actually meet — not at the platform centroid.
+# See .claude/concepts/far-zoom-stop-markers.md.
+far_zoom_marker:
+  # Proximity threshold for counting a line as passing near an intersection
+  # candidate point.
+  intersection_tol_m:      8
+  # Bounding-box padding when scanning for pairwise polyline crossings
+  # beyond the cluster's own extent.
+  intersection_bbox_pad_m: 20
+
 # ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
 # Endpoints of the per-bucket frequency score curve. The line's weighted
 # frequency (window_weights × per-window trips/hour) is mapped onto [0, 1]:

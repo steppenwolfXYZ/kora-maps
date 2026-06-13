@@ -77,6 +77,19 @@ FERRY_CONNECTOR_WB     = float(FERRY_STOPS_CFG.get("connector_width_base", 1.0))
 FERRY_COLLAPSE_M       = float(FERRY_STOPS_CFG.get("collapse_threshold_m", 15.0))
 FERRY_CONVERGE_M       = float(FERRY_STOPS_CFG.get("convergence_threshold_m", 20.0))
 
+# Far-zoom dot positioning: see config.yaml `far_zoom_marker` and
+# .claude/concepts/far-zoom-stop-markers.md.
+FAR_ZOOM_CFG = _transit_cfg.get("far_zoom_marker", {}) or {}
+FAR_ZOOM_INTERSECTION_TOL_M      = float(FAR_ZOOM_CFG.get("intersection_tol_m", 8.0))
+FAR_ZOOM_INTERSECTION_BBOX_PAD_M = float(FAR_ZOOM_CFG.get("intersection_bbox_pad_m", 20.0))
+
+# Mode family for the far-zoom dot rule. RAIL_LIKE skips the intersection
+# search (largest pill → largest disc → existing centroid); every other mode
+# runs intersection search first. Mountain rail-like is added per-feature
+# via `mountain_origin ∈ MOUNTAIN_RAIL_ORIGINS`, mirroring the rest of the
+# pipeline. See far-zoom-stop-markers.md § "Position rule by mode family".
+FAR_ZOOM_RAIL_LIKE_MODES = {"train"}
+
 RAIL_MODES = {"train"}
 # Modes that get pills via the non-rail pipeline. `train` uses the rail
 # pipeline (RAIL_MODES). Mountain pill routing is per-feature via
@@ -3129,6 +3142,356 @@ def _polyline_midpoint_and_tangent_deg(coords):
 
 
 # =============================================================================
+# Far-zoom dot positioning — see .claude/concepts/far-zoom-stop-markers.md
+# =============================================================================
+
+def _meters_per_deg(lat):
+    """Return (mx_per_deg_lon, my_per_deg_lat) for local equirectangular
+    scaling at the given latitude."""
+    return 111320.0 * cos(radians(lat)), 111320.0
+
+
+def _logical_line_key(oid, line_lookup):
+    """Return the logical-line key `(ref, mode, agency_id)` for an osm_id.
+    Direction and terminus variants of one route share this key — counting
+    by it (not by osm_id) is what prevents the four parallel direction-
+    variants of one bus from scoring as a four-way intersection or as a
+    four-line pill. See far-zoom-stop-markers.md § 'Intersection search'."""
+    info = line_lookup.get(oid) or {}
+    ref = info.get("gtfs_ref") or info.get("ref") or ""
+    return (ref, info.get("mode") or "", info.get("agency_id") or "")
+
+
+def _key_freq_map(cluster, line_lookup):
+    """Map each logical-line key present in the cluster to the max
+    `freq_score` across its osm_ids — used by the largest pill/disc freq
+    tiebreak. Max over osm_ids of one logical line because direction
+    variants can carry slightly different per-direction freq_scores."""
+    out = {}
+    for s in cluster:
+        oid = str(s.get("osm_id", ""))
+        if not oid:
+            continue
+        info = line_lookup.get(oid)
+        if not info:
+            continue
+        key = _logical_line_key(oid, line_lookup)
+        fs = info.get("freq_score", 0.0) or 0.0
+        if key not in out or fs > out[key]:
+            out[key] = fs
+    return out
+
+
+def _snap_centre_m(cluster, mx, my):
+    """Arithmetic centre of the cluster's pre-placement pfaedle snaps,
+    in local metric coords. Falls back to post-placement coords for
+    members that don't carry a snap (none should, but be defensive)."""
+    sx = sum(s.get("snap_lon", s["lon"]) for s in cluster) / len(cluster)
+    sy = sum(s.get("snap_lat", s["lat"]) for s in cluster) / len(cluster)
+    return sx * mx, sy * my
+
+
+def _cluster_xy_m(cluster, mx, my):
+    """Per-member (x_m, y_m, osm_id) — post-placement positions used to
+    match cluster members against pill / disc geometry."""
+    out = []
+    for s in cluster:
+        oid = str(s.get("osm_id", "")) or str(id(s))
+        out.append((s["lon"] * mx, s["lat"] * my, oid))
+    return out
+
+
+def _osm_ids_on_polyline_m(cluster_xy_m, poly_m, tol_sq):
+    """Distinct osm_ids whose placed position sits within sqrt(tol_sq) of
+    the polyline (any segment). When `poly_m` is a single point, this
+    reduces to a proximity check around that point — used for endpoint
+    discs."""
+    if not poly_m:
+        return set()
+    oids = set()
+    for x, y, oid in cluster_xy_m:
+        if oid in oids:
+            continue
+        if len(poly_m) == 1:
+            ax, ay = poly_m[0]
+            if (x - ax) ** 2 + (y - ay) ** 2 <= tol_sq:
+                oids.add(oid)
+            continue
+        for k in range(len(poly_m) - 1):
+            ax, ay = poly_m[k]
+            bx, by = poly_m[k + 1]
+            dx, dy = bx - ax, by - ay
+            len_sq = dx * dx + dy * dy
+            if len_sq == 0:
+                cx, cy = ax, ay
+            else:
+                t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / len_sq))
+                cx, cy = ax + t * dx, ay + t * dy
+            if (x - cx) ** 2 + (y - cy) ** 2 <= tol_sq:
+                oids.add(oid)
+                break
+    return oids
+
+
+def _segment_intersection_xy(a1, a2, b1, b2):
+    """Two finite line segments in any 2-D space. Returns the single
+    intersection point (x, y) when both interiors meet, else None.
+    Parallel / colinear segments return None — colinear overlap doesn't
+    produce a meaningful 'intersection' for the far-zoom rule (parallel
+    lines on one street are handled by the stop-snap candidate path)."""
+    x1, y1 = a1
+    x2, y2 = a2
+    x3, y3 = b1
+    x4, y4 = b2
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if denom == 0:
+        return None
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = ((x1 - x3) * (y1 - y2) - (y1 - y3) * (x1 - x2)) / denom
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return (x1 + t * (x2 - x1), y1 + t * (y2 - y1))
+    return None
+
+
+def _polyline_crossings_m(line_a_m, line_b_m, bbox_m):
+    """All pairwise segment-segment crossings between two polylines (in
+    metric coords) that fall inside bbox_m=(xmin, ymin, xmax, ymax)."""
+    xmin, ymin, xmax, ymax = bbox_m
+    out = []
+    for i in range(len(line_a_m) - 1):
+        a1, a2 = line_a_m[i], line_a_m[i + 1]
+        sa_xmin = a1[0] if a1[0] < a2[0] else a2[0]
+        sa_xmax = a1[0] if a1[0] > a2[0] else a2[0]
+        sa_ymin = a1[1] if a1[1] < a2[1] else a2[1]
+        sa_ymax = a1[1] if a1[1] > a2[1] else a2[1]
+        if sa_xmax < xmin or sa_xmin > xmax or sa_ymax < ymin or sa_ymin > ymax:
+            continue
+        for j in range(len(line_b_m) - 1):
+            b1, b2 = line_b_m[j], line_b_m[j + 1]
+            sb_xmin = b1[0] if b1[0] < b2[0] else b2[0]
+            sb_xmax = b1[0] if b1[0] > b2[0] else b2[0]
+            sb_ymin = b1[1] if b1[1] < b2[1] else b2[1]
+            sb_ymax = b1[1] if b1[1] > b2[1] else b2[1]
+            if sa_xmax < sb_xmin or sb_xmax < sa_xmin or \
+               sa_ymax < sb_ymin or sb_ymax < sa_ymin:
+                continue
+            ip = _segment_intersection_xy(a1, a2, b1, b2)
+            if ip is None:
+                continue
+            if xmin <= ip[0] <= xmax and ymin <= ip[1] <= ymax:
+                out.append(ip)
+    return out
+
+
+def _far_zoom_intersection_search(cluster, line_lookup):
+    """Far-zoom dot intersection search per
+    .claude/concepts/far-zoom-stop-markers.md § 'Intersection search'.
+    Returns (lon, lat) of the highest-scoring candidate with score >= 2,
+    or None when no qualifying intersection exists.
+
+    Candidate set: distinct pre-placement pfaedle-snapped stop positions ∪
+    pairwise polyline crossings between in-scope lines. Score: number of
+    distinct in-scope **logical lines** (`(ref, mode, agency_id)` — not
+    `osm_id`s) with at least one polyline passing within
+    FAR_ZOOM_INTERSECTION_TOL_M of the candidate. Direction and terminus
+    variants of one route share a logical key and count once — without
+    this, four parallel direction-variants of one bus would score 4 at
+    every stop on the route. Ties: closest to the cluster snap-centre."""
+    seen_oids = set()
+    osm_ids = []
+    for s in cluster:
+        oid = str(s.get("osm_id", ""))
+        if not oid or oid in seen_oids:
+            continue
+        seen_oids.add(oid)
+        osm_ids.append(oid)
+    if len(osm_ids) < 2:
+        return None
+
+    # Per-osm_id polylines, tagged with their logical-line key. We need the
+    # polylines individually for proximity tests but score by distinct keys.
+    lines = []  # [(polyline, logical_key)]
+    for oid in osm_ids:
+        info = line_lookup.get(oid)
+        if not info:
+            continue
+        flat = flatten_coords(info.get("coords") or [])
+        if len(flat) < 2:
+            continue
+        lines.append((flat, _logical_line_key(oid, line_lookup)))
+    distinct_keys = {k for _, k in lines}
+    if len(distinct_keys) < 2:
+        return None
+
+    mean_lat = sum(s.get("snap_lat", s["lat"]) for s in cluster) / len(cluster)
+    mx, my = _meters_per_deg(mean_lat)
+    centre_m = _snap_centre_m(cluster, mx, my)
+
+    lines_m = [
+        ([(p[0] * mx, p[1] * my) for p in flat], key)
+        for flat, key in lines
+    ]
+
+    xs = [s.get("snap_lon", s["lon"]) * mx for s in cluster]
+    ys = [s.get("snap_lat", s["lat"]) * my for s in cluster]
+    pad = FAR_ZOOM_INTERSECTION_BBOX_PAD_M
+    bbox_m = (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
+
+    candidates_m = []
+    seen_keys = set()
+
+    def add(pt_m):
+        key = (round(pt_m[0], 3), round(pt_m[1], 3))
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        candidates_m.append(pt_m)
+
+    for s in cluster:
+        add((s.get("snap_lon", s["lon"]) * mx,
+             s.get("snap_lat", s["lat"]) * my))
+    # Pairwise crossings only between polylines of distinct logical keys.
+    # Two direction variants of one route share a key and their crossings
+    # are irrelevant for the intersection rule.
+    for i in range(len(lines_m)):
+        for j in range(i + 1, len(lines_m)):
+            if lines_m[i][1] == lines_m[j][1]:
+                continue
+            for ip in _polyline_crossings_m(lines_m[i][0], lines_m[j][0], bbox_m):
+                add(ip)
+
+    if not candidates_m:
+        return None
+
+    tol_sq = FAR_ZOOM_INTERSECTION_TOL_M * FAR_ZOOM_INTERSECTION_TOL_M
+
+    def line_passes_near(line_m, p_m):
+        for k in range(len(line_m) - 1):
+            ax, ay = line_m[k]
+            bx, by = line_m[k + 1]
+            dx, dy = bx - ax, by - ay
+            len_sq = dx * dx + dy * dy
+            if len_sq == 0:
+                cx, cy = ax, ay
+            else:
+                t = max(0.0, min(1.0, ((p_m[0] - ax) * dx + (p_m[1] - ay) * dy) / len_sq))
+                cx, cy = ax + t * dx, ay + t * dy
+            if (p_m[0] - cx) ** 2 + (p_m[1] - cy) ** 2 <= tol_sq:
+                return True
+        return False
+
+    best_score = 0
+    best = None
+    best_dist_sq = float("inf")
+    for cm in candidates_m:
+        keys_near = set()
+        for lm, key in lines_m:
+            if key in keys_near:
+                continue
+            if line_passes_near(lm, cm):
+                keys_near.add(key)
+        score = len(keys_near)
+        if score < 2:
+            continue
+        d_sq = (cm[0] - centre_m[0]) ** 2 + (cm[1] - centre_m[1]) ** 2
+        if (score > best_score) or (score == best_score and d_sq < best_dist_sq):
+            best_score = score
+            best = cm
+            best_dist_sq = d_sq
+
+    if best is None:
+        return None
+    return (best[0] / mx, best[1] / my)
+
+
+def _largest_pill_or_disc_position(pill_feats, cluster, line_lookup):
+    """Far-zoom position from the pill or endpoint disc with the highest
+    rank, per .claude/concepts/far-zoom-stop-markers.md § 'Position rule
+    by mode family' tiebreak rules:
+
+      1. logical-line count desc (count by (ref, mode, agency_id),
+         not by osm_id — a tram with one direction kept and a two-
+         direction bus at the same stop both count as 1)
+      2. logical-line freq_scores descending lexicographic
+      3. closer to cluster snap-centre
+
+    Pill and disc features compete in one ranking — pill geometry is not
+    privileged over disc geometry. Returns (lon, lat) or None when no
+    pill / endpoint feature exists.
+    """
+    if not pill_feats or not cluster:
+        return None
+
+    mean_lat = sum(s.get("snap_lat", s["lat"]) for s in cluster) / len(cluster)
+    mx, my = _meters_per_deg(mean_lat)
+    cluster_xy_m = _cluster_xy_m(cluster, mx, my)
+    centre_m = _snap_centre_m(cluster, mx, my)
+    tol_sq = DEDUP_TOL_M * DEDUP_TOL_M
+    key_freq = _key_freq_map(cluster, line_lookup)
+
+    def freq_lex(line_keys):
+        return tuple(sorted(-key_freq.get(k, 0.0) for k in line_keys))
+
+    best_key = None
+    best_pos = None
+    for feat in pill_feats:
+        props = feat.get("properties") or {}
+        ftype = props.get("feature_type")
+        geom = feat.get("geometry") or {}
+        coords = geom.get("coordinates") or []
+
+        if ftype == "pill":
+            if len(coords) < 2:
+                continue
+            coords_m = [(p[0] * mx, p[1] * my) for p in coords]
+            oids = _osm_ids_on_polyline_m(cluster_xy_m, coords_m, tol_sq)
+            if not oids:
+                continue
+            pos = _polyline_midpoint(coords)
+        elif ftype == "endpoint" and geom.get("type") == "Point":
+            if len(coords) < 2:
+                continue
+            oids = _osm_ids_on_polyline_m(
+                cluster_xy_m, [(coords[0] * mx, coords[1] * my)], tol_sq)
+            if not oids:
+                continue
+            pos = (coords[0], coords[1])
+        else:
+            continue
+
+        line_keys = {_logical_line_key(oid, line_lookup) for oid in oids}
+        d_sq = (pos[0] * mx - centre_m[0]) ** 2 + (pos[1] * my - centre_m[1]) ** 2
+        # Ranking key: (-logical_line_count, freq-lex tuple, dist_sq).
+        # Lower tuple wins under `<`. -count means larger counts sort first;
+        # freq tuple has negative scores so highest freq sorts first.
+        key = (-len(line_keys), freq_lex(line_keys), d_sq)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_pos = pos
+
+    return best_pos
+
+
+def far_zoom_dot_position(cluster, pill_feats, line_lookup, fallback_pos,
+                          rail_like):
+    """Pick the far-zoom dot position per
+    .claude/concepts/far-zoom-stop-markers.md § 'Position rule by mode family'.
+
+    Rail-like (train + mountain rebucketed_rail / rack) skips the
+    intersection search; every other mode runs it first. Falls through to
+    `fallback_pos` (the existing centroid of placed positions) when nothing
+    else matches."""
+    if not rail_like:
+        pos = _far_zoom_intersection_search(cluster, line_lookup)
+        if pos is not None:
+            return pos
+    pos = _largest_pill_or_disc_position(pill_feats, cluster, line_lookup)
+    if pos is not None:
+        return pos
+    return fallback_pos
+
+
+# =============================================================================
 # Pill geometry — nearest-neighbor path through dot positions
 # =============================================================================
 
@@ -4880,8 +5243,14 @@ def main():
     n_ferry_collapsed = 0
     n_ferry_split = 0
     n_ferry_diverged = 0
-    FERRY_PILL_MZ = 11        # convergence-point endpoint, per-line endpoints
+    # Pill (medium-zoom) and pair (split detail) both appear from z13 — the
+    # same zoom every other non-train pill mode starts at. The z9–z12
+    # far-zoom marker for ferry is a low-zoom dot emitted into
+    # `other_features` below, matching every other mode's far-zoom
+    # behaviour. See far-zoom-stop-markers.md § "Ferry far-zoom marker".
+    FERRY_PILL_MZ = 13        # convergence-point endpoint, per-line endpoints
     FERRY_PAIR_MZ = 13        # split-case GTFS endpoint + connector
+    FERRY_FAR_ZOOM_MZ = MODE_MINZOOM.get("ferry", 9)
     for pier_key, cands in ferry_by_pier.items():
         gtfs_repr = (cands[0]["gtfs_lon"], cands[0]["gtfs_lat"])
 
@@ -4931,13 +5300,23 @@ def main():
 
         canon, max_vertex_dist_m = _ferry_canonical_snap(polylines, gtfs_repr)
 
-        # Every pier — convergent or not, split or collapsed — gets one
-        # canonical-vertex endpoint at FERRY_PILL_MZ. This is the only ferry
-        # feature visible between z11 and z13: same "one dot per pier below
-        # the pill detail threshold" rule that tram/bus stops follow at their
-        # own PILL_MINZOOM. The connector + GTFS endpoint pair (split case)
-        # and the per-line endpoints (non-convergent case) are detail layers
-        # that only appear from FERRY_PAIR_MZ upward.
+        # Far-zoom dot at canonical pier position — the ferry intersection-
+        # search result. Rendered through the low-zoom dot paint stack
+        # (transit_stops.geojson), matching every other mode's far-zoom
+        # behaviour. Maxzoom = FERRY_PILL_MZ - 1 so the dot disappears at
+        # exactly the zoom where the medium-zoom endpoint disc takes over.
+        other_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": FERRY_FAR_ZOOM_MZ,
+                            "maxzoom": FERRY_PILL_MZ - 1},
+            "geometry": {"type": "Point", "coordinates": [canon[0], canon[1]]},
+            "properties": dict(base_props),
+        })
+
+        # Medium-zoom canonical-vertex endpoint at FERRY_PILL_MZ. From z13
+        # this is the disc the user sees. Split-case GTFS endpoint and
+        # per-line endpoints (non-convergent case) also appear from
+        # FERRY_PAIR_MZ upward.
         ferry_pill_features.append({
             "type": "Feature",
             "tippecanoe": {"minzoom": FERRY_PILL_MZ},
@@ -5016,6 +5395,12 @@ def main():
     # perpendicular bar; leftovers run through the old algorithm.
     print(f"  Placing rail dots across {len(rail_pill_clusters):,} clusters...")
     for c in rail_pill_clusters:
+        # Preserve pre-placement pfaedle snaps for the far-zoom-dot
+        # intersection search and tiebreak centre. coordinate_dots_global_stab
+        # rewrites lon/lat to the placed positions.
+        for s in c:
+            s["snap_lon"] = s["lon"]
+            s["snap_lat"] = s["lat"]
         coordinate_dots_global_stab(c, PROTECTION_RADIUS_RAIL_M,
                                     LONE_OUTLIER_GAP_RAIL_METRO_M)
     print("  → rail dot placement done")
@@ -5027,8 +5412,8 @@ def main():
         mz = pill_minzoom("train", stop_count)
 
         color, mode, max_wb, dom_stop = dominant_line(cluster)
-        lon = sum(s["lon"] for s in cluster) / len(cluster)
-        lat = sum(s["lat"] for s in cluster) / len(cluster)
+        centroid_lon = sum(s["lon"] for s in cluster) / len(cluster)
+        centroid_lat = sum(s["lat"] for s in cluster) / len(cluster)
         lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
         centroid_props = {
             "color":          color,
@@ -5041,43 +5426,46 @@ def main():
         }
 
         if mz is None:
-            # Single-line station: one cluster dot at all zooms.
+            # Single-line station: one cluster dot at all zooms. Rule chain
+            # falls through to the centroid (no pill, no disc, single line
+            # ⇒ no intersection).
             rail_features.append({
                 "type": "Feature",
                 "tippecanoe": {"minzoom": 5},
-                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
                 "properties": centroid_props,
             })
             indicator_features.extend(build_indicator_features(
-                cluster, lon, lat, line_lookup))
+                cluster, centroid_lon, centroid_lat, line_lookup))
         else:
             feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
-                # Multi-line station with a real pill: cluster dot at low
-                # zoom, pill takes over at mz. The per-platform dots that
-                # used to render alongside the pill caused visible wobble
-                # along the pill casing — `make_pill_features` now emits
-                # endpoint Points for singletons inside the cluster, and
-                # the pill itself stands in for every other platform.
+                # Multi-line station with a real pill: far-zoom dot at low
+                # zoom, pill takes over at mz. Rail-like family skips the
+                # intersection search; rule picks largest pill (by line
+                # count) → largest disc → centroid.
+                dot_lon, dot_lat = far_zoom_dot_position(
+                    cluster, feats, line_lookup,
+                    (centroid_lon, centroid_lat), rail_like=True)
                 rail_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": 5, "maxzoom": mz - 1},
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
                     "properties": centroid_props,
                 })
                 pill_features_rail.extend(feats)
             else:
                 # Multi-line cluster whose pill collapsed (all positions
                 # deduped to one point) — no pill is emitted, so the
-                # cluster dot stays visible at all zooms.
+                # cluster dot stays visible at all zooms at the centroid.
                 rail_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": 5},
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
                     "properties": centroid_props,
                 })
                 indicator_features.extend(build_indicator_features(
-                    cluster, lon, lat, line_lookup))
+                    cluster, centroid_lon, centroid_lat, line_lookup))
 
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
@@ -5101,6 +5489,11 @@ def main():
         lone_outlier_m = (LONE_OUTLIER_GAP_RAIL_METRO_M
                           if dom_mode == "metro"
                           else LONE_OUTLIER_GAP_BUS_TRAM_M)
+        # Preserve pre-placement pfaedle snaps for the far-zoom-dot
+        # intersection search and tiebreak centre.
+        for s in c:
+            s["snap_lon"] = s["lon"]
+            s["snap_lat"] = s["lat"]
         coordinate_dots_global_stab(c, PROTECTION_RADIUS_NONRAIL_M,
                                     lone_outlier_m)
     print("  → non-rail dot placement done")
@@ -5120,8 +5513,17 @@ def main():
         color, dom_mode, max_wb, dom_stop = dominant_line(cluster)
         mz = pill_minzoom(dom_mode, stop_count)
 
-        lon_c        = sum(s["lon"] for s in cluster) / len(cluster)
-        lat_c        = sum(s["lat"] for s in cluster) / len(cluster)
+        # rail_like decides whether the far-zoom rule runs the intersection
+        # search. Mountain rebucketed_rail / rack ride the non-rail pool
+        # (rare — most rebucketed_rail trips cluster with regular train), so
+        # detect them by dominant mode/mountain_origin here.
+        cluster_rail_like = (dom_mode == "train") or (
+            dom_mode == "mountain"
+            and any(s.get("mountain_origin") in MOUNTAIN_RAIL_ORIGINS
+                    for s in cluster))
+
+        centroid_lon = sum(s["lon"] for s in cluster) / len(cluster)
+        centroid_lat = sum(s["lat"] for s in cluster) / len(cluster)
         mode_minzoom = min(MODE_MINZOOM.get(s["mode"], 11) for s in cluster)
         lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
         centroid_props = {
@@ -5135,40 +5537,46 @@ def main():
         }
 
         if mz is None:
-            # Single-line stop: one cluster dot at all zooms.
+            # Single-line stop: one cluster dot at all zooms. Rule chain
+            # falls through to centroid (intersection needs ≥2 lines).
             nonrail_dot_features.append({
                 "type": "Feature",
                 "tippecanoe": {"minzoom": mode_minzoom},
-                "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
                 "properties": centroid_props,
             })
             indicator_features.extend(build_indicator_features(
-                cluster, lon_c, lat_c, line_lookup))
+                cluster, centroid_lon, centroid_lat, line_lookup))
         else:
             feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
             if feats:
-                # Multi-line stop with a real pill: cluster dot at low
-                # zoom, pill from `mz` up. See the matching rail-side
-                # comment above.
+                # Multi-line stop with a real pill: far-zoom dot at low
+                # zoom, pill from `mz` up. Non-rail family runs the
+                # intersection search first — at a crossroads the dot
+                # sits at the junction, not at the platform centroid.
+                dot_lon, dot_lat = far_zoom_dot_position(
+                    cluster, feats, line_lookup,
+                    (centroid_lon, centroid_lat),
+                    rail_like=cluster_rail_like)
                 nonrail_dot_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
-                    "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                    "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
                     "properties": centroid_props,
                 })
                 pill_features.extend(feats)
                 nonrail_pill_count += len(feats)
             else:
-                # Pill collapsed — cluster dot stays at all zooms in place
-                # of the missing pill.
+                # Pill collapsed — cluster dot stays at all zooms at the
+                # centroid (no pill, no disc, fall-through case).
                 nonrail_dot_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": mode_minzoom},
-                    "geometry": {"type": "Point", "coordinates": [lon_c, lat_c]},
+                    "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
                     "properties": centroid_props,
                 })
                 indicator_features.extend(build_indicator_features(
-                    cluster, lon_c, lat_c, line_lookup))
+                    cluster, centroid_lon, centroid_lat, line_lookup))
 
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
           f"from {len(nonrail_clusters):,} clusters")

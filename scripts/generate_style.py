@@ -1074,9 +1074,6 @@ def build_station_layers(cfg) -> list:
     ]
 
     for source, minzoom in stop_groups:
-        extra_filter = [["!=", ["get", "mode"], "ferry"]] if source == "transit_stops_regional" else []
-        layer_filter = ["all"] + extra_filter if extra_filter else None
-
         layer = {
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
@@ -1094,17 +1091,15 @@ def build_station_layers(cfg) -> list:
                 "circle-stroke-width": 1.0,
             }
         }
-        if layer_filter:
-            layer["filter"] = layer_filter
         layers.append(layer)
 
-    # Ferry stops render entirely through the non-rail pill paint stack
-    # (endpoints + connector from transit_stop_pills, minzoom PILL_MINZOOM
-    # = 12), so the disc, the optional connector, and the optional GTFS-
-    # side endpoint all share one set of style layers and the connector
-    # seam handling that comes with them. Ferry stops are therefore
-    # invisible until z13 (same as every non-train pill); ferry lines
-    # themselves still appear from z9. See pill-rendering.md § "Ferry stops".
+    # Ferry stops follow the same two-tier pattern as every other non-train
+    # mode: a low-zoom dot at z9–z12 (rendered through the regional source
+    # above) and a medium-zoom endpoint disc + optional connector + GTFS
+    # endpoint at z13+ (rendered through the pill paint stack below). The
+    # far-zoom dot is emitted at the canonical pier vertex; the pill paint
+    # stack carries the connector seam handling. See
+    # far-zoom-stop-markers.md § "Ferry far-zoom marker".
 
     # Hard cut at the appear-zoom — no opacity fade. Train pills appear
     # at z12 and every other mode at z13; the per-feature tippecanoe
