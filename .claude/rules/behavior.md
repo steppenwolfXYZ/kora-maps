@@ -12,11 +12,27 @@ A question is a question. An exclamation, a swearword, a "WTF", a "that sounds d
 
 - "what does X do?"
 - "why is X like that?"
+- "why is the red dot larger than the yellow dot?"
+- "why does X behave differently from Y?"
 - "sounds like a dumb idea"
 - "this is broken"
 - "I don't like X"
 - "X seems wrong"
 - "why on earth would we do that?"
+- "we have an issue with X"
+- "see screenshot — Y has no Z"
+- "the upper section is missing a dot"
+- "this should not happen"
+
+**Diagnostic "why" questions are the most dangerous to misread.** A question like "why is X happening?" describes an observation and asks for an explanation. It is **not** an authorisation to fix X. Even if the cause is obvious and the fix is small, the correct response is to **explain the cause and stop**. The user is gathering information so they can decide what to do next. Implementing a fix on their behalf takes that decision away from them and forces a revert if they disagree with the diagnosis or wanted a different fix.
+
+**Bug reports are not fix requests.** A message describing a problem — "X is broken / wrong / missing", a screenshot showing a visual defect, "we have an issue with Y" — is a symptom report and (implicitly) a diagnosis request. It is **not** an authorisation to change code. The correct response is: investigate, report findings in prose (cause, scope, fix sketch), and **stop**. The user decides whether to apply the fix. This rule holds even when the cause is unambiguous and the fix is a one-line change — the same one-liner can have side effects the user wants to weigh, and they may prefer a different fix than the one you'd write. "Could you check why X?" / "Could you investigate Y?" likewise stay in report mode. Default: when a message is a bug report, end with "want me to fix this?" and wait.
+
+**Prior authorization does not carry forward.** The most common violation: the user authorises an implementation, the implementation goes in, they then report that part of it didn't work ("Spiez is unchanged", "still not at the junction", "most of the issues are not solved", "the original dots are still there behind"). That follow-up is a NEW bug report — re-enter investigate-and-ask mode. The original "implement" does not become an open-ended license to keep editing until the user is happy. Each new turn is gated by its own authorisation. Continued-problem reports in particular feel like they're asking for continuation, but they are reports — investigate, report, ask.
+
+**Name the trap.** If you catch yourself thinking "while I'm here, I should also fix...", "the user obviously wants this resolved", "the rebuild output shows it didn't work, so I should fix it", or "this is clearly part of the work I was already doing" — that is the violation pattern. Stop and ask. Implicit authorisation is never authorisation.
+
+Do not revert prior edits on your own initiative either. If the user objects to an unauthorised change, do not assume they want it undone — they may want to keep, modify, or replace it. Leave the working tree as it is and let them direct the next step.
 
 Answer the question or acknowledge the reaction. Do not edit code, do not propose code edits, do not write concepts. A change happens only when the user explicitly authorises it with one of the words listed under "Investigation and analysis". When unsure whether the user wants action, ask.
 

@@ -1098,23 +1098,13 @@ def build_station_layers(cfg) -> list:
             layer["filter"] = layer_filter
         layers.append(layer)
 
-    layers.append({
-        "id": "transit-stop-fill-ferry",
-        "type": "circle",
-        "source": "transit_stops_regional",
-        "source-layer": "transit_stops",
-        "minzoom": 9,
-        "filter": ["==", ["get", "mode"], "ferry"],
-        "paint": {
-            "circle-color": "#ffffff",
-            "circle-radius": dot_radius(9),
-            "circle-opacity": ["interpolate", ["linear"], ["zoom"],
-                9, 0.0, 10.0, 1.0
-            ],
-            "circle-stroke-color": "#000000",
-            "circle-stroke-width": 1.0,
-        }
-    })
+    # Ferry stops render entirely through the non-rail pill paint stack
+    # (endpoints + connector from transit_stop_pills, minzoom PILL_MINZOOM
+    # = 11), so the disc, the optional connector, and the optional GTFS-
+    # side endpoint all share one set of style layers and the connector
+    # seam handling that comes with them. Ferry stops are therefore
+    # invisible at z9–z10 (same as bus stops); ferry lines themselves
+    # still appear from z9. See pill-rendering.md § "Ferry stops".
 
     PILL_MINZOOM = 11
 
@@ -1247,15 +1237,12 @@ def build_station_layers(cfg) -> list:
     INDICATOR_MINZOOM = 15
     INDICATOR_FADE_END = 15.3
 
-    # text-size tracks the parent's own diameter curve (z14: 1.5 × wb,
-    # z20: 12 × wb — same anchors the dot radius and pill line-width
-    # interpolations use). text-size == parent_diameter; the "●" glyph
-    # then visually fills ~0.5 × parent_diameter. Indicators stay at the
-    # same fraction of parent width at every zoom, instead of drifting
-    # bigger relative to the pill at low zoom.
+    # text-size depends on zoom only — all indicator dots are the same
+    # pixel size at a given zoom, regardless of the parent stop's
+    # line-width. Curve picked to match a wb≈3 parent visually.
     text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        14, ["*", ["get", "width_base"], 1.5],
-        20, ["*", ["get", "width_base"], 12.0],
+        14, 4.5,
+        20, 36.0,
     ]
 
     # text-offset is in em. Half-spacing per slot_unit; tight (just enough

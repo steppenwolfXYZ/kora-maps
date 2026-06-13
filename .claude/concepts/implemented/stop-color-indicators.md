@@ -56,9 +56,9 @@ Pills use the same layout at the pill's midpoint. At the indicator's small size 
 
 ### Sizing
 
-Indicator diameter scales with the parent's `width_base` AND with zoom, so indicators on a large train pill look proportionally large and those on a small bus dot look proportionally small. The size grows with zoom from z15 to z20, matching the rest of the stop family's natural growth.
+Indicator diameter depends on **zoom only** — every indicator dot is the same pixel size at a given zoom, regardless of the parent stop's line-width. This is a hard requirement: a heavily-served interchange and a quiet single-line stop both show indicators at the same size.
 
-The indicator-to-parent size ratio is **not exactly constant across zooms** — at low zoom the indicators are slightly larger relative to the parent than at high zoom. The mismatch comes from the gap between `text-size` (an MapLibre font-size value) and the actual visible "●" glyph diameter inside the em-box, which doesn't scale strictly linearly with `text-size` the way circle radii do. Anchoring `text-size` to the parent's own diameter curve (`1.5 × wb` at z14, `12 × wb` at z20) keeps the proportions close enough to look right at every zoom from z15 onward, and that's where the trade-off was left.
+The size grows with zoom from z15 to z20, matching the stop family's overall growth. The curve is tuned to look right against a typical median parent; on very narrow parents the indicators look comparatively large, and on very wide parents they look comparatively small — that's the accepted trade-off for keeping every indicator equal-sized.
 
 A new identifier introduced by this concept:
 
@@ -84,7 +84,7 @@ A single location can yield up to 6 indicator features (one per color group pres
 Indicators render via a **single symbol style layer** `transit-stop-indicator` in `build_station_layers`, sourced from `transit_stop_pills` with `feature_type=indicator`:
 
 - `text-field = "●"` (Unicode U+25CF BLACK CIRCLE) in `Noto Sans Regular`. The glyph's visible diameter is approximately 0.7 em.
-- `text-size` is data-driven on `width_base` and zoom-interpolated: `5 × width_base` px at z15 and `12 × width_base` px at z20. Indicators scale with both zoom and the parent's frequency-driven width.
+- `text-size` is zoom-only (no `width_base` reference): `4.5 px` at z14 and `36 px` at z20, linearly interpolated. All indicators are the same size at the same zoom.
 - `text-offset` is in em (so it auto-scales with `text-size`) via a `match` on `slot_units` returning literal pairs. Each unit corresponds to `0.28 em` horizontally, with a constant `-0.1 em` vertical compensation for the "●" glyph's vertical asymmetry inside its em-box (Noto Sans renders the bullet slightly below bbox center; the compensation nudges the anchor up in glyph-local space and rotates with the row).
 - `text-rotate` reads `tangent_deg` from the feature; combined with `text-rotation-alignment: map`, the entire row (offsets + glyphs) rotates with the parent's tangent.
 - `text-allow-overlap` / `text-ignore-placement` are true so all indicators always render, regardless of collisions.

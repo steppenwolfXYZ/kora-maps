@@ -643,13 +643,26 @@ def _mountain_origin(bucket: str, route_type: str):
 
 
 def _gate_exempt(bucket: str, mountain_origin) -> bool:
-    """True if a trip group is exempt from the three direction-coverage rules:
-    per-direction split, freq-score gate, active-days gate. Per the
-    direction-coverage concept these three share the same exemption set —
-    ferry + true mountain (aerial, funicular). Rebucketed rail is treated like
-    normal train across all three."""
+    """True if a trip group is exempt from the per-direction split and the
+    active-days gate. Ferries collapse direction-wise (one polyline serves
+    both directions) and run seasonally, so both rules don't apply to them.
+    True mountain (aerial, funicular) is exempt for the same reasons.
+    Rebucketed rail is treated like normal train.
+
+    Ferries are NOT exempt from the freq-score gate — see _freq_gate_exempt."""
     if bucket == "ferry":
         return True
+    if bucket == "mountain" and mountain_origin in ("aerial", "funicular"):
+        return True
+    return False
+
+
+def _freq_gate_exempt(bucket: str, mountain_origin) -> bool:
+    """True if a trip group is exempt from the freq-score gate
+    (f_weighted > worst_freq). Restricted to true mountain (aerial, funicular)
+    — these are scenic / on-demand services where any frequency is meaningful.
+    Ferries used to be exempt here; they are now gated like normal modes, with
+    a low `worst_freq.ferry` to preserve once-a-week-ish lake services."""
     if bucket == "mountain" and mountain_origin in ("aerial", "funicular"):
         return True
     return False
@@ -1397,7 +1410,7 @@ def main():
         raw = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
         f_weighted = weighted_freq(raw)
         worst_f = worst_freq_map.get(mode_approx, 0.0)
-        if _gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
+        if _freq_gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
             line_key[0] == "CC" and bucket == "train"
         ) or f_weighted > worst_f:
             drawable_groups[tg_key] = variant_map
@@ -1652,7 +1665,7 @@ def main():
             group_reason = "rare_group_dropped"
         elif tg_key in tg_keys_all_short_active:
             group_reason = "short_active_period"
-        elif _gate_exempt(bucket, mountain_origin) or (
+        elif _freq_gate_exempt(bucket, mountain_origin) or (
             short_name == "CC" and bucket == "train"
         ):
             # These should have been drawable; only here if neither emitted

@@ -13,8 +13,11 @@ The exclusion was introduced in the pill-rendering concept as an "out of scope" 
 The `mountain` bucket is heterogeneous. The rule splits by the `mountain_origin` property already attached to every mountain line feature in step 06:
 
 - **`rebucketed_rail` and `rack`** — handled identically to **rail** (train). They run on physical rail platforms with real platform geometry; many already carry atlas `length` (the rack agencies — Jungfraubahn, Wengernalpbahn, Monte Generoso — supply real 75–287 m platform values). They participate in clustering, pill construction, and connector emission exactly as `train` does.
-- **`funicular`** — handled like rail (centred ±L/2 anchoring, joins the rail-pill pipeline), but with **smaller default and sanity values** because funicular platforms are short (~20–40 m, with atlas typically reporting the cabin footprint 5–18 m).
-- **`aerial`** — **fixed dot** (see below). Aerial cable-car / gondola / elevator stations have no platform geometry and zero atlas length coverage. Each aerial stop locks its dot to the snapped GTFS coord and joins the pill pipeline with no extent freedom.
+- **`funicular`** — centred ±L/2 anchoring with **smaller default and sanity values** (funicular platforms are short, ~20–40 m; atlas typically reports the cabin footprint 5–18 m). Two funicular-specific rules:
+  - **Extent clipped to the polyline.** No straight-line tangent extrapolation. When the centred extent would reach a polyline endpoint, the asymmetric Fallback B anchor applies: the polyline side absorbs the full L (range = `[poly_max − L, poly_max]` or `[0, L]`). When the polyline is shorter than L, the extent is the full polyline.
+  - **Dot pinned to polyline endpoint when extent reaches it.** Whenever the extent uses the asymmetric anchor above, the stop's drawn dot is pinned to that polyline endpoint instead of the GTFS-coord projection. So a funicular endpoint stop always renders at the end of the line rather than somewhere inside the platform extent.
+  - **Non-rail clustering pool (50 m radius).** Funiculars do **not** join the rail clustering pool. Short funicular lines (Marzilibahn ≈ 108 m) routinely have both endpoint stops within the rail pool's 300 m radius, which collapses them into a single cluster — and because a single-line funicular cluster has `stop_count == 1`, the cluster renders as a centroid dot in the middle of the line instead of two endpoint dots. The 50 m non-rail radius keeps each endpoint as its own cluster while still co-clustering with adjacent tram/bus stops (Polybahn at Zürich Central, Rigiblickbahn at Zürich Seilbahn Rigiblick).
+- **`aerial`** — **fixed dot** (see below). Aerial cable-car / gondola / elevator stations have no platform geometry and zero atlas length coverage. Each aerial stop locks its dot to the snapped GTFS coord and joins the pill pipeline with no extent freedom. Aerial features are additionally **exempt from terminus dedup**: at cascade stations where one section ends and another begins (Stockhornbahn lower → upper aerial at Chrindi, Niederhornbahn funicular → upper aerial at Beatenberg), the GTFS feed assigns a single bare UIC across both sections, but each section is a separate physical aerialway. One dot per (line geometry, stop_id) — an aerial feature is never dropped by terminus dedup, and an aerial arrival never causes a paired departure to be dropped either.
 
 ### The fixed-dot concept
 
@@ -41,19 +44,17 @@ Atlas `length` values outside the sanity range fall through to the default, same
 
 ### Anchoring rule for the extent-bearing mountain origins
 
-For `mountain_origin in {rebucketed_rail, rack, funicular}` the GTFS coord is at the **platform centre**; the extent is `[snapped − L/2, snapped + L/2]`. This is the train/metro rule. When the polyline runs out before ±L/2 is satisfied, the missing side is **straight-line-extrapolated along the local tangent** (the metro behaviour), not via the OSM rail walk. Mountain polylines are not pre-extended by `_extend_polylines_at_terminals` — that function stays scoped to `train` — so the extrapolation handles terminus stations directly inside `_platform_extent`.
+For `mountain_origin in {rebucketed_rail, rack, funicular}` the GTFS coord is at the **platform centre**; the extent is `[snapped − L/2, snapped + L/2]`. Missing-side behaviour differs by origin:
 
-This is deliberately simpler than the train rule: no OSM walk, no `end_of_platform` Fallback B. The funicular / rack / rebucketed_rail terminal stations are visually small enough that a straight extrapolation at the terminus is acceptable for a first iteration; the rule can be tightened later if it produces visible wrong-direction extents.
+- **rebucketed_rail / rack** — same as train: the polyline is pre-extended at terminal stops by `_extend_polylines_at_terminals` via the OSM rail walk (rack/rebucketed_rail tracks are `railway=narrow_gauge`, present in step 03's rail extraction). When the OSM walk reaches the end of the way (Fallback B: Brienzer Rothorn, Pilatus Kulm, Jungfraujoch and similar summit termini), the asymmetric anchor applies: polyline side absorbs the full L, no line extension. The line itself is also extended via the same walk so the drawn line reaches the platform.
+- **funicular** — extent is clipped to the polyline; no extrapolation and no OSM walk (funicular tracks are `railway=funicular`, not in step 03's rail extraction). See the funicular bullet under "Scope by mountain_origin" for the full clip + endpoint-pin rule.
 
 ### Clustering
 
-In-scope mountain stops (rebucketed_rail / rack / funicular / aerial) join the **rail pill clustering pass**: 300 m radius, same `parent_station` merge, same dot-coordination algorithm, same sweep. This is what gives the desired co-cluster behaviour at shared stations:
+Mountain stops join one of two pill clustering pools based on `mountain_origin`:
 
-- Lauterbrunnen, Grindelwald, Brienz, Capolago, Sierre, Zermatt — train and rack platforms physically interleave; the cluster needs to span both.
-- Trockener Steg, Mürren, Bettmeralp Talstation, Pardiel, etc. — multiple aerial lines visit the same UIC; the cluster collects all of them.
-- Eigergletscher — Eiger Express (aerial) and Jungfraubahn (rack) share a UIC; the cluster mixes a fixed-dot aerial with an extent-bearing rack platform.
-
-Putting every in-scope mountain origin into the same clustering pool is what makes the last case work without a separate cross-pool merge step.
+- **Rail pool (300 m radius):** rebucketed_rail, rack, aerial. The 300 m radius is what makes the train ↔ rack co-cluster work at shared stations (Lauterbrunnen, Grindelwald, Brienz, Capolago, Sierre, Zermatt), where train platforms and rack platforms physically interleave. Aerial sits in the same pool so it co-clusters with rack at Eigergletscher (Eiger Express ↔ Jungfraubahn share UIC 8507361). Within-aerial co-clusters at Trockener Steg, Mürren, Bettmeralp Talstation, Pardiel etc. work uniformly here.
+- **Non-rail pool (50 m radius):** funicular. The smaller radius keeps funicular endpoint stops distinct on short lines while still allowing co-clustering with tram/bus at the bottom-station case (Polybahn ↔ Zürich Central, Rigiblickbahn ↔ Zürich Seilbahn Rigiblick). The two obscure funicular ↔ rebucketed_rail co-cluster cases (VerticAlp at Brünig-area UICs) are forgone — the funiculars there render in the non-rail pool and the rebucketed_rail in the rail pool, with two slightly offset dots at each shared station.
 
 ### Straight-line-fallback aerial features
 

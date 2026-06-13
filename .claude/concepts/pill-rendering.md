@@ -33,7 +33,7 @@ Each platform has an **allowed range** along its line's polyline, of length L: t
 
 The two-metre proximity gate rejects siblings that physically run on a different alignment at `p` (typical of one-way-pair buses with separate platforms on parallel streets — those siblings sit 20+ m away and are correctly excluded). The 15° tangent gate rejects siblings that share `p` but diverge in direction (typical of tram turning loops at termini, where two directions share a platform but curve apart within 20 m). Circular lines are their own siblings — the same feature is allowed to match itself, with the scan starting from the polyline's other end.
 
-**Missing-range fill (rail only).** When the polyline does not extend ±L/2 around the snapped coord `p`, the clipped side's missing arc-length is filled by the first of the following that succeeds. The rule is separate from the tram / bus sibling-borrow above because rail platforms typically sit on a single track with no good sibling-borrow candidate, but do have unambiguous OSM rail geometry under `p` to walk along.
+**Missing-range fill (rail and mountain rail-like).** Applies to train and mountain `rebucketed_rail` / `rack`. When the polyline does not extend ±L/2 around the snapped coord `p`, the clipped side's missing arc-length is filled by the first of the following that succeeds. The rule is separate from the tram / bus sibling-borrow above because these modes typically sit on a single track with no good sibling-borrow candidate, but do have unambiguous OSM rail geometry under `p` to walk along.
 
 1. **OSM rail walk.** At `p` with tangent `T` (the polyline's last-segment tangent at `p`), identify the OSM rail way under the polyline by combining proximity (within `osm_match_radius_m` of `p`) and tangent alignment (within `osm_match_max_tangent_diff_deg` of `T`, mod π). When a way matches, walk it in the clipped direction (away from where the polyline is) for the missing arc-length and use that segment as the fill. At interior nodes and junctions, the walk continues along the outgoing edge whose tangent best matches the incoming direction.
 2. **OSM way runs out.** When step 1 matches a way but the way reaches its end before the missing arc-length is fulfilled, treat the GTFS stop as the actual end of the platform. The clipped-side fill is dropped entirely; the polyline side absorbs the full L so the total range length stays L. `p` is then at one end of the range rather than its centre — an explicit exception to the anchoring rule above.
@@ -50,7 +50,7 @@ When multiple lines terminate at the same physical platform, each independently 
 
 `length` comes from atlas for rail (about 95% coverage); the remaining 5% use a per-mode default. Tram/bus use the per-mode default unconditionally — atlas does not carry `length` for those modes.
 
-Out-of-scope modes (ferry, mountain) render as today.
+Ferry renders as today (out of scope). Mountain participates per `.claude/concepts/mountain-line-pills.md`: rebucketed_rail / rack / funicular take the centred-extent rail-like path (with their own length config keys); aerial joins the rail clustering pool as a fixed dot (no extent).
 
 ### Dot placement
 
@@ -239,6 +239,24 @@ For tram / bus / regional_bus only, two additional rules drop arrival entries th
 
 Loop trips are technically in scope for rule 1; in Swiss feeds this rarely matters because circular routes are split into two directional segments. Rule 2 is independent of pairing — it fires whether or not rule 1 already would.
 
+### Ferry stops
+
+Ferries are out of scope for the pill rendering above: there is no platform geometry to align dots along, no atlas length, no per-line cluster to coordinate. But the pier rendering on basemap tiles is poor — the GTFS coordinate sits at the terminal building, while the ferry line's polyline runs through the boarding gate out in the water — and a single dot placed at either location reads as detached. So ferries get their own pattern: a stop disc at the boarding point with an optional connector back to the GTFS coord.
+
+Per `parent_station` (or `stop_id` when no parent), the renderer first computes a single **canonical pier position**, then chooses one of three outputs depending on geometry:
+
+**Canonical pier (closest-vertex medoid).** For each ferry line at the pier, find its polyline **vertex** (not its closest segment-point) closest to the GTFS coord — the natural "pier representative" for that line, pinned to an actual OSM node it shares with the other lines rather than a mid-segment interpolation. Take the medoid of those vertices (the vertex with the smallest sum of distances to all others). Return the medoid as the canonical pier position alongside the maximum distance from the medoid to any line's pier vertex — that max distance is the convergence-quality signal used below. Earlier iterations of this used closest-on-segment + iterative Weber and converged on whichever direction the GTFS-coord offset suggested, missing the actual shared OSM node at fan piers like Spiez Schiffstation (where 16 of 20 ferry trips share one OSM ferry node and the other 4 sit at a terminal node 17 m away).
+
+**Output selection.**
+
+1. **Non-convergent pier** (max vertex distance > `convergence_threshold_m`). The lines don't really meet at one boarding point — typical when the data lumps physically separate berths under one `parent_station`, or when one line terminates while others pass through. Fallback: one endpoint per visiting ferry line at that line's individual closest-point snap to GTFS. No shared disc, no connector.
+2. **Convergent + collapsed** (max vertex distance ≤ `convergence_threshold_m`, GTFS↔canonical < `collapse_threshold_m`). The boarding point is at the GTFS coord anyway — emit one endpoint at the canonical pier vertex.
+3. **Convergent + split** (max vertex distance ≤ `convergence_threshold_m`, GTFS↔canonical ≥ `collapse_threshold_m`). The basemap pier doesn't reach the boarding point. Emit the canonical-vertex endpoint plus a connector + GTFS-coord endpoint pair from the non-rail pill machinery.
+
+**Rendering architecture.** Every ferry stop feature — convergent or not, split or collapsed — is written into `transit_stop_pills.geojson` as either `feature_type = endpoint` (Point) or `feature_type = connector` (LineString) with `mode = ferry`. The existing non-rail pill paint stack — connector casing → connector fill → endpoint disc — draws them with no ferry-specific style layers, and the endpoint disc covers the connector's casing seam so the dot↔connector join is visually continuous. Because the pill paint stack is gated by `PILL_MINZOOM = 11`, ferry stops are invisible at z9–z10 (same as bus stops); ferry lines themselves still appear from z9. No separate low-zoom circle layer — every disc the user sees is the same pill endpoint feature, so there is no duplicate underneath at high zoom.
+
+**Dot size.** Ferry stop discs use a fixed `width_base`, independent of any individual ferry line's frequency-derived width. The default (`ferry_stops.dot_width_base = 2.5`) matches the median train-stop dot diameter, so ferry stops read as substantial transfer points regardless of how thin the ferry lines themselves are. The connector uses its own fixed `width_base` (`ferry_stops.connector_width_base = 1.0`) and is sized via the standard pill-connector zoom curve. Far-zoom and short-zoom ferry styles are out of scope.
+
 ### Per-mode defaults and sanity ranges
 
 The following values live in `config.yaml` and are tuned via configuration only, not code changes:
@@ -259,13 +277,13 @@ For each platform's allowed range:
 
 1. If atlas provides a sane `length` (within the per-mode sanity range), use it, anchored per the mode rule.
 2. Otherwise use the per-mode default length with the same anchor rule.
-3. For rail (train, metro): if the polyline does not symmetrically support ±L/2 around the snapped GTFS coord, the missing side is filled per the **missing-range fill (rail only)** rule above. The total range stays L in the OSM-walk and end-of-platform cases; if no OSM way matches, the clipped side is filled with a tangent-direction straight line capped at 50 m, so the total range can be less than L when L/2 > 50 m.
+3. For rail and mountain rail-like (train, metro, mountain rebucketed_rail / rack): if the polyline does not symmetrically support ±L/2 around the snapped GTFS coord, the missing side is filled per the **missing-range fill (rail and mountain rail-like)** rule above. The total range stays L in the OSM-walk and end-of-platform cases; if no OSM way matches, the clipped side is filled with a tangent-direction straight line capped at 50 m, so the total range can be less than L when L/2 > 50 m.
 4. For tram/bus/regional_bus: if the polyline does not extend L metres backward from the snapped GTFS coord, the missing backward portion is filled per the **missing-range fill** rule above — sibling borrow first, straight-line tangent extrapolation otherwise.
 5. If no fill step succeeds (e.g. polyline too short to compute a tangent), the range is clipped to whatever on-polyline geometry exists.
 
 ### Debug overlay
 
-Three debug elements render on top of the production style, filtered to the modes in scope (train, metro, tram, bus, regional_bus):
+Three debug elements render on top of the production style, filtered to the modes in scope (train, metro, tram, bus, regional_bus, mountain rebucketed_rail / rack / funicular):
 
 - A **thin black line** tracing each platform's full allowed range along its line's polyline — one per `(line, stop)` pair, including the extrapolated portions of any extent.
 - A **clickable circle** at the snapped GTFS coordinate. Filled black if that `(line, stop)` was placed on a perpendicular bar by the sweep; hollow (white fill, black outline) otherwise. Clicking opens a popup with the stop name, mode, atlas platform length (or `– (default)` when atlas had none), and mode-coloured badges for each line stopping there. Hovering a badge shows the line's `origin → destination` as a tooltip. The badge for the specific `(line, direction)` whose polyline produced the clicked dot is outlined with a black-on-white ring, so that when multiple dots overlap the same stop (e.g. both directions of a terminus) the user can tell which one is selected.
@@ -285,7 +303,7 @@ Items deferred from the current pass, in roughly the order they should be addres
 - Far-zoom and short-zoom stop styles are out of scope.
 - `compass_direction` from atlas is intentionally not consumed. The polyline tangent at the dot position is the orientation source for pill geometry.
 - Per-mode default lengths and atlas-`length` sanity ranges are configuration values.
-- Ferries and mountain modes are out of scope; they render as today.
+- Ferries don't get pills — the "Ferry stops" section above defines their two-dot + connector pattern instead. Mountain is handled per `.claude/concepts/mountain-line-pills.md` — rebucketed_rail / rack / funicular as extent-bearing rail-like pills, aerial as fixed dots in the rail clustering pool.
 - The bar-finding sweep runs only on σ-clumps with at least two distinct-position platforms, and reruns recursively on a σ-clump's still-unmatched members under the same condition. Singletons, singleton tangent groups, singleton σ-clumps within a multi-clump tangent group, and members left over after the recursion terminates all flow through the leftover-fill alongside the bars.
 - This concept depends on `prm-platform-positions` being implemented and `stop_attributes_sources.json` being emitted.
 - The implementation must not regress the rendering of stops without atlas data — the fallback chain guarantees an allowed range is always producible.

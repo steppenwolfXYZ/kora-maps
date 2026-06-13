@@ -15,7 +15,10 @@ Stop dot rules:
 Pill rules:
   - Pills appear when a cluster has ≥2 distinct OSM line IDs (osm_id).
   - Pill-appear zoom is determined by line count and dominant mode.
-  - Ferry and mountain modes: no pills.
+  - Ferry: no pills, but each parent_station emits a two-dot + connector
+    pattern (snap-side dot, optional GTFS-side dot, optional connector). See
+    pill-rendering.md § "Ferry stops".
+  - Mountain modes: no pills.
   - Pill geometry is derived from dot positions using a nearest-neighbor path:
       → Build a greedy nearest-neighbor path through ALL dot positions
         in the cluster. This ensures every dot is at a vertex of the pill.
@@ -66,9 +69,33 @@ _STABBED_PAIRS = set()
 # Per-mode platform-length defaults and sanity ranges from config.
 PILL_CFG = _transit_cfg.get("pill_rendering", {})
 
+# Ferry stop rendering: see config.yaml `ferry_stops` and pill-rendering.md
+# § "Ferry stops".
+FERRY_STOPS_CFG = _transit_cfg.get("ferry_stops", {}) or {}
+FERRY_DOT_WB           = float(FERRY_STOPS_CFG.get("dot_width_base", 2.5))
+FERRY_CONNECTOR_WB     = float(FERRY_STOPS_CFG.get("connector_width_base", 1.0))
+FERRY_COLLAPSE_M       = float(FERRY_STOPS_CFG.get("collapse_threshold_m", 15.0))
+FERRY_CONVERGE_M       = float(FERRY_STOPS_CFG.get("convergence_threshold_m", 20.0))
+
 RAIL_MODES = {"train"}
-# Modes that get pills; ferry and mountain are excluded
+# Modes that get pills via the non-rail pipeline. `train` uses the rail
+# pipeline (RAIL_MODES). Mountain pill routing is per-feature via
+# `mountain_origin` — see MOUNTAIN_PILL_ORIGINS below.
 PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus"}
+
+# Mountain origins that enter the rail pill pipeline. Splits:
+#   • MOUNTAIN_RAIL_ORIGINS — physical rail platforms; identical handling to
+#     `train` (centred ±L/2 extent, mountain_rail length config).
+#   • MOUNTAIN_EXTENT_ORIGINS — adds funicular with centred ±L/2 anchoring but
+#     a smaller per-mode length config (mountain_funicular).
+#   • MOUNTAIN_PILL_ORIGINS — adds aerial, which has no extent (no platform
+#     geometry, zero atlas coverage). Aerial stops join the rail clustering
+#     pool as fixed dots: position locked to the snapped GTFS coord, never
+#     moved by the sweep / leftover-fill, but allowed to participate in the
+#     NN-path / pill-split / connector logic.
+MOUNTAIN_RAIL_ORIGINS = {"rebucketed_rail", "rack"}
+MOUNTAIN_EXTENT_ORIGINS = MOUNTAIN_RAIL_ORIGINS | {"funicular"}
+MOUNTAIN_PILL_ORIGINS = MOUNTAIN_EXTENT_ORIGINS | {"aerial"}
 
 # Cluster radius for rail station dot deduplication (degrees ≈ 300m at CH lat)
 CLUSTER_DEG = 0.003
@@ -387,6 +414,13 @@ def compute_terminus_skip_oids(line_stops: dict,
     redundant. `line_lookup` is required to apply rule 1; `stop_meta` is
     additionally required for rule 2.
     """
+    def _is_aerial(oid):
+        if not line_lookup:
+            return False
+        info = line_lookup.get(oid) or line_lookup.get(str(oid))
+        return bool(info and info.get("mode") == "mountain"
+                    and info.get("mountain_origin") == "aerial")
+
     arrivals_by_sid: dict = {}
     departures: list = []
     arrivals_meta: list = []  # (osm_id, sid, lon, lat) for arrival-side rule
@@ -407,8 +441,19 @@ def compute_terminus_skip_oids(line_stops: dict,
     departures_by_sid: dict = {}
     for oid_dep, sid, lon_d, lat_d in departures:
         departures_by_sid.setdefault(sid, []).append((oid_dep, lon_d, lat_d))
+        # Aerial features are exempt from terminus dedup: at cable-car
+        # cascade stations (Niederhornbahn funicular → aerial at Beatenberg,
+        # Stockhornbahn lower → upper aerial at Chrindi) the GTFS feed
+        # assigns one bare UIC to the connection station, but the two
+        # sections are separate physical aerialways. Each (line geometry,
+        # stop_id) needs its own visible dot, so an aerial feature is never
+        # added to skip_first and never causes another feature to be added.
+        if _is_aerial(oid_dep):
+            continue
         for oid_arr, lon_a, lat_a in arrivals_by_sid.get(sid, []):
             if oid_arr == oid_dep:
+                continue
+            if _is_aerial(oid_arr):
                 continue
             if haversine_km(lon_d, lat_d, lon_a, lat_a) * 1000.0 <= radius_m:
                 skip_first.add(oid_dep)
@@ -880,9 +925,19 @@ def _osm_rail_walk(rail_idx, p_lon, p_lat,
 
 def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
                                      pill_cfg, stop_attrs):
-    """Extend train-line polylines at terminal stops via OSM rail walk
-    (Fallback A's capped straight when no way matches). Modifies
-    `line_lookup[oid]["coords"]` in place.
+    """Extend train and mountain rail-like polylines at terminal stops via
+    OSM rail walk (Fallback A's capped straight when no way matches).
+    Modifies `line_lookup[oid]["coords"]` in place.
+
+    Scope:
+      • `mode == "train"` — full rail.
+      • `mode == "mountain"` with `mountain_origin in MOUNTAIN_RAIL_ORIGINS`
+        (rebucketed_rail / rack) — physical rail (narrow_gauge), present in
+        `data/osm/rail_ways.geojson`. Uses `mountain_rail` length config.
+
+    Funicular and aerial mountain origins are skipped: funicular tracks are
+    `railway=funicular` (not in step 03's rail extraction), and aerial
+    cable cars have no rail geometry at all.
 
     Returns the set of (osm_id, stop_id) pairs that hit Fallback B — the OSM
     walk matched a way but the way chain ran out before reaching L/2. These
@@ -896,7 +951,10 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
     n_walk = n_straight = n_eop = 0
 
     for oid, info in line_lookup.items():
-        if info.get("mode") != "train":
+        mode = info.get("mode")
+        mo = info.get("mountain_origin")
+        if mode != "train" and not (
+                mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS):
             continue
         coords = info.get("coords")
         if not coords:
@@ -955,7 +1013,7 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
             walk_dy = tan[1] * sign
 
             atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
-            L = _resolve_length("train", atlas_len, pill_cfg)
+            L = _resolve_length(mode, atlas_len, pill_cfg, mountain_origin=mo)
             if L is None or L <= 0:
                 continue
             target_m = L / 2.0
@@ -1097,31 +1155,53 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
     return None
 
 
-def _resolve_length(mode: str, atlas_length, cfg: dict):
+def _length_key(mode: str, mountain_origin):
+    """Map (mode, mountain_origin) to a config key under
+    pill_rendering.{default,sanity_min,sanity_max}_length_m. Returns None
+    when no extent is defined for the stop (ferry; mountain aerial; any
+    out-of-scope mode)."""
+    if mode == "mountain":
+        if mountain_origin in MOUNTAIN_RAIL_ORIGINS:
+            return "mountain_rail"
+        if mountain_origin == "funicular":
+            return "mountain_funicular"
+        return None
+    return mode
+
+
+def _resolve_length(mode: str, atlas_length, cfg: dict, mountain_origin=None):
     """Pick the platform length to use for a given mode and atlas value.
 
     Atlas value is used when it lies within the per-mode sanity range;
     otherwise the per-mode default is returned. Returns None for modes
-    not in the rendering scope (ferry, mountain).
+    that don't carry a platform extent (ferry; mountain aerial).
     """
-    if mode not in cfg.get("default_length_m", {}):
+    key = _length_key(mode, mountain_origin)
+    if key is None or key not in cfg.get("default_length_m", {}):
         return None
-    smin = cfg["sanity_min_m"][mode]
-    smax = cfg["sanity_max_m"][mode]
+    smin = cfg["sanity_min_m"][key]
+    smax = cfg["sanity_max_m"][key]
     if atlas_length is not None and smin <= atlas_length <= smax:
         return atlas_length
-    return cfg["default_length_m"][mode]
+    return cfg["default_length_m"][key]
 
 
 def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
-                      osm_id=None, siblings=None, end_of_platform=False):
+                      osm_id=None, siblings=None, end_of_platform=False,
+                      mountain_origin=None):
     """Return the (lon, lat) sequence tracing the platform's allowed range
     along its polyline, or None for out-of-scope modes / degenerate geometry.
 
     Anchoring (per pill-rendering concept):
-      • train, metro  — GTFS coord (snapped to polyline) is platform CENTRE
-                        → range = ±L/2.
-      • tram, bus     — GTFS coord is FRONT of stop → range = [coord - L, coord].
+      • train, metro            — GTFS coord (snapped to polyline) is platform
+                                  CENTRE → range = ±L/2.
+      • mountain rebucketed_rail / rack / funicular — same as train/metro
+                                  (centred ±L/2), but with metro-style
+                                  straight-line extrapolation on the missing
+                                  side (mountain polylines are not pre-extended
+                                  by `_extend_polylines_at_terminals`).
+      • tram, bus               — GTFS coord is FRONT of stop → range
+                                  = [coord - L, coord].
 
     Missing-range fill differs by mode:
       • train: handled UPSTREAM by `_extend_polylines_at_terminals` — the
@@ -1130,17 +1210,19 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         ±L/2 slice fits within the polyline. `end_of_platform=True` flips
         the anchoring to asymmetric (Fallback B): the polyline side absorbs
         the full L and no extrapolation is performed.
-      • metro: straight-line tangent-direction extrapolation, unchanged from
-        the pre-OSM-walk behaviour (subway tracks are outside the rail-walk
-        filter list).
+      • metro, mountain rail-like / funicular: straight-line tangent-direction
+        extrapolation.
       • tram / bus / regional_bus: sibling-borrow first (passes through
         `siblings` as a list of (osm_id, polyline) tuples in the same
         `(ref, agency_id, mode)` group), straight-line tangent extrapolation
         as fallback.
+
+    Mountain aerial returns None — those stops are fixed-dot in the pill
+    pipeline and have no extent.
     """
     if len(polyline) < 2:
         return None
-    L = _resolve_length(mode, atlas_length, cfg)
+    L = _resolve_length(mode, atlas_length, cfg, mountain_origin=mountain_origin)
     if L is None:
         return None
     dists = _cum_dist_m(polyline)
@@ -1149,7 +1231,11 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         return None
     t = _project_meters(stop_lon, stop_lat, polyline, dists)
 
-    if mode not in ("train", "metro"):
+    is_centred_extent = (
+        mode in ("train", "metro")
+        or (mode == "mountain" and mountain_origin in MOUNTAIN_EXTENT_ORIGINS)
+    )
+    if not is_centred_extent:
         # Tram / bus / regional_bus: backward-anchored range [t-L, t].
         if t >= L:
             # Polyline supports the full backward range — slice and return.
@@ -1206,13 +1292,31 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
     on_end = min(poly_max, t_end_ideal)
     slice_pts = list(_slice_polyline(polyline, dists, on_start, on_end))
 
-    if mode == "train":
-        # Train extents rely on the polyline being pre-extended at terminals
-        # (OSM walk or capped 50 m straight) by
-        # `_extend_polylines_at_terminals`. Don't re-extrapolate here — the
-        # concept caps Fallback A at osm_fallback_max_straight_m, so any
-        # remaining clip on the missing side must stay clipped.
+    if mode == "train" or (
+            mode == "mountain" and mountain_origin in MOUNTAIN_RAIL_ORIGINS):
+        # Train and mountain rail-like (rebucketed_rail / rack) extents rely
+        # on the polyline being pre-extended at terminals (OSM walk or capped
+        # 50 m straight) by `_extend_polylines_at_terminals`. Don't
+        # re-extrapolate here — the concept caps Fallback A at
+        # osm_fallback_max_straight_m, so any remaining clip on the missing
+        # side must stay clipped.
         return slice_pts
+
+    if mode == "mountain" and mountain_origin == "funicular":
+        # Funicular: clip to the polyline. No straight-line extrapolation;
+        # when the centred ±L/2 extent would reach a polyline endpoint, use
+        # Fallback B-style asymmetric anchoring (polyline side absorbs the
+        # full L) so the extent stays within the line shape. The dot's snap
+        # is pinned to the same endpoint via `_funicular_snap_override`.
+        if t_end_ideal > poly_max:
+            t_start = max(0.0, poly_max - L)
+            t_end = poly_max
+        elif t_start_ideal < 0:
+            t_start = 0.0
+            t_end = min(poly_max, L)
+        else:
+            return slice_pts
+        return list(_slice_polyline(polyline, dists, t_start, t_end))
 
     # Metro: keep the symmetric straight-line extrapolation behaviour.
     tan = _directional_tangent_at(polyline, dists, t)
@@ -1235,6 +1339,31 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         ey = slice_pts[-1][1] + dy_per_m * missing_m
         pts.append((ex, ey))
     return pts
+
+
+def _funicular_snap_override(stop_lon, stop_lat, polyline, atlas_length, cfg):
+    """For funicular: when the centred ±L/2 extent would reach a polyline
+    endpoint, return that endpoint so the dot's snap pins there instead of
+    at the GTFS-coord projection. Returns None when the extent stays inside
+    the polyline (regular snap_to_line is fine) or the polyline is degenerate.
+    """
+    if len(polyline) < 2:
+        return None
+    L = _resolve_length("mountain", atlas_length, cfg,
+                         mountain_origin="funicular")
+    if L is None or L <= 0:
+        return None
+    dists = _cum_dist_m(polyline)
+    poly_max = dists[-1]
+    if poly_max <= 0:
+        return None
+    t = _project_meters(stop_lon, stop_lat, polyline, dists)
+    half_L = L / 2.0
+    if t + half_L >= poly_max:
+        return (polyline[-1][0], polyline[-1][1])
+    if t - half_L <= 0:
+        return (polyline[0][0], polyline[0][1])
+    return None
 
 
 # Window over which the per-stop polyline tangent is averaged. Sized to
@@ -2639,7 +2768,8 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
         if not line:
             continue
         mode = line["mode"]
-        if mode not in cfg["default_length_m"]:
+        mo = line.get("mountain_origin")
+        if _length_key(mode, mo) not in cfg["default_length_m"]:
             continue
         polyline = flatten_coords(line["coords"])
         if len(polyline) < 2:
@@ -2662,7 +2792,8 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
             extent = _platform_extent(stop_lon, stop_lat, polyline,
                                        mode, atlas_length, cfg,
                                        osm_id=str(osm_id), siblings=siblings,
-                                       end_of_platform=is_eop)
+                                       end_of_platform=is_eop,
+                                       mountain_origin=mo)
             if extent is None or len(extent) < 2:
                 continue
             feats.append({
@@ -2876,6 +3007,57 @@ def flatten_coords(coords):
     if coords and isinstance(coords[0][0], list):
         return [pt for seg in coords for pt in seg]
     return coords
+
+
+def _ferry_canonical_snap(polylines, gtfs):
+    """Find a single canonical on-line position for a pier served by
+    multiple ferry lines.
+
+    For each line, take its polyline VERTEX closest to the GTFS coord
+    (not the closest point on a segment). Closest-vertex matters at fan
+    piers like Spiez Schiffstation: most ferry trips ride the same OSM
+    ferry way out of the pier, and the way has a shared node V at the
+    physical convergence. The GTFS coord typically sits a few metres
+    inland on the building, so closest-segment-point slides east along
+    each line's first segment and ends up at the per-line GTFS projection
+    — never at V. Closest-vertex pins each line to the OSM node it
+    actually shares with the others, so the medoid lands at V.
+
+    The canonical is the medoid (vertex with min sum of distances to all
+    others). Returns (canonical_lonlat, max_distance_to_medoid_m). The
+    max distance is the convergence-quality signal: small ⇒ the lines
+    really do meet at one node; large ⇒ the parent_station bundles two
+    physically separate berths and the caller falls back to per-line
+    dots (see pill-rendering.md § "Ferry stops")."""
+    if not polylines:
+        return gtfs, 0.0
+    pier_verts = []
+    for pl in polylines:
+        if not pl:
+            continue
+        cv = min(pl, key=lambda v: (v[0] - gtfs[0]) ** 2 + (v[1] - gtfs[1]) ** 2)
+        pier_verts.append((float(cv[0]), float(cv[1])))
+    if not pier_verts:
+        return gtfs, 0.0
+    if len(pier_verts) == 1:
+        return pier_verts[0], 0.0
+    best_idx = 0
+    best_sum = float("inf")
+    for i, p in enumerate(pier_verts):
+        s = 0.0
+        for j, q in enumerate(pier_verts):
+            if i == j:
+                continue
+            s += haversine_km(p[0], p[1], q[0], q[1])
+        if s < best_sum:
+            best_sum = s
+            best_idx = i
+    medoid = pier_verts[best_idx]
+    max_dist_m = max(
+        haversine_km(v[0], v[1], medoid[0], medoid[1]) * 1000.0
+        for v in pier_verts
+    )
+    return medoid, max_dist_m
 
 
 def _polyline_midpoint(coords):
@@ -3136,8 +3318,8 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
     Pass the pill's local tangent angle for pill indicators; leave 0 for
     dot / disc indicators (screen-horizontal row).
 
-    Each feature carries `color`, `slot_units`, `tangent_deg`, `width_base`;
-    the row offset is applied paint-side per concept
+    Each feature carries `color`, `slot_units`, `tangent_deg`; the row
+    offset is applied paint-side per concept
     `.claude/concepts/stop-color-indicators.md`.
     """
     by_group: dict = {}
@@ -3161,7 +3343,6 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
 
     groups_present = [g for g in COLOR_GROUP_ORDER if g in by_group]
     n = len(groups_present)
-    wb = max((s.get("width_base", 1.0) for s in stops_at_location), default=1.0)
 
     feats = []
     # slot_units = 2*i - (n-1) gives a centered, integer-stepped sequence
@@ -3181,7 +3362,6 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
                 "color":        color,
                 "slot_units":   slot_units,
                 "tangent_deg":  round(tangent_deg, 2),
-                "width_base":   wb,
             },
         })
     return feats
@@ -4293,14 +4473,15 @@ def main():
         oid = str(p.get("osm_id", ""))
         if oid:
             line_lookup[oid] = {
-                "color":      p["color"],
-                "mode":       p["mode"],
-                "width_base": p.get("width_base", 3.0),
-                "freq_score": p.get("freq_score", 0.0),
-                "coords":     feat["geometry"]["coordinates"],
-                "ref":        p.get("ref", ""),
-                "name":       p.get("name", ""),
-                "agency_id":  p.get("agency_id", ""),
+                "color":           p["color"],
+                "mode":            p["mode"],
+                "mountain_origin": p.get("mountain_origin"),
+                "width_base":      p.get("width_base", 3.0),
+                "freq_score":      p.get("freq_score", 0.0),
+                "coords":          feat["geometry"]["coordinates"],
+                "ref":             p.get("ref", ""),
+                "name":            p.get("name", ""),
+                "agency_id":       p.get("agency_id", ""),
             }
         if p.get("gtfs_stops"):
             gtfs_stop_features.append(feat)
@@ -4330,18 +4511,23 @@ def main():
     print("Loading OSM rail ways for terminal extension...")
     rail_idx = _load_rail_index(RAIL_WAYS_GEOJSON)
 
-    print("Extending train polylines at terminal stops...")
+    print("Extending train and mountain rail-like polylines at terminal stops...")
     end_of_platform_pairs = _extend_polylines_at_terminals(
         line_lookup, line_stops, rail_idx, PILL_CFG, stop_attrs)
 
-    # Sync extended train polylines back into lines_data so transit_lines.geojson
+    # Sync extended polylines back into lines_data so transit_lines.geojson
     # on disk reflects the new geometry — step 08's pmtile build reads the file,
-    # not the in-memory line_lookup.
+    # not the in-memory line_lookup. Same scope as _extend_polylines_at_terminals:
+    # train + mountain rail-like (rebucketed_rail / rack).
     n_synced = 0
     for feat in lines_data["features"]:
-        if (feat.get("properties") or {}).get("mode") != "train":
+        props = feat.get("properties") or {}
+        mode = props.get("mode")
+        mo = props.get("mountain_origin")
+        if mode != "train" and not (
+                mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS):
             continue
-        oid = str(feat["properties"].get("osm_id", ""))
+        oid = str(props.get("osm_id", ""))
         if not oid:
             continue
         info = line_lookup.get(oid)
@@ -4351,7 +4537,7 @@ def main():
         feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]
         n_synced += 1
     LINES.write_text(json.dumps(lines_data, ensure_ascii=False))
-    print(f"  Wrote {n_synced:,} extended train polylines back to {LINES.name}")
+    print(f"  Wrote {n_synced:,} extended polylines back to {LINES.name}")
 
     skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
         line_stops, line_lookup, stop_meta)
@@ -4372,6 +4558,9 @@ def main():
     all_nonrail_pills = []   # ALL non-rail pill modes combined (tram+bus+metro+regional_bus)
     other_features    = []   # dot features for non-rail, ferry, mountain
     indicator_features = []  # mini per-color-group dots inside stop dots/discs/pills (z16+)
+    # Per-line ferry-stop snap candidates; aggregated by parent_station after
+    # the per-line loop. See pill-rendering.md § "Ferry stops".
+    ferry_candidates  = []
 
     # --- Mountain / straight-line features with embedded gtfs_stops ---
     for feat in gtfs_stop_features:
@@ -4408,6 +4597,7 @@ def main():
 
         color      = line["color"]
         mode       = line["mode"]
+        mo         = line.get("mountain_origin")
         width_base = line["width_base"]
         coords     = line["coords"]
         minzoom    = MODE_MINZOOM.get(mode, 11)
@@ -4419,7 +4609,24 @@ def main():
         sib_key = oid_sibling_key.get(str(osm_id))
         siblings = sibling_groups.get(sib_key, []) if sib_key else []
 
-        if mode in RAIL_MODES:
+        # Rail clustering pool (300 m radius): train, plus mountain origins
+        # that share station-scale geometry with rail — rebucketed_rail / rack
+        # (centred ±L/2 with OSM rail walk at terminals) and aerial (fixed
+        # dot, extent=None; in the rail pool so it co-clusters with rack at
+        # Eigergletscher).
+        # Funicular goes to the **non-rail** pool below: its endpoint stops
+        # are often within 300 m of each other along a short line (Marzilibahn
+        # 108 m), which the 300 m rail radius merges into a single centroid
+        # dot.  The 50 m non-rail radius keeps each endpoint distinct while
+        # still co-clustering with adjacent tram/bus stops (Polybahn at
+        # Zürich Central etc.).
+        in_rail_pool = (
+            mode in RAIL_MODES
+            or (mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS | {"aerial"})
+        )
+        funicular_in_nonrail_pool = (mode == "mountain" and mo == "funicular")
+
+        if in_rail_pool:
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
                     continue
@@ -4435,7 +4642,8 @@ def main():
                 is_eop = (str(osm_id), sid) in end_of_platform_pairs
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
                                           osm_id=str(osm_id), siblings=siblings,
-                                          end_of_platform=is_eop)
+                                          end_of_platform=is_eop,
+                                          mountain_origin=mo)
                 rail_pill_raw.append({
                     "lon":            slon,
                     "lat":            slat,
@@ -4451,7 +4659,9 @@ def main():
                 })
 
         elif mode == "ferry":
-            line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
+            # Defer ferry-stop emission to the post-loop aggregation pass —
+            # the canonical on-line position depends on every line visiting
+            # the pier, not just this one. See "Ferry stop aggregation" below.
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
                     continue
@@ -4460,25 +4670,20 @@ def main():
                 lon, lat = entry[0], entry[1]
                 sid      = entry[2] if len(entry) > 2 else ""
                 meta     = stop_meta.get(sid, {})
-                other_features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": minzoom},
-                    "geometry": {"type": "Point", "coordinates": [lon, lat]},
-                    "properties": {
-                        "color":          color,
-                        "mode":           mode,
-                        "width_base":     width_base,
-                        "stop_id":        sid,
-                        "stop_name":      meta.get("name", ""),
-                        "parent_station": meta.get("parent", ""),
-                        "lines_json":     line_lines_json,
-                    },
+                ferry_candidates.append({
+                    "gtfs_lon":       lon,
+                    "gtfs_lat":       lat,
+                    "stop_id":        sid,
+                    "stop_name":      meta.get("name", ""),
+                    "parent_station": meta.get("parent", ""),
+                    "color":          color,
+                    "osm_id":         osm_id,
+                    "line":           line,
+                    "polyline":       flat,
+                    "minzoom":        minzoom,
                 })
-                indicator_features.extend(build_indicator_features(
-                    [{"osm_id": str(osm_id), "width_base": width_base}],
-                    lon, lat, line_lookup))
 
-        elif mode in PILL_MODES:
+        elif mode in PILL_MODES or funicular_in_nonrail_pool:
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
                     continue
@@ -4489,10 +4694,19 @@ def main():
                 meta       = stop_meta.get(sid, {})
                 stop_name  = meta.get("name", "")
                 parent_sta = meta.get("parent", "")
-                cx, cy = snap_to_line(lon, lat, flat)
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                # Funicular: pin the snap to the polyline endpoint when the
+                # extent reaches it (mountain-line-pills concept). Otherwise
+                # use the regular polyline projection.
+                if funicular_in_nonrail_pool:
+                    override = _funicular_snap_override(
+                        lon, lat, flat, atlas_len, PILL_CFG)
+                    cx, cy = override if override is not None else snap_to_line(lon, lat, flat)
+                else:
+                    cx, cy = snap_to_line(lon, lat, flat)
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
-                                          osm_id=str(osm_id), siblings=siblings)
+                                          osm_id=str(osm_id), siblings=siblings,
+                                          mountain_origin=mo)
                 # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
                     "lon":            cx,
@@ -4535,6 +4749,153 @@ def main():
                 indicator_features.extend(build_indicator_features(
                     [{"osm_id": str(osm_id), "width_base": width_base}],
                     slon, slat, line_lookup))
+
+    # --- Ferry stop aggregation (parent_station → one disc) ---------------
+    # Group ferry candidates by parent_station (or stop_id when no parent),
+    # run the closest-vertex medoid to find the pier's canonical OSM node,
+    # and emit pill endpoint / connector features only. No separate dot
+    # circle in transit_stops.geojson — every ferry stop renders through
+    # the non-rail pill paint stack, so the connector seam handling and
+    # PILL_MINZOOM = 11 gating come for free. Ferry stops are therefore
+    # invisible below z11 (same as bus stops), with the lines themselves
+    # still appearing from z9.
+    #
+    # Three branches:
+    #
+    #   Convergent + collapsed (max-vertex-distance ≤ convergence_threshold_m
+    #     AND GTFS↔canonical < collapse_threshold_m):
+    #       one endpoint at the canonical vertex.
+    #
+    #   Convergent + split (same convergence test, GTFS↔canonical ≥ threshold):
+    #       endpoint at canonical + endpoint at GTFS + connector between.
+    #
+    #   Non-convergent (vertices spread beyond convergence_threshold_m):
+    #     One endpoint per visiting line at that line's individual closest-
+    #     point snap to GTFS. No shared disc, no connector.
+    #
+    # See pill-rendering.md § "Ferry stops".
+    ferry_by_pier: dict = {}
+    for cand in ferry_candidates:
+        pier_key = cand["parent_station"] or cand["stop_id"]
+        ferry_by_pier.setdefault(pier_key, []).append(cand)
+
+    ferry_pill_features = []
+    n_ferry_collapsed = 0
+    n_ferry_split = 0
+    n_ferry_diverged = 0
+    FERRY_PILL_MZ = 11
+    for pier_key, cands in ferry_by_pier.items():
+        gtfs_repr = (cands[0]["gtfs_lon"], cands[0]["gtfs_lat"])
+
+        # Aggregate all lines visiting this pier into one lines_json blob —
+        # the popup at the pier should list every ferry line, not just the
+        # one whose feature spawned the dot.
+        lines_seen = set()
+        lines_json_list = []
+        for c in cands:
+            line = c["line"] or {}
+            ref = line.get("gtfs_ref") or line.get("ref", "")
+            name = line.get("name", "")
+            key = (ref, name)
+            if key in lines_seen:
+                continue
+            lines_seen.add(key)
+            lines_json_list.append({
+                "ref":   ref,
+                "color": c["color"],
+                "mode":  "ferry",
+                "name":  name,
+            })
+        lines_json_str = json.dumps(lines_json_list)
+
+        rep = cands[0]
+        base_props = {
+            "color":          rep["color"],
+            "mode":           "ferry",
+            "width_base":     FERRY_DOT_WB,
+            "stop_id":        rep["stop_id"],
+            "stop_name":      rep["stop_name"],
+            "parent_station": rep["parent_station"],
+            "lines_json":     lines_json_str,
+        }
+        indicator_stubs = [{"osm_id": str(c["osm_id"])} for c in cands]
+
+        # Dedup polylines by osm_id — the same line can visit the pier twice
+        # (e.g. an arrival + departure entry) and we only want it counted once.
+        seen_oids = set()
+        polylines = []
+        for c in cands:
+            oid = c["osm_id"]
+            if oid in seen_oids:
+                continue
+            seen_oids.add(oid)
+            polylines.append(c["polyline"])
+
+        canon, max_vertex_dist_m = _ferry_canonical_snap(polylines, gtfs_repr)
+
+        if max_vertex_dist_m > FERRY_CONVERGE_M:
+            # Non-convergent fallback: per-line endpoint at each line's own snap.
+            n_ferry_diverged += 1
+            for c in cands:
+                slon, slat = snap_to_line(c["gtfs_lon"], c["gtfs_lat"],
+                                          c["polyline"])
+                ferry_pill_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+                    "geometry": {"type": "Point", "coordinates": [slon, slat]},
+                    "properties": {**base_props,
+                                   "stop_id":      c["stop_id"],
+                                   "stop_name":    c["stop_name"],
+                                   "feature_type": "endpoint"},
+                })
+                indicator_features.extend(build_indicator_features(
+                    [{"osm_id": str(c["osm_id"])}],
+                    slon, slat, line_lookup))
+            continue
+
+        # Convergent: one canonical pier vertex shared across lines.
+        ferry_pill_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "geometry": {"type": "Point", "coordinates": [canon[0], canon[1]]},
+            "properties": {**base_props, "feature_type": "endpoint"},
+        })
+        indicator_features.extend(build_indicator_features(
+            indicator_stubs, canon[0], canon[1], line_lookup))
+
+        dist_m = haversine_km(gtfs_repr[0], gtfs_repr[1],
+                              canon[0], canon[1]) * 1000.0
+        if dist_m < FERRY_COLLAPSE_M:
+            n_ferry_collapsed += 1
+            continue
+
+        # Split: GTFS-side endpoint + connector. The on-line endpoint above
+        # plus this GTFS endpoint give the connector a disc at each end; the
+        # existing pill paint stack (connector casing → connector fill →
+        # endpoint disc) handles the dot↔connector seam at both joints.
+        n_ferry_split += 1
+        ferry_pill_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "geometry": {"type": "Point",
+                         "coordinates": [gtfs_repr[0], gtfs_repr[1]]},
+            "properties": {**base_props, "feature_type": "endpoint"},
+        })
+        ferry_pill_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": FERRY_PILL_MZ},
+            "geometry": {"type": "LineString",
+                         "coordinates": [
+                             [gtfs_repr[0], gtfs_repr[1]],
+                             [canon[0], canon[1]],
+                         ]},
+            "properties": {**base_props,
+                           "width_base":   FERRY_CONNECTOR_WB,
+                           "feature_type": "connector"},
+        })
+    print(f"  Ferry stops: {len(ferry_by_pier):,} piers "
+          f"({n_ferry_split:,} split, {n_ferry_collapsed:,} collapsed, "
+          f"{n_ferry_diverged:,} per-line fallback)")
 
     # --- Rail dots + pills (unified pass) ---
     print(f"  {len(rail_pill_raw):,} raw rail stop positions → clustering...")
@@ -4710,6 +5071,7 @@ def main():
     dot_features = rail_features + other_features + nonrail_dot_features
     OUT_DOTS.parent.mkdir(parents=True, exist_ok=True)
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
+    pill_features.extend(ferry_pill_features)
     pill_features.extend(indicator_features)
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
 

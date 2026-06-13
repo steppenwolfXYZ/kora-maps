@@ -89,23 +89,29 @@ mountain_agency_ids:
 # — catches 0 m placeholders and km-scale ferry-route mislabels.
 pill_rendering:
   default_length_m:
-    train:        100
-    metro:         60
-    tram:          35
-    bus:           30
-    regional_bus:  30
+    train:              100
+    metro:               60
+    tram:                35
+    bus:                 30
+    regional_bus:        30
+    mountain_rail:      100   # mountain_origin in {rebucketed_rail, rack}
+    mountain_funicular:  25
   sanity_min_m:
-    train:         30
-    metro:         30
-    tram:          10
-    bus:            5
-    regional_bus:   5
+    train:               30
+    metro:               30
+    tram:                10
+    bus:                  5
+    regional_bus:         5
+    mountain_rail:       30
+    mountain_funicular:  10
   sanity_max_m:
-    train:        700
-    metro:        400
-    tram:         100
-    bus:          100
-    regional_bus: 100
+    train:              700
+    metro:              400
+    tram:               100
+    bus:                100
+    regional_bus:       100
+    mountain_rail:      700
+    mountain_funicular:  60
   perp_platform_tol_deg: 5.0
   # ── Rail-only missing-range fill (terminal train stops) ─────────────────
   # See pill-rendering concept § "Missing-range fill (rail only)". When the
@@ -119,6 +125,36 @@ pill_rendering:
   osm_match_max_tangent_diff_deg: 15.0
   osm_fallback_max_straight_m: 50.0
 
+# ── Ferry stop rendering ────────────────────────────────────────────────────
+# Ferries don't get pills (no platform). Instead each parent_station emits:
+# a big white dot at the canonical on-line snap, and — if the GTFS coord sits
+# more than `collapse_threshold_m` from the snap — a second dot at the GTFS
+# coord plus a short connector between the two. The pier itself is poorly
+# drawn in basemap tiles, so the connector visually bridges land→boarding
+# point. The canonical snap is the medoid of each ferry line's individual
+# snap onto its own polyline (so all lines at the pier share one stop disc).
+#
+# `dot_width_base` is a fixed visual size, NOT a freq-derived value — every
+# ferry stop dot renders at the same diameter regardless of how thick the
+# ferry line is (typical ferry line widths are clustered near the floor).
+# 2.5 matches the median train-stop dot diameter.
+# `connector_width_base` drives the connector's line-width via the standard
+# pill connector curve; 1.0 keeps it visibly thinner than the dot.
+# `collapse_threshold_m` is the GTFS↔snap distance below which the GTFS-side
+# dot and connector are suppressed and only the snap dot is drawn.
+ferry_stops:
+  dot_width_base:          2.5
+  connector_width_base:    1.0
+  collapse_threshold_m:    15
+  # Max allowed distance from the canonical pier vertex (medoid of each
+  # line's closest polyline vertex to the GTFS coord) to any other line's
+  # pier vertex. Above this, the parent_station bundles physically
+  # separate berths — the renderer falls back to one dot per line at each
+  # line's individual GTFS snap (no shared canonical disc, no connector).
+  # Spiez-style fans where 16 of 20 lines share one OSM node and the
+  # other 4 sit at a terminal node ~17 m away stay under 20 m.
+  convergence_threshold_m: 20
+
 # ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
 # Endpoints of the per-bucket frequency score curve. The line's weighted
 # frequency (window_weights × per-window trips/hour) is mapped onto [0, 1]:
@@ -127,8 +163,10 @@ pill_rendering:
 # Between the endpoints, the score is computed on a log curve with a power
 # applied to bend the mid-range. See
 # .claude/concepts/frequency-weighted-line-scoring.md.
-# Ferry's worst_freq is intentionally low so seasonal once-daily lake services
-# (BAT 74 Brienz, Thunersee, Walensee, etc.) clear the freq gate.
+# Ferry's worst_freq is intentionally low so seasonal lake services (BAT 74
+# Brienz, Thunersee, Walensee, etc.) clear the freq gate. Ferries are NOT
+# gate-exempt — 0.010 trips/hour ≈ a line running roughly five trips a week,
+# which drops only the lowest-tier lake services.
 # Mountain values are informational — mountain is exempt from the freq gate.
 # Every bucket appearing in either table must appear in both; a missing entry
 # is a fatal config error.
@@ -147,7 +185,7 @@ frequency:
     metro:           0.8
     bus:             0.75
     regional_bus:    0.17
-    ferry:           0.029
+    ferry:           0.010
     mountain:        0.05
 
 # ── Per-window weights ───────────────────────────────────────────────────────
