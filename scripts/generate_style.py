@@ -972,25 +972,39 @@ def build_label_layers(cfg):
 # Transit layer
 # =============================================================================
 
-# (mode value in GeoJSON, minzoom)
-# ORDER MATTERS: drawn bottom-to-top — less important modes first,
-# so faster/more important lines always render on top.
+# Salience-based visibility (see .claude/concepts/salience-ranking.md): each
+# transit_line feature carries `tippecanoe.minzoom = min_zoom` baked in by
+# 06_score_and_match.py, so the per-mode layer minzoom acts only as an absolute
+# floor. With salience controlling, all modes share the same floor (z5) and
+# the same width curve. ORDER MATTERS: drawn bottom-to-top — less important
+# modes first, so faster/more important lines always render on top.
 TRANSIT_MODE_LAYERS = [
-    ("mountain",      8),
-    ("regional_bus",  8),
-    ("bus",          11),
-    ("ferry",         8),
-    ("metro",         9),
-    ("tram",         10),
-    ("train",         5),
+    "mountain",
+    "regional_bus",
+    "bus",
+    "ferry",
+    "metro",
+    "tram",
+    "train",
 ]
+
+TRANSIT_LINE_FLOOR_ZOOM = 5
 
 GTFS_MATCHED_FILTER = ["==", ["get", "gtfs_matched"], True]
 
+# Salience filter: enforces the per-feature float `min_zoom` at render time
+# so features appear at fractional zoom levels. Features without `min_zoom`
+# default to always-visible (coalesce to 0). See salience-ranking concept.
+SALIENCE_FILTER = [">=", ["zoom"], ["coalesce", ["get", "min_zoom"], 0]]
+
 def build_transit_layers() -> list:
     layers = []
-    for mode, minzoom in TRANSIT_MODE_LAYERS:
-        base_filter = ["all", ["==", ["get", "mode"], mode], GTFS_MATCHED_FILTER]
+    floor = TRANSIT_LINE_FLOOR_ZOOM
+    for mode in TRANSIT_MODE_LAYERS:
+        base_filter = ["all",
+                       ["==", ["get", "mode"], mode],
+                       GTFS_MATCHED_FILTER,
+                       SALIENCE_FILTER]
 
         # Casing — halo drawn under the color line so lines separate visually.
         casing_color = "#ffffff"
@@ -999,7 +1013,7 @@ def build_transit_layers() -> list:
             "type": "line",
             "source": "transit_lines",
             "source-layer": "transit_lines",
-            "minzoom": minzoom,
+            "minzoom": floor,
             "filter": base_filter,
             "layout": {
                 "line-cap": "round",
@@ -1010,14 +1024,11 @@ def build_transit_layers() -> list:
             "paint": {
                 "line-color": casing_color,
                 "line-width": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,     ["+", ["*", ["get", "width_base"], 0.4], 2.0],
+                    floor,       ["+", ["*", ["get", "width_base"], 0.4], 2.0],
                     14,          ["+", ["get", "width_base"], 2.0],
                     18,          ["+", ["*", ["get", "width_base"], 4.0], 2.0]
                 ],
-                "line-opacity": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,       0.0,
-                    minzoom + 1.5, 0.9
-                ]
+                "line-opacity": 0.9
             }
         })
 
@@ -1027,7 +1038,7 @@ def build_transit_layers() -> list:
             "type": "line",
             "source": "transit_lines",
             "source-layer": "transit_lines",
-            "minzoom": minzoom,
+            "minzoom": floor,
             "filter": base_filter,
             "layout": {
                 "line-cap": "round",
@@ -1037,14 +1048,11 @@ def build_transit_layers() -> list:
             "paint": {
                 "line-color": ["get", "color"],
                 "line-width": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,     ["*", ["get", "width_base"], 0.4],
+                    floor,       ["*", ["get", "width_base"], 0.4],
                     14,          ["get", "width_base"],
                     18,          ["*", ["get", "width_base"], 4.0]
                 ],
-                "line-opacity": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,       0.0,
-                    minzoom + 1.5, 0.85
-                ]
+                "line-opacity": 0.85
             }
         })
     return layers
@@ -1080,13 +1088,11 @@ def build_station_layers(cfg) -> list:
             "source": source,
             "source-layer": "transit_stops",
             "minzoom": minzoom,
+            "filter": SALIENCE_FILTER,
             "paint": {
                 "circle-color": "#ffffff",
                 "circle-radius": dot_radius(minzoom),
-                "circle-opacity": ["interpolate", ["linear"], ["zoom"],
-                    minzoom,       0.0,
-                    minzoom + 1.0, 1.0,
-                ],
+                "circle-opacity": 1.0,
                 "circle-stroke-color": "#000000",
                 "circle-stroke-width": 1.0,
             }

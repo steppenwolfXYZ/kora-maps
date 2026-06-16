@@ -39,7 +39,7 @@ import json
 import colorsys
 import sys
 from collections import defaultdict
-from math import radians, cos, sin, sqrt, atan2, log
+from math import radians, cos, sin, sqrt, atan2, log, ceil, floor
 from pathlib import Path
 from typing import Optional
 
@@ -106,6 +106,90 @@ SCORE_POWER = 2.5
 _FREQ_CACHE: dict = {}
 _WEIGHTS_CACHE: dict = {}
 _LINE_WIDTH_CACHE: dict = {}
+_SALIENCE_CACHE: dict = {}
+
+
+def _salience_cfg() -> dict:
+    """Salience block from config.yaml. Cached. See
+    .claude/concepts/salience-ranking.md."""
+    if _SALIENCE_CACHE:
+        return _SALIENCE_CACHE["cfg"]
+    cfg = yaml.safe_load(CFG_PATH.read_text())
+    sc = cfg.get("salience") or {}
+    if not sc:
+        sys.exit("config.yaml is missing salience section.")
+    _SALIENCE_CACHE["cfg"] = sc
+    return sc
+
+
+def score_to_min_zoom(score: float, mode: str, ranges: dict,
+                      default_range=(5.0, 12.0)) -> float:
+    """Map salience [0, 1] → float min_zoom via the per-mode (z_low, z_high)
+    range. Salience 1.0 → z_low (visible earliest); salience 0.0 → z_high
+    (visible latest). Linear and continuous — features land at fractional
+    zoom levels (e.g. 7.42), enforced at render time by a style filter."""
+    rng = ranges.get(mode) or ranges.get("default") or list(default_range)
+    z_low, z_high = float(rng[0]), float(rng[1])
+    s = max(0.0, min(1.0, float(score)))
+    return z_high - s * (z_high - z_low)
+
+
+# Meters per degree at equator; lon component is additionally scaled by
+# cos(latitude) for equal-distance projection. Used by the line-graph
+# UIC clustering for connectivity.
+_M_PER_DEG = 111319.49
+
+
+def _cluster_uics(uic_coords: dict, threshold_m: float) -> dict:
+    """Cluster UIC nodes whose coordinates are within `threshold_m` of each
+    other into one super-node. Returns {uic: super_id}. Used for the
+    connectivity line-graph in the salience-ranking concept (transfer
+    points whose GTFS parents differ but are physically the same).
+
+    Implementation: grid-cell candidate search + union-find.
+    """
+    if not uic_coords:
+        return {}
+    # Grid cell sized at the threshold; any candidate must be in same or 8
+    # neighbouring cells. Use latitude-corrected degree size at CH lat.
+    lat0 = sum(lat for _lon, lat in uic_coords.values()) / len(uic_coords)
+    cos_lat = cos(radians(lat0)) or 1e-9
+    cell_lat_deg = threshold_m / _M_PER_DEG
+    cell_lon_deg = cell_lat_deg / cos_lat
+
+    grid: dict = defaultdict(list)
+    for uic, (lon, lat) in uic_coords.items():
+        cx = int(floor(lon / cell_lon_deg))
+        cy = int(floor(lat / cell_lat_deg))
+        grid[(cx, cy)].append(uic)
+
+    uic_list = list(uic_coords.keys())
+    parent: dict = {u: u for u in uic_list}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    threshold_m_sq = threshold_m * threshold_m
+    for uic, (lon, lat) in uic_coords.items():
+        cx = int(floor(lon / cell_lon_deg))
+        cy = int(floor(lat / cell_lat_deg))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for other in grid.get((cx + dx, cy + dy), ()):
+                    if other == uic:
+                        continue
+                    olon, olat = uic_coords[other]
+                    mdx = (olon - lon) * cos_lat * _M_PER_DEG
+                    mdy = (olat - lat) * _M_PER_DEG
+                    if mdx * mdx + mdy * mdy <= threshold_m_sq:
+                        ru, ro = find(uic), find(other)
+                        if ru != ro:
+                            parent[ru] = ro
+
+    return {u: find(u) for u in uic_list}
 
 
 def _frequencies() -> tuple:
@@ -1598,6 +1682,343 @@ def main():
     features = deduplicate_mountain(features)
     kept_ids = {f["properties"]["osm_id"] for f in features}
     line_stops_out = {oid: v for oid, v in line_stops_out.items() if oid in kept_ids}
+
+    # ── Line salience → own_min_zoom (per feature) ──────────────────────────
+    # See .claude/concepts/salience-ranking.md.
+    # absolute = freq_score
+    # relative = mean tier-filtered percentile of this line's f_weighted vs
+    #            comparator-mode lines at each stop it serves (mode-tier rule)
+    # speed    = speed_kmh normalised by per-mode max
+    # mountain_boost added for mountain features (additive).
+    print("\nComputing line salience...")
+    sal_cfg = _salience_cfg()
+    w_abs   = float(sal_cfg.get("weight_absolute", 0.45))
+    w_rel   = float(sal_cfg.get("weight_relative", 0.30))
+    w_speed = float(sal_cfg.get("weight_speed",    0.25))
+    mode_zoom_range = (sal_cfg.get("mode_zoom_range_lines")
+                       or sal_cfg.get("mode_zoom_range")  # legacy fallback
+                       or {})
+    mode_tiers_raw = sal_cfg.get("mode_tiers") or {}
+    mode_tiers = {m: frozenset(ms) for m, ms in mode_tiers_raw.items()}
+
+    def _comparators_for(mode: str) -> frozenset:
+        return mode_tiers.get(mode, frozenset({mode}))
+
+    # (ref, agency_id, tg_id) → tg_key lookup so we can fetch raw freq per
+    # feature. (ref, agency, tg_id) is unique across emitted features.
+    tg_lookup: dict = {}
+    for tg_key in tg_freq.keys():
+        line_key, aid, tg_id = tg_key
+        sn, _ln, _bkt = line_key
+        tg_lookup[(sn, aid, tg_id)] = tg_key
+
+    f_weighted_by_oid: dict = {}
+    mode_by_oid: dict = {}
+    for f in features:
+        p = f["properties"]
+        key = (p["ref"], p["agency_id"], p["trip_group_id"])
+        tg_key = tg_lookup.get(key)
+        raw = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}) \
+            if tg_key else {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
+        fw = round(weighted_freq(raw), 4)
+        f_weighted_by_oid[p["osm_id"]] = fw
+        mode_by_oid[p["osm_id"]] = p["mode"]
+        p["f_weighted"] = fw
+
+    # Per-stop competing lines: uic → [(oid, f_weighted, mode)]. Per-mode
+    # tier filtering happens in the percentile loop below.
+    by_stop: dict = defaultdict(list)
+    for oid, entry in line_stops_out.items():
+        fw = f_weighted_by_oid.get(oid, 0.0)
+        mode = mode_by_oid.get(oid, "")
+        for stop in entry.get("stops", []):
+            if len(stop) >= 3 and stop[2]:
+                uic = stop[2].split(":")[0]
+                by_stop[uic].append((oid, fw, mode))
+
+    # Per-line relative percentile, mode-tier filtered.
+    relative_by_oid: dict = {}
+    for oid, entry in line_stops_out.items():
+        my_fw = f_weighted_by_oid.get(oid, 0.0)
+        my_mode = mode_by_oid.get(oid, "")
+        comparators = _comparators_for(my_mode)
+        percentiles: list = []
+        for stop in entry.get("stops", []):
+            if not (len(stop) >= 3 and stop[2]):
+                continue
+            uic = stop[2].split(":")[0]
+            competitors = [(c_oid, c_fw) for c_oid, c_fw, c_mode
+                           in by_stop.get(uic, [])
+                           if c_mode in comparators]
+            if len(competitors) <= 1:
+                percentiles.append(1.0)
+                continue
+            lower = sum(1 for c_oid, c_fw in competitors
+                        if c_oid != oid and c_fw < my_fw)
+            percentiles.append(lower / (len(competitors) - 1))
+        relative_by_oid[oid] = (sum(percentiles) / len(percentiles)
+                                if percentiles else 0.0)
+
+    # Raw salience per feature (pre-normalisation).
+    salience_by_oid: dict = {}
+    for f in features:
+        p = f["properties"]
+        oid = p["osm_id"]
+        mode = p["mode"]
+        absolute = float(p.get("freq_score") or 0.0)
+        relative = float(relative_by_oid.get(oid, 0.0))
+        speed = p.get("speed_kmh")
+        max_speed = MODE_MAX_SPEED.get(mode)
+        if speed is None or not max_speed:
+            speed_score = 0.5
+        else:
+            speed_score = min(1.0, max(0.0, speed / max_speed))
+        score = w_abs * absolute + w_rel * relative + w_speed * speed_score
+        score = max(0.0, min(1.0, score))
+        salience_by_oid[oid] = score
+        p["salience"] = round(score, 4)
+        p["salience_absolute"] = round(absolute, 4)
+        p["salience_relative"] = round(relative, 4)
+        p["salience_speed"]    = round(speed_score, 4)
+
+    # Per-mode min-max stretch: the highest-salience line in each mode lands
+    # at the mode's z_low, the lowest at z_high; everything in between is
+    # spaced linearly between them. This guarantees the full configured zoom
+    # range is used regardless of how the raw salience distribution clusters.
+    # Modes with a single feature (or all-equal scores) collapse to z_low —
+    # treated as "best of its mode."
+    by_mode: dict = defaultdict(list)
+    for oid, score in salience_by_oid.items():
+        by_mode[mode_by_oid.get(oid, "")].append((oid, score))
+
+    own_min_zoom_by_oid: dict = {}
+    for mode, oid_scores in by_mode.items():
+        rng = mode_zoom_range.get(mode) or [5.0, 12.0]
+        z_low, z_high = float(rng[0]), float(rng[1])
+        scores = [s for _o, s in oid_scores]
+        s_max = max(scores)
+        s_min = min(scores)
+        span = s_max - s_min
+        for oid, s in oid_scores:
+            if span < 1e-9:
+                # Single feature or all-equal: treat as best of mode.
+                own_mz = z_low
+            else:
+                # Normalised position: 0 for best (s_max), 1 for worst (s_min).
+                pos = (s_max - s) / span
+                own_mz = z_low + pos * (z_high - z_low)
+            own_min_zoom_by_oid[oid] = own_mz
+
+    # Write own_min_zoom onto features after the stretch is computed.
+    for f in features:
+        p = f["properties"]
+        p["own_min_zoom"] = round(own_min_zoom_by_oid.get(p["osm_id"], 14.0), 3)
+
+    # ── Line graph + MBST connector promotion → final min_zoom ──────────────
+    # See salience-ranking concept § "Network connectivity".
+    print("Building line graph and computing connector promotion...")
+    cluster_m         = float(sal_cfg.get("cluster_threshold_m", 250.0))
+    promotion_ratio   = float(sal_cfg.get("promotion_ratio", 0.5))
+    isolated_min_zoom = int(sal_cfg.get("isolated_mountain_min_zoom", 13))
+
+    # First-seen UIC → coords. Stops with no platform suffix share coord
+    # with their platforms in stops.txt, so any encounter is representative.
+    uic_coords: dict = {}
+    for entry in line_stops_out.values():
+        for stop in entry.get("stops", []):
+            if len(stop) >= 3 and stop[2]:
+                uic = stop[2].split(":")[0]
+                uic_coords.setdefault(uic, (float(stop[0]), float(stop[1])))
+
+    super_of_uic = _cluster_uics(uic_coords, cluster_m)
+
+    # Lines per super-cluster (deduped — same line can hit the same cluster
+    # via multiple platforms).
+    lines_at_super: dict = defaultdict(set)
+    for oid, entry in line_stops_out.items():
+        for stop in entry.get("stops", []):
+            if len(stop) >= 3 and stop[2]:
+                uic = stop[2].split(":")[0]
+                super_id = super_of_uic.get(uic)
+                if super_id is not None:
+                    lines_at_super[super_id].add(oid)
+
+    station_count: dict = {oid: len(entry.get("stops", []))
+                           for oid, entry in line_stops_out.items()}
+
+    line_oids: list = [f["properties"]["osm_id"] for f in features]
+    oid_set: set = set(line_oids)
+
+    # Edges: per super-cluster, star edges from the cheapest-own line to
+    # every other (sufficient to build the MBST — proven by the bottleneck
+    # property and the fact that all-pair edges at one cluster collapse to
+    # the star under min-bottleneck).
+    edges: list = []
+    for super_id, oids in lines_at_super.items():
+        oids_here = [o for o in oids if o in oid_set]
+        if len(oids_here) < 2:
+            continue
+        oids_here.sort(key=lambda o: own_min_zoom_by_oid.get(o, 14.0))
+        L0 = oids_here[0]
+        for L_other in oids_here[1:]:
+            w = max(own_min_zoom_by_oid.get(L0, 14.0),
+                    own_min_zoom_by_oid.get(L_other, 14.0))
+            edges.append((w, L0, L_other))
+    edges.sort(key=lambda e: e[0])
+
+    # Kruskal — pick the minimum-bottleneck spanning tree.
+    parent_uf: dict = {oid: oid for oid in line_oids}
+
+    def _uf_find(x):
+        while parent_uf[x] != x:
+            parent_uf[x] = parent_uf[parent_uf[x]]
+            x = parent_uf[x]
+        return x
+
+    mst_adj: dict = defaultdict(list)
+    for w, u, v in edges:
+        ru, rv = _uf_find(u), _uf_find(v)
+        if ru == rv:
+            continue
+        parent_uf[ru] = rv
+        mst_adj[u].append(v)
+        mst_adj[v].append(u)
+
+    # Base set: train lines tied at the lowest own_min_zoom among trains.
+    # Tied within an epsilon to handle float comparison.
+    train_oids = [oid for oid in line_oids if mode_by_oid.get(oid) == "train"]
+    if train_oids:
+        min_train_own = min(own_min_zoom_by_oid.get(oid, 14.0)
+                            for oid in train_oids)
+        base_oids: set = {oid for oid in train_oids
+                          if abs(own_min_zoom_by_oid.get(oid, 14.0)
+                                 - min_train_own) < 1e-6}
+    else:
+        min_train_own = None
+        base_oids = set()
+
+    # BFS from the base set rooting the MBST. parent_in_tree[L] = next hop
+    # toward base; base oids have no parent.
+    parent_in_tree: dict = {}
+    visited: set = set(base_oids)
+    queue: list = list(base_oids)
+    while queue:
+        u = queue.pop(0)
+        for v in mst_adj.get(u, ()):
+            if v in visited:
+                continue
+            visited.add(v)
+            parent_in_tree[v] = u
+            queue.append(v)
+
+    isolated_oids: set = oid_set - visited
+
+    # Children adjacency in the rooted tree (for post-order subtree walk).
+    children_in_tree: dict = defaultdict(list)
+    for child, par in parent_in_tree.items():
+        children_in_tree[par].append(child)
+
+    # Post-order traversal — children done before parent.
+    post_order: list = []
+    for root in base_oids:
+        stack = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                post_order.append(node)
+                continue
+            stack.append((node, True))
+            for c in children_in_tree.get(node, ()):
+                stack.append((c, False))
+
+    # subtree_weight(L) = sum of station counts of L's DESCENDANTS (excluding L).
+    # subtree_earliest(L) = min own_min_zoom across descendants (excluding L).
+    subtree_weight: dict = {}
+    subtree_earliest: dict = {}
+    for node in post_order:
+        sw = 0
+        eds: list = []
+        for c in children_in_tree.get(node, ()):
+            sw += station_count.get(c, 0) + subtree_weight.get(c, 0)
+            eds.append(own_min_zoom_by_oid.get(c, 14.0))
+            cd = subtree_earliest.get(c)
+            if cd is not None:
+                eds.append(cd)
+        subtree_weight[node] = sw
+        subtree_earliest[node] = min(eds) if eds else None
+
+    # Per-line meet_zoom + effective_min_zoom (per-node value before the
+    # path-max climb computes the per-line final). All values float.
+    effective_node_mz: dict = {}
+    meet_zoom_by_oid: dict = {}
+    promoted_oids: set = set()
+    for oid in line_oids:
+        own_mz = float(own_min_zoom_by_oid.get(oid, 14.0))
+        if oid in isolated_oids:
+            effective_node_mz[oid] = float(isolated_min_zoom)
+            continue
+        bw = subtree_weight.get(oid, 0)
+        s_c = station_count.get(oid, 1)
+        ed = subtree_earliest.get(oid)
+        if bw > 0 and ed is not None and bw >= s_c * promotion_ratio:
+            meet = (bw * float(ed) + s_c * own_mz) / (bw + s_c)
+            meet_zoom_by_oid[oid] = meet
+            if meet < own_mz:
+                promoted_oids.add(oid)
+            effective_node_mz[oid] = min(own_mz, meet)
+        else:
+            effective_node_mz[oid] = own_mz
+
+    # Final per-line min_zoom = max(own, max effective_node on path to base).
+    # The path-climb ensures a line never appears before any of its ancestors.
+    final_min_zoom: dict = {}
+    for oid in line_oids:
+        if oid in isolated_oids:
+            final_min_zoom[oid] = float(isolated_min_zoom)
+            continue
+        own_mz = float(own_min_zoom_by_oid.get(oid, 14.0))
+        max_eff = effective_node_mz.get(oid, own_mz)
+        cur = oid
+        while cur in parent_in_tree:
+            cur = parent_in_tree[cur]
+            max_eff = max(max_eff,
+                          effective_node_mz.get(cur,
+                                                own_min_zoom_by_oid.get(cur, 14.0)))
+        final_min_zoom[oid] = max(own_mz, max_eff)
+
+    # Apply final min_zoom (float) to features. tippecanoe.minzoom is the
+    # integer floor so the feature is in tile from that zoom onward; the
+    # style filter `zoom >= min_zoom` enforces the exact float at render.
+    for f in features:
+        p = f["properties"]
+        oid = p["osm_id"]
+        mz = final_min_zoom.get(oid, own_min_zoom_by_oid.get(oid, 14.0))
+        p["min_zoom"] = round(float(mz), 3)
+        f["tippecanoe"] = {"minzoom": int(floor(mz))}
+
+    n_iso = len(isolated_oids)
+    n_iso_mountain = sum(1 for o in isolated_oids
+                         if mode_by_oid.get(o) == "mountain")
+    n_iso_other = n_iso - n_iso_mountain
+    print(f"  Line graph: {len(super_of_uic):,} UICs → "
+          f"{len(set(super_of_uic.values())):,} super-clusters, "
+          f"{len(edges):,} candidate edges, "
+          f"{sum(len(v) for v in mst_adj.values()) // 2:,} MBST edges")
+    base_str = (f"{len(base_oids)} train(s) at z{min_train_own}"
+                if base_oids else "EMPTY (no train lines found!)")
+    print(f"  Base set: {base_str}")
+    print(f"  Promoted connectors: {len(promoted_oids):,}  "
+          f"Isolated lines: {n_iso} "
+          f"({n_iso_mountain} mountain, {n_iso_other} other)")
+    if features:
+        own_mins = [own_min_zoom_by_oid.get(f["properties"]["osm_id"], 14.0)
+                    for f in features]
+        finals = [final_min_zoom.get(f["properties"]["osm_id"], 14.0)
+                  for f in features]
+        print(f"  own_min_zoom:   range {min(own_mins):.2f}–{max(own_mins):.2f}, "
+              f"mean {sum(own_mins)/len(own_mins):.2f}")
+        print(f"  final min_zoom: range {min(finals):.2f}–{max(finals):.2f}, "
+              f"mean {sum(finals)/len(finals):.2f}")
 
     # ── Write outputs ────────────────────────────────────────────────────────
     OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))

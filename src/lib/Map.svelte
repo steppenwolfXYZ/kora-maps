@@ -22,8 +22,7 @@
 		'transit-stop-fill-transit_stops_rail',
 		'transit-stop-fill-transit_stops_tram',
 		'transit-stop-fill-transit_stops_regional',
-		'transit-stop-fill-transit_stops_bus',
-		'transit-stop-fill-ferry'
+		'transit-stop-fill-transit_stops_bus'
 	];
 
 	const TRANSIT_STOP_PILL_LAYERS = [

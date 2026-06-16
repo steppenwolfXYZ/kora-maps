@@ -301,6 +301,86 @@ freq_sampling:
     - "20261122"
     - "20261212"
 
+# ── Salience-based zoom visibility ───────────────────────────────────────────
+# See .claude/concepts/salience-ranking.md.
+# Per-line and per-stop salience score in [0, 1] decides the minimum zoom
+# level at which the feature is rendered. Score combines absolute frequency
+# (f_weighted via freq_score), local relative frequency (KNN-based rank
+# against competing transit), and a speed boost so faster modes stay
+# visible at lower zooms. Mountain gets a fixed additive boost. For stops
+# only, terminus stops dominated by one line get an additional boost.
+# Tunable; values are first-pass and to be calibrated by trial.
+salience:
+  weight_absolute: 0.20
+  weight_relative: 0.40
+  weight_speed:    0.65
+  k_lines: 8                  # not used directly — line neighborhoods are
+                              # built from competing lines at the line's stops
+  k_stops: 12                 # K nearest other stops for stop KNN
+  terminus_boost: 0.20        # added to a stop's score when its line is
+                              # dominant at the stop and the stop is an endpoint
+  terminus_dominance_ratio: 1.5  # the dominant line's f_weighted must exceed
+                                 # the next-highest's by this factor
+  # mountain_boost was removed when mountain got its own zoom range in
+  # mode_zoom_range_lines / mode_zoom_range_stops — the per-mode range
+  # subsumes what the additive boost used to do.
+  # Mode-tier competition. For each mode, the set of comparator modes used
+  # when computing the local-relative component. A line / stop only
+  # competes against modes in its comparator set; this prevents (e.g.)
+  # bus density from suppressing trains. Modes absent from this dict
+  # default to "self only".
+  mode_tiers:
+    train:        [train]
+    metro:        [metro, train]
+    tram:         [tram, metro, train]
+    bus:          [bus, tram, metro, train]
+    regional_bus: [regional_bus, bus, tram, metro, train]
+    ferry:        [ferry]
+    mountain:     [mountain]
+  # Per-mode zoom range. Highest-salience feature of the mode lands at the
+  # first value (visible earliest); lowest-salience at the second
+  # (visible latest); features in between are linearly stretched between
+  # the two so the full range is always used. The mapping is continuous
+  # (float min_zoom), so features appear at fractional zoom levels — no
+  # banding at integer zoom transitions. tippecanoe.minzoom uses
+  # floor(min_zoom) for tile inclusion; the style filter
+  # `zoom >= min_zoom` enforces the exact float at render time.
+  # Lines and stops have separate tables so stops can lag behind their
+  # lines (the stops-follow-lines rule additionally ensures a stop never
+  # appears before any of its serving lines).
+  mode_zoom_range_lines:
+    train:        [4, 6]
+    metro:        [8, 10]
+    tram:         [8.5, 10]
+    regional_bus: [7, 10]
+    bus:          [9.5, 11]
+    ferry:        [7.5, 9]
+    mountain:     [7.5, 9.5]
+  mode_zoom_range_stops:
+    train:        [6, 8]
+    metro:        [9, 10.5]
+    tram:         [9, 11.5]
+    regional_bus: [9, 11.5]
+    bus:          [10.5, 12.5]
+    ferry:        [10.5, 12.5]
+    mountain:     [8.5, 10]
+  # Network connectivity & connector promotion (salience-ranking concept
+  # § "Network connectivity").
+  cluster_threshold_m: 250          # stops within this Euclidean distance
+                                    # merge into one line-graph node, regardless
+                                    # of parent_station. Catches transfer points
+                                    # that don't share a GTFS parent.
+  promotion_ratio: 0.5              # gate: a connector C is promoted only if
+                                    # its MBST sub-tree station count ≥
+                                    # promotion_ratio * C's own station count.
+                                    # Smaller branches are held back to the
+                                    # connector's natural appearance zoom.
+  isolated_mountain_min_zoom: 13    # min_zoom for lines with no path to base
+                                    # in the line graph. Affects truly isolated
+                                    # mountain lines (Schynige Platte and
+                                    # similar) and surfaces non-mountain
+                                    # isolation in the diagnostic.
+
 # ── Pfaedle invocation ───────────────────────────────────────────────────────
 pfaedle:
   # Docker image tag built from scripts/transit/pfaedle/Dockerfile.

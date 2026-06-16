@@ -35,7 +35,7 @@ import csv
 import json
 import yaml
 from itertools import permutations
-from math import radians, cos, sin, sqrt, atan2, acos, degrees, floor, pi
+from math import radians, cos, sin, sqrt, atan2, acos, degrees, floor, pi, log
 from pathlib import Path
 from collections import defaultdict
 
@@ -133,6 +133,18 @@ MODE_MINZOOM = {
     "ferry":        9,
     "bus":         11,
     "mountain":    11,
+}
+
+# Per-mode max speed (km/h) for the salience speed boost. Mirrors the table
+# in 06_score_and_match.py. Mountain has no entry; speed isn't a salience
+# input for mountain (mountain_boost handles it).
+MODE_MAX_SPEED = {
+    "train":        100,
+    "tram":          25,
+    "metro":         50,
+    "bus":           35,
+    "regional_bus":  65,
+    "ferry":         22,
 }
 
 # Color-indicator zoom (mini per-group dots inside stop dots/discs/pills).
@@ -4897,6 +4909,237 @@ def cluster_stops_for_pills(raw_stops, radius_km):
     return clusters
 
 
+# Stop tier hierarchy. Higher index = higher priority for tier assignment
+# when a stop is served by multiple modes. Ferry / mountain are evaluated
+# only when no hierarchy mode is present (their "own pool" semantics per
+# salience-ranking concept § "Mode-tier competition").
+STOP_TIER_HIERARCHY = ("train", "metro", "tram", "bus", "regional_bus")
+STOP_TIER_ISOLATED  = ("ferry", "mountain")
+STOP_TIER_RANK = {m: i for i, m in enumerate(STOP_TIER_HIERARCHY)}
+
+
+def _resolve_stop_tier(modes_present: set) -> str:
+    """Return the tier for a stop served by `modes_present`. Hierarchy
+    modes win over isolated pools when both present."""
+    best = None
+    best_rank = -1
+    for m in modes_present:
+        r = STOP_TIER_RANK.get(m, -1)
+        if r > best_rank:
+            best_rank = r
+            best = m
+    if best is not None:
+        return best
+    for m in STOP_TIER_ISOLATED:
+        if m in modes_present:
+            return m
+    return ""
+
+
+def compute_stop_salience(line_lookup: dict, line_stops: dict,
+                          stop_meta: dict, sal_cfg: dict) -> dict:
+    """Per-UIC salience scoring for stops (see salience-ranking concept).
+    UIC = parent_station if present, else stop_id base. Returns
+    {uic: {salience, own_min_zoom, tier, absolute, relative, speed,
+           terminus_boost, mountain_boost, absolute_raw}}.
+
+    Mode-tier rule: a stop's tier is the highest-priority mode that serves
+    it (hierarchy: train > metro > tram > bus > regional_bus, then ferry,
+    then mountain). Absolute density sums f_weighted of lines whose mode
+    equals the tier only. KNN neighbours are the K nearest same-tier
+    stops.
+    """
+    # Per-UIC: list of {oid, f_weighted, mode, speed_kmh, mountain_origin,
+    # is_first, is_last}. Also first-seen coords for KNN.
+    by_uic: dict = defaultdict(list)
+    coords_by_uic: dict = {}
+    for oid, entry in line_stops.items():
+        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if not stops:
+            continue
+        info = line_lookup.get(str(oid))
+        if not info:
+            continue
+        fw = float(info.get("f_weighted") or 0.0)
+        spd = info.get("speed_kmh")
+        mode = info.get("mode", "")
+        mo = info.get("mountain_origin")
+        last_idx = len(stops) - 1
+        for idx, stop in enumerate(stops):
+            if len(stop) < 3 or not stop[2]:
+                continue
+            sid = stop[2]
+            lon, lat = stop[0], stop[1]
+            meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
+            uic = meta.get("parent") or sid.split(":")[0]
+            by_uic[uic].append({
+                "oid": str(oid), "f_weighted": fw, "mode": mode,
+                "speed_kmh": spd, "mountain_origin": mo,
+                "is_first": idx == 0, "is_last": idx == last_idx,
+            })
+            coords_by_uic.setdefault(uic, (lon, lat))
+
+    if not by_uic:
+        return {}
+
+    # Tier per UIC.
+    tier_by_uic: dict = {}
+    for uic, entries in by_uic.items():
+        modes = {e["mode"] for e in entries}
+        tier_by_uic[uic] = _resolve_stop_tier(modes)
+
+    # Absolute density per UIC — tier-restricted (only lines whose mode
+    # equals the stop's tier contribute).
+    absolute_raw: dict = {}
+    for uic, entries in by_uic.items():
+        tier = tier_by_uic.get(uic, "")
+        absolute_raw[uic] = sum(e["f_weighted"] for e in entries
+                                if e["mode"] == tier)
+
+    # Per-tier log-normalisation so each tier's "1.0" is its own busiest hub.
+    max_abs_by_tier: dict = defaultdict(float)
+    for uic, v in absolute_raw.items():
+        t = tier_by_uic.get(uic, "")
+        if v > max_abs_by_tier[t]:
+            max_abs_by_tier[t] = v
+    absolute_norm: dict = {}
+    for uic, v in absolute_raw.items():
+        t = tier_by_uic.get(uic, "")
+        mx = max_abs_by_tier.get(t, 0.0)
+        log_max = log(mx + 1.0) if mx > 0 else 1.0
+        absolute_norm[uic] = (log(v + 1.0) / log_max) if log_max > 0 else 0.0
+
+    # KNN — neighbours restricted to same tier.
+    k = max(1, int(sal_cfg.get("k_stops", 12)))
+    uics_by_tier: dict = defaultdict(list)
+    for uic in coords_by_uic:
+        uics_by_tier[tier_by_uic.get(uic, "")].append(uic)
+
+    relative_by_uic: dict = {}
+    for tier, tier_uics in uics_by_tier.items():
+        coords = [coords_by_uic[u] for u in tier_uics]
+        if not coords:
+            continue
+        cos_lat0 = cos(radians(coords[0][1]))
+        for i, uic in enumerate(tier_uics):
+            my_abs = absolute_raw.get(uic, 0.0)
+            x0, y0 = coords[i]
+            dists: list = []
+            for j, other in enumerate(tier_uics):
+                if j == i:
+                    continue
+                x1, y1 = coords[j]
+                dx = (x1 - x0) * cos_lat0
+                dy = y1 - y0
+                dists.append((dx * dx + dy * dy, other))
+            dists.sort(key=lambda t: t[0])
+            neighbors = [u for _, u in dists[:k]]
+            if not neighbors:
+                relative_by_uic[uic] = 1.0
+                continue
+            lower = sum(1 for n in neighbors
+                        if absolute_raw.get(n, 0.0) < my_abs)
+            relative_by_uic[uic] = lower / len(neighbors)
+
+    # Speed: max speed-fraction across serving lines (normalized per-mode).
+    speed_by_uic: dict = {}
+    for uic, entries in by_uic.items():
+        speeds = [(e["speed_kmh"], e["mode"]) for e in entries
+                  if e["speed_kmh"] is not None]
+        if not speeds:
+            speed_by_uic[uic] = 0.5
+            continue
+        best = 0.0
+        for spd, mode in speeds:
+            ms = MODE_MAX_SPEED.get(mode)
+            if not ms:
+                continue
+            best = max(best, min(1.0, float(spd) / ms))
+        speed_by_uic[uic] = best if best > 0 else 0.5
+
+    # Terminus boost: applied when the dominant line (top f_weighted) is an
+    # endpoint AND clearly dominates the next line at the stop. Bern HB fails
+    # the ratio test (its terminating lines are minor relative to IC); Ostring
+    # passes because tram 7 ≫ bus 40.
+    dom_ratio = float(sal_cfg.get("terminus_dominance_ratio", 1.5))
+    terminus_by_uic: dict = {}
+    for uic, entries in by_uic.items():
+        sorted_entries = sorted(entries,
+                                key=lambda e: (-e["f_weighted"], e["oid"]))
+        top = sorted_entries[0]
+        next_fw = (sorted_entries[1]["f_weighted"]
+                   if len(sorted_entries) > 1 else 0.0)
+        dominant = (next_fw <= 0.0) or (top["f_weighted"] >= next_fw * dom_ratio)
+        terminus_by_uic[uic] = bool((top["is_first"] or top["is_last"])
+                                    and dominant)
+
+    mountain_by_uic = {uic: any(e["mode"] == "mountain" for e in entries)
+                       for uic, entries in by_uic.items()}
+
+    w_abs   = float(sal_cfg.get("weight_absolute", 0.45))
+    w_rel   = float(sal_cfg.get("weight_relative", 0.30))
+    w_speed = float(sal_cfg.get("weight_speed",    0.25))
+    term_boost = float(sal_cfg.get("terminus_boost", 0.20))
+
+    # Per-tier zoom range for stops. Stops use their tier's range and the
+    # per-tier min-max stretch below to spread the highest-salience stop at
+    # z_low and the lowest at z_high. Falls back to legacy `mode_zoom_range`
+    # if the new key isn't present.
+    zoom_ranges = (sal_cfg.get("mode_zoom_range_stops")
+                   or sal_cfg.get("mode_zoom_range")
+                   or {})
+
+    # Raw salience score per UIC (pre-normalisation).
+    raw_score_by_uic: dict = {}
+    for uic in coords_by_uic:
+        absolute = absolute_norm.get(uic, 0.0)
+        relative = relative_by_uic.get(uic, 0.0)
+        speed    = speed_by_uic.get(uic, 0.5)
+        score = w_abs * absolute + w_rel * relative + w_speed * speed
+        if terminus_by_uic.get(uic):
+            score += term_boost
+        raw_score_by_uic[uic] = max(0.0, min(1.0, score))
+
+    # Per-tier min-max stretch: highest-salience stop of each tier → z_low,
+    # lowest → z_high, linearly stretched between. Mountain boost is gone —
+    # mountain now has its own tier-range so the additive boost is moot.
+    uics_by_tier_for_stretch: dict = defaultdict(list)
+    for uic, score in raw_score_by_uic.items():
+        uics_by_tier_for_stretch[tier_by_uic.get(uic, "")].append((uic, score))
+
+    own_mz_by_uic: dict = {}
+    for tier, uic_scores in uics_by_tier_for_stretch.items():
+        rng = zoom_ranges.get(tier) or zoom_ranges.get("default") or [5.0, 13.0]
+        z_low, z_high = float(rng[0]), float(rng[1])
+        scores = [s for _u, s in uic_scores]
+        s_max = max(scores)
+        s_min = min(scores)
+        span = s_max - s_min
+        for uic, s in uic_scores:
+            if span < 1e-9:
+                own_mz_by_uic[uic] = z_low
+            else:
+                pos = (s_max - s) / span
+                own_mz_by_uic[uic] = z_low + pos * (z_high - z_low)
+
+    result: dict = {}
+    for uic in coords_by_uic:
+        tier = tier_by_uic.get(uic, "")
+        own_mz = own_mz_by_uic.get(uic, 13.0)
+        result[uic] = {
+            "salience":       round(raw_score_by_uic.get(uic, 0.0), 4),
+            "own_min_zoom":   round(own_mz, 3),
+            "tier":           tier,
+            "absolute":       round(absolute_norm.get(uic, 0.0), 4),
+            "relative":       round(relative_by_uic.get(uic, 0.0), 4),
+            "speed":          round(speed_by_uic.get(uic, 0.5), 4),
+            "absolute_raw":   round(absolute_raw.get(uic, 0.0), 4),
+            "terminus_boost": terminus_by_uic.get(uic, False),
+            "mountain_boost": mountain_by_uic.get(uic, False),
+        }
+    return result
+
+
 def merge_clusters_by_parent_station(clusters):
     """
     Merge spatially separate clusters that share the same parent_station into
@@ -4934,6 +5177,11 @@ def main():
                 "mountain_origin": p.get("mountain_origin"),
                 "width_base":      p.get("width_base", 3.0),
                 "freq_score":      p.get("freq_score", 0.0),
+                "f_weighted":      p.get("f_weighted", 0.0),
+                "speed_kmh":       p.get("speed_kmh"),
+                "salience":        p.get("salience"),
+                "own_min_zoom":    p.get("own_min_zoom"),
+                "min_zoom":        p.get("min_zoom"),
                 "coords":          feat["geometry"]["coordinates"],
                 "ref":             p.get("ref", ""),
                 "name":            p.get("name", ""),
@@ -4960,6 +5208,48 @@ def main():
     line_stops = json.loads(LINE_STOPS.read_text())
     stop_meta  = load_stop_meta()
     print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
+
+    print("Computing per-UIC stop salience...")
+    sal_cfg = _transit_cfg.get("salience") or {}
+    if not sal_cfg:
+        print("  WARNING: config.yaml has no `salience` section — stops will use mode minzoom only.")
+    stop_salience = compute_stop_salience(line_lookup, line_stops,
+                                          stop_meta, sal_cfg)
+    if stop_salience:
+        mins = [v["own_min_zoom"] for v in stop_salience.values()]
+        print(f"  {len(stop_salience):,} UICs scored; "
+              f"own_min_zoom range {min(mins):.2f}–{max(mins):.2f}, "
+              f"mean {sum(mins)/len(mins):.2f}")
+
+        # Stops-follow-lines: a stop never appears before any of its
+        # serving lines. min_zoom = max(own_min_zoom_stop, min over
+        # serving lines' effective min_zoom from 06's MBST/promotion).
+        # All comparisons in float.
+        lines_per_uic: dict = defaultdict(list)
+        for oid, entry in line_stops.items():
+            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+            for stop in stops:
+                if len(stop) < 3 or not stop[2]:
+                    continue
+                meta = stop_meta.get(stop[2]) or stop_meta.get(stop[2].split(":")[0]) or {}
+                uic = meta.get("parent") or stop[2].split(":")[0]
+                lines_per_uic[uic].append(str(oid))
+        for uic, sal in stop_salience.items():
+            serving_oids = lines_per_uic.get(uic, [])
+            own_mz = float(sal["own_min_zoom"])
+            if serving_oids:
+                line_mins = [
+                    line_lookup.get(o, {}).get("min_zoom")
+                    for o in serving_oids
+                ]
+                line_mins = [float(m) for m in line_mins if m is not None]
+                line_min = min(line_mins) if line_mins else own_mz
+                sal["min_zoom"] = round(max(own_mz, line_min), 3)
+            else:
+                sal["min_zoom"] = round(own_mz, 3)
+        finals = [v["min_zoom"] for v in stop_salience.values()]
+        print(f"  After stops-follow-lines: range {min(finals):.2f}–{max(finals):.2f}, "
+              f"mean {sum(finals)/len(finals):.2f}")
 
     print("Loading atlas platform attributes...")
     stop_attrs = write_stop_attributes_diag(line_stops)
@@ -5582,10 +5872,68 @@ def main():
           f"from {len(nonrail_clusters):,} clusters")
 
     # ==========================================================================
+    # Apply per-UIC salience min_zoom to stop dots
+    # ==========================================================================
+    # Each stop dot in transit_stops.geojson carries a stop_id / parent_station
+    # in its properties. Resolve to canonical UIC and override the feature's
+    # tippecanoe.minzoom from stop_salience. Dots without a resolvable UIC
+    # (mountain/straight-line embedded gtfs_stops without stop_id) keep their
+    # mode-derived minzoom.
+    dot_features = rail_features + other_features + nonrail_dot_features
+    if stop_salience:
+        n_applied = 0
+        for feat in dot_features:
+            p = feat["properties"]
+            uic = p.get("parent_station") or (
+                (p.get("stop_id") or "").split(":")[0])
+            if not uic:
+                continue
+            sal = stop_salience.get(uic)
+            if not sal:
+                continue
+            tipp = feat.setdefault("tippecanoe", {})
+            # tippecanoe.minzoom is integer (tile-boundary); style filter
+            # `zoom >= min_zoom` enforces the float at render time.
+            tipp["minzoom"] = int(floor(float(sal["min_zoom"])))
+            p["salience"] = sal["salience"]
+            p["own_min_zoom"] = sal["own_min_zoom"]
+            p["min_zoom"] = sal["min_zoom"]
+            p["tier"] = sal["tier"]
+            n_applied += 1
+        print(f"  Salience min_zoom applied to {n_applied:,}/{len(dot_features):,} dot features")
+
+    # ==========================================================================
+    # Salience diagnostic
+    # ==========================================================================
+    OUT_SALIENCE = ROOT / "data" / "transit" / "salience.json"
+    line_diag = []
+    for oid, info in line_lookup.items():
+        if info.get("salience") is None:
+            continue
+        line_diag.append({
+            "osm_id":   oid,
+            "ref":      info.get("ref", ""),
+            "name":     info.get("name", ""),
+            "mode":     info.get("mode", ""),
+            "agency_id":  info.get("agency_id", ""),
+            "f_weighted": info.get("f_weighted", 0.0),
+            "speed_kmh":  info.get("speed_kmh"),
+            "salience":   info.get("salience"),
+            "own_min_zoom": info.get("own_min_zoom"),
+            "min_zoom":     info.get("min_zoom"),
+        })
+    stop_diag = []
+    for uic, v in stop_salience.items():
+        stop_diag.append({"uic": uic, **v})
+    OUT_SALIENCE.write_text(json.dumps(
+        {"lines": line_diag, "stops": stop_diag}, ensure_ascii=False))
+    print(f"  Salience diagnostic: {len(line_diag)} lines, "
+          f"{len(stop_diag)} stops → {OUT_SALIENCE}")
+
+    # ==========================================================================
     # Write outputs
     # ==========================================================================
 
-    dot_features = rail_features + other_features + nonrail_dot_features
     OUT_DOTS.parent.mkdir(parents=True, exist_ok=True)
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
     pill_features.extend(ferry_pill_features)
