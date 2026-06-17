@@ -45,13 +45,14 @@ In stop scoring: each stop has a **tier** equal to the highest-importance mode t
 
 ### Line salience score
 
-Combines three signals into one number in `[0, 1]`:
+Combines four signals into one number in `[0, 1]`:
 
 1. **Absolute frequency** — existing `f_weighted` / `freq_score`.
 2. **Local relative frequency** — how this line's `f_weighted` ranks among competing lines in its neighborhood, where competition is restricted to the comparator-set rule above.
 3. **Speed** — faster modes get a salience boost so trains stay visible further out than buses without per-mode hard-coding. Speed is the same value already driving line width.
+4. **Length** — longer lines (more geographic reach) score higher. Per-mode normalisation: the **`length_outlier_percentile`** length within each mode (default 95th) is treated as the max, anything longer clamps to 1.0. Per-mode is required because "long" means very different things across modes (IC trains in CH go 250+ km, regional buses 30 km). The percentile cap prevents a handful of outliers from compressing typical lines to near-zero.
 
-Component weights live in a new `salience` section in `scripts/transit/config.yaml`. Initial weights are tuned by trial.
+Component weights live in a new `salience` section in `scripts/transit/config.yaml` (`weight_absolute`, `weight_relative`, `weight_speed`, `weight_length`). Initial weights are tuned by trial. Stops use the same first three signals (length doesn't apply to stops — they inherit longer-line visibility via stops-follow-lines).
 
 ### Stop salience score
 
@@ -83,27 +84,55 @@ Mountain and ferry are isolated comparator pools (see "Mode-tier competition") w
 
 ### Visibility cutoffs
 
-Each feature carries a **float** `min_zoom` derived from its salience score and subsequent adjustments (connectivity, stops-follow-lines). The MapLibre style filters features by `min_zoom <= current_zoom`. There is no opacity fade — visibility is binary per zoom level, but the exact zoom at which a feature appears is fractional (e.g. 6.43), so features spread continuously over the zoom scale instead of banding at integer zoom transitions.
+Each feature carries a **float** `min_zoom` derived from its salience score and subsequent adjustments (connectivity, stops-follow-lines). Visibility is binary per zoom level — features are either fully visible or hidden, with no opacity transition — but the exact zoom at which a feature appears is fractional, so features spread continuously over the zoom scale instead of banding at integer zoom transitions.
+
+The reveal is enforced via a **step-in-paint** opacity expression (see "Render-time gate" below) — MapLibre's filter context only sees integer tile zoom, so the gate has to live in a paint property where the camera zoom is available continuously.
 
 The mapping from salience score to `own_min_zoom` is **per-mode**, with separate tables for lines and stops in `config.yaml`:
 
 - `mode_zoom_range_lines` — used by line scoring; lookup key is the line's mode.
 - `mode_zoom_range_stops` — used by stop scoring; lookup key is the stop's tier (the highest-priority mode serving it).
 
-Each table maps a mode to a `[z_low, z_high]` range. Within each mode, salience scores are normalised by **min-max stretch**: the highest-salience feature of the mode lands at `z_low` (visible earliest), the lowest at `z_high` (visible latest), and the rest are linearly spaced between:
+Each table maps a mode to a `[z_low, z_high]` range. Within each mode, features are positioned by **pure rank**: sort the lines (or stops, per tier) descending by salience, then map the rank index to a uniform position in the range:
 
 ```
-own_min_zoom = z_low + ((s_max - salience) / (s_max - s_min)) * (z_high - z_low)
+position = i / (n - 1)        # i = 0 for the best, n-1 for the worst
+own_min_zoom = z_low + position * (z_high - z_low)
 ```
 
-Where `s_max` and `s_min` are the highest and lowest raw salience scores observed within the mode in the current pipeline run. This guarantees the configured range is fully used regardless of how raw scores cluster. A mode with a single feature, or all-equal salience scores, collapses to `z_low` (treated as "best of its mode").
+The best-scoring feature always lands exactly at `z_low`, the worst at `z_high`, and the rest are spaced **uniformly** regardless of how raw salience scores cluster (this fixes "all regiobuses pop in at z8 because most saliences pile up in [0.4, 0.7]" — pure rank flattens the distribution by construction).
+
+Ties in salience are broken by `(-f_weighted, osm_id)` for lines and `(-absolute_raw, uic)` for stops, so identical-salience features still get distinct, deterministic positions.
+
+A mode with a single feature collapses to `z_low` (treated as "best of its mode"; the i / (n-1) formula is skipped when n ≤ 1).
 
 `own_min_zoom` is the value from min-max stretch alone; the final `min_zoom` is computed after connectivity and stops-follow-lines adjustments and is what the style filter compares against.
 
-Because tile boundaries are at integer zoom levels, two zoom values are baked into each feature:
+Because tile boundaries are at integer zoom levels, two zoom values are involved per feature:
 
 - `tippecanoe.minzoom = floor(min_zoom)` — the first integer zoom whose tiles must contain the feature.
-- `min_zoom` (float, in properties) — enforced at render time via the layer filter `["zoom"] >= ["get", "min_zoom"]`.
+- `min_zoom` (float, in properties) — enforced at render time by the **render-time gate** below.
+
+#### Render-time gate
+
+MapLibre evaluates filter expressions against the *tile's* integer zoom (`worker_tile.zoom`), so a filter like `[">=", ["zoom"], ["get", "min_zoom"]]` only flips at integer tile boundaries — features with `min_zoom` 7.0–7.999 would all appear at once when the tile zoom flips from 7 to 8, defeating the fractional design.
+
+To enforce the fractional `min_zoom`, the gate lives in a **paint property** instead. MapLibre's expression validator allows `["zoom"]` only as the direct input to a top-level `step` or `interpolate`. The pattern that works:
+
+```
+line-opacity = step(zoom,
+                    case(min_zoom <= 4.0,  visible, 0),
+                    4.1, case(min_zoom <= 4.1,  visible, 0),
+                    4.2, case(min_zoom <= 4.2,  visible, 0),
+                    ...
+                    13.0, case(min_zoom <= 13.0, visible, 0))
+```
+
+`["zoom"]` is the direct input to `step`; stops are literal numbers; each stop's output is a `case` comparing the per-feature `min_zoom` against the stop value. At camera zoom 7.43, MapLibre picks the stop at 7.4 and evaluates that case per feature — only features whose `min_zoom <= 7.4` get the visible opacity. Camera moves to 7.5, the stop at 7.5 activates and another sliver of features turn on.
+
+**Granularity** is controlled by the stop spacing — currently 0.1 zoom, which spreads each mode's features across 30+ reveal points over its `[z_low, z_high]` range. Cost: ~90 stops per layer (`floor SALIENCE_Z_LOW=4` to `SALIENCE_Z_HIGH=13`), constant per-feature evaluation cost (one binary search + one comparison), no scaling with feature count.
+
+Same pattern is applied to `circle-opacity` on stop-dot layers. Pills and connectors are not gated — they appear only at z11+ anyway, by which point all the lines/stops they belong to are visible.
 
 Separate stop ranges intentionally lag their line counterparts (e.g. train lines `[4, 6]` vs. train stops `[6, 8]`) so a line is visible alone for a zoom band before the stops decorate it. The stops-follow-lines rule then clamps: a stop never appears before any of its serving lines, even if its tier's range would say so.
 
@@ -135,7 +164,9 @@ The base is the set of train lines tied at the lowest `own_min_zoom` among train
 
 #### Connector promotion via min-bottleneck spanning tree
 
-Form a minimum bottleneck spanning tree (MBST) of the line graph rooted at the base super-node, where edge weight between two lines is the larger of their two `own_min_zoom` values. In the MBST every non-base line has a unique chain of ancestors leading to the base.
+Form a minimum bottleneck spanning tree (MBST) of the line graph rooted at the base super-node, where edge weight between two lines is the larger of their two **travel durations** (`line_km / speed_kmh`, in minutes). In the MBST every non-base line has a unique chain of ancestors leading to the base.
+
+Travel duration — not `own_min_zoom` — is the right metric because connector selection is a network-topology question (which line a passenger would physically take to bridge a branch to the main network) and is independent of when each line appears on the map. Salience is only used downstream by the promotion math to express *when* the chosen connector should appear; *which* line is chosen is decided by service quality (fast / direct lines win).
 
 For each line C that is the ancestor of at least one other line in the MBST (a **connector**):
 
@@ -157,9 +188,11 @@ If the gate fails (the sub-tree is too small relative to the connector), C is no
 For each line L, its final `effective_min_zoom`:
 
 ```
-effective_min_zoom(L) = max(own_min_zoom(L),
-                            max effective_min_zoom(C) over C on L's path to base)
+effective_min_zoom(L) = max effective_min_zoom(C) over C on L's path to base,
+                       including L itself
 ```
+
+A promoted connector C therefore renders at its own promoted zoom (`min(own_C, meet_C)`), not at `own_C` — the sub-tree's pull-forward is actualised on the connector, not just propagated to descendants. A non-promoted line has `effective_min_zoom == own_min_zoom`, so the path-climb still pins it to its own value.
 
 Both endpoints move: the sub-tree pulls the connector forward; the connector pulls the branch back. A long branch with a short connector pulls the connector close to the branch's own zoom; a short branch with a long connector is held at the connector's own zoom (because the connector resists promotion).
 
@@ -181,7 +214,8 @@ A stop is therefore never visible before at least one of its lines. This subsume
 ### New identifiers and outputs
 
 - `salience` section in `scripts/transit/config.yaml`. Sub-keys:
-  - Component weights: `weight_absolute`, `weight_relative`, `weight_speed`.
+  - Component weights: `weight_absolute`, `weight_relative`, `weight_speed`, `weight_length`.
+  - Length normalisation: `length_outlier_percentile` (percentile used as the per-mode length max, default 95).
   - KNN: `k_lines`, `k_stops` (optionally per-tier).
   - Boosts: `terminus_boost`, `terminus_dominance_ratio`.
   - Per-mode score → zoom mapping: `mode_zoom_range_lines` and `mode_zoom_range_stops` (separate `[z_low, z_high]` tables for lines vs. stops; within each table, min-max stretch ensures the full range is used per mode).

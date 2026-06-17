@@ -1,0 +1,10 @@
+Here's the rough idea I have:
+level 4: Major train lines appear, no stops
+level 5: All longer train lines appear, some minor or shorter lines in dense areas are still hidden. Still no stops.
+level 6: The longest ferry and mountain lines appear. still no stops
+level 7: The longest regio buses that are not too close to any trains appear. Train stops appear at intersections and at terminus stops.
+level 8: More regiobus, mountain and ferry lines. All intercity stops for trains
+level 9: The remaining mountain and ferry lines appear (except for very short mountain lines like urban funiculars below 2km length). All but the shortest regiobuses appear. More train stops appear, but no more than one every 5 km. The longest tram lines appear.
+level 10: Mountain and Ferry lines get stops. All regiobus lines appear. All tram lines and the longest city bus lines appear. tram and bus lines show stops at intersections and terminus stations. Train stops may now be 3km appart
+level 11: The remaining bus lines appear. Tram and bus lines get intermediate stops, but no more than a stop every km. Mountain lines between 500m and 2km appear.
+level 12: The remaining bus and tram stops appear. The remaining mountain lines appear.

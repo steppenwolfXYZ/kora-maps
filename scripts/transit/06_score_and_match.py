@@ -1174,6 +1174,9 @@ def main():
     min_active_days_by_bucket = {
         b: int(v) for b, v in (cfg.get("min_active_days_by_bucket") or {}).items()
     }
+    min_active_days_regional_bus = int(
+        cfg.get("min_active_days_regional_bus", min_active_days_default)
+    )
 
     def min_active_days_for(bucket: str) -> int:
         return min_active_days_by_bucket.get(bucket, min_active_days_default)
@@ -1299,6 +1302,10 @@ def main():
     variant_service_ids.clear()
 
     short_active_variants: dict = defaultdict(set)  # tg_key → {var_key,...}
+    # Bus variants below `min_active_days` but at or above
+    # `min_active_days_regional_bus` are kept and tagged. Dropped later at
+    # emission if the line classifies as city bus.
+    regional_bus_rescued: dict = defaultdict(set)   # tg_key → {var_key,...}
     tg_keys_all_short_active: set = set()
     for tg_key in list(groups.keys()):
         line_key, aid, tg_id_v = tg_key
@@ -1307,12 +1314,19 @@ def main():
             continue
         vmap = groups[tg_key]
         threshold = min_active_days_for(bucket)
-        to_drop = [
-            var_key for var_key in vmap
-            if variant_active_days.get(
+        rescue_floor = (min_active_days_regional_bus if bucket == "bus"
+                        else threshold)
+        to_drop: list = []
+        for var_key in vmap:
+            ad = variant_active_days.get(
                 (line_key, aid, tg_id_v, var_key[0], var_key[1]), 0
-            ) < threshold
-        ]
+            )
+            if ad >= threshold:
+                continue
+            if bucket == "bus" and ad >= rescue_floor:
+                regional_bus_rescued[tg_key].add(var_key)
+                continue
+            to_drop.append(var_key)
         if not to_drop:
             continue
         short_active_variants[tg_key].update(to_drop)
@@ -1323,6 +1337,7 @@ def main():
             tg_keys_all_short_active.add(tg_key)
             del groups[tg_key]
     n_dropped_var = sum(len(s) for s in short_active_variants.values())
+    n_rescued_var = sum(len(s) for s in regional_bus_rescued.values())
     threshold_summary = f"default={min_active_days_default}"
     if min_active_days_by_bucket:
         overrides = ", ".join(f"{b}={v}" for b, v in
@@ -1332,6 +1347,9 @@ def main():
           f"({threshold_summary}) "
           f"(across {len(short_active_variants)} trip groups; "
           f"{len(tg_keys_all_short_active)} groups fully dropped)")
+    print(f"  {n_rescued_var:,} bus variants tentatively rescued "
+          f"(active_days in [{min_active_days_regional_bus}, "
+          f"{min_active_days_default}); dropped at emission if classified as city bus)")
 
     # ── Supergroup formation + rare-group filter ─────────────────────────────
     # A supergroup is a transient classification used only for the rare-group
@@ -1602,6 +1620,17 @@ def main():
                                 short_name=short_name, length_km=length_km,
                                 route_type=route_type)
 
+            # Drop seasonal-rescue bus variants that landed in city `bus`.
+            if (var_key in regional_bus_rescued.get(tg_key, ())
+                    and mode == "bus"):
+                diag_emission[(tg_key, var_key)] = {
+                    "feature_emitted": False,
+                    "exclusion_reason": "seasonal_rescue_city_bus",
+                    "rep_trip_id": rep_tid, "shape_id": shape_id,
+                    "n_coords": len(polyline), "line_km": round(length_km, 2),
+                }
+                continue
+
             freq_score = compute_freq_score(raw_freq, mode)
 
             color      = speed_to_color(mode, speed_kmh)
@@ -1689,12 +1718,18 @@ def main():
     # relative = mean tier-filtered percentile of this line's f_weighted vs
     #            comparator-mode lines at each stop it serves (mode-tier rule)
     # speed    = speed_kmh normalised by per-mode max
-    # mountain_boost added for mountain features (additive).
+    # Per-mode min-max stretch maps the raw score → own_min_zoom so the
+    # highest-salience line in each mode lands at the mode's z_low and the
+    # lowest at z_high.
     print("\nComputing line salience...")
     sal_cfg = _salience_cfg()
-    w_abs   = float(sal_cfg.get("weight_absolute", 0.45))
-    w_rel   = float(sal_cfg.get("weight_relative", 0.30))
-    w_speed = float(sal_cfg.get("weight_speed",    0.25))
+    w_abs    = float(sal_cfg.get("weight_absolute", 0.45))
+    w_rel    = float(sal_cfg.get("weight_relative", 0.30))
+    w_speed  = float(sal_cfg.get("weight_speed",    0.25))
+    w_length = float(sal_cfg.get("weight_length",   0.0))
+    length_pct = max(0.0, min(1.0,
+                              float(sal_cfg.get("length_outlier_percentile", 95))
+                              / 100.0))
     mode_zoom_range = (sal_cfg.get("mode_zoom_range_lines")
                        or sal_cfg.get("mode_zoom_range")  # legacy fallback
                        or {})
@@ -1759,8 +1794,25 @@ def main():
         relative_by_oid[oid] = (sum(percentiles) / len(percentiles)
                                 if percentiles else 0.0)
 
-    # Raw salience per feature (pre-normalisation).
+    # Per-mode length normalisation: use the configured percentile as the
+    # "max length" so a few outlier IC routes don't crush typical lines to
+    # near-zero. Per-mode because "long" means different things by mode.
+    length_by_mode: dict = defaultdict(list)
+    for f in features:
+        p = f["properties"]
+        length_by_mode[p["mode"]].append(float(p.get("line_km") or 0.0))
+    length_norm_max: dict = {}
+    for mode, lengths in length_by_mode.items():
+        if not lengths:
+            length_norm_max[mode] = 1.0
+            continue
+        srt = sorted(lengths)
+        idx = max(0, min(len(srt) - 1, int(length_pct * (len(srt) - 1))))
+        length_norm_max[mode] = max(1.0, srt[idx])
+
+    # Raw salience per feature (pre-rank-normalisation).
     salience_by_oid: dict = {}
+    length_score_by_oid: dict = {}
     for f in features:
         p = f["properties"]
         oid = p["osm_id"]
@@ -1773,43 +1825,48 @@ def main():
             speed_score = 0.5
         else:
             speed_score = min(1.0, max(0.0, speed / max_speed))
-        score = w_abs * absolute + w_rel * relative + w_speed * speed_score
+        line_km = float(p.get("line_km") or 0.0)
+        length_score = min(1.0, line_km / length_norm_max.get(mode, 1.0))
+        length_score_by_oid[oid] = length_score
+        score = (w_abs * absolute
+                 + w_rel * relative
+                 + w_speed * speed_score
+                 + w_length * length_score)
         score = max(0.0, min(1.0, score))
         salience_by_oid[oid] = score
         p["salience"] = round(score, 4)
         p["salience_absolute"] = round(absolute, 4)
         p["salience_relative"] = round(relative, 4)
         p["salience_speed"]    = round(speed_score, 4)
+        p["salience_length"]   = round(length_score, 4)
 
-    # Per-mode min-max stretch: the highest-salience line in each mode lands
-    # at the mode's z_low, the lowest at z_high; everything in between is
-    # spaced linearly between them. This guarantees the full configured zoom
-    # range is used regardless of how the raw salience distribution clusters.
-    # Modes with a single feature (or all-equal scores) collapse to z_low —
-    # treated as "best of its mode."
+    # Pure rank within mode: sort lines descending by salience (ties broken
+    # by -f_weighted then osm_id), then assign position i / (n - 1) for the
+    # i-th line. Maps to the mode's [z_low, z_high] range linearly. This
+    # makes appearance uniform across the range regardless of how raw
+    # salience scores cluster — fixes the "all regiobuses appear at z8"
+    # symptom we saw with min-max stretch.
     by_mode: dict = defaultdict(list)
     for oid, score in salience_by_oid.items():
-        by_mode[mode_by_oid.get(oid, "")].append((oid, score))
+        by_mode[mode_by_oid.get(oid, "")].append(oid)
 
     own_min_zoom_by_oid: dict = {}
-    for mode, oid_scores in by_mode.items():
+    for mode, oids in by_mode.items():
         rng = mode_zoom_range.get(mode) or [5.0, 12.0]
         z_low, z_high = float(rng[0]), float(rng[1])
-        scores = [s for _o, s in oid_scores]
-        s_max = max(scores)
-        s_min = min(scores)
-        span = s_max - s_min
-        for oid, s in oid_scores:
-            if span < 1e-9:
-                # Single feature or all-equal: treat as best of mode.
-                own_mz = z_low
-            else:
-                # Normalised position: 0 for best (s_max), 1 for worst (s_min).
-                pos = (s_max - s) / span
-                own_mz = z_low + pos * (z_high - z_low)
-            own_min_zoom_by_oid[oid] = own_mz
+        # Tiebreaker: (-salience, -f_weighted, osm_id). Higher salience first;
+        # within ties, higher absolute frequency first; finally stable by id.
+        ordered = sorted(oids, key=lambda o: (
+            -salience_by_oid.get(o, 0.0),
+            -f_weighted_by_oid.get(o, 0.0),
+            o,
+        ))
+        n = len(ordered)
+        for i, oid in enumerate(ordered):
+            pos = 0.0 if n <= 1 else i / (n - 1)
+            own_min_zoom_by_oid[oid] = z_low + pos * (z_high - z_low)
 
-    # Write own_min_zoom onto features after the stretch is computed.
+    # Write own_min_zoom onto features after rank.
     for f in features:
         p = f["properties"]
         p["own_min_zoom"] = round(own_min_zoom_by_oid.get(p["osm_id"], 14.0), 3)
@@ -1849,7 +1906,20 @@ def main():
     line_oids: list = [f["properties"]["osm_id"] for f in features]
     oid_set: set = set(line_oids)
 
-    # Edges: per super-cluster, star edges from the cheapest-own line to
+    # MBST edge weight = travel duration (minutes), NOT own_min_zoom. The MBST
+    # picks the physical route a passenger would take between branches — fast
+    # / direct lines win. Visibility (own_min_zoom) is a separate concern;
+    # promotion below pulls the chosen connector forward to its branch's zoom
+    # regardless of where its own salience landed.
+    duration_by_oid: dict = {}
+    for f in features:
+        p = f["properties"]
+        oid = p["osm_id"]
+        km = float(p.get("line_km") or 0.0)
+        sp = float(p.get("speed_kmh") or 0.0)
+        duration_by_oid[oid] = (km / sp * 60.0) if sp > 0 else 1e9
+
+    # Edges: per super-cluster, star edges from the lowest-duration line to
     # every other (sufficient to build the MBST — proven by the bottleneck
     # property and the fact that all-pair edges at one cluster collapse to
     # the star under min-bottleneck).
@@ -1858,11 +1928,11 @@ def main():
         oids_here = [o for o in oids if o in oid_set]
         if len(oids_here) < 2:
             continue
-        oids_here.sort(key=lambda o: own_min_zoom_by_oid.get(o, 14.0))
+        oids_here.sort(key=lambda o: duration_by_oid.get(o, 1e9))
         L0 = oids_here[0]
         for L_other in oids_here[1:]:
-            w = max(own_min_zoom_by_oid.get(L0, 14.0),
-                    own_min_zoom_by_oid.get(L_other, 14.0))
+            w = max(duration_by_oid.get(L0, 1e9),
+                    duration_by_oid.get(L_other, 1e9))
             edges.append((w, L0, L_other))
     edges.sort(key=lambda e: e[0])
 
@@ -1969,8 +2039,11 @@ def main():
         else:
             effective_node_mz[oid] = own_mz
 
-    # Final per-line min_zoom = max(own, max effective_node on path to base).
-    # The path-climb ensures a line never appears before any of its ancestors.
+    # Final per-line min_zoom = max effective_node on path to base (incl. self).
+    # A promoted connector renders at its promoted zoom (concept § "both
+    # endpoints move: the sub-tree pulls the connector forward"). Non-promoted
+    # lines have effective_node_mz == own_min_zoom, so the path-climb still
+    # holds them at their own value.
     final_min_zoom: dict = {}
     for oid in line_oids:
         if oid in isolated_oids:
@@ -1984,7 +2057,7 @@ def main():
             max_eff = max(max_eff,
                           effective_node_mz.get(cur,
                                                 own_min_zoom_by_oid.get(cur, 14.0)))
-        final_min_zoom[oid] = max(own_mz, max_eff)
+        final_min_zoom[oid] = max_eff
 
     # Apply final min_zoom (float) to features. tippecanoe.minzoom is the
     # integer floor so the feature is in tile from that zoom onward; the
@@ -2154,6 +2227,7 @@ def main():
                 "last_terminus": last_terminus,
                 "kept_by_variant_filter": kept_by_filter,
                 "rare_variant_threshold_pct": threshold_pct,
+                "regional_bus_rescued": var_key in regional_bus_rescued.get(tg_key, ()),
                 "exclusion_reason": v_reason,
                 "feature_emitted": em.get("feature_emitted", False),
                 "stations": stations,

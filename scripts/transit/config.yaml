@@ -154,6 +154,18 @@ ferry_stops:
   # Spiez-style fans where 16 of 20 lines share one OSM node and the
   # other 4 sit at a terminal node ~17 m away stay under 20 m.
   convergence_threshold_m: 20
+  # Pier endpoint pull. Pfaedle sometimes routes a ferry polyline past
+  # the actual dock to an OSM ferry node a bit further from the GTFS
+  # coord, leaving an intermediate routing vertex closer than the
+  # endpoint. The closest-vertex / closest-point pick then lands
+  # mid-polyline in the water (e.g. line 3150 at Lausanne-Ouchy, where
+  # the last vertex sits ~50 m north of vertex [n-1]). When the closer
+  # polyline endpoint is within this distance of the initial pick, snap
+  # to the endpoint instead — the polyline's terminus is by construction
+  # the OSM ferry-pier node pfaedle routed to, i.e. the physical dock.
+  # Applies to both the canonical-pier closest-vertex pick and the
+  # per-line snap. Wide enough to cover Lausanne's 50.7 m offset.
+  endpoint_pull_threshold_m: 75
 
 # ── Far-zoom stop-marker placement ───────────────────────────────────────────
 # Far-zoom dot positioning for non-rail clusters (metro, tram, bus,
@@ -164,9 +176,6 @@ far_zoom_marker:
   # Proximity threshold for counting a line as passing near an intersection
   # candidate point.
   intersection_tol_m:      8
-  # Bounding-box padding when scanning for pairwise polyline crossings
-  # beyond the cluster's own extent.
-  intersection_bbox_pad_m: 20
 
 # ── Frequency endpoints per bucket (trips per hour) ──────────────────────────
 # Endpoints of the per-bucket frequency score curve. The line's weighted
@@ -253,6 +262,12 @@ min_active_days: 150
 min_active_days_by_bucket:
   mountain: 90
 
+# Seasonal mountain-feeder branches like Theytaz 372 → Le Chargeur run
+# only summer/winter and fall below `min_active_days`. Bus-bucket variants
+# at or above this threshold are kept only if they classify as regional_bus
+# at emission.
+min_active_days_regional_bus: 90
+
 # ── Frequency sampling ───────────────────────────────────────────────────────
 # Sample dates the low-frequency filter measures trip counts on, generated
 # once by scripts/transit/generate_sample_dates.py (seed + blackouts live in
@@ -314,6 +329,14 @@ salience:
   weight_absolute: 0.20
   weight_relative: 0.40
   weight_speed:    0.65
+  weight_length:   0.30        # length contribution — longer lines (more reach)
+                               # score higher and appear earlier in their mode's
+                               # zoom range. Per-mode normalisation uses
+                               # `length_outlier_percentile` to avoid IC routes
+                               # crushing typical lines.
+  length_outlier_percentile: 95  # length percentile used as the per-mode
+                                 # normalisation max. Anything longer than this
+                                 # percentile is clamped to score 1.0.
   k_lines: 8                  # not used directly — line neighborhoods are
                               # built from competing lines at the line's stops
   k_stops: 12                 # K nearest other stops for stop KNN

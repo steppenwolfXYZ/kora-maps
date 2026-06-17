@@ -76,12 +76,12 @@ FERRY_DOT_WB           = float(FERRY_STOPS_CFG.get("dot_width_base", 2.5))
 FERRY_CONNECTOR_WB     = float(FERRY_STOPS_CFG.get("connector_width_base", 1.0))
 FERRY_COLLAPSE_M       = float(FERRY_STOPS_CFG.get("collapse_threshold_m", 15.0))
 FERRY_CONVERGE_M       = float(FERRY_STOPS_CFG.get("convergence_threshold_m", 20.0))
+FERRY_ENDPOINT_PULL_M  = float(FERRY_STOPS_CFG.get("endpoint_pull_threshold_m", 75.0))
 
 # Far-zoom dot positioning: see config.yaml `far_zoom_marker` and
 # .claude/concepts/far-zoom-stop-markers.md.
 FAR_ZOOM_CFG = _transit_cfg.get("far_zoom_marker", {}) or {}
 FAR_ZOOM_INTERSECTION_TOL_M      = float(FAR_ZOOM_CFG.get("intersection_tol_m", 8.0))
-FAR_ZOOM_INTERSECTION_BBOX_PAD_M = float(FAR_ZOOM_CFG.get("intersection_bbox_pad_m", 20.0))
 
 # Mode family for the far-zoom dot rule. RAIL_LIKE skips the intersection
 # search (largest pill → largest disc → existing centroid); every other mode
@@ -136,8 +136,9 @@ MODE_MINZOOM = {
 }
 
 # Per-mode max speed (km/h) for the salience speed boost. Mirrors the table
-# in 06_score_and_match.py. Mountain has no entry; speed isn't a salience
-# input for mountain (mountain_boost handles it).
+# in 06_score_and_match.py. Mountain has no entry; mountain stops are
+# distinguished via their own tier and tier-range, so speed isn't a
+# salience signal for mountain.
 MODE_MAX_SPEED = {
     "train":        100,
     "tram":          25,
@@ -429,6 +430,11 @@ def compute_terminus_skip_oids(line_stops: dict,
     is the non-degenerate one for non-rail) and lets the popup-aggregation
     pass surface both directions.
 
+    Direction-collapsed modes (ferry, aerial mountain, funicular mountain)
+    are exempt: their opposite directions are already merged into one
+    feature upstream, so any first/last pair at the same stop_id is two
+    distinct variants whose pfaedle-snapped endpoints both need dots.
+
     `skip_last_oids` — tram / bus / regional_bus osm_ids whose LAST entry
     (arrival terminus) is dropped because either (1) the rule above did NOT
     pair it with any departure (layover ~100 m from the real terminus that
@@ -439,12 +445,28 @@ def compute_terminus_skip_oids(line_stops: dict,
     redundant. `line_lookup` is required to apply rule 1; `stop_meta` is
     additionally required for rule 2.
     """
-    def _is_aerial(oid):
+    def _is_dedup_exempt(oid):
+        # Modes whose directionality is collapsed upstream (ferry +
+        # aerial / funicular mountain — see .claude/rules/transit.md
+        # "Mountain and ferry" § per-direction split) cannot produce
+        # first/last duplicate pairs at a shared stop_id: opposite
+        # directions are already merged into one feature, so any
+        # first/last pair at the same stop_id belongs to two distinct
+        # variants whose pfaedle-snapped pier endpoints both need their
+        # own dot. Aerial additionally has the cable-car cascade reason
+        # (Niederhornbahn funicular → aerial at Beatenberg, Stockhornbahn
+        # lower → upper aerial at Chrindi: one bare UIC across two
+        # separate aerialways) — both arguments point the same way.
         if not line_lookup:
             return False
         info = line_lookup.get(oid) or line_lookup.get(str(oid))
-        return bool(info and info.get("mode") == "mountain"
-                    and info.get("mountain_origin") == "aerial")
+        if not info:
+            return False
+        if info.get("mode") == "ferry":
+            return True
+        if info.get("mode") == "mountain" and info.get("mountain_origin") in ("aerial", "funicular"):
+            return True
+        return False
 
     arrivals_by_sid: dict = {}
     departures: list = []
@@ -466,19 +488,14 @@ def compute_terminus_skip_oids(line_stops: dict,
     departures_by_sid: dict = {}
     for oid_dep, sid, lon_d, lat_d in departures:
         departures_by_sid.setdefault(sid, []).append((oid_dep, lon_d, lat_d))
-        # Aerial features are exempt from terminus dedup: at cable-car
-        # cascade stations (Niederhornbahn funicular → aerial at Beatenberg,
-        # Stockhornbahn lower → upper aerial at Chrindi) the GTFS feed
-        # assigns one bare UIC to the connection station, but the two
-        # sections are separate physical aerialways. Each (line geometry,
-        # stop_id) needs its own visible dot, so an aerial feature is never
-        # added to skip_first and never causes another feature to be added.
-        if _is_aerial(oid_dep):
+        # Direction-collapsed modes (ferry + aerial / funicular mountain)
+        # are exempt from terminus dedup — see _is_dedup_exempt above.
+        if _is_dedup_exempt(oid_dep):
             continue
         for oid_arr, lon_a, lat_a in arrivals_by_sid.get(sid, []):
             if oid_arr == oid_dep:
                 continue
-            if _is_aerial(oid_arr):
+            if _is_dedup_exempt(oid_arr):
                 continue
             if haversine_km(lon_d, lat_d, lon_a, lat_a) * 1000.0 <= radius_m:
                 skip_first.add(oid_dep)
@@ -3048,6 +3065,14 @@ def _ferry_canonical_snap(polylines, gtfs):
     — never at V. Closest-vertex pins each line to the OSM node it
     actually shares with the others, so the medoid lands at V.
 
+    Endpoint pull: if the closer of the polyline's two endpoints sits
+    within FERRY_ENDPOINT_PULL_M of the closest-vertex pick, prefer the
+    endpoint. The polyline endpoint is by construction the OSM ferry-pier
+    node pfaedle routed to (the physical dock); the closest-vertex can
+    otherwise land on an intermediate routing waypoint when pfaedle's
+    snap node sits a bit further from the GTFS coord than a curve vertex
+    on the approach (Lausanne-Ouchy line 3150).
+
     The canonical is the medoid (vertex with min sum of distances to all
     others). Returns (canonical_lonlat, max_distance_to_medoid_m). The
     max distance is the convergence-quality signal: small ⇒ the lines
@@ -3061,7 +3086,14 @@ def _ferry_canonical_snap(polylines, gtfs):
         if not pl:
             continue
         cv = min(pl, key=lambda v: (v[0] - gtfs[0]) ** 2 + (v[1] - gtfs[1]) ** 2)
-        pier_verts.append((float(cv[0]), float(cv[1])))
+        cv = (float(cv[0]), float(cv[1]))
+        endpoints = (pl[0], pl[-1])
+        closer_ep = min(endpoints,
+                        key=lambda v: (v[0] - cv[0]) ** 2 + (v[1] - cv[1]) ** 2)
+        if haversine_km(cv[0], cv[1], closer_ep[0], closer_ep[1]) * 1000.0 \
+                <= FERRY_ENDPOINT_PULL_M:
+            cv = (float(closer_ep[0]), float(closer_ep[1]))
+        pier_verts.append(cv)
     if not pier_verts:
         return gtfs, 0.0
     if len(pier_verts) == 1:
@@ -3174,11 +3206,12 @@ def _logical_line_key(oid, line_lookup):
     return (ref, info.get("mode") or "", info.get("agency_id") or "")
 
 
-def _key_freq_map(cluster, line_lookup):
+def _key_fweighted_map(cluster, line_lookup):
     """Map each logical-line key present in the cluster to the max
-    `freq_score` across its osm_ids — used by the largest pill/disc freq
-    tiebreak. Max over osm_ids of one logical line because direction
-    variants can carry slightly different per-direction freq_scores."""
+    `f_weighted` (weighted trips/h) across its osm_ids — used by the
+    far-zoom rule's combined-frequency scoring. Max over osm_ids of one
+    logical line because direction variants can carry slightly different
+    per-direction values."""
     out = {}
     for s in cluster:
         oid = str(s.get("osm_id", ""))
@@ -3188,9 +3221,9 @@ def _key_freq_map(cluster, line_lookup):
         if not info:
             continue
         key = _logical_line_key(oid, line_lookup)
-        fs = info.get("freq_score", 0.0) or 0.0
-        if key not in out or fs > out[key]:
-            out[key] = fs
+        fw = info.get("f_weighted", 0.0) or 0.0
+        if key not in out or fw > out[key]:
+            out[key] = fw
     return out
 
 
@@ -3298,17 +3331,22 @@ def _polyline_crossings_m(line_a_m, line_b_m, bbox_m):
 def _far_zoom_intersection_search(cluster, line_lookup):
     """Far-zoom dot intersection search per
     .claude/concepts/far-zoom-stop-markers.md § 'Intersection search'.
-    Returns (lon, lat) of the highest-scoring candidate with score >= 2,
-    or None when no qualifying intersection exists.
+    Returns ((lon, lat), all_lines_present) of the highest-scoring
+    candidate, or None when no candidate has at least 2 distinct logical
+    lines passing within tolerance. `all_lines_present` is True when every
+    in-scope logical line passes within tolerance of the winning
+    candidate — read by the bad-intersection gate to skip the
+    centroid-distance check on full-cluster junctions.
 
     Candidate set: distinct pre-placement pfaedle-snapped stop positions ∪
-    pairwise polyline crossings between in-scope lines. Score: number of
-    distinct in-scope **logical lines** (`(ref, mode, agency_id)` — not
-    `osm_id`s) with at least one polyline passing within
-    FAR_ZOOM_INTERSECTION_TOL_M of the candidate. Direction and terminus
-    variants of one route share a logical key and count once — without
-    this, four parallel direction-variants of one bus would score 4 at
-    every stop on the route. Ties: closest to the cluster snap-centre."""
+    pairwise polyline crossings between in-scope lines. Score: sum of
+    `f_weighted` (weighted trips/h) across in-scope **logical lines**
+    (`(ref, mode, agency_id)` — not `osm_id`s) with at least one polyline
+    passing within FAR_ZOOM_INTERSECTION_TOL_M of the candidate. Direction
+    and terminus variants of one route share a logical key and contribute
+    once. A candidate must have ≥2 distinct logical lines near it to
+    qualify — a single line at a point is not an intersection regardless
+    of its frequency. Ties: closest to the cluster snap-centre."""
     seen_oids = set()
     osm_ids = []
     for s in cluster:
@@ -3346,7 +3384,15 @@ def _far_zoom_intersection_search(cluster, line_lookup):
 
     xs = [s.get("snap_lon", s["lon"]) * mx for s in cluster]
     ys = [s.get("snap_lat", s["lat"]) * my for s in cluster]
-    pad = FAR_ZOOM_INTERSECTION_BBOX_PAD_M
+    # Pad = 1.5 × mean stop distance from the snap centre. Scales with the
+    # cluster's own footprint so off-platform junctions (e.g. roundabouts
+    # ~60 m from the platforms at Bern Viktoriaplatz) stay in scope without
+    # over-reaching into neighbouring clusters in dense city grids.
+    mean_stop_dist = sum(
+        sqrt((xs[i] - centre_m[0]) ** 2 + (ys[i] - centre_m[1]) ** 2)
+        for i in range(len(xs))
+    ) / len(xs)
+    pad = 1.5 * mean_stop_dist
     bbox_m = (min(xs) - pad, min(ys) - pad, max(xs) + pad, max(ys) + pad)
 
     candidates_m = []
@@ -3392,9 +3438,13 @@ def _far_zoom_intersection_search(cluster, line_lookup):
                 return True
         return False
 
-    best_score = 0
+    fw_by_key = _key_fweighted_map(cluster, line_lookup)
+    total_keys = len(distinct_keys)
+
+    best_score = 0.0
     best = None
     best_dist_sq = float("inf")
+    best_keys_count = 0
     for cm in candidates_m:
         keys_near = set()
         for lm, key in lines_m:
@@ -3402,18 +3452,19 @@ def _far_zoom_intersection_search(cluster, line_lookup):
                 continue
             if line_passes_near(lm, cm):
                 keys_near.add(key)
-        score = len(keys_near)
-        if score < 2:
+        if len(keys_near) < 2:
             continue
+        score = sum(fw_by_key.get(k, 0.0) for k in keys_near)
         d_sq = (cm[0] - centre_m[0]) ** 2 + (cm[1] - centre_m[1]) ** 2
         if (score > best_score) or (score == best_score and d_sq < best_dist_sq):
             best_score = score
             best = cm
             best_dist_sq = d_sq
+            best_keys_count = len(keys_near)
 
     if best is None:
         return None
-    return (best[0] / mx, best[1] / my)
+    return (best[0] / mx, best[1] / my), best_keys_count == total_keys
 
 
 def _largest_pill_or_disc_position(pill_feats, cluster, line_lookup):
@@ -3421,11 +3472,10 @@ def _largest_pill_or_disc_position(pill_feats, cluster, line_lookup):
     rank, per .claude/concepts/far-zoom-stop-markers.md § 'Position rule
     by mode family' tiebreak rules:
 
-      1. logical-line count desc (count by (ref, mode, agency_id),
-         not by osm_id — a tram with one direction kept and a two-
-         direction bus at the same stop both count as 1)
-      2. logical-line freq_scores descending lexicographic
-      3. closer to cluster snap-centre
+      1. sum of `f_weighted` (weighted trips/h) across the candidate's
+         logical lines desc — logical-line keys are (ref, mode, agency_id)
+         so direction and terminus variants of one route contribute once.
+      2. closer to cluster snap-centre.
 
     Pill and disc features compete in one ranking — pill geometry is not
     privileged over disc geometry. Returns (lon, lat) or None when no
@@ -3439,10 +3489,7 @@ def _largest_pill_or_disc_position(pill_feats, cluster, line_lookup):
     cluster_xy_m = _cluster_xy_m(cluster, mx, my)
     centre_m = _snap_centre_m(cluster, mx, my)
     tol_sq = DEDUP_TOL_M * DEDUP_TOL_M
-    key_freq = _key_freq_map(cluster, line_lookup)
-
-    def freq_lex(line_keys):
-        return tuple(sorted(-key_freq.get(k, 0.0) for k in line_keys))
+    fw_by_key = _key_fweighted_map(cluster, line_lookup)
 
     best_key = None
     best_pos = None
@@ -3472,16 +3519,71 @@ def _largest_pill_or_disc_position(pill_feats, cluster, line_lookup):
             continue
 
         line_keys = {_logical_line_key(oid, line_lookup) for oid in oids}
+        sum_fw = sum(fw_by_key.get(k, 0.0) for k in line_keys)
         d_sq = (pos[0] * mx - centre_m[0]) ** 2 + (pos[1] * my - centre_m[1]) ** 2
-        # Ranking key: (-logical_line_count, freq-lex tuple, dist_sq).
-        # Lower tuple wins under `<`. -count means larger counts sort first;
-        # freq tuple has negative scores so highest freq sorts first.
-        key = (-len(line_keys), freq_lex(line_keys), d_sq)
+        # Ranking key: (-sum_fw, dist_sq). Lower tuple wins under `<`;
+        # negating sum_fw sorts the highest combined frequency first.
+        key = (-sum_fw, d_sq)
         if best_key is None or key < best_key:
             best_key = key
             best_pos = pos
 
     return best_pos
+
+
+def _intersection_within_pill_spread(pos, pill_feats, cluster,
+                                     all_lines_present):
+    """Bad-intersection fallback gate per
+    .claude/concepts/far-zoom-stop-markers.md § 'Bad-intersection gate'.
+    Keeps the intersection candidate only when its distance to the cluster
+    snap centre is no greater than the mean distance of pill midpoints and
+    endpoint-disc positions to that same centre. Catches cases like Bern
+    Breitenrain where the intersection scores at a bus-only platform
+    ~80 m outside the rendered tram pill; usual intersections sit inside
+    the pill spread and pass.
+
+    When `all_lines_present` is True (every in-scope logical line passes
+    within tolerance of the candidate), the gate is skipped — a junction
+    that all the cluster's lines actually meet at is the correct service
+    node regardless of how far it sits from the platform centroid (Bern
+    Viktoriaplatz: tram 9 + bus 10 meet at a roundabout ~60 m from the
+    snap centre, outside the platform-derived budget).
+
+    Returns True when there are no pills / discs to compare against — in
+    that case the intersection is the only signal available and is kept.
+    """
+    if all_lines_present:
+        return True
+    if not cluster or not pill_feats:
+        return True
+    mean_lat = sum(s.get("snap_lat", s["lat"]) for s in cluster) / len(cluster)
+    mx, my = _meters_per_deg(mean_lat)
+    centre_m = _snap_centre_m(cluster, mx, my)
+    dists = []
+    for feat in pill_feats:
+        props = feat.get("properties") or {}
+        ftype = props.get("feature_type")
+        geom = feat.get("geometry") or {}
+        coords = geom.get("coordinates") or []
+        if ftype == "pill":
+            if len(coords) < 2:
+                continue
+            ref = _polyline_midpoint(coords)
+        elif ftype == "endpoint" and geom.get("type") == "Point":
+            if len(coords) < 2:
+                continue
+            ref = (coords[0], coords[1])
+        else:
+            continue
+        dx = ref[0] * mx - centre_m[0]
+        dy = ref[1] * my - centre_m[1]
+        dists.append(sqrt(dx * dx + dy * dy))
+    if not dists:
+        return True
+    mean_dist = sum(dists) / len(dists)
+    px = pos[0] * mx - centre_m[0]
+    py = pos[1] * my - centre_m[1]
+    return sqrt(px * px + py * py) <= mean_dist
 
 
 def far_zoom_dot_position(cluster, pill_feats, line_lookup, fallback_pos,
@@ -3490,13 +3592,19 @@ def far_zoom_dot_position(cluster, pill_feats, line_lookup, fallback_pos,
     .claude/concepts/far-zoom-stop-markers.md § 'Position rule by mode family'.
 
     Rail-like (train + mountain rebucketed_rail / rack) skips the
-    intersection search; every other mode runs it first. Falls through to
-    `fallback_pos` (the existing centroid of placed positions) when nothing
-    else matches."""
+    intersection search; every other mode runs it first. The intersection
+    result is additionally gated by `_intersection_within_pill_spread`
+    (§ 'Bad-intersection gate') — a result too far from the rendered pill
+    geometry is discarded and the chain falls through. Falls through to
+    `fallback_pos` (the existing centroid of placed positions) when
+    nothing else matches."""
     if not rail_like:
-        pos = _far_zoom_intersection_search(cluster, line_lookup)
-        if pos is not None:
-            return pos
+        res = _far_zoom_intersection_search(cluster, line_lookup)
+        if res is not None:
+            pos, all_lines_present = res
+            if _intersection_within_pill_spread(
+                    pos, pill_feats, cluster, all_lines_present):
+                return pos
     pos = _largest_pill_or_disc_position(pill_feats, cluster, line_lookup)
     if pos is not None:
         return pos
@@ -5100,27 +5208,27 @@ def compute_stop_salience(line_lookup: dict, line_stops: dict,
             score += term_boost
         raw_score_by_uic[uic] = max(0.0, min(1.0, score))
 
-    # Per-tier min-max stretch: highest-salience stop of each tier → z_low,
-    # lowest → z_high, linearly stretched between. Mountain boost is gone —
-    # mountain now has its own tier-range so the additive boost is moot.
-    uics_by_tier_for_stretch: dict = defaultdict(list)
-    for uic, score in raw_score_by_uic.items():
-        uics_by_tier_for_stretch[tier_by_uic.get(uic, "")].append((uic, score))
+    # Pure rank within tier: sort stops descending by salience (ties broken
+    # by -absolute_raw then uic), then assign position i / (n - 1). Maps to
+    # the tier's [z_low, z_high] range linearly so stops appear uniformly
+    # over the range regardless of how raw saliences cluster.
+    uics_by_tier_for_rank: dict = defaultdict(list)
+    for uic in raw_score_by_uic:
+        uics_by_tier_for_rank[tier_by_uic.get(uic, "")].append(uic)
 
     own_mz_by_uic: dict = {}
-    for tier, uic_scores in uics_by_tier_for_stretch.items():
+    for tier, uics_in_tier in uics_by_tier_for_rank.items():
         rng = zoom_ranges.get(tier) or zoom_ranges.get("default") or [5.0, 13.0]
         z_low, z_high = float(rng[0]), float(rng[1])
-        scores = [s for _u, s in uic_scores]
-        s_max = max(scores)
-        s_min = min(scores)
-        span = s_max - s_min
-        for uic, s in uic_scores:
-            if span < 1e-9:
-                own_mz_by_uic[uic] = z_low
-            else:
-                pos = (s_max - s) / span
-                own_mz_by_uic[uic] = z_low + pos * (z_high - z_low)
+        ordered = sorted(uics_in_tier, key=lambda u: (
+            -raw_score_by_uic.get(u, 0.0),
+            -absolute_raw.get(u, 0.0),
+            u,
+        ))
+        n = len(ordered)
+        for i, uic in enumerate(ordered):
+            pos = 0.0 if n <= 1 else i / (n - 1)
+            own_mz_by_uic[uic] = z_low + pos * (z_high - z_low)
 
     result: dict = {}
     for uic in coords_by_uic:
@@ -5626,6 +5734,20 @@ def main():
             for c in cands:
                 slon, slat = snap_to_line(c["gtfs_lon"], c["gtfs_lat"],
                                           c["polyline"])
+                # Endpoint pull (see _ferry_canonical_snap docstring):
+                # prefer the closer polyline endpoint when it's within
+                # FERRY_ENDPOINT_PULL_M of the closest-segment snap, so
+                # the dot lands on the OSM ferry-pier node rather than a
+                # routing waypoint in the water.
+                pl = c["polyline"]
+                if pl:
+                    endpoints = (pl[0], pl[-1])
+                    closer_ep = min(endpoints,
+                                    key=lambda v: (v[0] - slon) ** 2
+                                                  + (v[1] - slat) ** 2)
+                    if haversine_km(slon, slat, closer_ep[0], closer_ep[1]) \
+                            * 1000.0 <= FERRY_ENDPOINT_PULL_M:
+                        slon, slat = float(closer_ep[0]), float(closer_ep[1])
                 ferry_pill_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": FERRY_PAIR_MZ},

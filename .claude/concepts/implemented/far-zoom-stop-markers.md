@@ -14,7 +14,7 @@ Two mode families, each with its own fallback chain. The chain is evaluated in o
 
 **Train + mountain rail-like** (train, mountain `rebucketed_rail` / `rack`):
 
-1. The **largest pill or disc** in the cluster — pill and endpoint disc features are ranked together by line count (number of distinct lines whose dots the feature covers). Pill position = arc-length midpoint of its polyline; disc position = the endpoint position itself.
+1. The **largest pill or disc** in the cluster — pill and endpoint disc features are ranked together by combined frequency (sum of `f_weighted` across the distinct logical lines whose dots the feature covers). Pill position = arc-length midpoint of its polyline; disc position = the endpoint position itself.
 2. The existing centroid position (arithmetic mean of cluster members' positions after the medium-zoom pill algorithm).
 
 **Every other mode** (metro, tram, bus, regional_bus, ferry):
@@ -25,7 +25,7 @@ Two mode families, each with its own fallback chain. The chain is evaluated in o
 
 Tiebreaks within each ranking step:
 
-- **Largest pill or disc**: logical-line count descending → **line frequencies** (each candidate's logical lines' `freq_score`s sorted descending; compare candidates lexicographically — the candidate whose highest-freq line is higher wins, then next-highest, etc.) → closer to cluster snap-centre. Counting logical lines (not `osm_id`s) is what stops the count from over-rewarding multi-direction lines: a single-direction tram terminating at a stop should not be outranked by a two-direction bus at the same stop just because the bus has more `osm_id`s. The frequency tiebreak then fires at stations where a high-frequency line sits alongside a low-frequency line at the same line count (Bern Ostring: tram 7 terminus disc and bus 40 pill, both 1 logical line — tram wins by `freq_score`).
+- **Largest pill or disc**: **combined frequency** (sum of `f_weighted`, weighted trips/h, across the candidate's logical lines) descending → closer to cluster snap-centre. Logical-line keys are `(ref, mode, agency_id)`, so direction and terminus variants of one route contribute once (their `f_weighted` is shared). The combined-frequency rule means a single high-frequency tram outweighs several low-frequency buses at the same stop — Bern Breitenrain (tram 9 ≈ 18.4 trips/h vs. RBS bus 26+36+41 ≈ 17.3 trips/h combined) lands on the tram side, and Bern Ostring (tram 7 ≫ bus 40) lands on the tram disc.
 - **Intersection-search top score** → closer to cluster snap-centre.
 
 Every tiebreak is a total order; same input always produces the same position.
@@ -41,24 +41,35 @@ The cluster **arithmetic centre** used by every tiebreak is the mean of the clus
 **Candidate set.** Union of:
 
 - Every distinct **pfaedle-snapped stop position** of the cluster's members. These sit on a line polyline by construction.
-- Every **pairwise polyline crossing** between two distinct in-scope lines (distinct by logical key, not by `osm_id`) whose intersection point lies within the cluster bounding box expanded by `intersection_bbox_pad_m`.
+- Every **pairwise polyline crossing** between two distinct in-scope lines (distinct by logical key, not by `osm_id`) whose intersection point lies within the cluster bounding box expanded by **1.5 × the mean stop-to-snap-centre distance** within the cluster. The pad scales with each cluster's own footprint — wider for stretched-out interchanges where the actual junction sits well off the platforms (Bern Viktoriaplatz: roundabout ~60 m from the platforms), tighter for compact clusters so neighbouring crossings stay out of scope.
 
-**Score.** For each candidate `p`, score = number of distinct in-scope logical lines with at least one polyline passing within `intersection_tol_m` of `p`. Direction variants of one line count once regardless of how many of their polylines fall near `p`.
+**Score.** For each candidate `p`, score = sum of `f_weighted` (weighted trips/h) across the distinct in-scope logical lines with at least one polyline passing within `intersection_tol_m` of `p`. Direction variants of one line contribute once (shared `f_weighted`).
 
-**Pick.** Highest score, with a minimum of **2** — a candidate covered by only one logical line isn't an intersection. Among tied top-scoring candidates the closest to the cluster snap-centre wins.
+**Pick.** Highest score, with a hard minimum of **≥2 distinct logical lines near the candidate** — a point covered by only one logical line isn't an intersection regardless of how frequent that line is. Among tied top-scoring candidates the closest to the cluster snap-centre wins.
 
-If no candidate reaches score 2, the intersection search fails and the chain falls through.
+If no candidate has ≥2 distinct logical lines, the intersection search fails and the chain falls through.
+
+### Bad-intersection gate
+
+A winning intersection result is **kept** only when it sits within the rendered pill spread. Concretely: compute the cluster snap centre (the same arithmetic centre used by the tiebreaks). The intersection result is discarded — and the chain falls through to the largest-pill/disc step — when its distance to that centre exceeds the **mean** distance of the cluster's pill midpoints and endpoint-disc positions to the same centre.
+
+**Full-cluster carve-out.** The gate is skipped when every in-scope logical line passes within `intersection_tol_m` of the winning candidate — i.e. the candidate is the meeting point of *all* the cluster's lines, not just two of them. A junction that every line in the cluster actually traverses is the correct service node regardless of how far it sits from the platform centroid. Without this carve-out, asymmetric layouts where the true junction sits beyond the platform-derived budget (Bern Viktoriaplatz: tram 9 + bus 10 meet at a roundabout ~60 m from the snap centre, outside the ~46 m mean pill distance) would falsely fall through to the largest-pill step.
+
+Why this exists: at clusters like Bern Breitenrain the intersection candidate scores at a single-mode platform (three buses sharing one bus stop) that sits ~80 m outside the dominant-mode pill geometry (tram pill, 80 m south). The no-jump invariant breaks because the far-zoom dot would visually leap onto the pill at the dot-to-pill switch. The mean-distance threshold catches this case while leaving normal intersections — which always sit near the platform group's centre by construction — untouched.
+
+The gate has no configurable threshold. It uses the mean pill/disc-to-centre distance directly so it scales with each cluster's geometry. Clusters with tightly grouped pills set a tight bar; stretched-out platform arrays set a looser bar. Clusters with no pills / discs (the pill-collapse case) skip the gate — there is no rendered geometry to compare against, so the intersection is the only signal available and is kept.
 
 ### Required behaviour at characteristic cases
 
-- **Crossroads.** Two or more line polylines cross. The crossing point is in the candidate set, scores `n_lines`, wins. Dot sits at the junction even when all platforms are set back from it.
-- **Roundabout.** Lines share an arc of the loop without crossing each other. Pairwise crossings find nothing, but every stop snap on the shared arc sees the other lines within tolerance — those snaps tie at the top score. Arithmetic-centre tiebreak places the dot at the platform-group middle on the perimeter. The loop is sub-pixel at far zoom, so a perimeter position reads as the loop centre.
+- **Crossroads.** Two or more line polylines cross. The crossing point is in the candidate set, scores the full `sum(f_weighted)` over all crossing logical lines, wins. Dot sits at the junction even when all platforms are set back from it.
+- **Roundabout.** Lines enter the loop from different approach streets and cross at one or two points where their polylines traverse the loop. The dynamic bbox pad (1.5 × mean stop-to-snap-centre distance) reaches out to the loop even when the platforms are set back along the approach streets. The crossing nearest the snap centre wins on the closest-to-centre tiebreak; when every cluster line passes within tolerance of that crossing the bad-intersection gate skips the centroid-distance check (Bern Viktoriaplatz: tram 9 + bus 10 meet at four crossings around the roundabout; closest sits ~62 m from the snap centre, well outside the mean pill distance but kept because both logical lines are present).
 - **One-way pair / T-junction.** Lines converge at a single point. The convergence is captured either as a polyline crossing or as a near-crossing of stop snaps; the rule fires correctly.
-- **Parallel running on one street.** Multiple lines share a street segment without crossing. Every stop snap on the segment scores `n_lines`. Tiebreak lands the dot at the platform-group middle on the street — same outcome as largest-pill, so the rule degenerates gracefully.
-- **Multi-line metro interchange.** Underground lines cross. The crossing point scores `n_lines`, wins. Far-zoom dot sits at the interchange, not at the largest platform.
+- **Parallel running on one street.** Multiple lines share a street segment without crossing. Every stop snap on the segment sees the same set of logical lines and ties at the full `sum(f_weighted)`. Tiebreak lands the dot at the platform-group middle on the street — same outcome as largest-pill, so the rule degenerates gracefully.
+- **Multi-line metro interchange.** Underground lines cross. The crossing point scores the full `sum(f_weighted)` of the crossing lines, wins. Far-zoom dot sits at the interchange, not at the largest platform.
 - **Ferry pier.** Visiting ferry lines share a pier OSM node. The shared node is a stop snap, every visiting line passes within tolerance, it wins. Result equals the canonical pier position the ferry code already produces for medium-zoom rendering.
 - **Single-line stop.** Only one in-scope line; no candidate can reach score 2. The chain falls through.
 - **Non-convergent ferry pier.** Visiting ferry lines don't share a vertex within the convergence threshold (per the existing ferry rendering rule). No candidate reaches score 2; chain falls through.
+- **Off-pill multi-line single-mode platform** (Bern Breitenrain: 3 buses share one platform, 1 tram on platforms 80 m south). Intersection scores ≥2 distinct lines at the bus snap and would win on combined frequency, but its distance to the cluster snap centre exceeds the mean pill/disc-to-centre distance — the bad-intersection gate discards it. The chain falls through to the tram pill.
 
 ### Ferry far-zoom marker
 
@@ -86,7 +97,6 @@ Unchanged. The far-zoom dot keeps its existing low-zoom style: white fill, 1 px 
 New `far_zoom_marker` block in the transit config:
 
 - `intersection_tol_m` — proximity threshold for counting a line as passing near an intersection candidate. Default `8`.
-- `intersection_bbox_pad_m` — bounding-box padding when scanning for pairwise polyline crossings. Default `20`.
 
 ## Constraints
 
