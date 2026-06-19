@@ -19,8 +19,15 @@ Docker. Outputs:
 
     data/osm/ch_pfaedle.osm.pbf
     data/osm/rail_ways.geojson
+    data/osm/buildings.geojson
 
-Idempotent: skips if both outputs are newer than every input. Pass --force to rerun.
+`buildings.geojson` carries only building centroids (Point features, no
+geometry beyond `[lon, lat]`). It feeds the urbanness bracket in step 07
+(zoom-level-rules concept § "Urbanness bracket"): each canonical UIC counts
+how many buildings sit within 200 m and 500 m to derive a city / town /
+village / rural bracket.
+
+Idempotent: skips if all outputs are newer than every input. Pass --force to rerun.
 """
 
 import json
@@ -44,10 +51,16 @@ COUNTRY_PBFS = [
 ]
 OUT_PBF = OSM_DIR / "ch_pfaedle.osm.pbf"
 OUT_RAIL_GEOJSON = OSM_DIR / "rail_ways.geojson"
+OUT_BUILDINGS_GEOJSON = OSM_DIR / "buildings.geojson"
 # Railway tags whose ways step 07 walks at terminal train stops. Subway/tram/
 # funicular are excluded — they aren't used by train-bucket lines. See
 # pill-rendering concept § "Missing-range fill (rail only)".
 RAIL_TAG_FILTER = "w/railway=rail,light_rail,narrow_gauge"
+# Buildings: both closed-way buildings and building=* relations
+# (multipolygons covering stations, malls, etc.). osmium export's
+# add-centroid=force collapses them to a single representative Point each so
+# the output stays small (~50 MB for CH + neighbours within the bbox).
+BUILDING_TAG_FILTER = "wr/building"
 
 
 def load_bbox() -> tuple:
@@ -111,6 +124,28 @@ def is_valid_geojson(path: Path) -> bool:
     return n_lines >= 1000
 
 
+def is_valid_buildings_geojson(path: Path) -> bool:
+    """Validate the buildings.geojson output. Buildings are exported as Points
+    (centroids); CH alone has multi-million buildings, so demand at least
+    100 000 to catch crashed-mid-write files."""
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    if data.get("type") != "FeatureCollection":
+        return False
+    features = data.get("features")
+    if not isinstance(features, list):
+        return False
+    n_pts = sum(
+        1 for f in features
+        if (f.get("geometry") or {}).get("type") == "Point"
+    )
+    return n_pts >= 100_000
+
+
 def cut_bbox(image: str, bbox_str: str, inputs: list) -> list:
     cuts: list = []
     for pbf in inputs:
@@ -142,12 +177,20 @@ def main() -> None:
         and newer_than(OUT_RAIL_GEOJSON, [OUT_PBF])
         and is_valid_geojson(OUT_RAIL_GEOJSON)
     )
+    buildings_fresh = (
+        (not force) and pbf_fresh
+        and newer_than(OUT_BUILDINGS_GEOJSON, [OUT_PBF])
+        and is_valid_buildings_geojson(OUT_BUILDINGS_GEOJSON)
+    )
 
-    if pbf_fresh and rail_fresh:
+    if pbf_fresh and rail_fresh and buildings_fresh:
         size_mb = OUT_PBF.stat().st_size / 1_000_000
         rail_mb = OUT_RAIL_GEOJSON.stat().st_size / 1_000_000
+        bldg_mb = OUT_BUILDINGS_GEOJSON.stat().st_size / 1_000_000
         print(f"Up-to-date: {OUT_PBF} ({size_mb:.0f} MB), "
-              f"{OUT_RAIL_GEOJSON.name} ({rail_mb:.0f} MB). Pass --force to rebuild.")
+              f"{OUT_RAIL_GEOJSON.name} ({rail_mb:.0f} MB), "
+              f"{OUT_BUILDINGS_GEOJSON.name} ({bldg_mb:.0f} MB). "
+              "Pass --force to rebuild.")
         return
 
     image = load_image()
@@ -225,12 +268,144 @@ def main() -> None:
 
     for p in rail_pbfs + rail_geojsons:
         p.unlink(missing_ok=True)
-    for cut in cuts:
-        cut.unlink(missing_ok=True)
+    # Keep `cuts` on disk — the building extraction below also needs them.
+    # They're removed at the end of main() once both extractions have run.
 
     rail_mb = OUT_RAIL_GEOJSON.stat().st_size / 1_000_000
     print(f"Done. Rail GeoJSON: {len(features):,} ways, "
           f"{rail_mb:.0f} MB → {OUT_RAIL_GEOJSON}")
+
+    # Extract building centroids for step 07's urbanness bracket. Same
+    # per-country-slice pattern as the rail extraction: tags-filter → export
+    # (with centroid-force) → Python dedup. Buildings cross borders far less
+    # than rail does, so dedup hits are rare, but the same key works.
+    building_pbfs: list = []
+    building_geojsons: list = []
+    print(f"Extracting building centroids per country slice → "
+          f"{OUT_BUILDINGS_GEOJSON.name}")
+    # The bbox cuts may already have been deleted above, so recreate them.
+    if not cuts or any(not c.exists() for c in cuts):
+        cuts = cut_bbox(image, bbox_str, inputs)
+    for cut in cuts:
+        stem = cut.stem.replace(".osm", "")
+        bldg_pbf = OSM_DIR / f"{stem}.bldg.osm.pbf"
+        bldg_gj = OSM_DIR / f"{stem}.bldg.geojson"
+        docker_run(
+            image, "osmium", "tags-filter",
+            "--overwrite",
+            "-o", f"/work/{relpath(bldg_pbf)}",
+            f"/work/{relpath(cut)}",
+            BUILDING_TAG_FILTER,
+        )
+        # osmium export to GeoJSONSeq (newline-delimited GeoJSON) so step 03
+        # can stream the parsing — building polygons total several GB across
+        # CH + neighbours, way too big for a single json.loads. osmium has no
+        # native centroid extraction, so we compute the centroid from the
+        # polygon ring vertices in Python below.
+        docker_run(
+            image, "osmium", "export",
+            "--overwrite",
+            "-f", "geojsonseq",
+            "-o", f"/work/{relpath(bldg_gj)}",
+            f"/work/{relpath(bldg_pbf)}",
+        )
+        building_pbfs.append(bldg_pbf)
+        building_geojsons.append(bldg_gj)
+
+    # Stream per-feature centroid extraction from the line-delimited GeoJSON.
+    # For polygons / multipolygons we use the bbox centre of the first ring as
+    # a cheap centroid — fine for the urbanness use case (we just need a
+    # representative point inside the building). Point geometries (the small
+    # subset of buildings tagged on nodes) pass through directly.
+    coords: list = []
+    n_polys = n_points = n_skipped = 0
+
+    def _flat_coords(coords_obj):
+        """Yield flat (lon, lat) pairs from a polygon ring, multipolygon, or
+        linestring. Used to compute the bbox centre below."""
+        if not isinstance(coords_obj, list) or not coords_obj:
+            return
+        first = coords_obj[0]
+        if isinstance(first, (int, float)):
+            # Single Point
+            yield (coords_obj[0], coords_obj[1])
+            return
+        if isinstance(first, list) and first and isinstance(first[0], (int, float)):
+            # LineString / Polygon ring
+            for pt in coords_obj:
+                yield (pt[0], pt[1])
+            return
+        # Polygon / MultiLineString — take the first ring only.
+        for sub in _flat_coords(first):
+            yield sub
+
+    def _bbox_centre(coords_obj):
+        xs = []
+        ys = []
+        for x, y in _flat_coords(coords_obj):
+            xs.append(x)
+            ys.append(y)
+        if not xs:
+            return None
+        return ((min(xs) + max(xs)) / 2.0,
+                (min(ys) + max(ys)) / 2.0)
+
+    seen_ids: set = set()
+    for gj in building_geojsons:
+        with open(gj, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                # RFC 7464 GeoJSONSeq prefixes each record with U+001E; strip
+                # it before parsing.
+                if line.startswith("\x1e"):
+                    line = line[1:]
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    feat = json.loads(line)
+                except json.JSONDecodeError:
+                    n_skipped += 1
+                    continue
+                fid = feat.get("id")
+                if fid is not None:
+                    if fid in seen_ids:
+                        continue
+                    seen_ids.add(fid)
+                geom = feat.get("geometry") or {}
+                gtype = geom.get("type")
+                g_coords = geom.get("coordinates")
+                if gtype == "Point" and isinstance(g_coords, list) and len(g_coords) >= 2:
+                    coords.append([round(float(g_coords[0]), 6),
+                                   round(float(g_coords[1]), 6)])
+                    n_points += 1
+                    continue
+                centre = _bbox_centre(g_coords)
+                if centre is not None:
+                    coords.append([round(centre[0], 6), round(centre[1], 6)])
+                    n_polys += 1
+                else:
+                    n_skipped += 1
+    print(f"  Building centroids: {n_polys:,} polygons, {n_points:,} points, "
+          f"{n_skipped:,} skipped")
+
+    tmp_path = OUT_BUILDINGS_GEOJSON.with_suffix(
+        OUT_BUILDINGS_GEOJSON.suffix + ".tmp"
+    )
+    # Custom compact format: { "coords": [[lon, lat], ...] }. Not strict
+    # GeoJSON; step 07 reads via json.loads. Stays a .geojson filename for
+    # locality but the content is a flat coordinate list to keep the file
+    # small (~50 MB instead of 200+ MB).
+    tmp_path.write_text(json.dumps({"coords": coords}))
+    tmp_path.replace(OUT_BUILDINGS_GEOJSON)
+
+    for p in building_pbfs + building_geojsons:
+        p.unlink(missing_ok=True)
+    for cut in cuts:
+        cut.unlink(missing_ok=True)
+
+    bldg_mb = OUT_BUILDINGS_GEOJSON.stat().st_size / 1_000_000
+    print(f"Done. Building centroids: {len(coords):,} buildings, "
+          f"{bldg_mb:.0f} MB → {OUT_BUILDINGS_GEOJSON}")
 
 
 if __name__ == "__main__":

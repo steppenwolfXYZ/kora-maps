@@ -316,93 +316,77 @@ freq_sampling:
     - "20261122"
     - "20261212"
 
-# ── Salience-based zoom visibility ───────────────────────────────────────────
-# See .claude/concepts/salience-ranking.md.
-# Per-line and per-stop salience score in [0, 1] decides the minimum zoom
-# level at which the feature is rendered. Score combines absolute frequency
-# (f_weighted via freq_score), local relative frequency (KNN-based rank
-# against competing transit), and a speed boost so faster modes stay
-# visible at lower zooms. Mountain gets a fixed additive boost. For stops
-# only, terminus stops dominated by one line get an additional boost.
-# Tunable; values are first-pass and to be calibrated by trial.
-salience:
-  weight_absolute: 0.20
-  weight_relative: 0.40
-  weight_speed:    0.65
-  weight_length:   0.30        # length contribution — longer lines (more reach)
-                               # score higher and appear earlier in their mode's
-                               # zoom range. Per-mode normalisation uses
-                               # `length_outlier_percentile` to avoid IC routes
-                               # crushing typical lines.
-  length_outlier_percentile: 95  # length percentile used as the per-mode
-                                 # normalisation max. Anything longer than this
-                                 # percentile is clamped to score 1.0.
-  k_lines: 8                  # not used directly — line neighborhoods are
-                              # built from competing lines at the line's stops
-  k_stops: 12                 # K nearest other stops for stop KNN
-  terminus_boost: 0.20        # added to a stop's score when its line is
-                              # dominant at the stop and the stop is an endpoint
-  terminus_dominance_ratio: 1.5  # the dominant line's f_weighted must exceed
-                                 # the next-highest's by this factor
-  # mountain_boost was removed when mountain got its own zoom range in
-  # mode_zoom_range_lines / mode_zoom_range_stops — the per-mode range
-  # subsumes what the additive boost used to do.
-  # Mode-tier competition. For each mode, the set of comparator modes used
-  # when computing the local-relative component. A line / stop only
-  # competes against modes in its comparator set; this prevents (e.g.)
-  # bus density from suppressing trains. Modes absent from this dict
-  # default to "self only".
-  mode_tiers:
-    train:        [train]
-    metro:        [metro, train]
-    tram:         [tram, metro, train]
-    bus:          [bus, tram, metro, train]
-    regional_bus: [regional_bus, bus, tram, metro, train]
-    ferry:        [ferry]
-    mountain:     [mountain]
-  # Per-mode zoom range. Highest-salience feature of the mode lands at the
-  # first value (visible earliest); lowest-salience at the second
-  # (visible latest); features in between are linearly stretched between
-  # the two so the full range is always used. The mapping is continuous
-  # (float min_zoom), so features appear at fractional zoom levels — no
-  # banding at integer zoom transitions. tippecanoe.minzoom uses
-  # floor(min_zoom) for tile inclusion; the style filter
-  # `zoom >= min_zoom` enforces the exact float at render time.
-  # Lines and stops have separate tables so stops can lag behind their
-  # lines (the stops-follow-lines rule additionally ensures a stop never
-  # appears before any of its serving lines).
-  mode_zoom_range_lines:
-    train:        [4, 6]
-    metro:        [8, 10]
-    tram:         [8.5, 10]
-    regional_bus: [7, 10]
-    bus:          [9.5, 11]
-    ferry:        [7.5, 9]
-    mountain:     [7.5, 9.5]
-  mode_zoom_range_stops:
-    train:        [6, 8]
-    metro:        [9, 10.5]
-    tram:         [9, 11.5]
-    regional_bus: [9, 11.5]
-    bus:          [10.5, 12.5]
-    ferry:        [10.5, 12.5]
-    mountain:     [8.5, 10]
-  # Network connectivity & connector promotion (salience-ranking concept
-  # § "Network connectivity").
-  cluster_threshold_m: 250          # stops within this Euclidean distance
-                                    # merge into one line-graph node, regardless
-                                    # of parent_station. Catches transfer points
-                                    # that don't share a GTFS parent.
-  promotion_ratio: 0.5              # gate: a connector C is promoted only if
-                                    # its MBST sub-tree station count ≥
-                                    # promotion_ratio * C's own station count.
-                                    # Smaller branches are held back to the
-                                    # connector's natural appearance zoom.
-  isolated_mountain_min_zoom: 13    # min_zoom for lines with no path to base
-                                    # in the line graph. Affects truly isolated
-                                    # mountain lines (Schynige Platte and
-                                    # similar) and surfaces non-mountain
-                                    # isolation in the diagnostic.
+# ── Per-zoom-level visibility rules ──────────────────────────────────────────
+# See .claude/concepts/zoom-level-rules.md.
+# Per-feature integer `min_zoom` (4–12) computed from per-mode line / stop
+# rules, a geometric salience score (linear-falloff competition density),
+# and a stop-weighted average over the MBST path that pulls isolated
+# branches forward to connect to the base network.
+zoom_level_rules:
+  # Comma-separated route_short_name prefixes treated as intercity at the
+  # train z4 rule. Match is "ref starts with this prefix" (case-insensitive).
+  intercity_route_prefixes: [IC, ICE, EC]
+
+  # Salience: how alone a line is geographically.
+  salience:
+    # Spacing of sample points along the polyline (m). The per-sample
+    # competition score is averaged across all samples, so a long line in
+    # quiet country averages to the same value as a short line in quiet
+    # country.
+    sample_step_m: 1000
+    # Per-mode radius (m) within which other lines (in the mode's
+    # comparator set, see comparators below) contribute to competition.
+    # Each match contributes 1 − distance / radius (linear falloff).
+    radius_m:
+      train:        30000
+      regional_bus: 10000
+      metro:         5000
+      tram:          5000
+      bus:           5000
+      ferry:        10000
+      mountain:      5000
+    # Per-mode comparator sets — which modes count as competition. A line
+    # only competes against modes in its comparator set; this prevents
+    # (e.g.) bus density from suppressing trains.
+    comparators:
+      train:        [train]
+      metro:        [metro, train]
+      tram:         [tram, metro, train]
+      bus:          [bus, tram, metro, train]
+      regional_bus: [regional_bus, bus, tram, metro, train]
+      ferry:        [ferry]
+      mountain:     [mountain]
+
+  # Line graph (super-UIC clustering + MBST).
+  line_graph:
+    # Stops within this Euclidean distance merge into one line-graph node
+    # (super-UIC) regardless of parent_station — catches transfer points
+    # that don't share a GTFS parent.
+    cluster_threshold_m: 250
+
+  # Stop importance score (points-based, 4 categories summed).
+  stop_importance:
+    # Radius for the "Nearby transit" category. Counts distinct bus / tram
+    # line_keys with ≥ 1 stop within this radius of a train stop,
+    # excluding lines that also serve the train stop itself. Train stops
+    # only; non-train stops always score 0 in this category.
+    nearby_transit_radius_m: 1000
+
+  # Urbanness bracket — OSM building density around each canonical UIC.
+  # Two `building=*` counts are taken: within `radius_inner_m` (c200) and
+  # within `radius_outer_m` (c500). Bracket assigned by evaluating rules
+  # top-to-bottom; first match wins.
+  urbanness:
+    radius_inner_m: 200
+    radius_outer_m: 500
+    # Thresholds for elseif-style assignment:
+    #   c500 > city_c500              → city
+    #   else if c500 > town_c500      → town
+    #   else if c200 > village_c200   → village
+    #   else                          → rural
+    city_c500:    600
+    town_c500:    300
+    village_c200:  30
 
 # ── Pfaedle invocation ───────────────────────────────────────────────────────
 pfaedle:

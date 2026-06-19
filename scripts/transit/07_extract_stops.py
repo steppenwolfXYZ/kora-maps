@@ -5019,11 +5019,14 @@ def cluster_stops_for_pills(raw_stops, radius_km):
 
 # Stop tier hierarchy. Higher index = higher priority for tier assignment
 # when a stop is served by multiple modes. Ferry / mountain are evaluated
-# only when no hierarchy mode is present (their "own pool" semantics per
-# salience-ranking concept § "Mode-tier competition").
+# only when no hierarchy mode is present.
 STOP_TIER_HIERARCHY = ("train", "metro", "tram", "bus", "regional_bus")
 STOP_TIER_ISOLATED  = ("ferry", "mountain")
 STOP_TIER_RANK = {m: i for i, m in enumerate(STOP_TIER_HIERARCHY)}
+
+# Min_zoom assigned when no per-mode rule matches. Effectively "never visible"
+# at any rendered zoom level.
+UNREACH_Z = 13
 
 
 def _resolve_stop_tier(modes_present: set) -> str:
@@ -5044,208 +5047,510 @@ def _resolve_stop_tier(modes_present: set) -> str:
     return ""
 
 
-def compute_stop_salience(line_lookup: dict, line_stops: dict,
-                          stop_meta: dict, sal_cfg: dict) -> dict:
-    """Per-UIC salience scoring for stops (see salience-ranking concept).
-    UIC = parent_station if present, else stop_id base. Returns
-    {uic: {salience, own_min_zoom, tier, absolute, relative, speed,
-           terminus_boost, mountain_boost, absolute_raw}}.
+# ── Zoom-level rules: data loaders ──────────────────────────────────────────
+# See .claude/concepts/zoom-level-rules.md.
 
-    Mode-tier rule: a stop's tier is the highest-priority mode that serves
-    it (hierarchy: train > metro > tram > bus > regional_bus, then ferry,
-    then mountain). Absolute density sums f_weighted of lines whose mode
-    equals the tier only. KNN neighbours are the K nearest same-tier
-    stops.
+BUILDINGS_GEOJSON = ROOT / "data" / "osm" / "buildings.geojson"
+GTFS_STOP_TIMES   = ROOT / "data" / "gtfs_routed" / "stop_times.txt"
+OUT_URBANNESS     = ROOT / "data" / "transit" / "urbanness.json"
+
+
+def _zoom_rules_cfg() -> dict:
+    sc = _transit_cfg.get("zoom_level_rules") or {}
+    if not sc:
+        print("  WARNING: config.yaml has no `zoom_level_rules` section — "
+              "stop min_zoom defaults to mode minzoom only.")
+    return sc
+
+
+def _parse_time_secs(t: str) -> int:
+    """HH:MM:SS → seconds. Caller catches ValueError."""
+    p = t.strip().split(":")
+    return int(p[0]) * 3600 + int(p[1]) * 60 + int(p[2])
+
+
+def _uic_of(sid: str, stop_meta: dict) -> str:
+    """Canonical UIC for a stop_id — parent_station if present, else the
+    `:`-prefix base of the stop_id (which is the SBB-style UIC)."""
+    if not sid:
+        return ""
+    meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
+    return meta.get("parent") or sid.split(":")[0]
+
+
+def load_buildings():
+    """Return a flat [(lon, lat), ...] from data/osm/buildings.geojson.
+    Format is the custom `{"coords": [[lon, lat], ...]}` blob written by
+    03_bbox_osm.py — not strict GeoJSON, just a compact coord list."""
+    if not BUILDINGS_GEOJSON.exists():
+        print(f"  WARNING: {BUILDINGS_GEOJSON} missing — urbanness brackets "
+              "default to rural. Re-run step 03 to populate.")
+        return []
+    data = json.loads(BUILDINGS_GEOJSON.read_text())
+    return [(float(c[0]), float(c[1])) for c in data.get("coords", [])]
+
+
+def count_buildings_in_radii(coords_by_uic, buildings,
+                              r_inner_m, r_outer_m):
+    """{uic: (c_inner, c_outer)} via grid bucketing at the outer radius."""
+    if not buildings or not coords_by_uic:
+        return {uic: (0, 0) for uic in coords_by_uic}
+    cell_m = max(r_inner_m, r_outer_m)
+    lat0 = 46.8
+    cos_lat0 = cos(radians(lat0))
+    cell_lat_deg = cell_m / _M_PER_DEG
+    cell_lon_deg = cell_lat_deg / cos_lat0
+    grid: dict = defaultdict(list)
+    for lon, lat in buildings:
+        cx = int(floor(lon / cell_lon_deg))
+        cy = int(floor(lat / cell_lat_deg))
+        grid[(cx, cy)].append((lon, lat))
+    r_in_sq = r_inner_m * r_inner_m
+    r_out_sq = r_outer_m * r_outer_m
+    out: dict = {}
+    for uic, (lon, lat) in coords_by_uic.items():
+        cx = int(floor(lon / cell_lon_deg))
+        cy = int(floor(lat / cell_lat_deg))
+        c_in = c_out = 0
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (blon, blat) in grid.get((cx + dx, cy + dy), ()):
+                    mdx = (blon - lon) * cos_lat0 * _M_PER_DEG
+                    mdy = (blat - lat) * _M_PER_DEG
+                    d_sq = mdx * mdx + mdy * mdy
+                    if d_sq <= r_out_sq:
+                        c_out += 1
+                        if d_sq <= r_in_sq:
+                            c_in += 1
+        out[uic] = (c_in, c_out)
+    return out
+
+
+def compute_urbanness(building_counts, urb_cfg):
+    """{uic: {c_inner, c_outer, bracket}}. Bracket assigned by evaluating
+    rules top-to-bottom (elseif semantics):
+        c_outer > city_c500   → city
+        c_outer > town_c500   → town
+        c_inner > village_c200 → village
+        else                  → rural
+    See concept § "Urbanness bracket"."""
+    city_th    = float(urb_cfg.get("city_c500",    600))
+    town_th    = float(urb_cfg.get("town_c500",    300))
+    village_th = float(urb_cfg.get("village_c200",  30))
+    out: dict = {}
+    for uic, (c_in, c_out) in building_counts.items():
+        if c_out > city_th:
+            b = "city"
+        elif c_out > town_th:
+            b = "town"
+        elif c_in > village_th:
+            b = "village"
+        else:
+            b = "rural"
+        out[uic] = {"c200": c_in, "c500": c_out, "bracket": b}
+    return out
+
+
+def compute_dwell_per_uic(stop_meta):
+    """{uic: avg_dwell_seconds} streamed from data/gtfs_routed/stop_times.txt.
+    avg (dep − arr) across every trip-stop row. Rows with arr == dep or
+    missing fields are folded in as 0 — they count toward the average but
+    pull it down, matching the concept's "average departure − arrival
+    across trips visiting the stop".
     """
-    # Per-UIC: list of {oid, f_weighted, mode, speed_kmh, mountain_origin,
-    # is_first, is_last}. Also first-seen coords for KNN.
-    by_uic: dict = defaultdict(list)
+    if not GTFS_STOP_TIMES.exists():
+        print(f"  WARNING: {GTFS_STOP_TIMES} missing — dwell points default "
+              "to 0.")
+        return {}
+    sum_secs: dict = defaultdict(float)
+    cnt: dict = defaultdict(int)
+    with open(GTFS_STOP_TIMES, encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            arr = row.get("arrival_time", "")
+            dep = row.get("departure_time", "")
+            sid = row.get("stop_id", "")
+            if not sid:
+                continue
+            try:
+                a = _parse_time_secs(arr)
+                d = _parse_time_secs(dep)
+            except (ValueError, IndexError):
+                continue
+            uic = _uic_of(sid, stop_meta)
+            if not uic:
+                continue
+            sum_secs[uic] += max(0, d - a)
+            cnt[uic] += 1
+    return {uic: sum_secs[uic] / cnt[uic] for uic in sum_secs if cnt[uic] > 0}
+
+
+def compute_stop_importance(uic_serving, coords_by_uic,
+                             urbanness, dwell_by_uic,
+                             nearby_transit_radius_m):
+    """Per-stop importance score = dwell + urbanness + nearby_transit + interchange.
+    See concept § "Stop importance score". Returns {uic: int}.
+
+    Per-category points are hard-coded in this function; only the radius
+    for the nearby-transit category lives in config (see
+    `zoom_level_rules.stop_importance.nearby_transit_radius_m`).
+    """
+    # Per-uic: distinct line-key set. line_key = (ref, agency, mode) here —
+    # mode-typed so "Bus 10 BernMobil" and "Train 10 SBB" count as distinct.
+    line_keys_by_uic: dict = defaultdict(set)
+    bus_tram_keys_by_uic: dict = defaultdict(set)
+    modes_by_uic: dict = defaultdict(set)
+    for uic, entries in uic_serving.items():
+        for e in entries:
+            lk = e["line_key"]
+            line_keys_by_uic[uic].add(lk)
+            modes_by_uic[uic].add(e["mode"])
+            if e["mode"] in ("bus", "tram", "regional_bus"):
+                bus_tram_keys_by_uic[uic].add(lk)
+
+    # Spatial grid for nearby-transit lookup (train stop → bus/tram lines
+    # within radius). Index keys are uic, value is the bus/tram line_key set
+    # at that uic.
+    lat0 = 46.8
+    cos_lat0 = cos(radians(lat0))
+    cell_m = nearby_transit_radius_m
+    cell_lat_deg = cell_m / _M_PER_DEG
+    cell_lon_deg = cell_lat_deg / cos_lat0
+    bt_grid: dict = defaultdict(list)
+    for uic, keys in bus_tram_keys_by_uic.items():
+        coord = coords_by_uic.get(uic)
+        if not coord:
+            continue
+        lon, lat = coord
+        cx = int(floor(lon / cell_lon_deg))
+        cy = int(floor(lat / cell_lat_deg))
+        bt_grid[(cx, cy)].append((uic, lon, lat, keys))
+    r_sq = nearby_transit_radius_m * nearby_transit_radius_m
+
+    URBANNESS_POINTS = {"city": 3, "town": 2, "village": 1, "rural": 0}
+    out: dict = {}
+    for uic in uic_serving:
+        score = 0
+        # Dwell: > 3 min → 3; > 0 min → 2; else 0.
+        dwell = dwell_by_uic.get(uic, 0.0)
+        if dwell > 180:
+            score += 3
+        elif dwell > 0:
+            score += 2
+        # Urbanness bracket.
+        bracket = urbanness.get(uic, {}).get("bracket", "rural")
+        score += URBANNESS_POINTS.get(bracket, 0)
+        # Nearby transit (train stops only).
+        my_modes = modes_by_uic.get(uic, set())
+        if "train" in my_modes:
+            coord = coords_by_uic.get(uic)
+            if coord is not None:
+                lon, lat = coord
+                cx = int(floor(lon / cell_lon_deg))
+                cy = int(floor(lat / cell_lat_deg))
+                my_keys = line_keys_by_uic.get(uic, set())
+                found_keys: set = set()
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for (_other_uic, olon, olat, keys) in \
+                                bt_grid.get((cx + dx, cy + dy), ()):
+                            mdx = (olon - lon) * cos_lat0 * _M_PER_DEG
+                            mdy = (olat - lat) * _M_PER_DEG
+                            if mdx * mdx + mdy * mdy > r_sq:
+                                continue
+                            found_keys.update(keys - my_keys)
+                if len(found_keys) > 3:
+                    score += 3
+                elif len(found_keys) > 0:
+                    score += 2
+        # Interchange.
+        keys_here = line_keys_by_uic.get(uic, set())
+        if len(keys_here) >= 2:
+            if "train" in my_modes:
+                score += 3
+            else:
+                score += 2
+        out[uic] = score
+    return out
+
+
+def _build_uic_serving(line_lookup, line_stops, stop_meta):
+    """Build the per-UIC line-membership index used by every stop-rule
+    function. Each entry carries {oid, mode, idx, is_first, is_last,
+    line_key}. uic = parent_station if present, else stop_id base.
+    """
+    uic_serving: dict = defaultdict(list)
     coords_by_uic: dict = {}
     for oid, entry in line_stops.items():
-        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
-        if not stops:
-            continue
         info = line_lookup.get(str(oid))
         if not info:
             continue
-        fw = float(info.get("f_weighted") or 0.0)
-        spd = info.get("speed_kmh")
+        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if not stops:
+            continue
         mode = info.get("mode", "")
-        mo = info.get("mountain_origin")
+        ref = info.get("ref", "")
+        agency_id = info.get("agency_id", "")
+        line_key = (ref, agency_id, mode)
         last_idx = len(stops) - 1
         for idx, stop in enumerate(stops):
             if len(stop) < 3 or not stop[2]:
                 continue
             sid = stop[2]
-            lon, lat = stop[0], stop[1]
-            meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
-            uic = meta.get("parent") or sid.split(":")[0]
-            by_uic[uic].append({
-                "oid": str(oid), "f_weighted": fw, "mode": mode,
-                "speed_kmh": spd, "mountain_origin": mo,
+            lon, lat = float(stop[0]), float(stop[1])
+            uic = _uic_of(sid, stop_meta)
+            if not uic:
+                continue
+            uic_serving[uic].append({
+                "oid": str(oid), "mode": mode, "idx": idx,
                 "is_first": idx == 0, "is_last": idx == last_idx,
+                "line_key": line_key,
             })
             coords_by_uic.setdefault(uic, (lon, lat))
+    return uic_serving, coords_by_uic
 
-    if not by_uic:
-        return {}
 
-    # Tier per UIC.
-    tier_by_uic: dict = {}
-    for uic, entries in by_uic.items():
-        modes = {e["mode"] for e in entries}
-        tier_by_uic[uic] = _resolve_stop_tier(modes)
-
-    # Absolute density per UIC — tier-restricted (only lines whose mode
-    # equals the stop's tier contribute).
-    absolute_raw: dict = {}
-    for uic, entries in by_uic.items():
-        tier = tier_by_uic.get(uic, "")
-        absolute_raw[uic] = sum(e["f_weighted"] for e in entries
-                                if e["mode"] == tier)
-
-    # Per-tier log-normalisation so each tier's "1.0" is its own busiest hub.
-    max_abs_by_tier: dict = defaultdict(float)
-    for uic, v in absolute_raw.items():
-        t = tier_by_uic.get(uic, "")
-        if v > max_abs_by_tier[t]:
-            max_abs_by_tier[t] = v
-    absolute_norm: dict = {}
-    for uic, v in absolute_raw.items():
-        t = tier_by_uic.get(uic, "")
-        mx = max_abs_by_tier.get(t, 0.0)
-        log_max = log(mx + 1.0) if mx > 0 else 1.0
-        absolute_norm[uic] = (log(v + 1.0) / log_max) if log_max > 0 else 0.0
-
-    # KNN — neighbours restricted to same tier.
-    k = max(1, int(sal_cfg.get("k_stops", 12)))
-    uics_by_tier: dict = defaultdict(list)
-    for uic in coords_by_uic:
-        uics_by_tier[tier_by_uic.get(uic, "")].append(uic)
-
-    relative_by_uic: dict = {}
-    for tier, tier_uics in uics_by_tier.items():
-        coords = [coords_by_uic[u] for u in tier_uics]
-        if not coords:
+def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
+                           importance_by_uic, intercity_oids,
+                           uic_serving, coords_by_uic):
+    """Apply per-mode stop rules → candidate min_zoom per UIC, then
+    raise to the smallest min_zoom of any line serving the UIC
+    (stops-follow-lines). Returns {uic: {min_zoom, rule_label,
+    is_intersection, is_terminus, tier}}.
+    """
+    # Per-line cumulative km along the polyline at each stop index.
+    cum_km_by_oid: dict = {}
+    for oid, entry in line_stops.items():
+        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if not stops:
+            cum_km_by_oid[str(oid)] = []
             continue
-        cos_lat0 = cos(radians(coords[0][1]))
-        for i, uic in enumerate(tier_uics):
-            my_abs = absolute_raw.get(uic, 0.0)
-            x0, y0 = coords[i]
-            dists: list = []
-            for j, other in enumerate(tier_uics):
-                if j == i:
+        cum = [0.0]
+        for i in range(1, len(stops)):
+            cum.append(cum[-1] + haversine_km(
+                stops[i - 1][0], stops[i - 1][1],
+                stops[i][0], stops[i][1]))
+        cum_km_by_oid[str(oid)] = cum
+
+    # Per-uic per-line index map (so a line can be checked at a uic without
+    # rescanning its stops).
+    uic_indices_on_oid: dict = defaultdict(dict)  # (uic, oid) → idx
+    for uic, entries in uic_serving.items():
+        for e in entries:
+            uic_indices_on_oid[(uic, e["oid"])] = e["idx"]
+
+    # Pre-bucket lines by mode for fast lookup.
+    oids_by_mode: dict = defaultdict(list)
+    for oid, info in line_lookup.items():
+        oids_by_mode[info.get("mode", "")].append(str(oid))
+
+    def _line_mz(oid: str) -> int:
+        mz = line_lookup.get(oid, {}).get("min_zoom")
+        try:
+            return int(mz) if mz is not None else UNREACH_Z
+        except (TypeError, ValueError):
+            return UNREACH_Z
+
+    def _visible_oids_in_mode(mode: str, level: int) -> set:
+        return {o for o in oids_by_mode.get(mode, [])
+                if _line_mz(o) <= level}
+
+    candidate_mz: dict = {uic: UNREACH_Z for uic in uic_serving}
+    rule_label: dict = {uic: "" for uic in uic_serving}
+    # `is_intersection` / `is_terminus` are computed against the FINAL set of
+    # visible lines (using the final per-line min_zoom). Recorded for diag
+    # output; not used to gate further rules.
+    is_intersection_flag: dict = {uic: False for uic in uic_serving}
+    is_terminus_flag: dict = {uic: False for uic in uic_serving}
+
+    def _maybe_set(uic: str, level: int, label: str):
+        if candidate_mz[uic] > level:
+            candidate_mz[uic] = level
+            rule_label[uic] = label
+
+    # Pre-compute the canonical-UIC stop set per line — used by the
+    # intersection rule below to test "how many stops do these two lines share?"
+    # See concept § "Metrics referenced below" → is_intersection.
+    uic_stops_by_oid: dict = {}
+    for oid, entry in line_stops.items():
+        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+        s: set = set()
+        for stop in stops:
+            if len(stop) >= 3 and stop[2]:
+                uic = _uic_of(stop[2], stop_meta)
+                if uic:
+                    s.add(uic)
+        uic_stops_by_oid[str(oid)] = s
+
+    # Two lines can share at most this many UIC stops and still count as an
+    # intersection. The tolerance keeps parallel-corridor stops out of
+    # intersection status while keeping real hubs that happen to share a
+    # secondary stop on top of the hub.
+    INTERSECTION_MAX_SHARED_STOPS = 2
+
+    def _apply_intersection_or_terminus(mode: str, level: int):
+        vis = _visible_oids_in_mode(mode, level)
+        if not vis:
+            return
+        for uic, entries in uic_serving.items():
+            # Visible mode-entries at this UIC.
+            mode_entries = [e for e in entries
+                            if e["mode"] == mode and e["oid"] in vis]
+            terminus = any(e["is_first"] or e["is_last"]
+                           for e in mode_entries)
+            # Group by line_key (distinct logical lines). Multiple variants of
+            # the same logical line don't count as a separate line for the
+            # intersection test.
+            oids_by_key: dict = defaultdict(list)
+            for e in mode_entries:
+                oids_by_key[e["line_key"]].append(e["oid"])
+            # Per-line-key UIC set = union over variants.
+            stops_by_key: dict = {
+                k: set().union(*(uic_stops_by_oid.get(o, set())
+                                 for o in oids))
+                for k, oids in oids_by_key.items()
+            }
+            intersection = False
+            keys = list(oids_by_key.keys())
+            for i in range(len(keys)):
+                for j in range(i + 1, len(keys)):
+                    shared = stops_by_key[keys[i]] & stops_by_key[keys[j]]
+                    if len(shared) <= INTERSECTION_MAX_SHARED_STOPS:
+                        intersection = True
+                        break
+                if intersection:
+                    break
+            if mode_entries and (intersection or terminus):
+                _maybe_set(uic, level, f"{mode}: intersection_or_terminus")
+                if intersection:
+                    is_intersection_flag[uic] = True
+                if terminus:
+                    is_terminus_flag[uic] = True
+
+    def _apply_intercity_train_stops(level: int):
+        # Every stop on a visible intercity train line.
+        for oid in intercity_oids:
+            if _line_mz(oid) > level:
+                continue
+            entry = line_stops.get(oid) or line_stops.get(str(oid)) or {}
+            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+            for stop in stops:
+                if len(stop) < 3 or not stop[2]:
                     continue
-                x1, y1 = coords[j]
-                dx = (x1 - x0) * cos_lat0
-                dy = y1 - y0
-                dists.append((dx * dx + dy * dy, other))
-            dists.sort(key=lambda t: t[0])
-            neighbors = [u for _, u in dists[:k]]
-            if not neighbors:
-                relative_by_uic[uic] = 1.0
+                uic = _uic_of(stop[2], stop_meta)
+                if uic and uic in candidate_mz:
+                    _maybe_set(uic, level, "train: served by intercity line")
+
+    def _apply_importance_greedy(mode: str, level: int, min_km: float):
+        vis = _visible_oids_in_mode(mode, level)
+        for oid in vis:
+            entry = line_stops.get(oid) or line_stops.get(str(oid)) or {}
+            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+            cum_km = cum_km_by_oid.get(str(oid), [])
+            if not stops or not cum_km:
                 continue
-            lower = sum(1 for n in neighbors
-                        if absolute_raw.get(n, 0.0) < my_abs)
-            relative_by_uic[uic] = lower / len(neighbors)
+            uic_per_idx: list = []
+            for stop in stops:
+                if len(stop) < 3 or not stop[2]:
+                    uic_per_idx.append("")
+                else:
+                    uic_per_idx.append(_uic_of(stop[2], stop_meta))
+            order = sorted(
+                range(len(stops)),
+                key=lambda i: (
+                    -importance_by_uic.get(uic_per_idx[i], 0),
+                    uic_per_idx[i] or "",
+                    i,
+                ),
+            )
+            accepted_km: list = []
+            for i in order:
+                uic = uic_per_idx[i]
+                if not uic:
+                    continue
+                ki = cum_km[i] if i < len(cum_km) else 0.0
+                if any(abs(ki - aj) < min_km for aj in accepted_km):
+                    continue
+                accepted_km.append(ki)
+                _maybe_set(uic, level,
+                           f"{mode}: importance-greedy <= 1 / {min_km:g} km")
 
-    # Speed: max speed-fraction across serving lines (normalized per-mode).
-    speed_by_uic: dict = {}
-    for uic, entries in by_uic.items():
-        speeds = [(e["speed_kmh"], e["mode"]) for e in entries
-                  if e["speed_kmh"] is not None]
-        if not speeds:
-            speed_by_uic[uic] = 0.5
-            continue
-        best = 0.0
-        for spd, mode in speeds:
-            ms = MODE_MAX_SPEED.get(mode)
-            if not ms:
-                continue
-            best = max(best, min(1.0, float(spd) / ms))
-        speed_by_uic[uic] = best if best > 0 else 0.5
+    def _apply_all_stops_on_visible_mode(mode: str, base_level: int):
+        # Stops on visible lines of `mode` get base_level (or the line's own
+        # min_zoom if later — "lines first becoming visible at z11 bring their
+        # stops with them at z11"). Used by ferry + mountain stop rules.
+        for oid in oids_by_mode.get(mode, []):
+            line_mz = _line_mz(oid)
+            effective = max(base_level, line_mz)
+            entry = line_stops.get(oid) or line_stops.get(str(oid)) or {}
+            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+            for stop in stops:
+                if len(stop) < 3 or not stop[2]:
+                    continue
+                uic = _uic_of(stop[2], stop_meta)
+                if uic and uic in candidate_mz:
+                    _maybe_set(uic, effective,
+                               f"{mode}: all stops on visible line")
 
-    # Terminus boost: applied when the dominant line (top f_weighted) is an
-    # endpoint AND clearly dominates the next line at the stop. Bern HB fails
-    # the ratio test (its terminating lines are minor relative to IC); Ostring
-    # passes because tram 7 ≫ bus 40.
-    dom_ratio = float(sal_cfg.get("terminus_dominance_ratio", 1.5))
-    terminus_by_uic: dict = {}
-    for uic, entries in by_uic.items():
-        sorted_entries = sorted(entries,
-                                key=lambda e: (-e["f_weighted"], e["oid"]))
-        top = sorted_entries[0]
-        next_fw = (sorted_entries[1]["f_weighted"]
-                   if len(sorted_entries) > 1 else 0.0)
-        dominant = (next_fw <= 0.0) or (top["f_weighted"] >= next_fw * dom_ratio)
-        terminus_by_uic[uic] = bool((top["is_first"] or top["is_last"])
-                                    and dominant)
+    def _apply_all_remaining(mode: str, level: int):
+        # Every stop on every line of this mode gets capped at level (or the
+        # line's min_zoom if later).
+        for oid in oids_by_mode.get(mode, []):
+            line_mz = _line_mz(oid)
+            effective = max(level, line_mz)
+            entry = line_stops.get(oid) or line_stops.get(str(oid)) or {}
+            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+            for stop in stops:
+                if len(stop) < 3 or not stop[2]:
+                    continue
+                uic = _uic_of(stop[2], stop_meta)
+                if uic and uic in candidate_mz:
+                    _maybe_set(uic, effective, f"{mode}: all remaining")
 
-    mountain_by_uic = {uic: any(e["mode"] == "mountain" for e in entries)
-                       for uic, entries in by_uic.items()}
+    # ── Apply the per-mode tables ───────────────────────────────────────────
+    # Train
+    _apply_intersection_or_terminus("train", 7)
+    _apply_intercity_train_stops(8)
+    _apply_importance_greedy("train", 9, 5.0)
+    _apply_importance_greedy("train", 10, 3.0)
+    _apply_all_remaining("train", 11)
+    # Metro
+    _apply_intersection_or_terminus("metro", 10)
+    _apply_importance_greedy("metro", 11, 1.0)
+    _apply_all_remaining("metro", 12)
+    # Ferry — single rule at z10.
+    _apply_all_stops_on_visible_mode("ferry", 10)
+    # Mountain — single rule at z10 with line-min_zoom carry.
+    _apply_all_stops_on_visible_mode("mountain", 10)
+    # Regional bus
+    _apply_intersection_or_terminus("regional_bus", 10)
+    _apply_importance_greedy("regional_bus", 11, 1.0)
+    _apply_all_remaining("regional_bus", 12)
+    # Tram
+    _apply_intersection_or_terminus("tram", 10)
+    _apply_importance_greedy("tram", 11, 1.0)
+    _apply_all_remaining("tram", 12)
+    # Bus
+    _apply_intersection_or_terminus("bus", 10)
+    _apply_importance_greedy("bus", 11, 1.0)
+    _apply_all_remaining("bus", 12)
 
-    w_abs   = float(sal_cfg.get("weight_absolute", 0.45))
-    w_rel   = float(sal_cfg.get("weight_relative", 0.30))
-    w_speed = float(sal_cfg.get("weight_speed",    0.25))
-    term_boost = float(sal_cfg.get("terminus_boost", 0.20))
-
-    # Per-tier zoom range for stops. Stops use their tier's range and the
-    # per-tier min-max stretch below to spread the highest-salience stop at
-    # z_low and the lowest at z_high. Falls back to legacy `mode_zoom_range`
-    # if the new key isn't present.
-    zoom_ranges = (sal_cfg.get("mode_zoom_range_stops")
-                   or sal_cfg.get("mode_zoom_range")
-                   or {})
-
-    # Raw salience score per UIC (pre-normalisation).
-    raw_score_by_uic: dict = {}
-    for uic in coords_by_uic:
-        absolute = absolute_norm.get(uic, 0.0)
-        relative = relative_by_uic.get(uic, 0.0)
-        speed    = speed_by_uic.get(uic, 0.5)
-        score = w_abs * absolute + w_rel * relative + w_speed * speed
-        if terminus_by_uic.get(uic):
-            score += term_boost
-        raw_score_by_uic[uic] = max(0.0, min(1.0, score))
-
-    # Pure rank within tier: sort stops descending by salience (ties broken
-    # by -absolute_raw then uic), then assign position i / (n - 1). Maps to
-    # the tier's [z_low, z_high] range linearly so stops appear uniformly
-    # over the range regardless of how raw saliences cluster.
-    uics_by_tier_for_rank: dict = defaultdict(list)
-    for uic in raw_score_by_uic:
-        uics_by_tier_for_rank[tier_by_uic.get(uic, "")].append(uic)
-
-    own_mz_by_uic: dict = {}
-    for tier, uics_in_tier in uics_by_tier_for_rank.items():
-        rng = zoom_ranges.get(tier) or zoom_ranges.get("default") or [5.0, 13.0]
-        z_low, z_high = float(rng[0]), float(rng[1])
-        ordered = sorted(uics_in_tier, key=lambda u: (
-            -raw_score_by_uic.get(u, 0.0),
-            -absolute_raw.get(u, 0.0),
-            u,
-        ))
-        n = len(ordered)
-        for i, uic in enumerate(ordered):
-            pos = 0.0 if n <= 1 else i / (n - 1)
-            own_mz_by_uic[uic] = z_low + pos * (z_high - z_low)
-
-    result: dict = {}
-    for uic in coords_by_uic:
-        tier = tier_by_uic.get(uic, "")
-        own_mz = own_mz_by_uic.get(uic, 13.0)
-        result[uic] = {
-            "salience":       round(raw_score_by_uic.get(uic, 0.0), 4),
-            "own_min_zoom":   round(own_mz, 3),
-            "tier":           tier,
-            "absolute":       round(absolute_norm.get(uic, 0.0), 4),
-            "relative":       round(relative_by_uic.get(uic, 0.0), 4),
-            "speed":          round(speed_by_uic.get(uic, 0.5), 4),
-            "absolute_raw":   round(absolute_raw.get(uic, 0.0), 4),
-            "terminus_boost": terminus_by_uic.get(uic, False),
-            "mountain_boost": mountain_by_uic.get(uic, False),
+    # ── Stops follow lines ──────────────────────────────────────────────────
+    final: dict = {}
+    for uic, entries in uic_serving.items():
+        line_mzs = [_line_mz(e["oid"]) for e in entries]
+        min_line = min(line_mzs) if line_mzs else UNREACH_Z
+        cand = candidate_mz.get(uic, UNREACH_Z)
+        mz = max(cand, min_line)
+        modes_here = {e["mode"] for e in entries}
+        final[uic] = {
+            "min_zoom":        int(mz),
+            "candidate_min_zoom": int(cand),
+            "rule_label":      rule_label.get(uic, ""),
+            "is_intersection": is_intersection_flag.get(uic, False),
+            "is_terminus":     is_terminus_flag.get(uic, False),
+            "tier":            _resolve_stop_tier(modes_here),
         }
-    return result
+    return final
 
 
 def merge_clusters_by_parent_station(clusters):
@@ -5288,7 +5593,6 @@ def main():
                 "f_weighted":      p.get("f_weighted", 0.0),
                 "speed_kmh":       p.get("speed_kmh"),
                 "salience":        p.get("salience"),
-                "own_min_zoom":    p.get("own_min_zoom"),
                 "min_zoom":        p.get("min_zoom"),
                 "coords":          feat["geometry"]["coordinates"],
                 "ref":             p.get("ref", ""),
@@ -5317,47 +5621,97 @@ def main():
     stop_meta  = load_stop_meta()
     print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
 
-    print("Computing per-UIC stop salience...")
-    sal_cfg = _transit_cfg.get("salience") or {}
-    if not sal_cfg:
-        print("  WARNING: config.yaml has no `salience` section — stops will use mode minzoom only.")
-    stop_salience = compute_stop_salience(line_lookup, line_stops,
-                                          stop_meta, sal_cfg)
-    if stop_salience:
-        mins = [v["own_min_zoom"] for v in stop_salience.values()]
-        print(f"  {len(stop_salience):,} UICs scored; "
-              f"own_min_zoom range {min(mins):.2f}–{max(mins):.2f}, "
-              f"mean {sum(mins)/len(mins):.2f}")
+    # ── Zoom-level rules: per-mode stop min_zoom ─────────────────────────────
+    # See .claude/concepts/zoom-level-rules.md.
+    print("Building per-UIC line index...")
+    uic_serving, coords_by_uic = _build_uic_serving(
+        line_lookup, line_stops, stop_meta)
+    print(f"  {len(uic_serving):,} canonical UICs across "
+          f"{sum(len(v) for v in uic_serving.values()):,} (line, stop) pairs")
 
-        # Stops-follow-lines: a stop never appears before any of its
-        # serving lines. min_zoom = max(own_min_zoom_stop, min over
-        # serving lines' effective min_zoom from 06's MBST/promotion).
-        # All comparisons in float.
-        lines_per_uic: dict = defaultdict(list)
-        for oid, entry in line_stops.items():
-            stops = entry.get("stops", []) if isinstance(entry, dict) else entry
-            for stop in stops:
-                if len(stop) < 3 or not stop[2]:
-                    continue
-                meta = stop_meta.get(stop[2]) or stop_meta.get(stop[2].split(":")[0]) or {}
-                uic = meta.get("parent") or stop[2].split(":")[0]
-                lines_per_uic[uic].append(str(oid))
-        for uic, sal in stop_salience.items():
-            serving_oids = lines_per_uic.get(uic, [])
-            own_mz = float(sal["own_min_zoom"])
-            if serving_oids:
-                line_mins = [
-                    line_lookup.get(o, {}).get("min_zoom")
-                    for o in serving_oids
-                ]
-                line_mins = [float(m) for m in line_mins if m is not None]
-                line_min = min(line_mins) if line_mins else own_mz
-                sal["min_zoom"] = round(max(own_mz, line_min), 3)
-            else:
-                sal["min_zoom"] = round(own_mz, 3)
-        finals = [v["min_zoom"] for v in stop_salience.values()]
-        print(f"  After stops-follow-lines: range {min(finals):.2f}–{max(finals):.2f}, "
-              f"mean {sum(finals)/len(finals):.2f}")
+    zr_cfg = _zoom_rules_cfg()
+
+    # Urbanness — building counts at two radii per UIC.
+    print("Loading OSM building centroids...")
+    buildings = load_buildings()
+    print(f"  {len(buildings):,} building centroids")
+    urb_cfg = zr_cfg.get("urbanness") or {}
+    r_in = float(urb_cfg.get("radius_inner_m", 200))
+    r_out = float(urb_cfg.get("radius_outer_m", 500))
+    print(f"  Counting buildings within {r_in:g}m / {r_out:g}m per UIC...")
+    building_counts = count_buildings_in_radii(coords_by_uic, buildings,
+                                               r_in, r_out)
+    urbanness = compute_urbanness(building_counts, urb_cfg)
+    OUT_URBANNESS.write_text(json.dumps(urbanness, ensure_ascii=False))
+    bracket_counts = defaultdict(int)
+    for v in urbanness.values():
+        bracket_counts[v["bracket"]] += 1
+    print(f"  Urbanness brackets: " +
+          ", ".join(f"{k}={v}" for k, v in sorted(bracket_counts.items())) +
+          f" → {OUT_URBANNESS}")
+
+    # Dwell per UIC (avg dep − arr across all trip-stop rows).
+    print("Computing per-UIC dwell from stop_times.txt...")
+    dwell_by_uic = compute_dwell_per_uic(stop_meta)
+    if dwell_by_uic:
+        avgs = list(dwell_by_uic.values())
+        print(f"  {len(dwell_by_uic):,} UICs with dwell data; "
+              f"mean {sum(avgs)/len(avgs):.1f}s, "
+              f"max {max(avgs):.0f}s")
+
+    # Stop importance score (4 categories, sum).
+    si_cfg = zr_cfg.get("stop_importance") or {}
+    nt_radius = float(si_cfg.get("nearby_transit_radius_m", 1000))
+    importance_by_uic = compute_stop_importance(
+        uic_serving, coords_by_uic, urbanness, dwell_by_uic, nt_radius)
+    imp_counts = defaultdict(int)
+    for s in importance_by_uic.values():
+        imp_counts[s] += 1
+    print(f"  Importance scores: " +
+          ", ".join(f"{k}={imp_counts[k]}" for k in sorted(imp_counts.keys())))
+
+    # Intercity oid set (matches the train rule in 06).
+    intercity_prefixes_cfg = zr_cfg.get("intercity_route_prefixes") or \
+        ["IC", "ICE", "EC"]
+    intercity_prefixes = tuple(str(p).upper() for p in intercity_prefixes_cfg)
+    intercity_oids: set = set()
+    for oid, info in line_lookup.items():
+        if info.get("mode") != "train":
+            continue
+        r = (info.get("ref") or "").strip().upper()
+        if any(r.startswith(p) for p in intercity_prefixes):
+            intercity_oids.add(str(oid))
+
+    print("Applying per-mode stop rules...")
+    stop_min_zoom = compute_stop_min_zoom(
+        line_lookup, line_stops, stop_meta,
+        importance_by_uic, intercity_oids,
+        uic_serving, coords_by_uic,
+    )
+    if stop_min_zoom:
+        mzs = [v["min_zoom"] for v in stop_min_zoom.values()]
+        mz_counts = defaultdict(int)
+        for v in mzs:
+            mz_counts[v] += 1
+        print(f"  {len(stop_min_zoom):,} UICs scored. "
+              f"min_zoom distribution: " +
+              ", ".join(f"z{k}={mz_counts[k]}"
+                        for k in sorted(mz_counts.keys())))
+
+    # Pack into `stop_salience` shape used by the rest of main() — every
+    # downstream block reads `min_zoom` and the few diagnostic keys below.
+    stop_salience: dict = {}
+    for uic, v in stop_min_zoom.items():
+        stop_salience[uic] = {
+            "min_zoom":           v["min_zoom"],
+            "candidate_min_zoom": v["candidate_min_zoom"],
+            "rule_label":         v["rule_label"],
+            "is_intersection":    v["is_intersection"],
+            "is_terminus":        v["is_terminus"],
+            "tier":               v["tier"],
+            "importance_score":   importance_by_uic.get(uic, 0),
+            "urbanness_bracket":  urbanness.get(uic, {}).get("bracket", "rural"),
+        }
 
     print("Loading atlas platform attributes...")
     stop_attrs = write_stop_attributes_diag(line_stops)
@@ -5994,11 +6348,11 @@ def main():
           f"from {len(nonrail_clusters):,} clusters")
 
     # ==========================================================================
-    # Apply per-UIC salience min_zoom to stop dots
+    # Apply per-UIC min_zoom to stop dots
     # ==========================================================================
     # Each stop dot in transit_stops.geojson carries a stop_id / parent_station
     # in its properties. Resolve to canonical UIC and override the feature's
-    # tippecanoe.minzoom from stop_salience. Dots without a resolvable UIC
+    # tippecanoe.minzoom from stop_min_zoom. Dots without a resolvable UIC
     # (mountain/straight-line embedded gtfs_stops without stop_id) keep their
     # mode-derived minzoom.
     dot_features = rail_features + other_features + nonrail_dot_features
@@ -6014,18 +6368,18 @@ def main():
             if not sal:
                 continue
             tipp = feat.setdefault("tippecanoe", {})
-            # tippecanoe.minzoom is integer (tile-boundary); style filter
-            # `zoom >= min_zoom` enforces the float at render time.
-            tipp["minzoom"] = int(floor(float(sal["min_zoom"])))
-            p["salience"] = sal["salience"]
-            p["own_min_zoom"] = sal["own_min_zoom"]
+            tipp["minzoom"] = int(sal["min_zoom"])
             p["min_zoom"] = sal["min_zoom"]
             p["tier"] = sal["tier"]
+            p["importance_score"] = sal["importance_score"]
+            p["urbanness_bracket"] = sal["urbanness_bracket"]
+            p["is_intersection"] = sal["is_intersection"]
+            p["is_terminus"] = sal["is_terminus"]
             n_applied += 1
-        print(f"  Salience min_zoom applied to {n_applied:,}/{len(dot_features):,} dot features")
+        print(f"  min_zoom applied to {n_applied:,}/{len(dot_features):,} dot features")
 
     # ==========================================================================
-    # Salience diagnostic
+    # Salience diagnostic (per-line salience + per-stop rule placement)
     # ==========================================================================
     OUT_SALIENCE = ROOT / "data" / "transit" / "salience.json"
     line_diag = []
@@ -6033,23 +6387,22 @@ def main():
         if info.get("salience") is None:
             continue
         line_diag.append({
-            "osm_id":   oid,
-            "ref":      info.get("ref", ""),
-            "name":     info.get("name", ""),
-            "mode":     info.get("mode", ""),
+            "osm_id":     oid,
+            "ref":        info.get("ref", ""),
+            "name":       info.get("name", ""),
+            "mode":       info.get("mode", ""),
             "agency_id":  info.get("agency_id", ""),
             "f_weighted": info.get("f_weighted", 0.0),
             "speed_kmh":  info.get("speed_kmh"),
             "salience":   info.get("salience"),
-            "own_min_zoom": info.get("own_min_zoom"),
-            "min_zoom":     info.get("min_zoom"),
+            "min_zoom":   info.get("min_zoom"),
         })
     stop_diag = []
     for uic, v in stop_salience.items():
         stop_diag.append({"uic": uic, **v})
     OUT_SALIENCE.write_text(json.dumps(
         {"lines": line_diag, "stops": stop_diag}, ensure_ascii=False))
-    print(f"  Salience diagnostic: {len(line_diag)} lines, "
+    print(f"  Diagnostic: {len(line_diag)} lines, "
           f"{len(stop_diag)} stops → {OUT_SALIENCE}")
 
     # ==========================================================================

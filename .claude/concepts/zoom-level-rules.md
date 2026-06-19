@@ -27,8 +27,9 @@ Metrics referenced below:
 
 - **length** — polyline length of the line (`line_km`).
 - **spread** — geodesic distance between the two stops furthest apart on the line.
+- **longest gap** — straight-line distance between the two stops that are *consecutive in the line's stop sequence* and furthest apart. Used by ferry — water hops between piers tell us more about a lake line's reach than its end-to-end spread.
 - **salience** — score from the salience pipeline. `salience: top X %` means the X % highest-salience lines **within the same mode**.
-- **is_intersection** — stop served by ≥ 2 distinct line_keys of the same mode at the level being evaluated.
+- **is_intersection** — stop S (canonical UIC) qualifies for mode M at level Z if there exist two distinct M-mode lines, both visible at Z (`min_zoom ≤ Z`), whose UIC-stop sets share at most 2 stops and one of those is S. The "share at most 2" tolerance keeps parallel-corridor stops (Tram 6 and Tram 7 along Bahnhof–Wankdorf) out of intersection status while still flagging real hubs whose crossing lines happen to coincide at a depot or branch terminus on top of the hub stop.
 - **is_terminus** — first or last stop of at least one visible line of the same mode at the level being evaluated.
 - **importance-greedy ≤ 1 / X km** — over the line's stops not already accepted, sort by stop importance score desc, accept a stop iff no already-accepted stop on the same line is within X km along the polyline.
 
@@ -77,9 +78,9 @@ Lines
 
 | Level | Rule |
 |---|---|
-| 6 | spread ≥ 20 km |
-| 7 | spread ≥ 10 km |
-| 8 | spread ≥ 5 km |
+| 6 | longest gap ≥ 20 km |
+| 7 | longest gap ≥ 10 km |
+| 8 | longest gap ≥ 5 km |
 | 9 | all remaining |
 
 Stops
@@ -94,8 +95,8 @@ Lines
 
 | Level | Rule |
 |---|---|
-| 6 | length ≥ 20 km |
-| 7 | length ≥ 10 km |
+| 6 | length ≥ 15 km |
+| 7 | length ≥ 8 km |
 | 8 | length ≥ 5 km |
 | 9 | length ≥ 2 km |
 | 10 | length ≥ 0.5 km |
@@ -205,11 +206,9 @@ Lines of the same mode are ranked by `competition_count` ascending. The lowest c
 
 ### Line graph and base set
 
-Stops are clustered into "super-UICs" by 250 m proximity. Two lines share an edge in the line graph if they share at least one super-UIC. Edge weight = `max(travel_duration(u), travel_duration(v))`, where `travel_duration(line) = line_km / speed_kmh`.
+Stops are clustered into "super-UICs" by 250 m proximity. Two lines share an edge in the line graph if they share at least one super-UIC. The line graph is undirected and unweighted — it just records "which lines meet which".
 
-The **MBST** (minimum bottleneck spanning tree) of this graph is the tree connecting every line where the worst edge weight is as small as possible — picking the most direct passenger connectors between every pair of lines. Every non-base line ends up with a unique chain of ancestor connectors back to the base set, and that chain is what the connectivity rule operates on.
-
-The **base set** is the **largest connected component of intercity train lines** in the line graph (intercity per the train z4 rule). If multiple intercity components exist, only the largest counts as base; the others follow normal connectivity rules. The MBST is rooted at a virtual super-source connected to every base line.
+The **base set** is the **largest connected component of intercity train lines** in the raw line graph (intercity per the train z4 rule). If multiple intercity components exist, only the largest counts as base; the others have to bridge to the base via the connectivity rule below.
 
 ### Stop importance score
 
@@ -241,14 +240,21 @@ Counts and the resulting bracket are baked into a new diagnostic `data/transit/u
 
 ### Connectivity (isolation avoidance)
 
-After the per-mode rules have assigned a candidate `min_zoom` to each line, the MBST (defined above) is consulted to make sure each visible line is connected to the main network at the zoom it shows.
+The sole purpose of this step is to avoid lines that float disconnected from the rest of the network at a given zoom level. After the per-mode rules have produced a candidate `min_zoom` for every line, the algorithm walks zoom levels bottom-up and decides, level by level, which clusters of lines are allowed to appear and which must wait.
 
-The rule, per non-base line **L** with path `L → C1 → C2 → … → base` through the MBST:
+For each `Z` from 4 upward:
 
-- **L's `min_zoom`** is the floor of the stop-weighted average over the lines on L's path (L itself plus its ancestor connectors): `floor( Σ stops_i · z_i / Σ stops_i )`. Z_i is each line's candidate `min_zoom` from the per-mode rules.
-- **Each connector C's `min_zoom`** is the **minimum** of the values produced by all branches whose path runs through C. A connector with many branches takes the earliest zoom that any of them dragged it to.
+1. **Eligible set at Z** = every line whose final `min_zoom` has already been fixed to ≤ Z (lines already visible at this level) plus every not-yet-finalised line whose candidate `min_zoom` ≤ Z (lines that *want* to appear at or before Z per their per-mode rule).
+2. **Connected components** of the line graph induced on the eligible set.
+3. The **main component** is the CC that contains the IC base. Any line that just joined main this level and isn't finalised yet → assign `min_zoom = Z`.
+4. **For each other component** (an isolated cluster at level Z):
+   - **Find the shortest bridge** from the cluster to main through the full line graph. The bridge is the chain of currently-non-eligible lines on the cheapest path (fewest non-eligible intermediate lines). If no path exists, the cluster is truly disconnected and the level loop will keep skipping it.
+   - **Compute the stop-weighted average** over (cluster lines + bridge lines), using each line's candidate `min_zoom` and its stop count as the weight.
+   - **If the weighted average ≤ Z**: accept. Every bridge line and every cluster line is pulled down to `min_zoom = Z`. Bridge lines become immediately eligible so other clusters at the same Z can benefit.
+   - **If the weighted average > Z**: defer. Leave the cluster unassigned. Their candidate is preserved unchanged, so they re-enter the eligibility check at Z+1 and the bridge search runs fresh against the larger main of the next level.
+5. After the loop, any line never reached by main at any level is truly disconnected in the line graph; it falls back to its per-mode candidate (for example a truly isolated rack-railway spur stays at z11 via the mountain "all remaining" rule).
 
-A large branch with small connectors pulls them strongly forward; a small branch with large connectors gets held back. Lines never connected to base in the line graph follow their per-mode rules unchanged — no special fallback (for mountain this means landing at z11 via the "all remaining" row, which is intentional).
+A heavy cluster with a thin bridge to main pulls the bridge forward decisively. A thin cluster needing a heavy bridge is the case the weighted-average gate stops — the bridge would have to pretend to be much more prominent than it actually is, so the cluster waits one or more zoom levels for the network around it to grow naturally instead.
 
 ### Stops follow lines
 

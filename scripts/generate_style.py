@@ -972,12 +972,13 @@ def build_label_layers(cfg):
 # Transit layer
 # =============================================================================
 
-# Salience-based visibility (see .claude/concepts/salience-ranking.md): each
+# Per-zoom-level visibility (see .claude/concepts/zoom-level-rules.md): each
 # transit_line feature carries `tippecanoe.minzoom = min_zoom` baked in by
-# 06_score_and_match.py, so the per-mode layer minzoom acts only as an absolute
-# floor. With salience controlling, all modes share the same floor (z5) and
-# the same width curve. ORDER MATTERS: drawn bottom-to-top — less important
-# modes first, so faster/more important lines always render on top.
+# 06_score_and_match.py. The layer floor is a hard absolute cap (z4 — the
+# lowest level any train line can reach). Per-feature tippecanoe.minzoom
+# does the actual zoom gating; there is no runtime filter or opacity step
+# expression. ORDER MATTERS: drawn bottom-to-top — less important modes
+# first, so faster/more important lines always render on top.
 TRANSIT_MODE_LAYERS = [
     "mountain",
     "regional_bus",
@@ -988,41 +989,10 @@ TRANSIT_MODE_LAYERS = [
     "train",
 ]
 
-TRANSIT_LINE_FLOOR_ZOOM = 5
+TRANSIT_LINE_FLOOR_ZOOM = 4
 
 GTFS_MATCHED_FILTER = ["==", ["get", "gtfs_matched"], True]
 
-# Salience visibility — step-in-paint pattern (see .claude/concepts/salience-ranking.md).
-# MapLibre evaluates `["zoom"]` in filters against the *tile's* integer zoom,
-# so a filter-based `>=` against fractional `min_zoom` only flips at integer
-# tile boundaries. To get the per-feature fractional reveal we want, the gate
-# moves to a paint property: `line-opacity` / `circle-opacity` becomes a
-# `step` expression with `["zoom"]` as the direct input (the only form
-# MapLibre's spec validator accepts) and outputs that switch from 0 (hidden)
-# to the visible value via a `case` against `["get", "min_zoom"]`. Step
-# granularity below = 0.1; finer values cost ~150 KB of style.json per
-# halving of granularity but constant per-frame cost.
-SALIENCE_STEP = 0.1
-SALIENCE_Z_LOW = 4.0
-SALIENCE_Z_HIGH = 13.0
-
-
-def salience_opacity(visible_value: float):
-    """Build the step-in-paint opacity expression that hides a feature
-    until its float `min_zoom` is reached. `visible_value` is the opacity
-    above min_zoom. Features missing `min_zoom` coalesce to 0 (always
-    visible)."""
-    threshold = ["coalesce", ["get", "min_zoom"], 0]
-    expr = ["step", ["zoom"],
-            ["case", ["<=", threshold, SALIENCE_Z_LOW], visible_value, 0]]
-    z = SALIENCE_Z_LOW + SALIENCE_STEP
-    while z <= SALIENCE_Z_HIGH + 1e-9:
-        # Stops must be literal numbers; round to avoid float drift.
-        stop = round(z, 2)
-        expr.append(stop)
-        expr.append(["case", ["<=", threshold, stop], visible_value, 0])
-        z += SALIENCE_STEP
-    return expr
 
 def build_transit_layers() -> list:
     layers = []
@@ -1054,7 +1024,7 @@ def build_transit_layers() -> list:
                     14,          ["+", ["get", "width_base"], 2.0],
                     18,          ["+", ["*", ["get", "width_base"], 4.0], 2.0]
                 ],
-                "line-opacity": salience_opacity(0.9)
+                "line-opacity": 0.9
             }
         })
 
@@ -1078,7 +1048,7 @@ def build_transit_layers() -> list:
                     14,          ["get", "width_base"],
                     18,          ["*", ["get", "width_base"], 4.0]
                 ],
-                "line-opacity": salience_opacity(0.85)
+                "line-opacity": 0.85
             }
         })
     return layers
@@ -1117,7 +1087,6 @@ def build_station_layers(cfg) -> list:
             "paint": {
                 "circle-color": "#ffffff",
                 "circle-radius": dot_radius(minzoom),
-                "circle-opacity": salience_opacity(1.0),
                 "circle-stroke-color": "#000000",
                 "circle-stroke-width": 1.0,
             }

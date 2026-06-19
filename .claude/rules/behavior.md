@@ -40,7 +40,16 @@ Answer the question or acknowledge the reaction. Do not edit code, do not propos
 If you disagree with the user, say so directly at the top of the reply. Don't open with "yes, that makes sense" / "you're right" and then immediately argue the opposite point — that forces the reader to do the work of figuring out whether you actually agreed. State your read first ("I'd push back on X", "I don't think that's quite right because Y"), then explain. Disagreement is fine; faux agreement that flips into disagreement is not.
 
 ## Answer length
-Lead with the one-sentence answer. Stop there unless the user asks for more, or the extra detail is load-bearing for the answer itself. Do not pre-emptively walk through reasoning, list adjacent observations, or restate the user's question back in fuller form. If the user wants depth they will ask; defaulting to long answers wastes their time. A correct one-line answer beats a correct three-paragraph one.
+Default: 1–2 short paragraphs. Lead with the direct answer in the first sentence. Stop there if one sentence covers it.
+
+Go longer only when the user cannot act on the short answer without more material — a comparison whose tradeoffs ARE the answer, a diagnosis whose mechanism IS the answer. Going longer does NOT cover: walking through the reasoning that led to the answer, listing adjacent observations from the investigation, pre-empting follow-up questions, enumerating call sites or references the user did not ask about, restating the question in fuller form, or adding "also worth noting…" tangents. If you find yourself reaching for a justification to expand, the default is probably right.
+
+Complex multi-step analysis results may legitimately need more space. Everything else stays short — the user asks when they want depth.
+
+## Explanation depth
+The user decides at the architecture level and does not read the Python pipeline code (`scripts/`, including `scripts/transit/` and `scripts/generate_style.py`). When explaining pipeline behavior, stay at the algorithm and data-flow level: what the step does, what it consumes and produces, what the rule is. Do not reference function names, line numbers, code snippets, or Python-specific syntax unless asked.
+
+SvelteKit / frontend code (`src/`) is different. The user is fluent there, so concrete component names, props, and file references are welcome when discussing UI work.
 
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.

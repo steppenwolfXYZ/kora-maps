@@ -106,32 +106,20 @@ SCORE_POWER = 2.5
 _FREQ_CACHE: dict = {}
 _WEIGHTS_CACHE: dict = {}
 _LINE_WIDTH_CACHE: dict = {}
-_SALIENCE_CACHE: dict = {}
+_ZOOM_RULES_CACHE: dict = {}
 
 
-def _salience_cfg() -> dict:
-    """Salience block from config.yaml. Cached. See
-    .claude/concepts/salience-ranking.md."""
-    if _SALIENCE_CACHE:
-        return _SALIENCE_CACHE["cfg"]
+def _zoom_rules_cfg() -> dict:
+    """`zoom_level_rules` block from config.yaml. Cached. See
+    .claude/concepts/zoom-level-rules.md."""
+    if _ZOOM_RULES_CACHE:
+        return _ZOOM_RULES_CACHE["cfg"]
     cfg = yaml.safe_load(CFG_PATH.read_text())
-    sc = cfg.get("salience") or {}
+    sc = cfg.get("zoom_level_rules") or {}
     if not sc:
-        sys.exit("config.yaml is missing salience section.")
-    _SALIENCE_CACHE["cfg"] = sc
+        sys.exit("config.yaml is missing zoom_level_rules section.")
+    _ZOOM_RULES_CACHE["cfg"] = sc
     return sc
-
-
-def score_to_min_zoom(score: float, mode: str, ranges: dict,
-                      default_range=(5.0, 12.0)) -> float:
-    """Map salience [0, 1] → float min_zoom via the per-mode (z_low, z_high)
-    range. Salience 1.0 → z_low (visible earliest); salience 0.0 → z_high
-    (visible latest). Linear and continuous — features land at fractional
-    zoom levels (e.g. 7.42), enforced at render time by a style filter."""
-    rng = ranges.get(mode) or ranges.get("default") or list(default_range)
-    z_low, z_high = float(rng[0]), float(rng[1])
-    s = max(0.0, min(1.0, float(score)))
-    return z_high - s * (z_high - z_low)
 
 
 # Meters per degree at equator; lon component is additionally scaled by
@@ -1712,35 +1700,27 @@ def main():
     kept_ids = {f["properties"]["osm_id"] for f in features}
     line_stops_out = {oid: v for oid, v in line_stops_out.items() if oid in kept_ids}
 
-    # ── Line salience → own_min_zoom (per feature) ──────────────────────────
-    # See .claude/concepts/salience-ranking.md.
-    # absolute = freq_score
-    # relative = mean tier-filtered percentile of this line's f_weighted vs
-    #            comparator-mode lines at each stop it serves (mode-tier rule)
-    # speed    = speed_kmh normalised by per-mode max
-    # Per-mode min-max stretch maps the raw score → own_min_zoom so the
-    # highest-salience line in each mode lands at the mode's z_low and the
-    # lowest at z_high.
-    print("\nComputing line salience...")
-    sal_cfg = _salience_cfg()
-    w_abs    = float(sal_cfg.get("weight_absolute", 0.45))
-    w_rel    = float(sal_cfg.get("weight_relative", 0.30))
-    w_speed  = float(sal_cfg.get("weight_speed",    0.25))
-    w_length = float(sal_cfg.get("weight_length",   0.0))
-    length_pct = max(0.0, min(1.0,
-                              float(sal_cfg.get("length_outlier_percentile", 95))
-                              / 100.0))
-    mode_zoom_range = (sal_cfg.get("mode_zoom_range_lines")
-                       or sal_cfg.get("mode_zoom_range")  # legacy fallback
-                       or {})
-    mode_tiers_raw = sal_cfg.get("mode_tiers") or {}
-    mode_tiers = {m: frozenset(ms) for m, ms in mode_tiers_raw.items()}
+    # ── Salience score (geometric, linear-falloff) ───────────────────────────
+    # See .claude/concepts/zoom-level-rules.md § "Salience score".
+    # For each line L: sample every `sample_step_m` along its polyline; for
+    # each sample, find every other line whose mode is in comparators(L)
+    # whose polyline passes within `radius` of the sample; each match
+    # contributes (1 − distance / radius); the sample's score is the sum.
+    # competition_count(L) = mean of per-sample scores.
+    print("\nComputing line salience (linear-falloff competition density)...")
+    zr_cfg = _zoom_rules_cfg()
+    sal_cfg = zr_cfg.get("salience") or {}
+    sample_step_m = float(sal_cfg.get("sample_step_m", 1000.0))
+    radius_m_by_mode = {m: float(v) for m, v in
+                        (sal_cfg.get("radius_m") or {}).items()}
+    comparators_raw = sal_cfg.get("comparators") or {}
+    comparators_by_mode = {m: frozenset(ms)
+                           for m, ms in comparators_raw.items()}
 
     def _comparators_for(mode: str) -> frozenset:
-        return mode_tiers.get(mode, frozenset({mode}))
+        return comparators_by_mode.get(mode, frozenset({mode}))
 
-    # (ref, agency_id, tg_id) → tg_key lookup so we can fetch raw freq per
-    # feature. (ref, agency, tg_id) is unique across emitted features.
+    # Per-feature f_weighted and mode mapping for downstream use.
     tg_lookup: dict = {}
     for tg_key in tg_freq.keys():
         line_key, aid, tg_id = tg_key
@@ -1760,126 +1740,290 @@ def main():
         mode_by_oid[p["osm_id"]] = p["mode"]
         p["f_weighted"] = fw
 
-    # Per-stop competing lines: uic → [(oid, f_weighted, mode)]. Per-mode
-    # tier filtering happens in the percentile loop below.
-    by_stop: dict = defaultdict(list)
-    for oid, entry in line_stops_out.items():
-        fw = f_weighted_by_oid.get(oid, 0.0)
-        mode = mode_by_oid.get(oid, "")
-        for stop in entry.get("stops", []):
-            if len(stop) >= 3 and stop[2]:
-                uic = stop[2].split(":")[0]
-                by_stop[uic].append((oid, fw, mode))
-
-    # Per-line relative percentile, mode-tier filtered.
-    relative_by_oid: dict = {}
-    for oid, entry in line_stops_out.items():
-        my_fw = f_weighted_by_oid.get(oid, 0.0)
-        my_mode = mode_by_oid.get(oid, "")
-        comparators = _comparators_for(my_mode)
-        percentiles: list = []
-        for stop in entry.get("stops", []):
-            if not (len(stop) >= 3 and stop[2]):
-                continue
-            uic = stop[2].split(":")[0]
-            competitors = [(c_oid, c_fw) for c_oid, c_fw, c_mode
-                           in by_stop.get(uic, [])
-                           if c_mode in comparators]
-            if len(competitors) <= 1:
-                percentiles.append(1.0)
-                continue
-            lower = sum(1 for c_oid, c_fw in competitors
-                        if c_oid != oid and c_fw < my_fw)
-            percentiles.append(lower / (len(competitors) - 1))
-        relative_by_oid[oid] = (sum(percentiles) / len(percentiles)
-                                if percentiles else 0.0)
-
-    # Per-mode length normalisation: use the configured percentile as the
-    # "max length" so a few outlier IC routes don't crush typical lines to
-    # near-zero. Per-mode because "long" means different things by mode.
-    length_by_mode: dict = defaultdict(list)
+    # Cache polylines (flat list of (lon, lat)) by oid.
+    polyline_by_oid: dict = {}
     for f in features:
-        p = f["properties"]
-        length_by_mode[p["mode"]].append(float(p.get("line_km") or 0.0))
-    length_norm_max: dict = {}
-    for mode, lengths in length_by_mode.items():
-        if not lengths:
-            length_norm_max[mode] = 1.0
-            continue
-        srt = sorted(lengths)
-        idx = max(0, min(len(srt) - 1, int(length_pct * (len(srt) - 1))))
-        length_norm_max[mode] = max(1.0, srt[idx])
+        oid = f["properties"]["osm_id"]
+        coords = f["geometry"]["coordinates"]
+        if f["geometry"]["type"] == "MultiLineString":
+            flat = [tuple(c) for seg in coords for c in seg]
+        else:
+            flat = [tuple(c) for c in coords]
+        polyline_by_oid[oid] = flat
 
-    # Raw salience per feature (pre-rank-normalisation).
+    # Sample each polyline every sample_step_m. Stores (lon, lat) per sample.
+    samples_by_oid: dict = {}
+    for oid, poly in polyline_by_oid.items():
+        if len(poly) < 2:
+            samples_by_oid[oid] = []
+            continue
+        seg_lens_km = []
+        for i in range(len(poly) - 1):
+            seg_lens_km.append(
+                haversine_km(poly[i][0], poly[i][1],
+                             poly[i + 1][0], poly[i + 1][1]))
+        total_km = sum(seg_lens_km)
+        if total_km <= 0:
+            samples_by_oid[oid] = [poly[0]]
+            continue
+        step_km = sample_step_m / 1000.0
+        n_samples = max(1, int(total_km / step_km))
+        # Distribute n_samples evenly along the polyline (excluding the very
+        # endpoints to keep samples representative of the line's "middle").
+        # First sample at step_km/2, then every step_km.
+        targets = [(i + 0.5) / n_samples * total_km for i in range(n_samples)]
+        out = []
+        cum = 0.0
+        seg = 0
+        for t in targets:
+            while seg < len(seg_lens_km) - 1 and cum + seg_lens_km[seg] < t:
+                cum += seg_lens_km[seg]
+                seg += 1
+            seg_len = seg_lens_km[seg] or 1e-12
+            frac = max(0.0, min(1.0, (t - cum) / seg_len))
+            lon = poly[seg][0] + (poly[seg + 1][0] - poly[seg][0]) * frac
+            lat = poly[seg][1] + (poly[seg + 1][1] - poly[seg][1]) * frac
+            out.append((lon, lat))
+        samples_by_oid[oid] = out
+
+    # Build a grid index of every sample point keyed by mode for fast
+    # radius-bounded lookup. Cell size = 1000 m (cuts into degree-equivalents
+    # at CH latitude).
+    GRID_M = 1000.0
+    # Use CH-centric latitude for cell sizing.
+    lat0 = 46.8
+    cos_lat0 = cos(radians(lat0))
+    cell_lat_deg = GRID_M / _M_PER_DEG
+    cell_lon_deg = cell_lat_deg / cos_lat0
+
+    grid_by_mode: dict = defaultdict(lambda: defaultdict(list))
+    for oid, samples in samples_by_oid.items():
+        mode = mode_by_oid.get(oid, "")
+        for lon, lat in samples:
+            cx = int(floor(lon / cell_lon_deg))
+            cy = int(floor(lat / cell_lat_deg))
+            grid_by_mode[mode][(cx, cy)].append((oid, lon, lat))
+
+    competition_count_by_oid: dict = {}
+    for oid, samples in samples_by_oid.items():
+        if not samples:
+            competition_count_by_oid[oid] = 0.0
+            continue
+        my_mode = mode_by_oid.get(oid, "")
+        my_comparators = _comparators_for(my_mode)
+        radius_m = radius_m_by_mode.get(my_mode, 5000.0)
+        cells_radius = int(ceil(radius_m / GRID_M))
+        radius_m_sq = radius_m * radius_m
+        per_sample_scores: list = []
+        for lon, lat in samples:
+            cx = int(floor(lon / cell_lon_deg))
+            cy = int(floor(lat / cell_lat_deg))
+            nearest_by_other: dict = {}
+            for comp_mode in my_comparators:
+                g = grid_by_mode.get(comp_mode)
+                if not g:
+                    continue
+                for dx in range(-cells_radius, cells_radius + 1):
+                    for dy in range(-cells_radius, cells_radius + 1):
+                        for (other_oid, olon, olat) in g.get((cx + dx, cy + dy), ()):
+                            if other_oid == oid:
+                                continue
+                            mdx = (olon - lon) * cos_lat0 * _M_PER_DEG
+                            mdy = (olat - lat) * _M_PER_DEG
+                            d_sq = mdx * mdx + mdy * mdy
+                            if d_sq > radius_m_sq:
+                                continue
+                            prev = nearest_by_other.get(other_oid)
+                            if prev is None or d_sq < prev:
+                                nearest_by_other[other_oid] = d_sq
+            score = 0.0
+            for d_sq in nearest_by_other.values():
+                d = sqrt(d_sq)
+                score += 1.0 - d / radius_m
+            per_sample_scores.append(score)
+        competition_count_by_oid[oid] = (
+            sum(per_sample_scores) / len(per_sample_scores)
+            if per_sample_scores else 0.0
+        )
+
+    # Per-mode normalisation: lowest competition → salience = 1.0; highest
+    # → 0.0; intermediate linear.
     salience_by_oid: dict = {}
-    length_score_by_oid: dict = {}
+    by_mode_for_sal: dict = defaultdict(list)
+    for oid, cc in competition_count_by_oid.items():
+        by_mode_for_sal[mode_by_oid.get(oid, "")].append(oid)
+    for mode, oids in by_mode_for_sal.items():
+        ccs = [competition_count_by_oid.get(o, 0.0) for o in oids]
+        c_min, c_max = min(ccs), max(ccs)
+        span = c_max - c_min
+        for o in oids:
+            if span <= 0:
+                salience_by_oid[o] = 1.0
+            else:
+                cc = competition_count_by_oid.get(o, 0.0)
+                salience_by_oid[o] = 1.0 - (cc - c_min) / span
+
     for f in features:
         p = f["properties"]
         oid = p["osm_id"]
-        mode = p["mode"]
-        absolute = float(p.get("freq_score") or 0.0)
-        relative = float(relative_by_oid.get(oid, 0.0))
-        speed = p.get("speed_kmh")
-        max_speed = MODE_MAX_SPEED.get(mode)
-        if speed is None or not max_speed:
-            speed_score = 0.5
-        else:
-            speed_score = min(1.0, max(0.0, speed / max_speed))
-        line_km = float(p.get("line_km") or 0.0)
-        length_score = min(1.0, line_km / length_norm_max.get(mode, 1.0))
-        length_score_by_oid[oid] = length_score
-        score = (w_abs * absolute
-                 + w_rel * relative
-                 + w_speed * speed_score
-                 + w_length * length_score)
-        score = max(0.0, min(1.0, score))
-        salience_by_oid[oid] = score
-        p["salience"] = round(score, 4)
-        p["salience_absolute"] = round(absolute, 4)
-        p["salience_relative"] = round(relative, 4)
-        p["salience_speed"]    = round(speed_score, 4)
-        p["salience_length"]   = round(length_score, 4)
+        p["salience"] = round(float(salience_by_oid.get(oid, 0.0)), 4)
+        p["competition_count"] = round(
+            float(competition_count_by_oid.get(oid, 0.0)), 4)
 
-    # Pure rank within mode: sort lines descending by salience (ties broken
-    # by -f_weighted then osm_id), then assign position i / (n - 1) for the
-    # i-th line. Maps to the mode's [z_low, z_high] range linearly. This
-    # makes appearance uniform across the range regardless of how raw
-    # salience scores cluster — fixes the "all regiobuses appear at z8"
-    # symptom we saw with min-max stretch.
-    by_mode: dict = defaultdict(list)
-    for oid, score in salience_by_oid.items():
-        by_mode[mode_by_oid.get(oid, "")].append(oid)
+    # ── Per-mode line rules → candidate min_zoom ────────────────────────────
+    # See concept § "Per-mode rules". Each rule at level N adds any line
+    # matching the condition at that level; lines take the smallest such N.
+    print("Applying per-mode line rules...")
+    intercity_prefixes = tuple(
+        str(p).upper()
+        for p in (zr_cfg.get("intercity_route_prefixes") or ["IC", "ICE", "EC"])
+    )
 
-    own_min_zoom_by_oid: dict = {}
-    for mode, oids in by_mode.items():
-        rng = mode_zoom_range.get(mode) or [5.0, 12.0]
-        z_low, z_high = float(rng[0]), float(rng[1])
-        # Tiebreaker: (-salience, -f_weighted, osm_id). Higher salience first;
-        # within ties, higher absolute frequency first; finally stable by id.
-        ordered = sorted(oids, key=lambda o: (
+    def _is_intercity_train(ref: str, mode: str) -> bool:
+        if mode != "train":
+            return False
+        r = (ref or "").strip().upper()
+        return any(r.startswith(p) for p in intercity_prefixes)
+
+    # Salience top-sets per (mode, pct), precomputed once. Used by the
+    # per-mode rules below.
+    def _salience_ranked(mode: str) -> list:
+        oids = list(by_mode_for_sal.get(mode, []))
+        oids.sort(key=lambda o: (
             -salience_by_oid.get(o, 0.0),
             -f_weighted_by_oid.get(o, 0.0),
             o,
         ))
-        n = len(ordered)
-        for i, oid in enumerate(ordered):
-            pos = 0.0 if n <= 1 else i / (n - 1)
-            own_min_zoom_by_oid[oid] = z_low + pos * (z_high - z_low)
+        return oids
+    _train_top50 = set(_salience_ranked("train")[
+        :max(1, int(round(len(by_mode_for_sal.get("train", [])) * 0.50)))])
+    _rb_top30 = set(_salience_ranked("regional_bus")[
+        :max(1, int(round(len(by_mode_for_sal.get("regional_bus", [])) * 0.30)))])
+    _rb_top50 = set(_salience_ranked("regional_bus")[
+        :max(1, int(round(len(by_mode_for_sal.get("regional_bus", [])) * 0.50)))])
 
-    # Write own_min_zoom onto features after rank.
+    # Per-feature spread (km) — geodesic distance between the two stops
+    # farthest apart on the line. Also per-feature longest-gap (km) — the
+    # geodesic distance between the two stops that are CONSECUTIVE IN THE
+    # STOP SEQUENCE and furthest apart. Used by the ferry rule: a lake line's
+    # reach is described by its longest water hop between piers, not its
+    # end-to-end spread.
+    spread_by_oid: dict = {}
+    longest_gap_by_oid: dict = {}
+    line_km_by_oid: dict = {}
+    for f in features:
+        oid = f["properties"]["osm_id"]
+        line_km_by_oid[oid] = float(f["properties"].get("line_km") or 0.0)
+        entry = line_stops_out.get(oid, {})
+        stops = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if len(stops) < 2:
+            spread_by_oid[oid] = 0.0
+            longest_gap_by_oid[oid] = 0.0
+            continue
+        # Brute force O(n^2) for spread — fine for typical n ≤ 100 stops per
+        # line.
+        max_d = 0.0
+        for i in range(len(stops)):
+            for j in range(i + 1, len(stops)):
+                d = haversine_km(stops[i][0], stops[i][1],
+                                 stops[j][0], stops[j][1])
+                if d > max_d:
+                    max_d = d
+        spread_by_oid[oid] = max_d
+        # Longest gap between two stops adjacent in the stop sequence.
+        max_gap = 0.0
+        for i in range(len(stops) - 1):
+            g = haversine_km(stops[i][0], stops[i][1],
+                             stops[i + 1][0], stops[i + 1][1])
+            if g > max_gap:
+                max_gap = g
+        longest_gap_by_oid[oid] = max_gap
+
+    # Per-mode line-rule evaluator. Returns (min_zoom, rule_label) per oid.
+    # Levels evaluated bottom-up (lowest first); first matching level wins.
+    UNREACHABLE_Z = 13  # Lines that match no rule fall here (effectively hidden).
+
+    def _candidate_min_zoom_train(oid: str, p: dict) -> tuple:
+        ref = p.get("ref", "")
+        if _is_intercity_train(ref, "train"):
+            return 4, "intercity"
+        if line_km_by_oid.get(oid, 0.0) >= 30.0 and oid in _train_top50:
+            return 5, "length>=30km AND salience top50%"
+        return 6, "all remaining"
+
+    def _candidate_min_zoom_metro(oid: str, p: dict) -> tuple:
+        if spread_by_oid.get(oid, 0.0) >= 20.0:
+            return 8, "spread>=20km"
+        return 9, "all remaining"
+
+    def _candidate_min_zoom_ferry(oid: str, p: dict) -> tuple:
+        g = longest_gap_by_oid.get(oid, 0.0)
+        if g >= 20.0: return 6, "longest_gap>=20km"
+        if g >= 10.0: return 7, "longest_gap>=10km"
+        if g >=  5.0: return 8, "longest_gap>=5km"
+        return 9, "all remaining"
+
+    def _candidate_min_zoom_mountain(oid: str, p: dict) -> tuple:
+        L = line_km_by_oid.get(oid, 0.0)
+        if L >= 15.0:  return  6, "length>=15km"
+        if L >=  8.0:  return  7, "length>=8km"
+        if L >=  5.0:  return  8, "length>=5km"
+        if L >=  2.0:  return  9, "length>=2km"
+        if L >=  0.5:  return 10, "length>=0.5km"
+        return 11, "all remaining"
+
+    def _candidate_min_zoom_regional_bus(oid: str, p: dict) -> tuple:
+        s = spread_by_oid.get(oid, 0.0)
+        if s >= 25.0 and oid in _rb_top30:
+            return 7, "spread>=25km AND salience top30%"
+        if s >= 15.0 and oid in _rb_top50:
+            return 8, "spread>=15km AND salience top50%"
+        if s >= 5.0:
+            return 9, "spread>=5km"
+        return 10, "all remaining"
+
+    def _candidate_min_zoom_tram(oid: str, p: dict) -> tuple:
+        if spread_by_oid.get(oid, 0.0) >= 8.0:
+            return 9, "spread>=8km"
+        return 10, "all remaining"
+
+    def _candidate_min_zoom_bus(oid: str, p: dict) -> tuple:
+        if spread_by_oid.get(oid, 0.0) >= 5.0:
+            return 10, "spread>=5km"
+        return 11, "all remaining"
+
+    RULE_BY_MODE = {
+        "train":        _candidate_min_zoom_train,
+        "metro":        _candidate_min_zoom_metro,
+        "ferry":        _candidate_min_zoom_ferry,
+        "mountain":     _candidate_min_zoom_mountain,
+        "regional_bus": _candidate_min_zoom_regional_bus,
+        "tram":         _candidate_min_zoom_tram,
+        "bus":          _candidate_min_zoom_bus,
+    }
+
+    candidate_mz_by_oid: dict = {}
+    rule_label_by_oid: dict = {}
     for f in features:
         p = f["properties"]
-        p["own_min_zoom"] = round(own_min_zoom_by_oid.get(p["osm_id"], 14.0), 3)
+        oid = p["osm_id"]
+        mode = p["mode"]
+        fn = RULE_BY_MODE.get(mode)
+        if fn is None:
+            candidate_mz_by_oid[oid] = UNREACHABLE_Z
+            rule_label_by_oid[oid] = "no rule for mode"
+            continue
+        mz, label = fn(oid, p)
+        candidate_mz_by_oid[oid] = mz
+        rule_label_by_oid[oid] = label
 
-    # ── Line graph + MBST connector promotion → final min_zoom ──────────────
-    # See salience-ranking concept § "Network connectivity".
-    print("Building line graph and computing connector promotion...")
-    cluster_m         = float(sal_cfg.get("cluster_threshold_m", 250.0))
-    promotion_ratio   = float(sal_cfg.get("promotion_ratio", 0.5))
-    isolated_min_zoom = int(sal_cfg.get("isolated_mountain_min_zoom", 13))
+    # ── Line graph + MBST + stop-weighted-average connectivity ──────────────
+    # See concept § "Line graph and base set" and § "Connectivity".
+    print("Building line graph (super-UIC clustering + MBST)...")
+    lg_cfg = zr_cfg.get("line_graph") or {}
+    cluster_m = float(lg_cfg.get("cluster_threshold_m", 250.0))
 
-    # First-seen UIC → coords. Stops with no platform suffix share coord
-    # with their platforms in stops.txt, so any encounter is representative.
+    # First-seen UIC → coords.
     uic_coords: dict = {}
     for entry in line_stops_out.values():
         for stop in entry.get("stops", []):
@@ -1889,8 +2033,7 @@ def main():
 
     super_of_uic = _cluster_uics(uic_coords, cluster_m)
 
-    # Lines per super-cluster (deduped — same line can hit the same cluster
-    # via multiple platforms).
+    # Lines per super-cluster (deduped).
     lines_at_super: dict = defaultdict(set)
     for oid, entry in line_stops_out.items():
         for stop in entry.get("stops", []):
@@ -1900,17 +2043,14 @@ def main():
                 if super_id is not None:
                     lines_at_super[super_id].add(oid)
 
+    # Per-line station count (length of the per-feature stop list).
     station_count: dict = {oid: len(entry.get("stops", []))
                            for oid, entry in line_stops_out.items()}
 
     line_oids: list = [f["properties"]["osm_id"] for f in features]
     oid_set: set = set(line_oids)
 
-    # MBST edge weight = travel duration (minutes), NOT own_min_zoom. The MBST
-    # picks the physical route a passenger would take between branches — fast
-    # / direct lines win. Visibility (own_min_zoom) is a separate concern;
-    # promotion below pulls the chosen connector forward to its branch's zoom
-    # regardless of where its own salience landed.
+    # Travel duration (minutes) — edge weight basis.
     duration_by_oid: dict = {}
     for f in features:
         p = f["properties"]
@@ -1919,179 +2059,241 @@ def main():
         sp = float(p.get("speed_kmh") or 0.0)
         duration_by_oid[oid] = (km / sp * 60.0) if sp > 0 else 1e9
 
-    # Edges: per super-cluster, star edges from the lowest-duration line to
-    # every other (sufficient to build the MBST — proven by the bottleneck
-    # property and the fact that all-pair edges at one cluster collapse to
-    # the star under min-bottleneck).
-    edges: list = []
+    # Raw line graph: each pair of lines sharing a super-cluster is an edge.
+    # Used both for (a) finding the intercity base's connected component and
+    # (b) running the per-line shortest-path-to-base search below.
+    # Adjacency is deduped — many lines share many super-clusters, but we
+    # only need one edge between any pair in the graph.
+    line_graph_adj: dict = defaultdict(set)
     for super_id, oids in lines_at_super.items():
         oids_here = [o for o in oids if o in oid_set]
-        if len(oids_here) < 2:
+        n = len(oids_here)
+        if n < 2:
             continue
-        oids_here.sort(key=lambda o: duration_by_oid.get(o, 1e9))
-        L0 = oids_here[0]
-        for L_other in oids_here[1:]:
-            w = max(duration_by_oid.get(L0, 1e9),
-                    duration_by_oid.get(L_other, 1e9))
-            edges.append((w, L0, L_other))
-    edges.sort(key=lambda e: e[0])
+        for i in range(n):
+            u = oids_here[i]
+            for j in range(i + 1, n):
+                v = oids_here[j]
+                line_graph_adj[u].add(v)
+                line_graph_adj[v].add(u)
 
-    # Kruskal — pick the minimum-bottleneck spanning tree.
-    parent_uf: dict = {oid: oid for oid in line_oids}
+    # Base set: the LARGEST connected component of intercity train lines in
+    # the RAW line graph. (Computing CCs over MBST edges, as we used to,
+    # silently fragmented the IC backbone because MBST routed IC↔IC via
+    # cheaper non-IC connectors and the direct IC↔IC edges were never added.)
+    feature_by_oid = {f["properties"]["osm_id"]: f for f in features}
+    intercity_oids = [
+        o for o in line_oids
+        if _is_intercity_train(
+            feature_by_oid[o]["properties"].get("ref", ""),
+            mode_by_oid.get(o, ""))
+    ]
+    intercity_set: set = set(intercity_oids)
 
-    def _uf_find(x):
-        while parent_uf[x] != x:
-            parent_uf[x] = parent_uf[parent_uf[x]]
-            x = parent_uf[x]
-        return x
-
-    mst_adj: dict = defaultdict(list)
-    for w, u, v in edges:
-        ru, rv = _uf_find(u), _uf_find(v)
-        if ru == rv:
+    visited_ic: set = set()
+    components: list = []
+    for o in intercity_oids:
+        if o in visited_ic:
             continue
-        parent_uf[ru] = rv
-        mst_adj[u].append(v)
-        mst_adj[v].append(u)
-
-    # Base set: train lines tied at the lowest own_min_zoom among trains.
-    # Tied within an epsilon to handle float comparison.
-    train_oids = [oid for oid in line_oids if mode_by_oid.get(oid) == "train"]
-    if train_oids:
-        min_train_own = min(own_min_zoom_by_oid.get(oid, 14.0)
-                            for oid in train_oids)
-        base_oids: set = {oid for oid in train_oids
-                          if abs(own_min_zoom_by_oid.get(oid, 14.0)
-                                 - min_train_own) < 1e-6}
-    else:
-        min_train_own = None
-        base_oids = set()
-
-    # BFS from the base set rooting the MBST. parent_in_tree[L] = next hop
-    # toward base; base oids have no parent.
-    parent_in_tree: dict = {}
-    visited: set = set(base_oids)
-    queue: list = list(base_oids)
-    while queue:
-        u = queue.pop(0)
-        for v in mst_adj.get(u, ()):
-            if v in visited:
-                continue
-            visited.add(v)
-            parent_in_tree[v] = u
-            queue.append(v)
-
-    isolated_oids: set = oid_set - visited
-
-    # Children adjacency in the rooted tree (for post-order subtree walk).
-    children_in_tree: dict = defaultdict(list)
-    for child, par in parent_in_tree.items():
-        children_in_tree[par].append(child)
-
-    # Post-order traversal — children done before parent.
-    post_order: list = []
-    for root in base_oids:
-        stack = [(root, False)]
+        comp: list = []
+        stack = [o]
+        visited_ic.add(o)
         while stack:
-            node, expanded = stack.pop()
-            if expanded:
-                post_order.append(node)
+            u = stack.pop()
+            comp.append(u)
+            for v in line_graph_adj.get(u, ()):
+                if v in intercity_set and v not in visited_ic:
+                    visited_ic.add(v)
+                    stack.append(v)
+        components.append(comp)
+    components.sort(key=len, reverse=True)
+    base_oids: set = set(components[0]) if components else set()
+
+    # ── Per-level cluster gating ─────────────────────────────────────────────
+    # Sole purpose: avoid floating clusters at each zoom level. Algorithm:
+    #
+    #   For Z = 4, 5, 6, …, UNREACHABLE_Z:
+    #     1. eligible_at_Z = {oid already assigned final ≤ Z}
+    #                       ∪ {oid not yet assigned whose candidate ≤ Z}
+    #     2. Connected components of the line graph induced on eligible_at_Z.
+    #     3. main = the CC containing the IC base.
+    #     4. Newly arrived in main (not yet assigned) → assign Z.
+    #     5. For each other CC ("isolated cluster"):
+    #        a. Find the shortest bridge (least non-eligible intermediates)
+    #           from the cluster to main in the full line graph.
+    #        b. weighted_avg = stop-weighted average of (cluster + bridge)
+    #           candidates.
+    #        c. If avg ≤ Z: accept — pull every bridge line and every cluster
+    #           line down to Z. Bridge lines become eligible immediately so
+    #           later clusters at the same Z benefit.
+    #        d. Else: defer — leave unassigned, retry at Z+1.
+    #   After all levels: any still-unassigned line is truly disconnected from
+    #   base in the line graph; assign its candidate as fallback.
+    import heapq
+    final_mz_by_oid: dict = {}
+    for oid in base_oids:
+        final_mz_by_oid[oid] = candidate_mz_by_oid.get(oid, UNREACHABLE_Z)
+
+    def _shortest_bridge(cluster_set, main_set, eligible_set):
+        """Multi-source Dijkstra from cluster outward. Edge cost u→v is 0 if v
+        is in eligible_set (or in main_set), else 1. Returns the list of
+        non-eligible intermediate lines on the cheapest path from any cluster
+        node to any main node, or None if no path exists in the line graph.
+        """
+        INF = 10**9
+        dist: dict = {c: 0 for c in cluster_set}
+        parent: dict = {}
+        heap: list = [(0, c) for c in cluster_set]
+        target = None
+        while heap:
+            d, u = heapq.heappop(heap)
+            if d > dist.get(u, INF):
                 continue
-            stack.append((node, True))
-            for c in children_in_tree.get(node, ()):
-                stack.append((c, False))
+            if u in main_set:
+                target = u
+                break
+            for v in line_graph_adj.get(u, ()):
+                step = 0 if (v in eligible_set or v in main_set) else 1
+                v_d = d + step
+                if v_d < dist.get(v, INF):
+                    dist[v] = v_d
+                    parent[v] = u
+                    heapq.heappush(heap, (v_d, v))
+        if target is None:
+            return None
+        # Reconstruct path target → … → cluster_anchor
+        path: list = [target]
+        cur = target
+        while cur in parent:
+            cur = parent[cur]
+            path.append(cur)
+        path.reverse()
+        return [n for n in path
+                if n not in cluster_set and n not in main_set
+                and n not in eligible_set]
 
-    # subtree_weight(L) = sum of station counts of L's DESCENDANTS (excluding L).
-    # subtree_earliest(L) = min own_min_zoom across descendants (excluding L).
-    subtree_weight: dict = {}
-    subtree_earliest: dict = {}
-    for node in post_order:
-        sw = 0
-        eds: list = []
-        for c in children_in_tree.get(node, ()):
-            sw += station_count.get(c, 0) + subtree_weight.get(c, 0)
-            eds.append(own_min_zoom_by_oid.get(c, 14.0))
-            cd = subtree_earliest.get(c)
-            if cd is not None:
-                eds.append(cd)
-        subtree_weight[node] = sw
-        subtree_earliest[node] = min(eds) if eds else None
+    # Iterate zoom levels from base (z4) up to UNREACHABLE_Z. At each Z, the
+    # "main" component may absorb new clusters either via natural eligibility
+    # or via pull-down bridges. The loop is bounded by UNREACHABLE_Z so any
+    # cluster that survives all levels is logged as truly isolated.
+    for Z in range(4, UNREACHABLE_Z + 1):
+        eligible_oids: set = set()
+        for oid in line_oids:
+            if oid in final_mz_by_oid:
+                if final_mz_by_oid[oid] <= Z:
+                    eligible_oids.add(oid)
+            else:
+                if candidate_mz_by_oid.get(oid, UNREACHABLE_Z) <= Z:
+                    eligible_oids.add(oid)
 
-    # Per-line meet_zoom + effective_min_zoom (per-node value before the
-    # path-max climb computes the per-line final). All values float.
-    effective_node_mz: dict = {}
-    meet_zoom_by_oid: dict = {}
-    promoted_oids: set = set()
-    for oid in line_oids:
-        own_mz = float(own_min_zoom_by_oid.get(oid, 14.0))
-        if oid in isolated_oids:
-            effective_node_mz[oid] = float(isolated_min_zoom)
+        # CCs in line_graph_adj restricted to eligible_oids.
+        visited_cc: set = set()
+        comps: list = []
+        for o in eligible_oids:
+            if o in visited_cc:
+                continue
+            comp: set = set()
+            stack: list = [o]
+            visited_cc.add(o)
+            while stack:
+                u = stack.pop()
+                comp.add(u)
+                for v in line_graph_adj.get(u, ()):
+                    if v in eligible_oids and v not in visited_cc:
+                        visited_cc.add(v)
+                        stack.append(v)
+            comps.append(comp)
+
+        main_set: set = set()
+        for c in comps:
+            if base_oids & c:
+                main_set = c
+                break
+        if not main_set:
             continue
-        bw = subtree_weight.get(oid, 0)
-        s_c = station_count.get(oid, 1)
-        ed = subtree_earliest.get(oid)
-        if bw > 0 and ed is not None and bw >= s_c * promotion_ratio:
-            meet = (bw * float(ed) + s_c * own_mz) / (bw + s_c)
-            meet_zoom_by_oid[oid] = meet
-            if meet < own_mz:
-                promoted_oids.add(oid)
-            effective_node_mz[oid] = min(own_mz, meet)
-        else:
-            effective_node_mz[oid] = own_mz
 
-    # Final per-line min_zoom = max effective_node on path to base (incl. self).
-    # A promoted connector renders at its promoted zoom (concept § "both
-    # endpoints move: the sub-tree pulls the connector forward"). Non-promoted
-    # lines have effective_node_mz == own_min_zoom, so the path-climb still
-    # holds them at their own value.
-    final_min_zoom: dict = {}
+        # New arrivals in main: assign Z.
+        for line in main_set:
+            if line not in final_mz_by_oid:
+                final_mz_by_oid[line] = Z
+
+        # Process each isolated cluster.
+        for cluster in comps:
+            if cluster is main_set:
+                continue
+            # Skip clusters whose lines already all got assigned (e.g. as part
+            # of a previously-pulled bridge at this Z).
+            if all(l in final_mz_by_oid for l in cluster):
+                continue
+            bridge = _shortest_bridge(cluster, main_set, eligible_oids)
+            if bridge is None:
+                continue
+            nodes_for_avg = list(cluster) + bridge
+            total_stops = sum(station_count.get(n, 1) for n in nodes_for_avg)
+            if total_stops == 0:
+                continue
+            numer = sum(station_count.get(n, 1)
+                        * candidate_mz_by_oid.get(n, UNREACHABLE_Z)
+                        for n in nodes_for_avg)
+            avg = numer / total_stops
+            if avg > Z:
+                # Defer: cluster sits this level out, re-evaluate at Z+1.
+                continue
+            # Accept: pull bridge + cluster down to Z.
+            for line in bridge:
+                if line not in final_mz_by_oid:
+                    final_mz_by_oid[line] = Z
+                eligible_oids.add(line)
+                main_set.add(line)
+            for line in cluster:
+                if line not in final_mz_by_oid:
+                    final_mz_by_oid[line] = Z
+                main_set.add(line)
+
+    # Truly disconnected (no path to base in the line graph at any Z) → use
+    # candidate as the visibility level. Mark as isolated for diagnostics.
+    isolated_oids: set = set()
     for oid in line_oids:
-        if oid in isolated_oids:
-            final_min_zoom[oid] = float(isolated_min_zoom)
-            continue
-        own_mz = float(own_min_zoom_by_oid.get(oid, 14.0))
-        max_eff = effective_node_mz.get(oid, own_mz)
-        cur = oid
-        while cur in parent_in_tree:
-            cur = parent_in_tree[cur]
-            max_eff = max(max_eff,
-                          effective_node_mz.get(cur,
-                                                own_min_zoom_by_oid.get(cur, 14.0)))
-        final_min_zoom[oid] = max_eff
+        if oid not in final_mz_by_oid:
+            final_mz_by_oid[oid] = candidate_mz_by_oid.get(oid, UNREACHABLE_Z)
+            isolated_oids.add(oid)
 
-    # Apply final min_zoom (float) to features. tippecanoe.minzoom is the
-    # integer floor so the feature is in tile from that zoom onward; the
-    # style filter `zoom >= min_zoom` enforces the exact float at render.
+    # Apply to features.
     for f in features:
         p = f["properties"]
         oid = p["osm_id"]
-        mz = final_min_zoom.get(oid, own_min_zoom_by_oid.get(oid, 14.0))
-        p["min_zoom"] = round(float(mz), 3)
-        f["tippecanoe"] = {"minzoom": int(floor(mz))}
+        mz = int(final_mz_by_oid.get(oid, UNREACHABLE_Z))
+        p["min_zoom"] = mz
+        p["candidate_min_zoom"] = int(candidate_mz_by_oid.get(oid, UNREACHABLE_Z))
+        p["rule_label"] = rule_label_by_oid.get(oid, "")
+        f["tippecanoe"] = {"minzoom": mz}
 
     n_iso = len(isolated_oids)
     n_iso_mountain = sum(1 for o in isolated_oids
                          if mode_by_oid.get(o) == "mountain")
     n_iso_other = n_iso - n_iso_mountain
+    n_line_edges = sum(len(v) for v in line_graph_adj.values()) // 2
     print(f"  Line graph: {len(super_of_uic):,} UICs → "
           f"{len(set(super_of_uic.values())):,} super-clusters, "
-          f"{len(edges):,} candidate edges, "
-          f"{sum(len(v) for v in mst_adj.values()) // 2:,} MBST edges")
-    base_str = (f"{len(base_oids)} train(s) at z{min_train_own}"
-                if base_oids else "EMPTY (no train lines found!)")
+          f"{n_line_edges:,} line-graph edges")
+    base_str = (f"{len(base_oids)} intercity train(s), largest of "
+                f"{len(components)} intercity component(s) in line graph"
+                if base_oids else "EMPTY (no intercity train lines)")
     print(f"  Base set: {base_str}")
-    print(f"  Promoted connectors: {len(promoted_oids):,}  "
-          f"Isolated lines: {n_iso} "
-          f"({n_iso_mountain} mountain, {n_iso_other} other)")
+    n_promoted = sum(1 for oid, mz in final_mz_by_oid.items()
+                     if oid not in base_oids and oid not in isolated_oids
+                     and mz < candidate_mz_by_oid.get(oid, UNREACHABLE_Z))
+    print(f"  Connectivity-promoted: {n_promoted:,}  "
+          f"Isolated: {n_iso} ({n_iso_mountain} mountain, {n_iso_other} other)")
     if features:
-        own_mins = [own_min_zoom_by_oid.get(f["properties"]["osm_id"], 14.0)
-                    for f in features]
-        finals = [final_min_zoom.get(f["properties"]["osm_id"], 14.0)
-                  for f in features]
-        print(f"  own_min_zoom:   range {min(own_mins):.2f}–{max(own_mins):.2f}, "
-              f"mean {sum(own_mins)/len(own_mins):.2f}")
-        print(f"  final min_zoom: range {min(finals):.2f}–{max(finals):.2f}, "
-              f"mean {sum(finals)/len(finals):.2f}")
+        mzs = [int(final_mz_by_oid.get(f["properties"]["osm_id"], UNREACHABLE_Z))
+               for f in features]
+        cmzs = [int(candidate_mz_by_oid.get(f["properties"]["osm_id"], UNREACHABLE_Z))
+                for f in features]
+        print(f"  candidate min_zoom: range {min(cmzs)}–{max(cmzs)}, "
+              f"mean {sum(cmzs)/len(cmzs):.2f}")
+        print(f"  final min_zoom:     range {min(mzs)}–{max(mzs)}, "
+              f"mean {sum(mzs)/len(mzs):.2f}")
 
     # ── Write outputs ────────────────────────────────────────────────────────
     OUT.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
