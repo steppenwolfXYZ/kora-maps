@@ -265,7 +265,7 @@ A stop's `min_zoom` is at least the smallest `min_zoom` among the lines serving 
 - `zoom_level_rules` block in `scripts/transit/config.yaml`. Sub-keys:
   - `salience.sample_step_m` — default `1000`.
   - `salience.radius_m` — per-mode table; defaults `train: 30000`, `regional_bus: 10000`, `metro: 5000`, `tram: 5000`, `bus: 5000`, `ferry: 10000`, `mountain: 5000`.
-  - `line_graph.cluster_threshold_m` — default `250` (used to merge nearby stops into super-UICs for the line graph / MBST).
+  - `line_graph.cluster_threshold_m` — default `250` (used to merge nearby stops into super-UICs for the line graph).
   - `stop_importance.nearby_transit_radius_m` — default `1000`. The only point-system threshold lifted into config; the per-category point thresholds (3 min, > 0 lines, etc.) stay hard-coded for now, alongside the logic they belong to.
   - `urbanness` — `radius_inner_m` (default 200), `radius_outer_m` (default 500); bracket thresholds for `c500` and `c200` as described in "Urbanness bracket" above.
   - `intercity_route_prefixes` — list of `route_short_name` prefixes that mark a train as intercity. Default: `[IC, ICE, EC]`.
