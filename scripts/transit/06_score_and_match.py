@@ -61,6 +61,30 @@ OUT_PFAEDLE_UNROUTED = ROOT / "data" / "transit" / "pfaedle_unrouted.json"
 
 _SAMPLE_DATES_CACHE: dict = {}
 
+# Seasonal windows for the regional-bus rescue multi-window gates. See
+# .claude/concepts/seasonal-regional-bus-rescue.md. Months are inclusive
+# (1..12). "winter" = Jan-Mar covers the heart of the ski season; "summer" =
+# Jun-Aug covers the core alpine season. A bus running Dec-Apr passes via
+# winter, Jun-Oct via summer; one running only in December does not pass.
+_WINTER_MONTHS = frozenset({1, 2, 3})
+_SUMMER_MONTHS = frozenset({6, 7, 8})
+SEASONS = ("annual", "winter", "summer")
+
+
+def _date_in_season(date_str: str, season: str) -> bool:
+    """date_str = YYYYMMDD. season ∈ ("annual","winter","summer")."""
+    if season == "annual":
+        return True
+    try:
+        month = int(date_str[4:6])
+    except (ValueError, IndexError):
+        return False
+    if season == "winter":
+        return month in _WINTER_MONTHS
+    if season == "summer":
+        return month in _SUMMER_MONTHS
+    return False
+
 
 def _sample_dates() -> tuple:
     """Return (weekday_dates_set, weekend_dates_set, n_weekday, n_weekend)."""
@@ -81,6 +105,18 @@ def _sample_dates() -> tuple:
         "n_wd": len(wd), "n_we": len(we),
     })
     return _sample_dates()
+
+
+def _sample_dates_seasonal() -> dict:
+    """Return {season: (wd_set, we_set, n_wd, n_we)} for SEASONS. n_wd/n_we
+    are the per-season sample counts (n_wd in annual = total weekday samples)."""
+    wd_set, we_set, _n_wd, _n_we = _sample_dates()
+    out = {}
+    for s in SEASONS:
+        wd_s = frozenset(d for d in wd_set if _date_in_season(d, s))
+        we_s = frozenset(d for d in we_set if _date_in_season(d, s))
+        out[s] = (wd_s, we_s, len(wd_s), len(we_s))
+    return out
 
 
 CORE_START    = 7 * 3600
@@ -684,6 +720,7 @@ _trip_group_export: dict = {}        # trip_id → (line_key, trip_group_id, age
 _trip_stops_export: dict = {}        # trip_id → [stop_id, ...]   (sequence)
 _trip_merged_export: dict = {}       # trip_id → frozenset(merged_stop_id)  (variant identity)
 _trip_weight_export: dict = {}       # trip_id → int (≈ trip-runs across calendar)
+_trip_weight_seasonal_export: dict = {}  # trip_id → {"annual": n, "winter": n, "summer": n}
 _trip_direction_export: dict = {}    # trip_id → (first_merged_uic, last_merged_uic)
 
 _BUCKET_MODE_APPROX = {
@@ -758,19 +795,30 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         stop_merge[sid] = parent if parent else sid.split(":")[0]
 
     wd_set, we_set, n_wd_samples, n_we_samples = _sample_dates()
-    print(f"  Sample dates: {n_wd_samples} weekday + {n_we_samples} weekend")
+    season_dates = _sample_dates_seasonal()
+    print(f"  Sample dates: {n_wd_samples} weekday + {n_we_samples} weekend "
+          f"(winter: {season_dates['winter'][2]}+{season_dates['winter'][3]}, "
+          f"summer: {season_dates['summer'][2]}+{season_dates['summer'][3]})")
     print("  Streaming stop_times.txt ...")
 
     # Per-trip freq contribution buffered here, summed into tg_freq once trip
     # groups are assigned. No per-line_key aggregation exists — trip group is
     # the only line identity in this pipeline (see
     # .claude/concepts/trip-group-as-sole-line-identity.md).
+    # Per-season: trip_freq[tid] = {season: (core, eve, we)} for seasons
+    # ("annual","winter","summer"). The "annual" entry is the existing value.
     trip_freq: dict = {}
 
     # Per-trip buffer for the post-stream grouping phase.
     # trip_id → (line_key, agency_id, weight, raw_variant_frozenset,
     #            merged_stop_frozenset, sequence_list)
     trip_buf: dict = {}
+
+    # Per-trip seasonal activity weights. trip_weight_seasonal[tid][season]
+    # = number of active calendar dates in that season (annual = total).
+    # Consumed by the multi-window rare-variant filter for groups containing
+    # at least one regional_bus_rescued variant.
+    trip_weight_seasonal: dict = {}
 
     current_trip_id = None
     current_stops: list = []
@@ -784,11 +832,16 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         active_dates = svc_dates.get(service_id, set())
         first_dep = stops[0][3]
 
-        # Count of sample dates this trip is active on — used as the multiplier
-        # so a construction line active on 1/26 weekday samples contributes 1/26
-        # of its raw count after normalisation.
-        wd_hits = sum(1 for d in wd_set if d in active_dates)
-        we_hits = sum(1 for d in we_set if d in active_dates)
+        # Count of sample dates this trip is active on, per season. The annual
+        # multiplier downscales construction lines (active on 1/26 weekday
+        # samples → contributes 1/26 of its raw count); the seasonal versions
+        # support the multi-window freq gate for regional-bus-rescued groups.
+        per_season_hits = {}
+        for s, (wd_s, we_s, _nw, _nwe) in season_dates.items():
+            per_season_hits[s] = (
+                sum(1 for d in wd_s if d in active_dates),
+                sum(1 for d in we_s if d in active_dates),
+            )
 
         core_n = eve_n = we_n = 0
         freq_entries = trip_frequencies.get(trip_id, [])
@@ -799,7 +852,6 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
                 core_n += max(0, (min(end, CORE_END) - max(start, CORE_START)) // headway)
                 eve_n  += max(0, (min(end, EVENING_END) - max(start, EVENING_START)) // headway)
                 we_n   += max(0, (min(end, WEEKEND_END) - max(start, WEEKEND_START)) // headway)
-            trip_freq[trip_id] = (core_n * wd_hits, eve_n * wd_hits, we_n * we_hits)
         else:
             if CORE_START <= first_dep < CORE_END:
                 core_n = 1
@@ -807,14 +859,23 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
                 eve_n = 1
             if WEEKEND_START <= first_dep < WEEKEND_END:
                 we_n = 1
-            trip_freq[trip_id] = (core_n * wd_hits, eve_n * wd_hits, we_n * we_hits)
+        trip_freq[trip_id] = {
+            s: (core_n * wd_h, eve_n * wd_h, we_n * we_h)
+            for s, (wd_h, we_h) in per_season_hits.items()
+        }
 
         raw_variant = frozenset(s[1] for s in stops)
         merged_set = frozenset(stop_merge.get(s[1]) or s[1].split(":")[0] for s in stops)
         sequence   = [(s[1], s[2], s[3]) for s in stops]
+        annual_w = max(1, len(active_dates))
+        winter_w = sum(1 for d in active_dates if _date_in_season(d, "winter"))
+        summer_w = sum(1 for d in active_dates if _date_in_season(d, "summer"))
+        trip_weight_seasonal[trip_id] = {
+            "annual": annual_w, "winter": winter_w, "summer": summer_w,
+        }
         trip_buf[trip_id] = (
             line_key, trip.get("agency_id", ""),
-            max(1, len(active_dates)),
+            annual_w,
             raw_variant, merged_set, sequence,
         )
 
@@ -908,7 +969,10 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     # this pipeline. Frequency and the canonical trip are both summed/picked
     # here, in the single loop over trip_buf, against the trip-group partition
     # built above. No second partition, no name-based fallback.
-    tg_freq: dict = defaultdict(lambda: [0, 0, 0])
+    # tg_freq[tg_key][season] = [core_sum, eve_sum, we_sum] across trips.
+    tg_freq: dict = defaultdict(
+        lambda: {s: [0, 0, 0] for s in SEASONS}
+    )
     tg_canon: dict = {}  # tg_key → {"canon_score": int, "stops": [(sid, arr, dep), ...]}
 
     for tid, (lk, aid, weight, raw_variant, merged_set, sequence) in trip_buf.items():
@@ -922,6 +986,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         _trip_stops_export[tid] = [s[0] for s in sequence]
         _trip_merged_export[tid] = merged_set
         _trip_weight_export[tid] = weight
+        _trip_weight_seasonal_export[tid] = trip_weight_seasonal.get(tid)
         first_sid = sequence[0][0]
         last_sid = sequence[-1][0]
         first_uic = stop_merge.get(first_sid) or first_sid.split(":")[0]
@@ -931,9 +996,12 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         tc = trip_freq.get(tid)
         if tc is not None:
             tgf = tg_freq[tg_key]
-            tgf[0] += tc[0]
-            tgf[1] += tc[1]
-            tgf[2] += tc[2]
+            for s in SEASONS:
+                c, e, w = tc[s]
+                bucket = tgf[s]
+                bucket[0] += c
+                bucket[1] += e
+                bucket[2] += w
 
         n = len(sequence)
         canon_score = n * weight
@@ -982,15 +1050,34 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     # window. f_core = trips_in_core_window / (n_weekday_samples · core_hours)
     # — the trip group's average trips-per-hour during the core window across
     # weekday sample dates. Same for eve and we.
+    #
+    # `tg_freq_out` holds the annual (legacy) values, used by every gate that
+    # is not regional-bus-rescue aware.
+    # `tg_freq_seasonal_out` adds per-season {f_core, f_eve, f_we} for the
+    # multi-window freq gate. Seasons with zero sample dates collapse to 0
+    # rather than dividing by zero — a rescued group with no sample dates in
+    # a given window cannot pass that window's gate.
     tg_freq_out: dict = {}
-    for tg_key, (c, e, w) in tg_freq.items():
-        tg_freq_out[tg_key] = {
-            "f_core": c / (n_wd_samples * CORE_HOURS),
-            "f_eve":  e / (n_wd_samples * EVENING_HOURS),
-            "f_we":   w / (n_we_samples * WEEKEND_HOURS),
-        }
+    tg_freq_seasonal_out: dict = {}
+    season_norms = {
+        s: (max(1, ns[2]) * CORE_HOURS,
+            max(1, ns[2]) * EVENING_HOURS,
+            max(1, ns[3]) * WEEKEND_HOURS)
+        for s, ns in season_dates.items()
+    }
+    for tg_key, per_season in tg_freq.items():
+        seasonal = {}
+        for s, (c, e, w) in per_season.items():
+            cn, en, wen = season_norms[s]
+            seasonal[s] = {
+                "f_core": c / cn,
+                "f_eve":  e / en,
+                "f_we":   w / wen,
+            }
+        tg_freq_seasonal_out[tg_key] = seasonal
+        tg_freq_out[tg_key] = seasonal["annual"]
 
-    return tg_freq_out, tg_speed, tg_canon
+    return tg_freq_out, tg_freq_seasonal_out, tg_speed, tg_canon
 
 
 # ── Per-window frequency scoring ─────────────────────────────────────────────
@@ -1173,7 +1260,7 @@ def main():
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries "
           f"for {len(trip_frequencies):,} trips")
 
-    tg_freq, tg_speed, tg_canon = stream_stop_times(
+    tg_freq, tg_freq_seasonal, tg_speed, tg_canon = stream_stop_times(
         trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
     # Override direction_key with EXEMPT_DIRECTION_KEY for ferry + aerial /
@@ -1212,6 +1299,12 @@ def main():
     # trips share one variant and emit one feature per merged stop set.
     groups: dict = defaultdict(lambda: defaultdict(list))
     variant_counts: dict = defaultdict(lambda: defaultdict(int))
+    # Per-season weighted variant counts; consumed by the multi-window
+    # rare-variant filter for groups containing at least one
+    # regional_bus_rescued variant.
+    variant_counts_seasonal: dict = {
+        s: defaultdict(lambda: defaultdict(int)) for s in SEASONS
+    }
     for tid, (line_key, tg_id, aid) in _trip_group_export.items():
         merged_set = _trip_merged_export.get(tid)
         if merged_set is None:
@@ -1227,6 +1320,9 @@ def main():
         # the same trip_ids active every weekday. Same weight that the
         # in-stream rare-variant filter already uses.
         variant_counts[tg_key][var_key] += _trip_weight_export.get(tid, 1)
+        sweights = _trip_weight_seasonal_export.get(tid) or {}
+        for s in SEASONS:
+            variant_counts_seasonal[s][tg_key][var_key] += sweights.get(s, 0)
 
     # Snapshot for the comprehensive diagnostic before the active-days,
     # rare-group, and rare-variant filters mutate `groups`. Variants are keyed
@@ -1458,25 +1554,74 @@ def main():
     # <10% of group trips (garage runs, one-off detours, very weak counter
     # directions). Fall back to 5% if nothing clears 10%. If nothing clears 5%
     # either, keep all.
-    for tg_key, vmap in list(groups.items()):
-        counts = variant_counts[tg_key]
+    #
+    # For groups with at least one regional_bus_rescued variant the filter
+    # evaluates three windows independently — annual, winter (Jan-Mar),
+    # summer (Jun-Aug). A variant survives if it clears any window's
+    # threshold. See .claude/concepts/seasonal-regional-bus-rescue.md.
+    #
+    # rare_variant_window_passed[(tg_key, var_key)] = "annual"|"winter"|
+    #     "summer"|None — the window the variant cleared, or None if dropped.
+    # rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10 / 0.05 /
+    #     None — which fallback level produced the pass (or None on drop).
+    rare_variant_window_passed: dict = {}
+    rare_variant_threshold_pct_passed: dict = {}
+
+    def _rare_variant_pass(counts: dict, vmap: dict) -> tuple:
+        """One-window rare-variant evaluation. Returns
+        (kept_var_keys, threshold_pct_used). threshold_pct_used is None when
+        no fallback admitted anyone."""
         total = sum(counts.values())
-        threshold_used = None
         for pct in (0.10, 0.05):
             threshold = max(1, total * pct)
-            kept = {var_key: tids for var_key, tids in vmap.items()
-                    if counts[var_key] >= threshold}
-            if kept:
-                groups[tg_key] = kept
-                threshold_used = pct
-                break
-        kept_keys = set(groups.get(tg_key, vmap).keys())
+            kept_keys = {vk for vk in vmap if counts.get(vk, 0) >= threshold}
+            if kept_keys:
+                return kept_keys, pct
+        return set(), None
+
+    for tg_key, vmap in list(groups.items()):
+        is_rescued_group = bool(regional_bus_rescued.get(tg_key))
+        windows = SEASONS if is_rescued_group else ("annual",)
+
+        # Per-window kept set + threshold pct.
+        per_window: dict = {}
+        for s in windows:
+            counts_s = (variant_counts if s == "annual"
+                        else variant_counts_seasonal[s])[tg_key]
+            kept_s, pct_s = _rare_variant_pass(counts_s, vmap)
+            per_window[s] = (kept_s, pct_s)
+
+        # A variant survives if any window kept it. The window order in
+        # SEASONS doubles as the diagnostic priority for which window we
+        # report on a tie (annual first, then winter, then summer).
+        kept_keys: set = set()
+        for var_key in vmap:
+            for s in windows:
+                if var_key in per_window[s][0]:
+                    kept_keys.add(var_key)
+                    rare_variant_window_passed[(tg_key, var_key)] = s
+                    rare_variant_threshold_pct_passed[(tg_key, var_key)] = \
+                        per_window[s][1]
+                    break
+            else:
+                rare_variant_window_passed[(tg_key, var_key)] = None
+                rare_variant_threshold_pct_passed[(tg_key, var_key)] = None
+
+        if kept_keys:
+            groups[tg_key] = {vk: vmap[vk] for vk in kept_keys}
+        # Diagnostic outcome uses the kept set; threshold reported is the
+        # one annual-window value that the existing diag schema expects.
+        # For rescued groups we report the *winning* window's threshold per
+        # variant via rare_variant_window_passed / _pct_passed above.
         bucket_entry = diag_filter.setdefault(tg_key, {})
         for var_key in vmap:
-            bucket_entry[var_key] = (
-                "kept" if var_key in kept_keys else "rare_variant",
-                threshold_used,
-            )
+            if var_key in kept_keys:
+                bucket_entry[var_key] = (
+                    "kept",
+                    rare_variant_threshold_pct_passed[(tg_key, var_key)],
+                )
+            else:
+                bucket_entry[var_key] = ("rare_variant", per_window["annual"][1])
 
     # Trip groups dropped by the supergroup filter never reached the per-variant
     # filter loop above; mark any of their variants we haven't already labelled
@@ -1491,20 +1636,54 @@ def main():
     # active-days gate has already run upstream at variant granularity. Per
     # direction-coverage concept: ferry + true mountain (aerial/funicular)
     # skip the gate; rebucketed rail does not.
+    #
+    # Groups containing at least one regional_bus_rescued variant are
+    # evaluated against three windows (annual / winter Jan-Mar / summer
+    # Jun-Aug) and pass if the f_weighted in any window exceeds worst_freq.
+    # The winning window's raw freq becomes the group's effective freq for
+    # downstream emission and salience — line thickness / visibility track
+    # in-season cadence rather than annual dilution.
+    # See .claude/concepts/seasonal-regional-bus-rescue.md.
     drawable_groups = {}
+    freq_gate_window_passed: dict = {}  # tg_key → "annual"|"winter"|"summer"|None
     best_freq_map, worst_freq_map = _frequencies()
     for (line_key, aid, tg_id), variant_map in groups.items():
         bucket = line_key[2]
         mode_approx = _BUCKET_MODE_APPROX.get(bucket, "regional_bus")
         tg_key = (line_key, aid, tg_id)
-        raw = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
-        f_weighted = weighted_freq(raw)
+        seasonal = tg_freq_seasonal.get(tg_key) or {}
+        raw_annual = seasonal.get("annual") \
+            or {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
         worst_f = worst_freq_map.get(mode_approx, 0.0)
-        if _freq_gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
+        exempt = _freq_gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
             line_key[0] == "CC" and bucket == "train"
-        ) or f_weighted > worst_f:
+        )
+        is_rescued_group = bool(regional_bus_rescued.get(tg_key))
+        passed = False
+        if exempt:
+            passed = True
+            freq_gate_window_passed[tg_key] = "annual"
+        else:
+            windows = SEASONS if is_rescued_group else ("annual",)
+            for s in windows:
+                raw_s = seasonal.get(s) or {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
+                if weighted_freq(raw_s) > worst_f:
+                    passed = True
+                    freq_gate_window_passed[tg_key] = s
+                    if s != "annual":
+                        # Rebind the group's effective annual freq to the
+                        # winning window so downstream thickness / salience
+                        # use in-season cadence.
+                        tg_freq[tg_key] = dict(raw_s)
+                    break
+            if not passed:
+                freq_gate_window_passed[tg_key] = None
+        if passed:
             drawable_groups[tg_key] = variant_map
-    print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries")
+    n_rescued_drawable = sum(1 for k, v in drawable_groups.items()
+                             if freq_gate_window_passed.get(k) not in (None, "annual"))
+    print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries "
+          f"({n_rescued_drawable} via seasonal window)")
 
     # ── Emit features ────────────────────────────────────────────────────────
     features: list = []
@@ -2429,6 +2608,8 @@ def main():
                 "last_terminus": last_terminus,
                 "kept_by_variant_filter": kept_by_filter,
                 "rare_variant_threshold_pct": threshold_pct,
+                "rare_variant_window_passed":
+                    rare_variant_window_passed.get((tg_key, var_key)),
                 "regional_bus_rescued": var_key in regional_bus_rescued.get(tg_key, ()),
                 "exclusion_reason": v_reason,
                 "feature_emitted": em.get("feature_emitted", False),
@@ -2472,6 +2653,7 @@ def main():
             "min_active_days_threshold": threshold_field,
             "drawable": drawable,
             "group_exclusion_reason": group_reason,
+            "freq_gate_window_passed": freq_gate_window_passed.get(tg_key),
             "variants": variants_out,
         })
 
