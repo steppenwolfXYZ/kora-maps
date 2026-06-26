@@ -268,6 +268,15 @@ min_active_days_by_bucket:
 # at emission.
 min_active_days_regional_bus: 90
 
+# Unique-stop rescue for rare-variant filter on regional-bus-rescued groups.
+# A variant below the 10% share threshold is rescued if it serves a parent
+# station unserved by any kept-by-share variant across the dataset AND that
+# station is at least `unique_stop_min_distance_m` from any kept-by-share
+# stop within the same group AND the variant's weighted-share is at least
+# `unique_stop_min_share_pct` in some window.
+unique_stop_min_distance_m: 1000
+unique_stop_min_share_pct: 0.02
+
 # ── Frequency sampling ───────────────────────────────────────────────────────
 # Sample dates the low-frequency filter measures trip counts on, generated
 # once by scripts/transit/generate_sample_dates.py (seed + blackouts live in

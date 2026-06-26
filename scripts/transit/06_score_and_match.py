@@ -1252,6 +1252,12 @@ def main():
     min_active_days_regional_bus = int(
         cfg.get("min_active_days_regional_bus", min_active_days_default)
     )
+    unique_stop_min_distance_m = float(
+        cfg.get("unique_stop_min_distance_m", 1000)
+    )
+    unique_stop_min_share_pct = float(
+        cfg.get("unique_stop_min_share_pct", 0.02)
+    )
 
     def min_active_days_for(bucket: str) -> int:
         return min_active_days_by_bucket.get(bucket, min_active_days_default)
@@ -1550,78 +1556,152 @@ def main():
         for var_key in dropped:
             bucket_entry[var_key] = ("short_active_period", None)
 
-    # Rare-variant filter: drop (merged_set, direction_key) variants representing
-    # <10% of group trips (garage runs, one-off detours, very weak counter
-    # directions). Fall back to 5% if nothing clears 10%. If nothing clears 5%
-    # either, keep all.
+    # Rare-variant filter — two phases for groups with at least one
+    # regional_bus_rescued variant; legacy single-phase otherwise. See
+    # .claude/concepts/seasonal-regional-bus-rescue.md.
     #
-    # For groups with at least one regional_bus_rescued variant the filter
-    # evaluates three windows independently — annual, winter (Jan-Mar),
-    # summer (Jun-Aug). A variant survives if it clears any window's
-    # threshold. See .claude/concepts/seasonal-regional-bus-rescue.md.
+    # Phase 1 (share gate):
+    #   - Rescued-bearing group: 10% per window (annual/winter/summer). No 5%
+    #     fallback. A variant is "kept-by-share" if it clears 10% in any
+    #     window.
+    #   - Other group: legacy 10%/5%-fallback against the annual window only.
+    # Phase 2 (built only after phase 1 has run for every group):
+    #   - global_kept_uics = union of parent UICs served by any kept-by-share
+    #     variant across the whole dataset.
+    # Phase 3 (rescued-bearing groups only):
+    #   - Unique-stop rescue. A non-kept variant is rescued if it serves a
+    #     parent UIC not in global_kept_uics AND that UIC is ≥
+    #     unique_stop_min_distance_m from every UIC in *this* group's kept-by-
+    #     share set AND the variant's weighted-share is ≥
+    #     unique_stop_min_share_pct in at least one window.
     #
-    # rare_variant_window_passed[(tg_key, var_key)] = "annual"|"winter"|
-    #     "summer"|None — the window the variant cleared, or None if dropped.
-    # rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10 / 0.05 /
-    #     None — which fallback level produced the pass (or None on drop).
+    # Diagnostics:
+    #   rare_variant_window_passed[(tg_key, var_key)] ∈
+    #     {"annual", "winter", "summer", "unique_stop", None}
+    #   rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10 / 0.05 /
+    #     None (None for unique_stop rescues or for drops).
     rare_variant_window_passed: dict = {}
     rare_variant_threshold_pct_passed: dict = {}
 
-    def _rare_variant_pass(counts: dict, vmap: dict) -> tuple:
-        """One-window rare-variant evaluation. Returns
-        (kept_var_keys, threshold_pct_used). threshold_pct_used is None when
-        no fallback admitted anyone."""
+    def _pct_pass(counts: dict, vmap_keys, pct: float) -> set:
         total = sum(counts.values())
-        for pct in (0.10, 0.05):
-            threshold = max(1, total * pct)
-            kept_keys = {vk for vk in vmap if counts.get(vk, 0) >= threshold}
-            if kept_keys:
-                return kept_keys, pct
-        return set(), None
+        threshold = max(1, total * pct)
+        return {vk for vk in vmap_keys if counts.get(vk, 0) >= threshold}
 
+    def _legacy_rare_variant(counts: dict, vmap_keys) -> tuple:
+        """Annual 10% then 5% fallback; if both pass nothing, keep all."""
+        for pct in (0.10, 0.05):
+            kept = _pct_pass(counts, vmap_keys, pct)
+            if kept:
+                return kept, pct
+        return set(vmap_keys), None
+
+    # ── Phase 1: standard share gate for every group ─────────────────────
+    kept_by_share: dict = {}  # tg_key → set(var_key)
     for tg_key, vmap in list(groups.items()):
         is_rescued_group = bool(regional_bus_rescued.get(tg_key))
-        windows = SEASONS if is_rescued_group else ("annual",)
+        if is_rescued_group:
+            per_window_kept: dict = {}
+            for s in SEASONS:
+                counts_s = (variant_counts if s == "annual"
+                            else variant_counts_seasonal[s])[tg_key]
+                per_window_kept[s] = _pct_pass(counts_s, vmap, 0.10)
+            kept: set = set()
+            for var_key in vmap:
+                for s in SEASONS:
+                    if var_key in per_window_kept[s]:
+                        kept.add(var_key)
+                        rare_variant_window_passed[(tg_key, var_key)] = s
+                        rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10
+                        break
+            kept_by_share[tg_key] = kept
+        else:
+            kept, pct = _legacy_rare_variant(variant_counts[tg_key], vmap)
+            kept_by_share[tg_key] = kept
+            for var_key in kept:
+                rare_variant_window_passed[(tg_key, var_key)] = "annual"
+                rare_variant_threshold_pct_passed[(tg_key, var_key)] = pct
 
-        # Per-window kept set + threshold pct.
-        per_window: dict = {}
-        for s in windows:
-            counts_s = (variant_counts if s == "annual"
-                        else variant_counts_seasonal[s])[tg_key]
-            kept_s, pct_s = _rare_variant_pass(counts_s, vmap)
-            per_window[s] = (kept_s, pct_s)
+    # ── Phase 2: global kept-by-share parent UIC set ─────────────────────
+    # var_key[0] is the merged-stop frozenset = the variant's parent UICs.
+    global_kept_uics: set = set()
+    for tg_key, kept in kept_by_share.items():
+        for var_key in kept:
+            global_kept_uics |= var_key[0]
 
-        # A variant survives if any window kept it. The window order in
-        # SEASONS doubles as the diagnostic priority for which window we
-        # report on a tie (annual first, then winter, then summer).
-        kept_keys: set = set()
+    # ── Phase 3: unique-stop rescue (rescued-bearing groups only) ────────
+    n_unique_stop_rescued = 0
+    for tg_key, vmap in groups.items():
+        if not regional_bus_rescued.get(tg_key):
+            continue
+        kept = kept_by_share[tg_key]
+        group_kept_uics: set = set()
+        for vk in kept:
+            group_kept_uics |= vk[0]
+        # Pre-resolve this group's kept UIC coordinates once.
+        group_kept_coords: list = []
+        for uic in group_kept_uics:
+            c = stop_coords.get(uic) or stop_coords.get(uic.split(":")[0])
+            if c:
+                group_kept_coords.append(c)
+
         for var_key in vmap:
-            for s in windows:
-                if var_key in per_window[s][0]:
-                    kept_keys.add(var_key)
-                    rare_variant_window_passed[(tg_key, var_key)] = s
-                    rare_variant_threshold_pct_passed[(tg_key, var_key)] = \
-                        per_window[s][1]
+            if var_key in kept:
+                continue
+            candidate_uics = var_key[0] - global_kept_uics
+            if not candidate_uics:
+                continue
+            qualifying = False
+            for uic in candidate_uics:
+                uic_coord = stop_coords.get(uic) \
+                    or stop_coords.get(uic.split(":")[0])
+                if uic_coord is None:
+                    continue
+                far_enough = True
+                for kept_coord in group_kept_coords:
+                    if haversine_km(uic_coord[0], uic_coord[1],
+                                    kept_coord[0], kept_coord[1]) * 1000.0 \
+                            < unique_stop_min_distance_m:
+                        far_enough = False
+                        break
+                if far_enough:
+                    qualifying = True
                     break
-            else:
-                rare_variant_window_passed[(tg_key, var_key)] = None
-                rare_variant_threshold_pct_passed[(tg_key, var_key)] = None
+            if not qualifying:
+                continue
+            passes_floor = False
+            for s in SEASONS:
+                counts_s = (variant_counts if s == "annual"
+                            else variant_counts_seasonal[s])[tg_key]
+                total = sum(counts_s.values())
+                share = (counts_s.get(var_key, 0) / total) if total else 0
+                if share >= unique_stop_min_share_pct:
+                    passes_floor = True
+                    break
+            if not passes_floor:
+                continue
+            kept.add(var_key)
+            rare_variant_window_passed[(tg_key, var_key)] = "unique_stop"
+            rare_variant_threshold_pct_passed[(tg_key, var_key)] = None
+            n_unique_stop_rescued += 1
+    if n_unique_stop_rescued:
+        print(f"  {n_unique_stop_rescued:,} variants rescued by unique-stop rule")
 
-        if kept_keys:
-            groups[tg_key] = {vk: vmap[vk] for vk in kept_keys}
-        # Diagnostic outcome uses the kept set; threshold reported is the
-        # one annual-window value that the existing diag schema expects.
-        # For rescued groups we report the *winning* window's threshold per
-        # variant via rare_variant_window_passed / _pct_passed above.
+    # ── Apply kept_by_share to groups + populate diag_filter ─────────────
+    for tg_key, vmap in list(groups.items()):
+        kept = kept_by_share.get(tg_key, set())
+        if kept and kept != set(vmap.keys()):
+            groups[tg_key] = {vk: vmap[vk] for vk in kept}
         bucket_entry = diag_filter.setdefault(tg_key, {})
         for var_key in vmap:
-            if var_key in kept_keys:
+            if var_key in kept:
                 bucket_entry[var_key] = (
                     "kept",
-                    rare_variant_threshold_pct_passed[(tg_key, var_key)],
+                    rare_variant_threshold_pct_passed.get((tg_key, var_key)),
                 )
             else:
-                bucket_entry[var_key] = ("rare_variant", per_window["annual"][1])
+                rare_variant_window_passed.setdefault((tg_key, var_key), None)
+                bucket_entry[var_key] = ("rare_variant", None)
 
     # Trip groups dropped by the supergroup filter never reached the per-variant
     # filter loop above; mark any of their variants we haven't already labelled
