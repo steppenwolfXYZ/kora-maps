@@ -43,6 +43,16 @@ A group containing at least one `regional_bus_rescued` variant uses the rules be
 - Groups without any rescued variant continue to use the annual window only.
 - The per-group diagnostic carries `freq_gate_window_passed: "annual" | "winter" | "summer" | null`.
 
+### Per-variant freq for line thickness
+
+The motivating bug: a unique-stop-rescued variant (e.g. Theytaz 372 → Le Chargeur) inherits its group's high freq_score from the year-round dominant variants and renders at full thickness, despite running ~1 trip/day in season. The correct metric is per-direction trips/hour — what a passenger at a stop in that direction actually experiences.
+
+- The `freq_score` written onto each emitted feature is computed from **that variant's trips only**, not the trip group's total.
+- The per-variant `f_weighted` uses the same sample-date / window-hour normalisation as the group-level one. For groups that passed the freq gate via a seasonal window (above), the same window is used for the per-variant freq.
+- **Inclusion is unchanged.** The group-level `worst_freq` gate still uses the group's combined freq. Per-variant freq drives only `freq_score` → `width_base` → thickness, and `salience_absolute` → `min_zoom`.
+- Applies to every emitted feature in every bucket — bus, regional_bus, train, tram, metro, ferry, mountain. All buckets are now per-direction-split (see `.claude/concepts/remove-exempt-direction-key.md`), so per-variant freq equals per-direction freq across the board. Mountain has fixed width so the value is moot for the visual, but it still flows through salience scoring.
+- The per-variant block in `gtfs_groups_full.json` gains its own `raw_freq` and `f_weighted` fields for debugging.
+
 ## Constraints
 
 - All multi-window logic — both the rare-variant rules and the freq gate — is scoped to groups that contain at least one `regional_bus_rescued` variant. Non-rescued-bearing groups are evaluated against the annual window only with the legacy 10% / 5%-fallback gate, identical to today.
@@ -53,3 +63,4 @@ A group containing at least one `regional_bus_rescued` variant uses the rules be
 - City-bus construction-replacement services are kept out by the `seasonal_rescue_city_bus` drop at emission, which still runs regardless of which window or rescue rule kept the variant. The rare-variant rules only protect variants whose final mode classifies as `regional_bus`.
 - The unique-stop rescue's distance check uses the parent station's GTFS coordinates. The kept-by-share set is computed once per group and frozen before the unique-stop test runs, so two sub-share variants that each add the same unique station both pass.
 - Config validation: if `min_active_days_regional_bus >= min_active_days`, the rescue range is empty and the multi-window gates have no candidate groups; behaviour collapses to current annual-only.
+- The width curve (`best_freq` / `worst_freq` per mode in `config.yaml`) was calibrated assuming group-level freq. Per-variant freq is roughly half for balanced bidirectional services, so existing lines will render thinner. Expect a follow-up retune of these endpoints once the visual result is reviewed.

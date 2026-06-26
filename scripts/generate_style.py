@@ -1101,11 +1101,9 @@ def build_station_layers(cfg) -> list:
     # stack carries the connector seam handling. See
     # far-zoom-stop-markers.md § "Ferry far-zoom marker".
 
-    # Hard cut at the appear-zoom — no opacity fade. Train pills appear
-    # at z12 and every other mode at z13; the per-feature tippecanoe
-    # minzoom baked in by 07_extract_stops.py keeps non-train pills out
-    # of z12 tiles, so a single layer minzoom of 12 is sufficient.
-    PILL_MINZOOM = 12
+    # Hard cut at the appear-zoom — no opacity fade. Uniform z13 for
+    # every mode per `.claude/concepts/pill-zoom-stop-tweaks.md`.
+    PILL_MINZOOM = 13
 
     def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
@@ -1207,51 +1205,76 @@ def build_station_layers(cfg) -> list:
         }
     })
 
-    # --- Color indicators (z15+) ---------------------------------------------
+    # --- Color indicators (z13+) ---------------------------------------------
     # Mini per-color-group dots inside stop dots, endpoint discs, and pills.
-    # See `.claude/concepts/stop-color-indicators.md`.
+    # See `.claude/concepts/stop-color-indicators.md` and
+    # `.claude/concepts/pill-zoom-stop-tweaks.md`.
     #
-    # Layout: centered row of up to 6 indicators. Each indicator carries
-    # `slot_units` (integer in [-5, +5]; n=1 → {0}; n=2 → {-1, +1}; ...;
-    # n=6 → {-5, -3, -1, +1, +3, +5}) and `tangent_deg` (0 for dots/discs,
-    # pill tangent for pill indicators).
+    # Layout: centered row of up to 3 indicators (current data max).
+    # Each indicator carries `slot_units` (integer in [-5, +5]; n=1 → {0};
+    # n=2 → {-1, +1}; n=3 → {-2, 0, +2}) and `tangent_deg` (0 for
+    # dots/discs, pill tangent for pill indicators).
     #
-    # A symbol layer renders each indicator as a "●" glyph. `text-rotate`
-    # uses the feature's `tangent_deg` with `text-rotation-alignment: map`,
-    # so the row is screen-horizontal for dots/discs and pill-aligned for
-    # pills. `text-offset` (em-based) is set via a `match` on `slot_units`,
-    # so the gap scales with text-size (and therefore with width_base+zoom)
-    # automatically.
-    INDICATOR_MINZOOM = 15
-    INDICATOR_FADE_END = 15.3
+    # Indicators appear at the same zoom as pills (z13) with no opacity
+    # fade. Each feature carries `parent_width_base` (the floor-clamped
+    # width_base of the parent stop) and `n_indicators` (count in the
+    # row) so the text-size expression can shrink the row to fit when
+    # the parent is too thin for the default size.
+    INDICATOR_MINZOOM = 13
 
-    # text-size depends on zoom only — all indicator dots are the same
-    # pixel size at a given zoom, regardless of the parent stop's
-    # line-width. Curve picked to match a wb≈3 parent visually.
-    text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        14, 4.5,
+    # half_spacing_em and vert_em compensate for the "●" glyph's vertical
+    # asymmetry inside its em-box. The row span across N indicators is
+    # roughly `(0.56*N + 0.14)` em (glyph diameter ~0.7 em, gap between
+    # centers 2*half_spacing_em = 0.56 em).
+    half_spacing_em = 0.28
+    vert_em = -0.1
+    INDICATOR_INNER_MARGIN = 0.7  # fraction of parent inner dim usable
+
+    # Default text-size curve — re-anchored to PILL_MINZOOM (z13) so
+    # indicators have a sensible size from the moment pills appear.
+    default_text_size = ["interpolate", ["linear"], ["zoom"],
+        13, 4.5,
         20, 36.0,
     ]
 
-    # text-offset is in em. Half-spacing per slot_unit; tight (just enough
-    # for a small visible gap between adjacent dots).
-    # vert_em compensates for the "●" glyph's vertical asymmetry inside its
-    # em-box — Noto Sans's bullet sits slightly below bbox center, so we
-    # nudge the anchor up by a small constant in glyph-local space (which,
-    # under text-rotation-alignment: map + text-rotate, rotates with the
-    # parent's tangent — so the compensation stays aligned to the row).
-    half_spacing_em = 0.28
-    vert_em = -0.1
+    # Parent-disc diameter curve — must match `pill_disc_width()` above,
+    # since the indicator row sits inside that diameter.
+    parent_diameter_expr = ["*",
+        ["get", "parent_width_base"],
+        ["interpolate", ["linear"], ["zoom"],
+            PILL_MINZOOM, 0.6,
+            14,           1.5,
+            20,           12.0,
+        ],
+    ]
+
+    # Row span factor in em (= row width / text-size) for the actual
+    # indicator count at this location. See concept §
+    # "Indicators must not overflow the parent".
+    row_span_factor_expr = ["match", ["get", "n_indicators"],
+        1, 0.70,
+        2, 1.26,
+        3, 1.82,
+        0.70,  # default (shouldn't fire in current data)
+    ]
+
+    # Effective text-size = min(default, parent_diam * margin / row_factor).
+    # The right-hand expression is the maximum text-size that keeps the
+    # row inside the parent's binding inner dimension; when the default
+    # is already smaller, no shrink fires.
+    text_size_expr = ["min",
+        default_text_size,
+        ["/",
+            ["*", parent_diameter_expr, INDICATOR_INNER_MARGIN],
+            row_span_factor_expr,
+        ],
+    ]
+
     text_offset_expr = ["match", ["get", "slot_units"]]
     for k in range(-5, 6):
         text_offset_expr.append(k)
         text_offset_expr.append(["literal", [k * half_spacing_em, vert_em]])
     text_offset_expr.append(["literal", [0.0, vert_em]])  # default
-
-    text_opacity_expr = ["interpolate", ["linear"], ["zoom"],
-        INDICATOR_MINZOOM,  0.0,
-        INDICATOR_FADE_END, 1.0,
-    ]
 
     layers.append({
         "id": "transit-stop-indicator",
@@ -1273,7 +1296,6 @@ def build_station_layers(cfg) -> list:
         },
         "paint": {
             "text-color": ["get", "color"],
-            "text-opacity": text_opacity_expr,
         }
     })
 

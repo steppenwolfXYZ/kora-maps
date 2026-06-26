@@ -78,6 +78,18 @@ FERRY_COLLAPSE_M       = float(FERRY_STOPS_CFG.get("collapse_threshold_m", 15.0)
 FERRY_CONVERGE_M       = float(FERRY_STOPS_CFG.get("convergence_threshold_m", 20.0))
 FERRY_ENDPOINT_PULL_M  = float(FERRY_STOPS_CFG.get("endpoint_pull_threshold_m", 75.0))
 
+# Per-mode width_base floor for stop sizing. See
+# `.claude/concepts/pill-zoom-stop-tweaks.md` § "Width-base floor for stop
+# sizing". Applied to dot / endpoint disc / pill body width_base; connectors
+# are not clamped.
+STOP_WIDTH_BASE_FLOOR = {
+    k: float(v) for k, v in (_transit_cfg.get("stop_width_base_floor", {}) or {}).items()
+}
+
+def _clamp_stop_wb(wb: float, mode: str) -> float:
+    floor = STOP_WIDTH_BASE_FLOOR.get(mode)
+    return max(wb, floor) if floor is not None else wb
+
 # Far-zoom dot positioning: see config.yaml `far_zoom_marker` and
 # .claude/concepts/far-zoom-stop-markers.md.
 FAR_ZOOM_CFG = _transit_cfg.get("far_zoom_marker", {}) or {}
@@ -149,7 +161,9 @@ MODE_MAX_SPEED = {
 }
 
 # Color-indicator zoom (mini per-group dots inside stop dots/discs/pills).
-INDICATOR_MIN_ZOOM = 15
+# Appears at pill-minzoom so indicators are present from the moment pills
+# appear. See `.claude/concepts/pill-zoom-stop-tweaks.md`.
+INDICATOR_MIN_ZOOM = 13
 
 # Mode → color-group key. Ferry collapses into the bus group (shared color);
 # modes outside this dict produce no indicator.
@@ -3719,14 +3733,14 @@ def pill_minzoom(mode, stop_count):
     Return the zoom level at which pills appear for a stop cluster,
     or None if the cluster should not get a pill (single line).
 
-    Hard cut at z12 for train, z13 for every other mode — uniform per
-    mode regardless of stop_count. The earlier stop-count-banded
-    appear-zooms (11/13 for train, 12/13/14 for non-rail) read as
-    random to a viewer because the bands aren't visible.
+    Uniform z13 for every mode — see
+    `.claude/concepts/pill-zoom-stop-tweaks.md` § "Uniform pill
+    appear-zoom". Previously train pills came in at z12 and every other
+    mode at z13; the split is removed.
     """
     if stop_count < 2:
         return None
-    return 12 if mode == "train" else 13
+    return 13
 
 
 def color_luminance(hex_color: str) -> float:
@@ -3782,7 +3796,9 @@ def cluster_lines(cluster_stops, line_lookup):
     return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x.get("gtfs_ref") or x["ref"]))
 
 
-def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_deg=0.0):
+def build_indicator_features(stops_at_location, lon, lat, line_lookup,
+                              tangent_deg=0.0,
+                              parent_width_base=None, parent_mode=None):
     """
     Emit color-indicator Point features for a single rendered location.
 
@@ -3795,17 +3811,26 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
     Pass the pill's local tangent angle for pill indicators; leave 0 for
     dot / disc indicators (screen-horizontal row).
 
-    Each feature carries `color`, `slot_units`, `tangent_deg`; the row
-    offset is applied paint-side per concept
-    `.claude/concepts/stop-color-indicators.md`.
+    `parent_width_base` / `parent_mode`: the parent stop's effective (clamped)
+    width_base and mode. Stamped on every emitted indicator so the style
+    can size + shrink the row to fit the parent. When omitted, derived
+    from `stops_at_location` via dominant_line + the per-mode floor.
+
+    Each feature carries `color`, `slot_units`, `tangent_deg`,
+    `n_indicators`, `parent_width_base`. See
+    `.claude/concepts/stop-color-indicators.md` and
+    `.claude/concepts/pill-zoom-stop-tweaks.md`.
     """
     by_group: dict = {}
+    seen_modes_wb: list = []
     for s in stops_at_location:
         oid = str(s.get("osm_id", ""))
         line = line_lookup.get(oid)
         if not line:
             continue
-        group = MODE_TO_COLOR_GROUP.get(line.get("mode", ""))
+        mode = line.get("mode", "")
+        seen_modes_wb.append((mode, float(line.get("width_base", 1.0))))
+        group = MODE_TO_COLOR_GROUP.get(mode)
         if not group:
             continue
         fs = line.get("freq_score", 0.0)
@@ -3817,6 +3842,21 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
 
     if not by_group:
         return []
+
+    if parent_mode is None or parent_width_base is None:
+        # Derive from the visible lines at this location.
+        if seen_modes_wb:
+            dom_rank = min(MODE_RANK.get(m, 99) for m, _ in seen_modes_wb)
+            derived_mode = next(m for m, _ in seen_modes_wb
+                                if MODE_RANK.get(m, 99) == dom_rank)
+            derived_max_wb = max(wb for _, wb in seen_modes_wb)
+        else:
+            derived_mode = "bus"
+            derived_max_wb = 1.0
+        if parent_mode is None:
+            parent_mode = derived_mode
+        if parent_width_base is None:
+            parent_width_base = _clamp_stop_wb(derived_max_wb, parent_mode)
 
     groups_present = [g for g in COLOR_GROUP_ORDER if g in by_group]
     n = len(groups_present)
@@ -3835,10 +3875,12 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup, tangent_d
             "tippecanoe": {"minzoom": INDICATOR_MIN_ZOOM},
             "geometry": {"type": "Point", "coordinates": [lon, lat]},
             "properties": {
-                "feature_type": "indicator",
-                "color":        color,
-                "slot_units":   slot_units,
-                "tangent_deg":  round(tangent_deg, 2),
+                "feature_type":      "indicator",
+                "color":             color,
+                "slot_units":        slot_units,
+                "tangent_deg":       round(tangent_deg, 2),
+                "n_indicators":      n,
+                "parent_width_base": round(float(parent_width_base), 3),
             },
         })
     return feats
@@ -4714,7 +4756,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     stop_props = {
         "color":          color,
         "mode":           mode,
-        "width_base":     max_wb,
+        "width_base":     _clamp_stop_wb(max_wb, mode),
         "stop_count":     len(cluster_stops),
         "stop_id":        dom_stop.get("stop_id", ""),
         "stop_name":      dom_stop.get("stop_name", ""),
@@ -5785,10 +5827,13 @@ def main():
                 "type": "Feature",
                 "tippecanoe": {"minzoom": minzoom},
                 "geometry": {"type": "Point", "coordinates": [slon, slat]},
-                "properties": {"color": color, "mode": mode, "width_base": wb},
+                "properties": {"color": color, "mode": mode,
+                               "width_base": _clamp_stop_wb(wb, mode)},
             })
             indicator_features.extend(build_indicator_features(
-                [{"osm_id": oid, "width_base": wb}], slon, slat, line_lookup))
+                [{"osm_id": oid, "width_base": wb, "mode": mode}],
+                slon, slat, line_lookup,
+                parent_width_base=_clamp_stop_wb(wb, mode), parent_mode=mode))
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
@@ -5947,7 +5992,7 @@ def main():
                     "properties": {
                         "color":          color,
                         "mode":           mode,
-                        "width_base":     width_base,
+                        "width_base":     _clamp_stop_wb(width_base, mode),
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
@@ -5955,8 +6000,10 @@ def main():
                     },
                 })
                 indicator_features.extend(build_indicator_features(
-                    [{"osm_id": str(osm_id), "width_base": width_base}],
-                    slon, slat, line_lookup))
+                    [{"osm_id": str(osm_id), "width_base": width_base, "mode": mode}],
+                    slon, slat, line_lookup,
+                    parent_width_base=_clamp_stop_wb(width_base, mode),
+                    parent_mode=mode))
 
     # --- Ferry stop aggregation (parent_station → one disc) ---------------
     # Group ferry candidates by parent_station (or stop_id when no parent),
@@ -6031,13 +6078,13 @@ def main():
         base_props = {
             "color":          rep["color"],
             "mode":           "ferry",
-            "width_base":     FERRY_DOT_WB,
+            "width_base":     _clamp_stop_wb(FERRY_DOT_WB, "ferry"),
             "stop_id":        rep["stop_id"],
             "stop_name":      rep["stop_name"],
             "parent_station": rep["parent_station"],
             "lines_json":     lines_json_str,
         }
-        indicator_stubs = [{"osm_id": str(c["osm_id"])} for c in cands]
+        indicator_stubs = [{"osm_id": str(c["osm_id"]), "mode": "ferry"} for c in cands]
 
         # Dedup polylines by osm_id — the same line can visit the pier twice
         # (e.g. an arrival + departure entry) and we only want it counted once.
@@ -6184,7 +6231,7 @@ def main():
         centroid_props = {
             "color":          color,
             "mode":           mode,
-            "width_base":     max_wb,
+            "width_base":     _clamp_stop_wb(max_wb, mode),
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
@@ -6295,7 +6342,7 @@ def main():
         centroid_props = {
             "color":          color,
             "mode":           dom_mode,
-            "width_base":     max_wb,
+            "width_base":     _clamp_stop_wb(max_wb, dom_mode),
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),

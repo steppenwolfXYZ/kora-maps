@@ -19,10 +19,19 @@ Stop coverage is preserved — we do not prune unreferenced stops because
 pfaedle does not care, and downstream stages still need full stop metadata.
 
 Diagnostic side-effect: writes data/transit/gtfs_filtered.json listing the
-dropped trips' route identity and reason.
+dropped trips' route identity and reason, and data/transit/gtfs_trip_splits.json
+listing every original trip replaced by split-at-stop overrides.
 
 Streaming assumption: stop_times.txt rows for one trip_id are contiguous.
 Verified once on the current feed; the script raises if violated.
+
+Trip splitting: `gtfs_trip_overrides` (action: split_at_stop) rewrites every
+trip on a matched route into two new trips that share the original's metadata
+but each cover only one segment of the stop sequence. Used for services where
+two physically separate vehicles share one GTFS trip_id with a passenger
+transfer in the middle (canonical case: Niesenbahn at Schwandegg). New trip
+ids carry a `__1` / `__2` suffix; shape ids carry the same suffix so pfaedle
+emits distinct shapes per leg.
 """
 
 import csv
@@ -39,6 +48,7 @@ GTFS_IN = ROOT / "data" / "gtfs"
 GTFS_OUT = ROOT / "data" / "gtfs_filtered"
 CFG_PATH = ROOT / "scripts" / "transit" / "config.yaml"
 DIAG_OUT = ROOT / "data" / "transit" / "gtfs_filtered.json"
+SPLIT_DIAG_OUT = ROOT / "data" / "transit" / "gtfs_trip_splits.json"
 
 
 def load_cfg() -> dict:
@@ -112,6 +122,57 @@ def write_filtered_stops(overrides: dict) -> int:
     return n
 
 
+def load_trip_split_overrides(cfg: dict) -> list:
+    """Normalized list of `gtfs_trip_overrides` entries with action
+    `split_at_stop`. Entries missing required fields are skipped."""
+    out: list = []
+    for entry in (cfg.get("gtfs_trip_overrides") or []):
+        action = (entry.get("action") or "").strip()
+        if action != "split_at_stop":
+            continue
+        agency_id = str(entry.get("agency_id", "")).strip()
+        rsn = str(entry.get("route_short_name", "")).strip()
+        tsid = str(entry.get("transfer_stop_id", "")).strip()
+        if not (agency_id and rsn and tsid):
+            continue
+        out.append({
+            "agency_id": agency_id,
+            "route_short_name": rsn,
+            "transfer_stop_id": tsid,
+            "reason": entry.get("reason", ""),
+        })
+    return out
+
+
+def identify_split_routes(split_overrides: list) -> dict:
+    """{route_id: transfer_stop_id} for every route_id whose
+    (agency_id, route_short_name) matches an override entry."""
+    if not split_overrides:
+        return {}
+    key_to_tsid = {
+        (e["agency_id"], e["route_short_name"]): e["transfer_stop_id"]
+        for e in split_overrides
+    }
+    out: dict = {}
+    with open(GTFS_IN / "routes.txt", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("agency_id", "").strip(),
+                   (row.get("route_short_name") or "").strip())
+            if key in key_to_tsid:
+                out[row["route_id"]] = key_to_tsid[key]
+    return out
+
+
+def _stop_matches_transfer(row_sid: str, transfer_sid: str) -> bool:
+    """Stop_id match: exact, or — when the override names a parent (no `:`
+    suffix) — the row's stop_id resolves to that parent."""
+    if row_sid == transfer_sid:
+        return True
+    if ":" not in transfer_sid and ":" in row_sid:
+        return row_sid.split(":")[0] == transfer_sid
+    return False
+
+
 def identify_excluded_agencies(excluded_tokens: list) -> set:
     """{agency_id} for agencies whose lowercased name contains any token."""
     tokens = [t.lower() for t in excluded_tokens]
@@ -167,12 +228,20 @@ def load_trips_index(excluded_route_ids: set) -> tuple:
 
 
 def stream_filter_stop_times(stop_coords: dict, bbox: dict,
-                             trips_excluded_by_route: set) -> tuple:
+                             trips_excluded_by_route: set,
+                             split_routes: dict,
+                             trip_to_route: dict) -> tuple:
     """
     Streams stop_times.txt once, writes the filtered version to GTFS_OUT,
-    and returns (foreign_terminus_trips, total_trips, kept_trips).
-    Decides per-trip when the trip_id changes (relies on rows being
-    contiguous per trip_id).
+    and returns (foreign_terminus_trips, total_trips, kept_trips,
+    n_time_repairs, split_map, split_warnings). Decides per-trip when the
+    trip_id changes (relies on rows being contiguous per trip_id).
+
+    For trips whose route is in `split_routes`, the trip is rewritten into two
+    new trips with `__1` and `__2` suffixes on trip_id, split at the
+    configured transfer stop. Failed splits (transfer stop not in sequence,
+    or only at an endpoint) fall back to writing the trip unsplit and append
+    a warning.
     """
     src = GTFS_IN / "stop_times.txt"
     dst = GTFS_OUT / "stop_times.txt"
@@ -182,6 +251,8 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
     kept_trips = 0
     n_time_repairs = 0
     seen_trips: set = set()
+    split_map: dict = {}        # orig_tid -> [new_tid_1, new_tid_2]
+    split_warnings: list = []
 
     with open(src, encoding="utf-8-sig", newline="") as fin, \
          open(dst, "w", encoding="utf-8", newline="") as fout:
@@ -196,6 +267,9 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
             dep_idx  = header.index("departure_time")
         except ValueError:
             sys.exit("stop_times.txt missing required columns")
+        seq_idx = header.index("stop_sequence") if "stop_sequence" in header else None
+        dist_idx = (header.index("shape_dist_traveled")
+                    if "shape_dist_traveled" in header else None)
 
         cur_trip = None
         cur_rows: list = []
@@ -208,6 +282,22 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
                 return
             if cur_excluded or cur_any_foreign:
                 return
+            rid = trip_to_route.get(cur_trip, "")
+            tsid = split_routes.get(rid)
+            if tsid:
+                split = _split_trip_rows(
+                    cur_trip, cur_rows, tsid,
+                    trip_idx, stop_idx, seq_idx, dist_idx,
+                    split_warnings, rid)
+                if split is not None:
+                    leg1_lines, leg2_lines, new_tid_1, new_tid_2 = split
+                    for line in leg1_lines:
+                        fout.write(line)
+                    for line in leg2_lines:
+                        fout.write(line)
+                    split_map[cur_trip] = [new_tid_1, new_tid_2]
+                    kept_trips += 2
+                    return
             for line in cur_rows:
                 fout.write(line)
             kept_trips += 1
@@ -271,7 +361,65 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
         if cur_trip is not None:
             total_trips += 1
 
-    return foreign_terminus, total_trips, kept_trips, n_time_repairs
+    return (foreign_terminus, total_trips, kept_trips, n_time_repairs,
+            split_map, split_warnings)
+
+
+def _split_trip_rows(orig_tid: str, cur_rows: list, transfer_sid: str,
+                      trip_idx: int, stop_idx: int,
+                      seq_idx, dist_idx,
+                      warnings_out: list, route_id: str):
+    """Split `cur_rows` at the row whose stop_id matches `transfer_sid`.
+    Returns (leg1_lines, leg2_lines, new_tid_1, new_tid_2) or None on failure
+    (with a warning appended). The transfer-stop row appears as the last row
+    of leg1 AND the first row of leg2."""
+    parsed: list = []
+    for line in cur_rows:
+        if '"' in line:
+            row = next(csv.reader([line]))
+            quoted = True
+        else:
+            row = line.rstrip("\n\r").split(",")
+            quoted = False
+        parsed.append((row, quoted))
+
+    transfer_pos = None
+    for i, (row, _) in enumerate(parsed):
+        if _stop_matches_transfer(row[stop_idx], transfer_sid):
+            transfer_pos = i
+            break
+    if transfer_pos is None:
+        warnings_out.append({"trip_id": orig_tid, "route_id": route_id,
+                             "reason": "transfer_not_in_sequence"})
+        return None
+    if transfer_pos == 0 or transfer_pos == len(parsed) - 1:
+        warnings_out.append({"trip_id": orig_tid, "route_id": route_id,
+                             "reason": "transfer_at_endpoint"})
+        return None
+
+    new_tid_1 = f"{orig_tid}__1"
+    new_tid_2 = f"{orig_tid}__2"
+
+    def emit(parsed_slice, new_tid):
+        out_lines = []
+        for new_seq, (row, quoted) in enumerate(parsed_slice, 1):
+            r = list(row)
+            r[trip_idx] = new_tid
+            if seq_idx is not None:
+                r[seq_idx] = str(new_seq)
+            if dist_idx is not None:
+                r[dist_idx] = ""
+            needs_quote = quoted or any(
+                ("," in f or '"' in f or "\n" in f) for f in r)
+            if needs_quote:
+                out_lines.append(",".join(_csv_escape(f) for f in r) + "\n")
+            else:
+                out_lines.append(",".join(r) + "\n")
+        return out_lines
+
+    leg1 = emit(parsed[:transfer_pos + 1], new_tid_1)
+    leg2 = emit(parsed[transfer_pos:],     new_tid_2)
+    return leg1, leg2, new_tid_1, new_tid_2
 
 
 def _csv_escape(field: str) -> str:
@@ -281,8 +429,12 @@ def _csv_escape(field: str) -> str:
     return field
 
 
-def write_filtered_trips(dropped_trip_ids: set) -> tuple:
-    """Writes trips.txt and returns (kept_route_ids, kept_trip_count)."""
+def write_filtered_trips(dropped_trip_ids: set, split_map: dict) -> tuple:
+    """Writes trips.txt and returns (kept_route_ids, kept_trip_count).
+
+    For trip_ids in `split_map`, writes two rows with the suffixed trip_ids
+    and matching `__1` / `__2` suffixes on shape_id (so pfaedle emits distinct
+    shapes per leg)."""
     src = GTFS_IN / "trips.txt"
     dst = GTFS_OUT / "trips.txt"
     kept_route_ids: set = set()
@@ -295,8 +447,21 @@ def write_filtered_trips(dropped_trip_ids: set) -> tuple:
         writer.writerow(header)
         tid_idx = header.index("trip_id")
         rid_idx = header.index("route_id")
+        shape_idx = header.index("shape_id") if "shape_id" in header else None
         for row in reader:
-            if row[tid_idx] in dropped_trip_ids:
+            tid = row[tid_idx]
+            if tid in dropped_trip_ids:
+                continue
+            if tid in split_map:
+                orig_shape = row[shape_idx] if shape_idx is not None else ""
+                for leg_no, new_tid in enumerate(split_map[tid], 1):
+                    new_row = list(row)
+                    new_row[tid_idx] = new_tid
+                    if shape_idx is not None and orig_shape:
+                        new_row[shape_idx] = f"{orig_shape}__{leg_no}"
+                    writer.writerow(new_row)
+                    kept += 1
+                kept_route_ids.add(row[rid_idx])
                 continue
             writer.writerow(row)
             kept_route_ids.add(row[rid_idx])
@@ -353,6 +518,36 @@ def copy_verbatim(name: str) -> None:
     shutil.copyfile(src, GTFS_OUT / name)
 
 
+def write_filtered_frequencies(dropped_trip_ids: set, split_map: dict) -> tuple:
+    """Copy frequencies.txt, skipping rows for dropped trips and duplicating
+    rows for split trips so each new leg inherits the original headway."""
+    src = GTFS_IN / "frequencies.txt"
+    dst = GTFS_OUT / "frequencies.txt"
+    if not src.exists():
+        return 0, 0
+    total = kept = 0
+    with open(src, encoding="utf-8-sig", newline="") as fin, \
+         open(dst, "w", encoding="utf-8", newline="") as fout:
+        reader = csv.DictReader(fin)
+        writer = csv.DictWriter(fout, fieldnames=reader.fieldnames)
+        writer.writeheader()
+        for row in reader:
+            total += 1
+            tid = row.get("trip_id", "")
+            if tid in dropped_trip_ids:
+                continue
+            if tid in split_map:
+                for new_tid in split_map[tid]:
+                    new_row = dict(row)
+                    new_row["trip_id"] = new_tid
+                    writer.writerow(new_row)
+                    kept += 1
+                continue
+            writer.writerow(row)
+            kept += 1
+    return total, kept
+
+
 def write_filtered_transfers(kept_route_ids: set, dropped_trip_ids: set) -> tuple:
     """Copy transfers.txt but drop rows that reference a route or trip we
     filtered out. pfaedle validates the whole feed at load time and refuses to
@@ -399,6 +594,16 @@ def main() -> None:
         # Each entry seeds itself + its Parent… mirror, so divide by 2 for display.
         print(f"Loaded {len(stop_overrides)//2} GTFS stop coordinate override(s)")
 
+    split_overrides = load_trip_split_overrides(cfg)
+    if split_overrides:
+        print(f"Loaded {len(split_overrides)} GTFS trip split override(s)")
+        for e in split_overrides:
+            print(f"  • agency={e['agency_id']} route={e['route_short_name']} "
+                  f"→ split at stop {e['transfer_stop_id']}")
+    split_routes = identify_split_routes(split_overrides)
+    if split_overrides:
+        print(f"  matched {len(split_routes):,} route_id(s) in routes.txt")
+
     print(f"Loading stops…")
     stop_coords = load_stop_coords(stop_overrides)
     print(f"  {len(stop_coords):,} stops with coords")
@@ -421,19 +626,37 @@ def main() -> None:
     print(f"  {len(trip_to_route):,} trips total, "
           f"{len(trips_excluded_by_route):,} via excluded routes")
 
-    print(f"Streaming stop_times.txt → filter foreign-terminus trips…")
-    foreign_terminus, total_trips, kept_trips, n_time_repairs = stream_filter_stop_times(
-        stop_coords, bbox, trips_excluded_by_route)
+    print(f"Streaming stop_times.txt → filter foreign-terminus trips"
+          + (" + split overridden routes" if split_routes else "") + "…")
+    (foreign_terminus, total_trips, kept_trips, n_time_repairs,
+     split_map, split_warnings) = stream_filter_stop_times(
+        stop_coords, bbox, trips_excluded_by_route,
+        split_routes, trip_to_route)
     print(f"  {total_trips:,} trips scanned, "
           f"{len(foreign_terminus):,} foreign-terminus, "
-          f"{kept_trips:,} kept")
+          f"{kept_trips:,} kept (post-split count)")
     if n_time_repairs:
         print(f"  Repaired {n_time_repairs} rows with arrival_time > departure_time "
               "(clamped dep = arr)")
+    if split_map:
+        print(f"  Split {len(split_map):,} trip(s) → {len(split_map)*2:,} legs")
+    if split_warnings:
+        by_reason: dict = defaultdict(int)
+        for w in split_warnings:
+            by_reason[w["reason"]] += 1
+        print(f"  Warning: {len(split_warnings):,} trip(s) on split routes "
+              "could not be split:")
+        for reason, n in sorted(by_reason.items()):
+            print(f"    {reason}: {n}")
 
     dropped = trips_excluded_by_route | foreign_terminus
+    # Original trip_ids that were replaced by split legs no longer exist in
+    # trips.txt or stop_times.txt; treat them like dropped trips for cross-file
+    # reference cleanup.
+    removed_or_split = dropped | set(split_map.keys())
+
     print(f"Writing filtered trips.txt …")
-    kept_route_ids, n_trips = write_filtered_trips(dropped)
+    kept_route_ids, n_trips = write_filtered_trips(dropped, split_map)
     print(f"  {n_trips:,} trips, {len(kept_route_ids):,} distinct routes")
 
     print(f"Writing filtered routes.txt …")
@@ -449,12 +672,17 @@ def main() -> None:
     print(f"  {n_overridden:,} stop rows overridden")
 
     print(f"Copying remaining GTFS files…")
-    for name in ("calendar.txt", "calendar_dates.txt",
-                 "feed_info.txt", "frequencies.txt"):
+    for name in ("calendar.txt", "calendar_dates.txt", "feed_info.txt"):
         copy_verbatim(name)
 
+    print(f"Filtering frequencies.txt …")
+    n_fq_total, n_fq_kept = write_filtered_frequencies(dropped, split_map)
+    if n_fq_total:
+        print(f"  {n_fq_kept:,} kept of {n_fq_total:,}")
+
     print(f"Filtering transfers.txt …")
-    n_xf_total, n_xf_kept = write_filtered_transfers(kept_route_ids, dropped)
+    n_xf_total, n_xf_kept = write_filtered_transfers(kept_route_ids,
+                                                     removed_or_split)
     print(f"  {n_xf_kept:,} kept of {n_xf_total:,} "
           f"(dropped rows referencing excluded routes/trips)")
 
@@ -477,6 +705,19 @@ def main() -> None:
     ]
     DIAG_OUT.write_text(json.dumps(summary, ensure_ascii=False))
     print(f"  Diagnostic: {len(summary):,} routes affected → {DIAG_OUT}")
+
+    # Diagnostic: trip split map (original → legs) + any unsplit warnings.
+    split_diag = {
+        "splits": [
+            {"original_trip_id": orig,
+             "route_id": trip_to_route.get(orig, ""),
+             "split_trip_ids": legs}
+            for orig, legs in sorted(split_map.items())
+        ],
+        "warnings": split_warnings,
+    }
+    SPLIT_DIAG_OUT.write_text(json.dumps(split_diag, ensure_ascii=False))
+    print(f"  Diagnostic: {len(split_map):,} split trip(s) → {SPLIT_DIAG_OUT}")
 
     print(f"\nDone. Filtered feed at {GTFS_OUT}")
 

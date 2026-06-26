@@ -40,11 +40,16 @@ Answer the question or acknowledge the reaction. Do not edit code, do not propos
 If you disagree with the user, say so directly at the top of the reply. Don't open with "yes, that makes sense" / "you're right" and then immediately argue the opposite point — that forces the reader to do the work of figuring out whether you actually agreed. State your read first ("I'd push back on X", "I don't think that's quite right because Y"), then explain. Disagreement is fine; faux agreement that flips into disagreement is not.
 
 ## Answer length
-Default: 1–2 short paragraphs. Lead with the direct answer in the first sentence. Stop there if one sentence covers it.
+Default: 1–2 sentences. Lead with the direct answer in the first sentence. Stop there if one sentence covers it.
 
-Go longer only when the user cannot act on the short answer without more material — a comparison whose tradeoffs ARE the answer, a diagnosis whose mechanism IS the answer. Going longer does NOT cover: walking through the reasoning that led to the answer, listing adjacent observations from the investigation, pre-empting follow-up questions, enumerating call sites or references the user did not ask about, restating the question in fuller form, or adding "also worth noting…" tangents. If you find yourself reaching for a justification to expand, the default is probably right.
+Two — and only two — reasons to write more:
 
-Complex multi-step analysis results may legitimately need more space. Everything else stays short — the user asks when they want depth.
+1. **The user explicitly asks for more** (e.g. "explain in detail", "give me the full list", "go deeper"). No length cap here — match what was requested.
+2. **The user cannot act on the short answer without more material** — a comparison whose tradeoffs ARE the answer, a diagnosis whose mechanism IS the answer. **Cap: 4–6 sentences.** If the answer feels like it needs more than that, the right move is to give the headline and ask whether to expand, not to expand pre-emptively.
+
+Going longer does NOT cover: walking through the reasoning that led to the answer, listing adjacent observations from the investigation, pre-empting follow-up questions, enumerating call sites or references the user did not ask about, restating the question in fuller form, or adding "also worth noting…" tangents. Survey-style questions ("what are the implications / options / risks") are the most common trap — give the 1–2 highest-impact items, then ask whether to dig further.
+
+If you find yourself reaching for a justification to expand, the default is probably right.
 
 ## Explanation depth
 The user decides at the architecture level and does not read the Python pipeline code (`scripts/`, including `scripts/transit/` and `scripts/generate_style.py`). When explaining pipeline behavior, stay at the algorithm and data-flow level: what the step does, what it consumes and produces, what the rule is. Do not reference function names, line numbers, code snippets, or Python-specific syntax unless asked.
@@ -75,7 +80,7 @@ The `intercity` mode no longer exists. All rail (IC, IR, EC, TGV, ICE, S-Bahn, R
 Transit line casing is WHITE (`#ffffff`) for ALL modes including mountain. Never use black. User has confirmed white multiple times.
 
 ## Transit style: mountain line
-Mountain line color is fixed light yellow `#ffe566` — no frequency-based variance. Width base = 1.0. Do not change these without explicit instruction.
+Mountain line color is fixed light yellow `#ffe566` — no frequency-based color variance. Width carries a deliberately narrow frequency-driven spread (current `line_width.mountain` is 1.5 / 2.5). Do not change these without explicit instruction.
 
 ## Bridge deck
 Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` transportation. Do NOT split into per-class deck layers — they produce hollow "donut" artifacts. This has been tried and reverted multiple times; do not attempt again.
@@ -92,6 +97,8 @@ The focus is the requirements. Other sections are short context.
 - **Constraints** — edge cases, things that must not change, known exceptions.
 
 Do NOT include implementation steps, code snippets, or file/line references. Those belong in the code, not the concept doc. After implementation, move the file to `.claude/concepts/implemented/` only once the user has explicitly confirmed it is implemented — do not move it on your own assessment. It stays there as the original requirements record.
+
+**Stop after writing or updating a concept doc.** The concept is the deliverable for that turn. Do not chain straight into implementation — the user needs to read it, possibly amend it, and may want to commit other work first. Wait for explicit re-authorisation ("implement", "go ahead", "do it" etc.) referring to the implementation. Authorisation to "write a concept", "extend the concept", or "update the concept" covers the doc edit only, not the code that follows.
 
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.

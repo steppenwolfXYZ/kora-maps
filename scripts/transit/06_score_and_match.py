@@ -777,11 +777,6 @@ def _freq_gate_exempt(bucket: str, mountain_origin) -> bool:
     return False
 
 
-# Canonical direction_key for trips in exempt modes (ferry, aerial, funicular).
-# Set on every trip in such a group so both directions collapse into one variant.
-EXEMPT_DIRECTION_KEY = ("*", "*")
-
-
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
     """One streaming pass → raw trip counts + speed per line, plus trip-group
     partitioning. Populates module-level exports `_trip_group_export`,
@@ -973,6 +968,13 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     tg_freq: dict = defaultdict(
         lambda: {s: [0, 0, 0] for s in SEASONS}
     )
+    # var_freq[(tg_key, var_key)][season] = [core_sum, eve_sum, we_sum] —
+    # parallel to tg_freq but aggregated per variant for per-direction
+    # thickness; see .claude/concepts/seasonal-regional-bus-rescue.md
+    # § "Per-variant freq for line thickness".
+    var_freq: dict = defaultdict(
+        lambda: {s: [0, 0, 0] for s in SEASONS}
+    )
     tg_canon: dict = {}  # tg_key → {"canon_score": int, "stops": [(sid, arr, dep), ...]}
 
     for tid, (lk, aid, weight, raw_variant, merged_set, sequence) in trip_buf.items():
@@ -991,17 +993,24 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         last_sid = sequence[-1][0]
         first_uic = stop_merge.get(first_sid) or first_sid.split(":")[0]
         last_uic = stop_merge.get(last_sid) or last_sid.split(":")[0]
-        _trip_direction_export[tid] = (first_uic, last_uic)
+        direction_key = (first_uic, last_uic)
+        _trip_direction_export[tid] = direction_key
+        var_key = (merged_set, direction_key)
 
         tc = trip_freq.get(tid)
         if tc is not None:
             tgf = tg_freq[tg_key]
+            vf = var_freq[(tg_key, var_key)]
             for s in SEASONS:
                 c, e, w = tc[s]
                 bucket = tgf[s]
                 bucket[0] += c
                 bucket[1] += e
                 bucket[2] += w
+                vbucket = vf[s]
+                vbucket[0] += c
+                vbucket[1] += e
+                vbucket[2] += w
 
         n = len(sequence)
         canon_score = n * weight
@@ -1077,7 +1086,22 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         tg_freq_seasonal_out[tg_key] = seasonal
         tg_freq_out[tg_key] = seasonal["annual"]
 
-    return tg_freq_out, tg_freq_seasonal_out, tg_speed, tg_canon
+    # Normalise var_freq the same way. var_freq_seasonal_out[(tg_key, var_key)]
+    # mirrors tg_freq_seasonal_out's per-season {f_core, f_eve, f_we} shape.
+    var_freq_seasonal_out: dict = {}
+    for key, per_season in var_freq.items():
+        seasonal = {}
+        for s, (c, e, w) in per_season.items():
+            cn, en, wen = season_norms[s]
+            seasonal[s] = {
+                "f_core": c / cn,
+                "f_eve":  e / en,
+                "f_we":   w / wen,
+            }
+        var_freq_seasonal_out[key] = seasonal
+
+    return (tg_freq_out, tg_freq_seasonal_out,
+            var_freq_seasonal_out, tg_speed, tg_canon)
 
 
 # ── Per-window frequency scoring ─────────────────────────────────────────────
@@ -1266,24 +1290,13 @@ def main():
     print(f"  {sum(len(v) for v in trip_frequencies.values()):,} frequency entries "
           f"for {len(trip_frequencies):,} trips")
 
-    tg_freq, tg_freq_seasonal, tg_speed, tg_canon = stream_stop_times(
+    (tg_freq, tg_freq_seasonal, var_freq_seasonal,
+     tg_speed, tg_canon) = stream_stop_times(
         trip_lookup, stop_coords, svc_dates, trip_frequencies, stop_meta)
 
-    # Override direction_key with EXEMPT_DIRECTION_KEY for ferry + aerial /
-    # funicular mountain trips. Both directions then share one variant key and
-    # collapse into a single emitted feature per merged stop set, per the
-    # direction-coverage Mode-exemptions rule. Rebucketed mountain rail keeps
-    # its real (first_uic, last_uic) direction_key and stays per-direction.
-    n_exempt_collapsed = 0
-    for tid, t in trip_lookup.items():
-        bucket = t["line_key"][2]
-        rt = route_lookup.get(t.get("route_id", ""), {}).get("type", "")
-        if _gate_exempt(bucket, _mountain_origin(bucket, rt)):
-            if tid in _trip_direction_export:
-                _trip_direction_export[tid] = EXEMPT_DIRECTION_KEY
-                n_exempt_collapsed += 1
-    print(f"  {n_exempt_collapsed:,} ferry/aerial/funicular trips collapsed "
-          f"to single direction_key")
+    # Ferry / aerial / funicular trips keep their natural per-trip
+    # (first_uic, last_uic) direction key — same as every other bucket.
+    # See .claude/concepts/remove-exempt-direction-key.md.
 
     print("\nLoading pfaedle shapes...")
     shapes = load_shapes()
@@ -1299,10 +1312,9 @@ def main():
     # Each variant key is (merged_set, direction_key) so opposite directions of
     # the same merged-stop set form distinct variants. Per direction-coverage
     # concept: directions are split end-to-end so each gets its own pfaedle
-    # shape, rep trip, stop list, and filter outcome. Ferry + aerial/funicular
-    # mountain are exempt — their direction_key was overwritten with the
-    # canonical EXEMPT_DIRECTION_KEY just after stream_stop_times, so all their
-    # trips share one variant and emit one feature per merged stop set.
+    # shape, rep trip, stop list, and filter outcome. Applies to every bucket
+    # including ferry / aerial / funicular (see remove-exempt-direction-key
+    # concept).
     groups: dict = defaultdict(lambda: defaultdict(list))
     variant_counts: dict = defaultdict(lambda: defaultdict(int))
     # Per-season weighted variant counts; consumed by the multi-window
@@ -1775,12 +1787,19 @@ def main():
     # Per-(tg_key, var_key) emission outcome for the comprehensive diagnostic.
     diag_emission: dict = {}
 
+    _ZERO_FREQ = {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
     for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
         short_name, long_name, bucket = line_key
         all_trips = [tid for trips in variant_map.values() for tid in trips]
 
         tg_key = (line_key, agency_id, tg_id)
-        raw_freq  = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0})
+        # Group-level raw_freq retained for the diagnostic and as fallback.
+        raw_freq  = tg_freq.get(tg_key, _ZERO_FREQ)
+        # Winning window for this group's freq gate determines which window's
+        # per-variant freq drives thickness — same window everywhere in the
+        # group so a seasonal-rescued group's thickness reflects in-season
+        # cadence per direction.
+        gate_window = freq_gate_window_passed.get(tg_key) or "annual"
         speed_kmh = tg_speed.get(tg_key)
         for var_key, trip_ids in variant_map.items():
             merged_set, direction_key = var_key
@@ -1878,7 +1897,16 @@ def main():
                 }
                 continue
 
-            freq_score = compute_freq_score(raw_freq, mode)
+            # Per-variant freq for thickness — see
+            # .claude/concepts/seasonal-regional-bus-rescue.md
+            # § "Per-variant freq for line thickness". Falls back to group
+            # freq if the variant has no per-variant data (shouldn't happen
+            # since trip_buf populates both, but safe).
+            var_seasonal = var_freq_seasonal.get((tg_key, var_key)) or {}
+            variant_raw_freq = var_seasonal.get(gate_window) \
+                or var_seasonal.get("annual") or _ZERO_FREQ
+            freq_score = compute_freq_score(variant_raw_freq, mode)
+            variant_f_weighted = weighted_freq(variant_raw_freq)
 
             color      = speed_to_color(mode, speed_kmh)
             width_base = score_to_width_base(freq_score, mode)
@@ -1897,6 +1925,7 @@ def main():
                 "mode":         mode,
                 "route_type":   route_type,
                 "freq_score":   freq_score,
+                "f_weighted":   round(variant_f_weighted, 4),
                 "speed_kmh":    speed_kmh,
                 "color":        color,
                 "width_base":   width_base,
@@ -1990,14 +2019,12 @@ def main():
     mode_by_oid: dict = {}
     for f in features:
         p = f["properties"]
-        key = (p["ref"], p["agency_id"], p["trip_group_id"])
-        tg_key = tg_lookup.get(key)
-        raw = tg_freq.get(tg_key, {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}) \
-            if tg_key else {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
-        fw = round(weighted_freq(raw), 4)
+        # f_weighted was set per-variant during emission — see the
+        # per-variant freq concept. Use that value rather than recomputing
+        # from the group-level tg_freq.
+        fw = float(p.get("f_weighted", 0.0))
         f_weighted_by_oid[p["osm_id"]] = fw
         mode_by_oid[p["osm_id"]] = p["mode"]
-        p["f_weighted"] = fw
 
     # Cache polylines (flat list of (lon, lat)) by oid.
     polyline_by_oid: dict = {}
@@ -2677,6 +2704,8 @@ def main():
             v_active_days = variant_active_days.get(
                 (line_key, aid, tg_id, merged_set, direction_key), 0)
 
+            v_seasonal = var_freq_seasonal.get((tg_key, var_key)) or {}
+            v_raw = v_seasonal.get("annual") or _ZERO_FREQ
             v_entry = {
                 "direction_key": f"{direction_key[0]}-{direction_key[1]}",
                 "trip_count": len(ms_trips),
@@ -2691,6 +2720,8 @@ def main():
                 "rare_variant_window_passed":
                     rare_variant_window_passed.get((tg_key, var_key)),
                 "regional_bus_rescued": var_key in regional_bus_rescued.get(tg_key, ()),
+                "raw_freq": dict(v_raw),
+                "f_weighted": round(weighted_freq(v_raw), 3),
                 "exclusion_reason": v_reason,
                 "feature_emitted": em.get("feature_emitted", False),
                 "stations": stations,

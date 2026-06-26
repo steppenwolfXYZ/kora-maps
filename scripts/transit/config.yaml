@@ -42,6 +42,21 @@ gtfs_stop_overrides:
     lon: 7.9757404
     lat: 46.5754791
 
+# ── GTFS trip overrides ──────────────────────────────────────────────────────
+# Routes where every trip should be structurally rewritten before pfaedle runs.
+# Currently the only supported action is `split_at_stop`: split each trip at a
+# named transfer stop into two new trips so a service running on two physically
+# separate vehicle legs (joined only by a passenger transfer) is drawn as two
+# independent lines meeting at the transfer stop. See
+# .claude/concepts/gtfs-trip-split-at-stop.md for the requirements; matching is
+# (agency_id, route_short_name).
+gtfs_trip_overrides:
+  - agency_id: "135"            # Niesenbahn AG
+    route_short_name: "2405"
+    action: split_at_stop
+    transfer_stop_id: "8507458" # Schwandegg
+    reason: "Two cables, mandatory transfer at Schwandegg; OSM ways are not node-connected, so pfaedle can only route the leg adjacent to the start terminal."
+
 # ── GTFS preprocessing: agency denylists ─────────────────────────────────────
 # Both lists key on substrings of agency_name (case-insensitive) as found in
 # data/gtfs/agency.txt. Matching is "agency_name contains any of these tokens".
@@ -227,8 +242,8 @@ window_weights:
 # fatal config error.
 line_width:
   train:
-    min: 1.00
-    max: 3.75
+    min: 2.00
+    max: 5.00
   tram:
     min: 0.70
     max: 3.00
@@ -240,13 +255,31 @@ line_width:
     max: 2.50
   regional_bus:
     min: 1.00
-    max: 2.50
+    max: 2.00
   ferry:
     min: 1.00
     max: 2.50
   mountain:
-    min: 2.50
+    min: 1.50
     max: 2.50
+
+# ── Per-mode width_base floor for stop sizing ────────────────────────────────
+# Stops (dots, endpoint discs, pill bodies) clamp their `width_base` up to
+# this per-mode floor when computing the stop's diameter. The transit line
+# itself keeps its true `width_base`; the floor exists so a stop on a thin
+# line is visibly larger than the line. Connectors are NOT clamped — they
+# stay subordinate to the stops at either end. See
+# `.claude/concepts/pill-zoom-stop-tweaks.md` § "Width-base floor for stop
+# sizing". Starter values are the per-mode 20th percentile projected against
+# the current `line_width` config; tune visually after rebuild.
+stop_width_base_floor:
+  bus:           1.23
+  regional_bus:  1.62
+  train:         3.47
+  tram:          3.00
+  metro:         3.00
+  ferry:         2.50
+  mountain:      2.50
 
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates
