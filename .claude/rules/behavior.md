@@ -100,5 +100,7 @@ Do NOT include implementation steps, code snippets, or file/line references. Tho
 
 **Stop after writing or updating a concept doc.** The concept is the deliverable for that turn. Do not chain straight into implementation — the user needs to read it, possibly amend it, and may want to commit other work first. Wait for explicit re-authorisation ("implement", "go ahead", "do it" etc.) referring to the implementation. Authorisation to "write a concept", "extend the concept", or "update the concept" covers the doc edit only, not the code that follows.
 
+**Reference concept docs by filename only**, not by path (e.g. `` `seasonal-regional-bus-rescue.md` ``, not `` `.claude/concepts/implemented/seasonal-regional-bus-rescue.md` ``). Filenames are unique across the subfolders, so moving a concept between `concepts/`, `implemented/`, `deferred/`, and `superseded/` doesn't invalidate references.
+
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.

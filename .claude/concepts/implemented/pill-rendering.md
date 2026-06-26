@@ -50,7 +50,7 @@ When multiple lines terminate at the same physical platform, each independently 
 
 `length` comes from atlas for rail (about 95% coverage); the remaining 5% use a per-mode default. Tram/bus use the per-mode default unconditionally — atlas does not carry `length` for those modes.
 
-Ferry renders as today (out of scope). Mountain participates per `.claude/concepts/mountain-line-pills.md`: rebucketed_rail / rack / funicular take the centred-extent rail-like path (with their own length config keys); aerial joins the rail clustering pool as a fixed dot (no extent).
+Ferry renders as today (out of scope). Mountain participates per `mountain-line-pills.md`: rebucketed_rail / rack / funicular take the centred-extent rail-like path (with their own length config keys); aerial joins the rail clustering pool as a fixed dot (no extent).
 
 ### Dot placement
 
@@ -326,7 +326,7 @@ Items deferred from the current pass, in roughly the order they should be addres
 - Far-zoom and short-zoom stop styles are out of scope.
 - `compass_direction` from atlas is intentionally not consumed. The polyline tangent at the dot position is the orientation source for pill geometry.
 - Per-mode default lengths and atlas-`length` sanity ranges are configuration values.
-- Ferries don't get pills — the "Ferry stops" section above defines their two-dot + connector pattern instead. Mountain is handled per `.claude/concepts/mountain-line-pills.md` — rebucketed_rail / rack / funicular as extent-bearing rail-like pills, aerial as fixed dots in the rail clustering pool.
+- Ferries don't get pills — the "Ferry stops" section above defines their two-dot + connector pattern instead. Mountain is handled per `mountain-line-pills.md` — rebucketed_rail / rack / funicular as extent-bearing rail-like pills, aerial as fixed dots in the rail clustering pool.
 - The bar-finding sweep runs only on σ-clumps with at least two distinct-position platforms, and reruns recursively on a σ-clump's still-unmatched members under the same condition. Singletons, singleton tangent groups, singleton σ-clumps within a multi-clump tangent group, and members left over after the recursion terminates all flow through the leftover-fill alongside the bars.
 - This concept depends on `prm-platform-positions` being implemented and `stop_attributes_sources.json` being emitted.
 - The implementation must not regress the rendering of stops without atlas data — the fallback chain guarantees an allowed range is always producible.

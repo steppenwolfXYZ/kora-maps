@@ -20,4 +20,4 @@ The collapse causes downstream metrics (freq score, thickness, salience) to coun
 - `_gate_exempt(bucket, mountain_origin)` still exempts ferry + aerial + funicular from the active-days and freq-score gates.
 - The rare-variant filter is NOT gate-exempt for these modes and now sees per-direction variants. Asymmetric direction trip counts could drop a small direction below the 10% / 5% share threshold. This is the same exposure that buses and trains have today. Acceptable.
 - Aerial dedup key stays as `ref` only. No need to add `direction_key` — opposite directions sharing a bbox is the desired collapse case.
-- This is a prerequisite for the per-variant freq work in `.claude/concepts/seasonal-regional-bus-rescue.md` — once direction is no longer collapsed for these modes, the per-direction freq metric becomes consistent across all buckets.
+- This is a prerequisite for the per-variant freq work in `seasonal-regional-bus-rescue.md` — once direction is no longer collapsed for these modes, the per-direction freq metric becomes consistent across all buckets.

@@ -3798,7 +3798,8 @@ def cluster_lines(cluster_stops, line_lookup):
 
 def build_indicator_features(stops_at_location, lon, lat, line_lookup,
                               tangent_deg=0.0,
-                              parent_width_base=None, parent_mode=None):
+                              parent_width_base=None, parent_mode=None,
+                              parent_type="disc"):
     """
     Emit color-indicator Point features for a single rendered location.
 
@@ -3867,6 +3868,18 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup,
     # n=6 → {-5, -3, -1, +1, +3, +5}. The style layer applies
     # text-offset = slot_units × half_spacing_em and text-rotate = tangent_deg
     # in map-aligned space, so the row rotates with the parent's tangent.
+    # row_factor (em) — the multiple of text-size that the binding
+    # dimension of the parent must accommodate. Pill parents bind on
+    # their short axis (one glyph diameter through the pill thickness,
+    # row length is unbounded along the long axis). Disc/dot parents
+    # bind on the full row span (glyph diameters + inter-glyph gaps).
+    # See `.claude/concepts/pill-zoom-stop-tweaks.md` § "Indicators
+    # must not overflow the parent".
+    if parent_type == "pill":
+        row_factor = 0.70
+    else:
+        row_factor = 0.56 * n + 0.14
+
     for i, group in enumerate(groups_present):
         _fs, _ref, color = by_group[group]
         slot_units = 2 * i - (n - 1)
@@ -3880,6 +3893,7 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup,
                 "slot_units":        slot_units,
                 "tangent_deg":       round(tangent_deg, 2),
                 "n_indicators":      n,
+                "row_factor":        round(row_factor, 3),
                 "parent_width_base": round(float(parent_width_base), 3),
             },
         })
@@ -4812,7 +4826,10 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         feats = [make_feat(simp, "pill")]
         if line_lookup is not None:
             feats.extend(build_indicator_features(
-                cluster_stops, mid_lon, mid_lat, line_lookup, tangent_deg=tan_deg))
+                cluster_stops, mid_lon, mid_lat, line_lookup,
+                tangent_deg=tan_deg, parent_type="pill",
+                parent_width_base=stop_props["width_base"],
+                parent_mode=stop_props["mode"]))
         return feats
 
     # Split path at every large gap → N groups
@@ -4836,14 +4853,18 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                 (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
                 feats.extend(build_indicator_features(
                     _stops_at_positions(grp), mid_lon, mid_lat, line_lookup,
-                    tangent_deg=tan_deg))
+                    tangent_deg=tan_deg, parent_type="pill",
+                    parent_width_base=stop_props["width_base"],
+                    parent_mode=stop_props["mode"]))
         else:
             pos = grp[0]
             feats.append(make_endpoint(pos))
             if line_lookup is not None:
                 feats.extend(build_indicator_features(
                     pos_to_platforms.get((pos[0], pos[1]), []),
-                    pos[0], pos[1], line_lookup))
+                    pos[0], pos[1], line_lookup,
+                    parent_width_base=stop_props["width_base"],
+                    parent_mode=stop_props["mode"]))
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.

@@ -50,7 +50,7 @@ The motivating bug: a unique-stop-rescued variant (e.g. Theytaz 372 → Le Charg
 - The `freq_score` written onto each emitted feature is computed from **that variant's trips only**, not the trip group's total.
 - The per-variant `f_weighted` uses the same sample-date / window-hour normalisation as the group-level one. For groups that passed the freq gate via a seasonal window (above), the same window is used for the per-variant freq.
 - **Inclusion is unchanged.** The group-level `worst_freq` gate still uses the group's combined freq. Per-variant freq drives only `freq_score` → `width_base` → thickness, and `salience_absolute` → `min_zoom`.
-- Applies to every emitted feature in every bucket — bus, regional_bus, train, tram, metro, ferry, mountain. All buckets are now per-direction-split (see `.claude/concepts/remove-exempt-direction-key.md`), so per-variant freq equals per-direction freq across the board. Mountain has fixed width so the value is moot for the visual, but it still flows through salience scoring.
+- Applies to every emitted feature in every bucket — bus, regional_bus, train, tram, metro, ferry, mountain. All buckets are now per-direction-split (see `remove-exempt-direction-key.md`), so per-variant freq equals per-direction freq across the board. Mountain has fixed width so the value is moot for the visual, but it still flows through salience scoring.
 - The per-variant block in `gtfs_groups_full.json` gains its own `raw_freq` and `f_weighted` fields for debugging.
 
 ## Constraints

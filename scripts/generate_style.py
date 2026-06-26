@@ -1230,44 +1230,41 @@ def build_station_layers(cfg) -> list:
     vert_em = -0.1
     INDICATOR_INNER_MARGIN = 0.7  # fraction of parent inner dim usable
 
-    # Default text-size curve — re-anchored to PILL_MINZOOM (z13) so
-    # indicators have a sensible size from the moment pills appear.
-    default_text_size = ["interpolate", ["linear"], ["zoom"],
-        13, 4.5,
-        20, 36.0,
-    ]
+    # row_factor (em-units of the indicator row's binding extent) is
+    # stamped per feature by the pipeline — `0.70` for pill parents
+    # (single glyph diameter through the pill thickness; row length
+    # along the pill's long axis is unbounded) and `0.56*n + 0.14`
+    # for disc/dot parents (full row span through the round
+    # diameter). See `.claude/concepts/pill-zoom-stop-tweaks.md`
+    # § "Indicators must not overflow the parent".
 
-    # Parent-disc diameter curve — must match `pill_disc_width()` above,
-    # since the indicator row sits inside that diameter.
-    parent_diameter_expr = ["*",
-        ["get", "parent_width_base"],
-        ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM, 0.6,
-            14,           1.5,
-            20,           12.0,
-        ],
-    ]
+    # Per-zoom anchor: min(default_size_at_z, parent_wb * margin * mult / row).
+    # MapLibre requires zoom only at the top-level interpolate, so the
+    # min/fit math is baked separately into each anchor — `default_size`
+    # and `parent_diameter_multiplier` are evaluated at the anchor's
+    # specific zoom, and only the resulting expression goes into the
+    # interpolate stops.
+    def _indicator_size_at_zoom(default_size, parent_diameter_mult):
+        return ["min",
+            default_size,
+            ["/",
+                ["*",
+                    ["get", "parent_width_base"],
+                    parent_diameter_mult * INDICATOR_INNER_MARGIN,
+                ],
+                ["get", "row_factor"],
+            ],
+        ]
 
-    # Row span factor in em (= row width / text-size) for the actual
-    # indicator count at this location. See concept §
-    # "Indicators must not overflow the parent".
-    row_span_factor_expr = ["match", ["get", "n_indicators"],
-        1, 0.70,
-        2, 1.26,
-        3, 1.82,
-        0.70,  # default (shouldn't fire in current data)
-    ]
-
-    # Effective text-size = min(default, parent_diam * margin / row_factor).
-    # The right-hand expression is the maximum text-size that keeps the
-    # row inside the parent's binding inner dimension; when the default
-    # is already smaller, no shrink fires.
-    text_size_expr = ["min",
-        default_text_size,
-        ["/",
-            ["*", parent_diameter_expr, INDICATOR_INNER_MARGIN],
-            row_span_factor_expr,
-        ],
+    # Default text-size curve is anchored at z13 → 4.5 and z20 → 36; the
+    # z14 anchor is the linearly interpolated value (9.0). The
+    # parent-diameter curve must match `pill_disc_width()` above
+    # (PILL_MINZOOM=13 → 0.6, z14 → 1.5, z20 → 12.0) since the indicator
+    # row sits inside that diameter.
+    text_size_expr = ["interpolate", ["linear"], ["zoom"],
+        13, _indicator_size_at_zoom(4.5,  0.6),
+        14, _indicator_size_at_zoom(9.0,  1.5),
+        20, _indicator_size_at_zoom(36.0, 12.0),
     ]
 
     text_offset_expr = ["match", ["get", "slot_units"]]
