@@ -53,6 +53,7 @@ OUT_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 OUT_GTFS_UNMATCHED = ROOT / "data" / "transit" / "gtfs_unmatched.json"
 OUT_TRIP_GROUPS = ROOT / "data" / "transit" / "trip_groups.json"
 OUT_PFAEDLE_UNROUTED = ROOT / "data" / "transit" / "pfaedle_unrouted.json"
+OUT_STOP_SCORES = ROOT / "data" / "transit" / "stop_size_scores.json"
 
 # ── Frequency sample dates ──────────────────────────────────────────────────
 # Loaded from config.yaml (populated by scripts/transit/generate_sample_dates.py).
@@ -1987,6 +1988,57 @@ def main():
     features = deduplicate_mountain(features)
     kept_ids = {f["properties"]["osm_id"] for f in features}
     line_stops_out = {oid: v for oid, v in line_stops_out.items() if oid in kept_ids}
+
+    # ── Per-stop "size score" for far-zoom dot rendering ─────────────────────
+    # See .claude/concepts/far-zoom-stop-dot-redesign.md. Each emitted feature
+    # contributes `mode_weight × (1 + freq_score)` once to every non-terminal
+    # stop on its sequence — the (1 + freq_score) multiplier ranges from 1 at
+    # worst_freq to 2 at best_freq, so a high-frequency line is worth twice
+    # a low-frequency line of the same mode but a low-frequency line still
+    # counts. Per direction: bidirectional service contributes from both
+    # features. Terminal arrivals are excluded — a feature only counts at a
+    # stop if it actually departs that stop. Loop pass-throughs do not
+    # multiply: one contribution per feature regardless of how many times
+    # the feature's stop sequence visits the stop. Aggregated per parent UIC
+    # so platforms of the same physical station combine.
+    stop_size_mw = (cfg.get("stop_dot_sizing") or {}).get("mode_weights") or {}
+    stop_score: dict = defaultdict(float)
+    for f in features:
+        p = f["properties"]
+        mw = float(stop_size_mw.get(p.get("mode", ""), 0.0))
+        if mw <= 0:
+            continue
+        fs = float(p.get("freq_score", 0.0))
+        contribution = mw * (1.0 + fs)
+        feat_id = p["osm_id"]
+        feat_stops = (line_stops_out.get(feat_id) or {}).get("stops") or []
+        if len(feat_stops) < 2:
+            continue
+        seen_uics: set = set()
+        for entry in feat_stops[:-1]:
+            sid = entry[2] if len(entry) >= 3 else ""
+            if not sid:
+                continue
+            meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+            parent = meta[1] if meta else ""
+            uic = parent if parent else sid.split(":")[0]
+            if uic in seen_uics:
+                continue
+            seen_uics.add(uic)
+            stop_score[uic] += contribution
+
+    stop_score_out = {uic: round(v, 4) for uic, v in sorted(stop_score.items())}
+    OUT_STOP_SCORES.write_text(json.dumps(stop_score_out, ensure_ascii=False))
+    print(f"  {len(stop_score_out):,} stops scored → {OUT_STOP_SCORES.name}")
+
+    # Print 20th / 80th percentile for re-pinning stop_dot_sizing.score_range.
+    if stop_score_out:
+        sorted_scores = sorted(stop_score_out.values())
+        n = len(sorted_scores)
+        p20 = sorted_scores[max(0, min(n - 1, int(0.20 * n)))]
+        p80 = sorted_scores[max(0, min(n - 1, int(0.80 * n)))]
+        print(f"  stop_score percentiles: p20 = {p20:.3f}, p80 = {p80:.3f}  "
+              f"(pin into config stop_dot_sizing.score_range)")
 
     # ── Salience score (geometric, linear-falloff) ───────────────────────────
     # See .claude/concepts/zoom-level-rules.md § "Salience score".

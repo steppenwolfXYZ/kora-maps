@@ -1063,11 +1063,55 @@ def build_station_layers(cfg) -> list:
     """
     layers = []
 
-    def dot_radius(minzoom):
+    # Two style layers per stop source, drawing the dot as separate entities
+    # at the far-zoom and pill-zoom ranges. The pill-zoom layer is the pill
+    # design concept's domain — `width_base × zoom` interpolation,
+    # untouched here. The far-zoom layer is the
+    # `far-zoom-stop-dot-redesign.md` concept's domain — score-driven dot
+    # sizes at z7–z12.99 only.
+
+    # Pill-zoom dot (z13+): width_base × zoom curve. Pill design concept.
+    def dot_radius_pill_zoom(source_minzoom):
         return ["interpolate", ["linear"], ["zoom"],
-            minzoom, ["*", ["get", "width_base"], 0.3],
-            14,      ["*", ["get", "width_base"], 0.75],
-            20,      ["*", ["get", "width_base"], 6.0],
+            source_minzoom, ["*", ["get", "width_base"], 0.3],
+            14,             ["*", ["get", "width_base"], 0.75],
+            20,             ["*", ["get", "width_base"], 6.0],
+        ]
+
+    # Far-zoom dot (z7–z12.99): score-driven diameter. See
+    # `.claude/concepts/far-zoom-stop-dot-redesign.md`. `size_px` carries
+    # DIAMETERS at the z7 / z13 corners; circle-radius is half that.
+    # The score axis is **linear** — the stop_score distribution is
+    # heavy-tailed, but a low floor and a high upper cap give plenty of
+    # visual differentiation across the tail without log compression.
+    # Inner interpolate clamps past score_min / score_max. Dots without a
+    # `stop_score` (e.g. mountain straight-line embedded gtfs_stops) fall
+    # back to score 0 → minimum diameter.
+    stop_dot_cfg = (cfg.get("transit_pipeline", {})
+                       .get("stop_dot_sizing") or {})
+    score_range = stop_dot_cfg.get("score_range") or {}
+    score_min = float(score_range.get("min", 1.0))
+    score_max = float(score_range.get("max", 30.0))
+    sizes = stop_dot_cfg.get("size_px") or {}
+    z7 = sizes.get("z7") or {}
+    z13 = sizes.get("z13") or {}
+    r7_min  = float(z7.get("min", 2)) / 2.0
+    r7_max  = float(z7.get("max", 8)) / 2.0
+    r13_min = float(z13.get("min", 4))  / 2.0
+    r13_max = float(z13.get("max", 20)) / 2.0
+
+    def dot_radius_far_zoom():
+        return ["interpolate", ["linear"], ["zoom"],
+            7,  ["interpolate", ["linear"],
+                ["coalesce", ["get", "stop_score"], 0],
+                score_min, r7_min,
+                score_max, r7_max,
+            ],
+            13, ["interpolate", ["linear"],
+                ["coalesce", ["get", "stop_score"], 0],
+                score_min, r13_min,
+                score_max, r13_max,
+            ],
         ]
 
     stop_groups = [
@@ -1077,21 +1121,37 @@ def build_station_layers(cfg) -> list:
         ("transit_stops_bus",      11),
     ]
 
-    for source, minzoom in stop_groups:
-        layer = {
+    for source, source_minzoom in stop_groups:
+        # Far-zoom: new score-driven layer, z(source_minzoom)–z12.99.
+        layers.append({
+            "id": f"transit-stop-fill-{source}-far",
+            "type": "circle",
+            "source": source,
+            "source-layer": "transit_stops",
+            "minzoom": source_minzoom,
+            "maxzoom": 13,
+            "paint": {
+                "circle-color": "#ffffff",
+                "circle-radius": dot_radius_far_zoom(),
+                "circle-stroke-color": "#000000",
+                "circle-stroke-width": 1.0,
+            },
+        })
+        # Pill-zoom: original layer, expression untouched, zoom-capped to
+        # z13+ so the two layers do not overlap.
+        layers.append({
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
             "source": source,
             "source-layer": "transit_stops",
-            "minzoom": minzoom,
+            "minzoom": 13,
             "paint": {
                 "circle-color": "#ffffff",
-                "circle-radius": dot_radius(minzoom),
+                "circle-radius": dot_radius_pill_zoom(source_minzoom),
                 "circle-stroke-color": "#000000",
                 "circle-stroke-width": 1.0,
-            }
-        }
-        layers.append(layer)
+            },
+        })
 
     # Ferry stops follow the same two-tier pattern as every other non-train
     # mode: a low-zoom dot at z9–z12 (rendered through the regional source

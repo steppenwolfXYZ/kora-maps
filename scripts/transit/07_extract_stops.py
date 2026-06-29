@@ -45,6 +45,7 @@ _transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").rea
 
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
+STOP_SCORES = ROOT / "data" / "transit" / "stop_size_scores.json"
 RAIL_WAYS_GEOJSON = ROOT / "data" / "osm" / "rail_ways.geojson"
 GTFS_STOPS   = ROOT / "data" / "gtfs_routed" / "stops.txt"
 # pfaedle rewrites stops.txt to a canonical schema and drops `original_stop_id`,
@@ -384,6 +385,16 @@ def load_atlas_attributes() -> dict:
                 "compass_direction": _f(row.get("compassDirection")),
             }
     return out
+
+
+def load_stop_scores() -> dict:
+    """Return {parent_uic: stop_score} from step 06's stop_size_scores.json.
+    Empty dict if the file is missing — every dot then renders at the
+    minimum diameter and a `WARNING` is printed by the caller.
+    """
+    if not STOP_SCORES.exists():
+        return {}
+    return {k: float(v) for k, v in json.loads(STOP_SCORES.read_text()).items()}
 
 
 def write_stop_attributes_diag(line_stops: dict) -> dict:
@@ -6424,6 +6435,34 @@ def main():
     # (mountain/straight-line embedded gtfs_stops without stop_id) keep their
     # mode-derived minzoom.
     dot_features = rail_features + other_features + nonrail_dot_features
+
+    # ==========================================================================
+    # Attach per-stop "size score" (far-zoom-stop-dot-redesign.md)
+    # ==========================================================================
+    # The style's dot-radius expression interpolates between min/max diameters
+    # using `stop_score`. Score is per parent UIC; for each dot we resolve the
+    # UIC from `parent_station` (falling back to the platform-stripped
+    # `stop_id`) and stamp the score onto the feature. Dots without a
+    # resolvable UIC default to score 0 → minimum dot size.
+    stop_scores_lookup = load_stop_scores()
+    if stop_scores_lookup:
+        n_scored = 0
+        for feat in dot_features:
+            p = feat["properties"]
+            uic = p.get("parent_station") or (
+                (p.get("stop_id") or "").split(":")[0])
+            score = stop_scores_lookup.get(uic, 0.0) if uic else 0.0
+            p["stop_score"] = round(score, 4)
+            if score > 0:
+                n_scored += 1
+        print(f"  stop_score attached to {n_scored:,}/{len(dot_features):,} "
+              f"dot features")
+    else:
+        print(f"  WARNING: {STOP_SCORES.name} not found — every dot will "
+              "render at the minimum diameter")
+        for feat in dot_features:
+            feat["properties"]["stop_score"] = 0.0
+
     if stop_salience:
         n_applied = 0
         for feat in dot_features:

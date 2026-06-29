@@ -281,6 +281,52 @@ stop_width_base_floor:
   ferry:         2.50
   mountain:      2.50
 
+# ── Far-zoom stop dot sizing ─────────────────────────────────────────────────
+# Per-stop "size score" used to size dots at zooms 7–z12.99. Reuses the same
+# windowed f_weighted math used for line widths, but aggregated per parent
+# UIC instead of per line, and weighted by `mode_weights` so a train hub
+# scores higher than a bus stop with comparable trips/hour. Each emitted
+# feature contributes `mode_weight × f_weighted` to every non-terminal stop
+# on its sequence (terminal arrivals don't contribute — passengers can't
+# continue from a trip's last stop). Computed in step 06, attached to dot
+# features in step 07. See `.claude/concepts/far-zoom-stop-dot-redesign.md`.
+#
+# `score_range.min` / `.max` are the score values that map to the minimum
+# and maximum dot size. The mapping is **linear** in score. With a low
+# `size_px.z13.min` (sub-pixel diameters are still visible at retina) and
+# `score_range.max` near the dataset top, the upper tail spreads visually
+# without needing log compression.
+# Pick `min` near the lower end of "interesting" stops (around p20 of the
+# observed distribution) and `max` near the upper end of the actual
+# distribution (close to the dataset max, not the p80 or p95). Scores
+# outside the range clamp to the edge sizes. Step 06 prints percentiles
+# after each rebuild.
+#
+# `size_px` are dot DIAMETERS in screen pixels at each zoom corner. The
+# generator converts to radius (÷2) for `circle-radius`. Size grows
+# linearly with zoom between z7 and z13; clamped past either edge.
+stop_dot_sizing:
+  mode_weights:
+    bus:           1.0
+    regional_bus:  1.0
+    tram:          1.5
+    metro:         2.0
+    train:         3.0
+    mountain:      3.0
+    ferry:         3.0
+  score_range:
+    min: 2.16   # ~p20 of the observed stop_score distribution
+    max: 180    # below the dataset max (~304 = Zürich HB) so Zürich / Bern
+                # clamp to the max size while the next tier (Olten / Basel /
+                # etc.) spreads below.
+  size_px:
+    z7:
+      min: 2
+      max: 8
+    z13:
+      min: 4
+      max: 20
+
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates
 # across the full feed validity period is dropped. Catches construction-

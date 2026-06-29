@@ -8,12 +8,23 @@ At zooms 7–12.99 the map shows stops as plain dots (pills take over from z13).
 
 ### Stop score
 
-Each drawn stop gets a single numeric `stop_score`. The score is the **mode-weighted, window-weighted count of scheduled departures** at the stop on an average day.
+Each drawn stop gets a single numeric `stop_score`. The score is a **mode-weighted, frequency-modulated count of the lines departing the stop**. Per emitted feature serving the stop:
 
-- **Per departure contribution** = `mode_weight × window_weight`.
-- **Sum over all departures** at the stop across the sample dates (then averaged per date type, then combined across windows — i.e. the score is in "weighted trips per average day" units).
+```
+contribution = mode_weight × (1 + freq_score)
+```
 
-**Mode weights** (new config):
+with `freq_score ∈ [0, 1]` — the same per-line `freq_score` that already drives line width via `compute_freq_score`. The multiplier `(1 + freq_score)` is `1` at the bucket's `worst_freq` and `2` at its `best_freq`, so a high-frequency line is worth twice as much as a low-frequency line of the same mode, but a low-frequency line still counts.
+
+`stop_score(s) = Σ over emitted features f that depart s of  mode_weight(f) × (1 + freq_score(f))`.
+
+Counting rules:
+
+- **Per direction.** Emitted features are per-direction (one feature per `(line_key, agency, trip_group, merged_stop_set, direction_key)`). A bidirectional line at a stop contributes from both directions — a stop with service in both directions scores higher than a unidirectional stop, all else equal.
+- **Only departing lines count.** A feature contributes to a stop iff that stop is not the feature's terminal — i.e. iff at least one trip on that feature actually leaves the stop. A feature whose every trip arrives at the stop and terminates there does not contribute (passengers cannot board).
+- **One contribution per feature.** A loop feature that re-visits the same stop within one direction contributes once, not per pass-through. Each feature is a "line at this stop"; loop topology does not multiply the line count.
+
+**Mode weights** (new config; may be retuned):
 
 | Mode | Weight |
 |---|---|
@@ -26,11 +37,7 @@ Each drawn stop gets a single numeric `stop_score`. The score is the **mode-weig
 
 The mountain weight of 3.0 applies to every `mountain_origin` value (aerial, funicular, rack, rebucketed_rail) uniformly.
 
-**Window weights**: reuse the existing `window_weights` (core 0.6, eve 0.2, we 0.2) and the existing core/eve/we window boundaries used by `f_weighted`.
-
-**Sample dates**: reuse the existing `freq_sampling.weekday_dates` and `freq_sampling.weekend_dates`.
-
-**Reuse, not duplicate**: the existing per-line frequency aggregation logic must be extended so that one pass computes both the per-line frequency metrics (as today) and the per-stop score. Do not introduce a parallel aggregation path.
+**Reused inputs**: `freq_score` is already computed per emitted feature in step 06 and stored on the feature's properties. No additional aggregation or window math is needed — the per-stop score is a sum over feature-level numbers that already exist.
 
 ### Score → size mapping
 
@@ -39,9 +46,9 @@ A new config block carries:
 - `score_range.min` — score at which a dot is rendered at minimum size.
 - `score_range.max` — score at which a dot is rendered at maximum size.
 
-**Defaults** for `score_range.min` / `.max` are the **20th and 80th percentiles** of `stop_score` across the drawn-stop set. The defaults are derived from the data once, then committed as fixed numbers in config so the visual is stable across rebuilds.
+Mapping is **linear** in score. With a low `size_px.z13.min` (sub-pixel diameters are still visible at retina) and `score_range.max` pinned near the dataset top, the upper tail spreads visually without needing log compression. Scores below `score_range.min` clamp to the minimum size; scores above `score_range.max` clamp to the maximum size.
 
-Mapping is **linear** between `score_range.min` and `score_range.max`. Scores below `min` clamp to the minimum size; scores above `max` clamp to the maximum size.
+Pick `score_range.min` near the lower end of "interesting" stops (around the 20th percentile of the observed distribution). Pick `score_range.max` near the upper end of the actual distribution (close to the dataset maximum, not the p80 or p95) so the few largest hubs spread across the top of the size range. The build prints the distribution percentiles so the values can be re-pinned.
 
 ### Size → zoom curve
 
