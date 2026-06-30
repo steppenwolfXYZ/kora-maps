@@ -5051,10 +5051,16 @@ def cluster_rail_stops(rail_stops: list) -> list:
     return clusters
 
 
-def cluster_stops_for_pills(raw_stops, radius_km):
+def cluster_stops_for_pills(raw_stops, radius_km, lines_of_stop=None):
     """
     Spatially cluster raw stop dicts by their lon/lat within radius_km.
     Returns list of clusters; each cluster is a list of stop dicts.
+
+    Same-line guard (see `pill-cluster-same-line-guard.md`): when
+    `lines_of_stop` is provided ({stop_id: set(osm_id)}), a candidate is
+    rejected from joining a cluster whose existing members share any drawn
+    line with it. Stops served by the same line are by definition different
+    stations and must not be merged.
     """
     cluster_deg = radius_km / 111.0
     grid = defaultdict(list)
@@ -5072,15 +5078,25 @@ def cluster_stops_for_pills(raw_stops, radius_km):
                 continue
             cx0, cy0 = stop["lon"], stop["lat"]
             group = []
+            group_lines: set = set()
             kx, ky = key
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for ns in grid.get((kx + dx, ky + dy), []):
                         if id(ns) in visited:
                             continue
-                        if haversine_km(cx0, cy0, ns["lon"], ns["lat"]) < radius_km:
-                            group.append(ns)
-                            visited.add(id(ns))
+                        if haversine_km(cx0, cy0, ns["lon"], ns["lat"]) >= radius_km:
+                            continue
+                        if lines_of_stop is not None and group_lines:
+                            cand_lines = lines_of_stop.get(ns.get("stop_id", ""))
+                            if cand_lines and not cand_lines.isdisjoint(group_lines):
+                                continue
+                        group.append(ns)
+                        visited.add(id(ns))
+                        if lines_of_stop is not None:
+                            cand_lines = lines_of_stop.get(ns.get("stop_id", ""))
+                            if cand_lines:
+                                group_lines |= cand_lines
 
             if not group:
                 group = [stop]
@@ -5643,6 +5659,213 @@ def merge_clusters_by_parent_station(clusters):
         else:
             no_parent.append(cluster)
     return list(by_parent.values()) + no_parent
+
+
+# =============================================================================
+# Far-zoom dot dedup
+# =============================================================================
+
+def apply_stop_dedup(dot_features):
+    """Per-zoom-level dedup pass over far-zoom stop dots. See
+    `.claude/concepts/far-zoom-stop-dot-redesign.md` § "Dedup of overlapping
+    dots".
+
+    For each integer zoom z ∈ {12, 11, …, 7} (descending), the higher-score
+    dot absorbs lower-score neighbours whose discs touch (edge-to-edge ≤
+    `min_spacing_px`). Absorbed contributions add to the absorber's score
+    at zoom z and every lower zoom. Absorbed dots are hidden from the
+    far-zoom layer by raising their `tippecanoe.minzoom`.
+
+    Mutates `dot_features` in place. Adds `score_z7..score_z12` properties
+    to every participating feature (point dots with valid coordinates).
+    """
+    sd_cfg = _transit_cfg.get("stop_dot_sizing") or {}
+    score_range_cfg = sd_cfg.get("score_range") or {}
+    score_min = float(score_range_cfg.get("min", 1.0))
+    score_max = float(score_range_cfg.get("max", 300.0))
+    size_px_cfg = sd_cfg.get("size_px") or {}
+    z7_min  = float(((size_px_cfg.get("z7") or {}).get("min", 2)))
+    z7_max  = float(((size_px_cfg.get("z7") or {}).get("max", 8)))
+    z13_min = float(((size_px_cfg.get("z13") or {}).get("min", 4)))
+    z13_max = float(((size_px_cfg.get("z13") or {}).get("max", 20)))
+
+    dedup_cfg = _transit_cfg.get("stop_dot_dedup") or {}
+    min_spacing_px = float(dedup_cfg.get("min_spacing_px", 2.0))
+
+    EARTH_M = 40075016.7
+    MEAN_LAT_DEG = 46.5
+    cos_lat = cos(radians(MEAN_LAT_DEG))
+
+    def diameter_at(zoom, score):
+        z = max(7.0, min(13.0, float(zoom)))
+        t = (z - 7.0) / 6.0
+        d_min = z7_min + t * (z13_min - z7_min)
+        d_max = z7_max + t * (z13_max - z7_max)
+        if score_max > score_min:
+            s = max(score_min, min(score_max, score))
+            f = (s - score_min) / (score_max - score_min)
+        else:
+            f = 0.0
+        return d_min + f * (d_max - d_min)
+
+    def m_per_px(zoom):
+        # MapLibre renders at half the standard Web Mercator m/px (it uses
+        # 512-px tiles internally, so a given MapLibre zoom corresponds to
+        # one zoom higher under the standard 256-px convention). Verified
+        # against `map.project([lng, lat])` at z=13 in the browser.
+        return (EARTH_M * cos_lat) / (512.0 * (2 ** zoom))
+
+    states = []
+    for i, feat in enumerate(dot_features):
+        geom = feat.get("geometry") or {}
+        if geom.get("type") != "Point":
+            continue
+        coords = geom.get("coordinates") or []
+        if len(coords) < 2:
+            continue
+        p = feat["properties"]
+        base_score = float(p.get("stop_score", 0))
+        lines_raw = p.get("lines_json") or ""
+        try:
+            lines = json.loads(lines_raw) if lines_raw else []
+            if not isinstance(lines, list):
+                lines = []
+        except (json.JSONDecodeError, TypeError):
+            lines = []
+        # Effective minzoom: the lowest zoom at which this dot actually
+        # renders. Take max of the layer floor (MODE_MINZOOM, baked into
+        # the style as the source's minzoom) and the feature's own
+        # tippecanoe.minzoom (which may have been raised by salience).
+        # A stop not visible at zoom z must not participate in dedup at
+        # zoom z — neither as absorber nor as absorbed.
+        mode = p.get("mode", "")
+        layer_floor = MODE_MINZOOM.get(mode, 11)
+        tipp_minzoom = int((feat.get("tippecanoe") or {}).get("minzoom", layer_floor))
+        eff_minzoom = max(layer_floor, tipp_minzoom)
+        states.append({
+            "idx": i,
+            "lon": float(coords[0]),
+            "lat": float(coords[1]),
+            "stop_id": str(p.get("stop_id", "") or i),
+            "score": {z: base_score for z in range(7, 13)},
+            "alive": {z: (z >= eff_minzoom) for z in range(7, 13)},
+            "eff_minzoom": eff_minzoom,
+            "absorbed_max_z": None,
+            "lines_per_z": {z: list(lines) for z in range(7, 13)},
+            "lines_dirty": False,
+        })
+
+    if not states:
+        return
+
+    n_absorptions = 0
+    for z in range(12, 6, -1):
+        mpp = m_per_px(z)
+        # Cell size in degrees lat covering the max possible touch distance
+        # (two largest possible radii + spacing).
+        max_touch_px = z13_max + min_spacing_px
+        max_touch_m = max_touch_px * mpp
+        cell_deg = max(0.001, max_touch_m / 111320.0)
+
+        for _ in range(20):  # inner stability loop; converges in 2–3 normally
+            survivors = [s for s in states if s["alive"][z]]
+            survivors.sort(key=lambda s: (-s["score"][z], s["stop_id"]))
+
+            grid = defaultdict(list)
+            for s in survivors:
+                cx = int(s["lon"] / cell_deg)
+                cy = int(s["lat"] / cell_deg)
+                grid[(cx, cy)].append(s)
+
+            absorbed_any = False
+            for sa in survivors:
+                if not sa["alive"][z]:
+                    continue
+                ra = diameter_at(z, sa["score"][z]) / 2.0
+                cx_a = int(sa["lon"] / cell_deg)
+                cy_a = int(sa["lat"] / cell_deg)
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for sb in grid.get((cx_a + dx, cy_a + dy), ()):
+                            if sb is sa or not sb["alive"][z]:
+                                continue
+                            score_a = sa["score"][z]
+                            score_b = sb["score"][z]
+                            if score_b > score_a:
+                                continue
+                            if score_b == score_a and sb["stop_id"] < sa["stop_id"]:
+                                continue
+                            rb = diameter_at(z, score_b) / 2.0
+                            dist_m = haversine_km(sa["lon"], sa["lat"],
+                                                  sb["lon"], sb["lat"]) * 1000.0
+                            dist_px = dist_m / mpp
+                            if dist_px > ra + rb + min_spacing_px:
+                                continue
+                            # B's contribution only propagates down to zooms
+                            # where B itself would render. At zooms below B's
+                            # effective minzoom, B isn't visible — absorbing
+                            # it there has no visual meaning and must not
+                            # inflate the absorber's score.
+                            z_lo_start = max(7, sb["eff_minzoom"])
+                            for z_lo in range(z_lo_start, z + 1):
+                                sa["score"][z_lo] += sb["score"][z_lo]
+                                sb["alive"][z_lo] = False
+                                # Merge absorbed lines into the absorber AT
+                                # THIS zoom only — so the popup at zoom k
+                                # only shows the lines actually folded in at
+                                # or above k, not the union across every
+                                # zoom (a stop visible at z=12 shouldn't be
+                                # listed in the absorber's z=12 popup).
+                                # Dedup by (ref, mode) at this zoom.
+                                sa_lines = sa["lines_per_z"][z_lo]
+                                existing_keys = {(ln.get("ref", ""), ln.get("mode", ""))
+                                                 for ln in sa_lines}
+                                for ln in sb["lines_per_z"][z_lo]:
+                                    key = (ln.get("ref", ""), ln.get("mode", ""))
+                                    if key in existing_keys:
+                                        continue
+                                    existing_keys.add(key)
+                                    sa_lines.append(ln)
+                                    sa["lines_dirty"] = True
+                            sb["absorbed_max_z"] = (z if sb["absorbed_max_z"] is None
+                                                    else max(sb["absorbed_max_z"], z))
+                            absorbed_any = True
+                            n_absorptions += 1
+                            ra = diameter_at(z, sa["score"][z]) / 2.0
+            if not absorbed_any:
+                break
+
+    n_full = n_partial = n_lines_rewritten = 0
+    for s in states:
+        feat = dot_features[s["idx"]]
+        p = feat["properties"]
+        for z in range(7, 13):
+            p[f"score_z{z}"] = round(s["score"][z], 4)
+        if s["absorbed_max_z"] is not None:
+            new_minzoom = s["absorbed_max_z"] + 1
+            tipp = feat.setdefault("tippecanoe", {})
+            old_minzoom = int(tipp.get("minzoom", 0))
+            tipp["minzoom"] = max(old_minzoom, new_minzoom)
+            if new_minzoom >= 13:
+                n_full += 1
+            else:
+                n_partial += 1
+        if s["lines_dirty"]:
+            # Per-zoom lines_json: each `lines_json_zN` reflects the lines
+            # this dot represents at zoom N (base lines plus everything
+            # absorbed at or above N). Base `lines_json` is left untouched
+            # — the pill-zoom layer (z=13+) reads it and shows the dot's
+            # native lines without any far-zoom dedup growth.
+            for z in range(7, 13):
+                lns_sorted = sorted(s["lines_per_z"][z], key=lambda ln: (
+                    MODE_RANK.get(ln.get("mode", ""), 99),
+                    ln.get("ref", "")))
+                p[f"lines_json_z{z}"] = json.dumps(lns_sorted, ensure_ascii=False)
+            n_lines_rewritten += 1
+    print(f"  Dedup: {n_absorptions:,} absorptions "
+          f"({n_full:,} stops fully absorbed at far-zoom, "
+          f"{n_partial:,} partially absorbed, "
+          f"{n_lines_rewritten:,} absorber popups extended)")
 
 
 # =============================================================================
@@ -6230,9 +6453,20 @@ def main():
           f"({n_ferry_split:,} split, {n_ferry_collapsed:,} collapsed, "
           f"{n_ferry_diverged:,} per-line fallback)")
 
+    # Per-stop-id set of lines (osm_ids), used by cluster_stops_for_pills to
+    # block merging of two stops served by the same drawn line. See
+    # `pill-cluster-same-line-guard.md`.
+    lines_of_stop: dict = defaultdict(set)
+    for _oid_k, _ls_v in line_stops.items():
+        _seq = _ls_v.get("stops", []) if isinstance(_ls_v, dict) else _ls_v
+        for _entry in _seq:
+            if len(_entry) > 2 and _entry[2]:
+                lines_of_stop[_entry[2]].add(str(_oid_k))
+
     # --- Rail dots + pills (unified pass) ---
     print(f"  {len(rail_pill_raw):,} raw rail stop positions → clustering...")
-    rail_pill_clusters = cluster_stops_for_pills(rail_pill_raw, PILL_CLUSTER_RAIL_KM)
+    rail_pill_clusters = cluster_stops_for_pills(
+        rail_pill_raw, PILL_CLUSTER_RAIL_KM, lines_of_stop)
     rail_pill_clusters = merge_clusters_by_parent_station(rail_pill_clusters)
     print(f"  → {len(rail_pill_clusters):,} rail station clusters")
     # Place dots via tangent grouping + perpendicular sweep along the central
@@ -6325,7 +6559,8 @@ def main():
     # --- Non-rail pills (all modes combined → dominant wins) ---
     print(f"  {len(all_nonrail_pills):,} non-rail pill candidates "
           f"(tram+metro+bus+regional combined) → clustering...")
-    nonrail_clusters = cluster_stops_for_pills(all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM)
+    nonrail_clusters = cluster_stops_for_pills(
+        all_nonrail_pills, PILL_CLUSTER_NONRAIL_KM, lines_of_stop)
     nonrail_clusters = merge_clusters_by_parent_station(nonrail_clusters)
     # Same global stabbing placement as rail.
     print(f"  Placing non-rail dots across {len(nonrail_clusters):,} clusters...")
@@ -6484,6 +6719,12 @@ def main():
             p["is_terminus"] = sal["is_terminus"]
             n_applied += 1
         print(f"  min_zoom applied to {n_applied:,}/{len(dot_features):,} dot features")
+
+    # ==========================================================================
+    # Far-zoom dot dedup
+    # ==========================================================================
+    print("Applying far-zoom dot dedup...")
+    apply_stop_dedup(dot_features)
 
     # ==========================================================================
     # Salience diagnostic (per-line salience + per-stop rule placement)

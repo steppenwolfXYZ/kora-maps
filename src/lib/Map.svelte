@@ -22,7 +22,11 @@
 		'transit-stop-fill-transit_stops_rail',
 		'transit-stop-fill-transit_stops_tram',
 		'transit-stop-fill-transit_stops_regional',
-		'transit-stop-fill-transit_stops_bus'
+		'transit-stop-fill-transit_stops_bus',
+		'transit-stop-fill-transit_stops_rail-far',
+		'transit-stop-fill-transit_stops_tram-far',
+		'transit-stop-fill-transit_stops_regional-far',
+		'transit-stop-fill-transit_stops_bus-far'
 	];
 
 	const TRANSIT_STOP_PILL_LAYERS = [
@@ -146,11 +150,22 @@
 				           : 'stop';
 				const countLine = p.stop_count != null ? `&ensp;count: ${fmt(p.stop_count)}` : '';
 
+				// Floor zoom used by both the per-zoom lines lookup below
+				// and the per-zoom score line further down.
+				const zoomFloor = Math.max(7, Math.min(12, Math.floor(map.getZoom())));
+
+				// Per-zoom lines for far-zoom dots: the absorber's lines_json
+				// at zoom k reflects only lines absorbed AT zoom k (not the
+				// union across every zoom). Falls back to base `lines_json`
+				// for pill-zoom features (z ≥ 13) and stops that never
+				// absorbed anything.
+				const linesRaw = (p as Record<string, unknown>)[`lines_json_z${zoomFloor}`]
+					?? p.lines_json;
 				let linesHtml = '';
-				if (p.lines_json) {
+				if (linesRaw) {
 					try {
 						const lines: { ref: string; color: string; mode: string; name?: string }[] =
-							JSON.parse(String(p.lines_json));
+							JSON.parse(String(linesRaw));
 						if (lines.length) {
 							const badges = lines.map(l => {
 								const label = l.ref || l.mode || '?';
@@ -166,10 +181,29 @@
 					} catch { /* ignore malformed */ }
 				}
 
+				// Stop score line. Far-zoom dots carry per-zoom scores
+				// (score_z7..z12) — pick the one matching the current zoom
+				// and show the base alongside if dedup absorbed something
+				// at this zoom. Pill-zoom features only carry `stop_score`.
+				const scoreAtZoom = (p as Record<string, unknown>)[`score_z${zoomFloor}`];
+				const baseScore = p.stop_score;
+				let scoreLine = '';
+				if (typeof scoreAtZoom === 'number') {
+					if (typeof baseScore === 'number'
+						&& Math.abs(scoreAtZoom - baseScore) > 0.01) {
+						scoreLine = `<br>score: ${scoreAtZoom.toFixed(1)} `
+							+ `(base ${baseScore.toFixed(1)})`;
+					} else {
+						scoreLine = `<br>score: ${scoreAtZoom.toFixed(1)}`;
+					}
+				} else if (typeof baseScore === 'number') {
+					scoreLine = `<br>score: ${baseScore.toFixed(1)}`;
+				}
+
 				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
 					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)} ${kind}]${countLine}<br>
 					id: ${fmt(p.stop_id)}<br>
-					parent: ${fmt(p.parent_station)}
+					parent: ${fmt(p.parent_station)}${scoreLine}
 					${linesHtml}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '320px' })

@@ -1101,18 +1101,31 @@ def build_station_layers(cfg) -> list:
     r13_max = float(z13.get("max", 20)) / 2.0
 
     def dot_radius_far_zoom():
-        return ["interpolate", ["linear"], ["zoom"],
-            7,  ["interpolate", ["linear"],
-                ["coalesce", ["get", "stop_score"], 0],
-                score_min, r7_min,
-                score_max, r7_max,
-            ],
-            13, ["interpolate", ["linear"],
-                ["coalesce", ["get", "stop_score"], 0],
-                score_min, r13_min,
-                score_max, r13_max,
-            ],
-        ]
+        # Step 07's dedup pass writes `score_z{N}` per integer far-zoom
+        # level (N ∈ 7..12); at each integer zoom the dot's radius is the
+        # score→radius interpolation using THAT zoom's score and THAT
+        # zoom's min/max radius corners (themselves linearly interpolated
+        # between the z7 and z13 anchors). The outer top-level `zoom`
+        # interpolation blends those per-zoom stops smoothly across
+        # sub-zoom values. Per-zoom-zoom nesting is required because
+        # MapLibre forbids `zoom` inside a non-top-level expression.
+        # Features without per-zoom props (e.g. mountain straight-line
+        # embedded gtfs_stops) fall back to `stop_score`, then 0.
+        stops = []
+        for z in range(7, 14):  # z=7..13 inclusive
+            t = (z - 7) / 6.0
+            r_min_z = r7_min + t * (r13_min - r7_min)
+            r_max_z = r7_max + t * (r13_max - r7_max)
+            # z=13 uses score_z12 — dedup writes z7..z12 and the layer's
+            # maxzoom is 13 anyway; the z13 stop only matters for the
+            # sub-zoom blend immediately below z13.
+            score_prop = f"score_z{min(z, 12)}"
+            stops.extend([z, ["interpolate", ["linear"],
+                ["coalesce", ["get", score_prop], ["get", "stop_score"], 0],
+                score_min, r_min_z,
+                score_max, r_max_z,
+            ]])
+        return ["interpolate", ["linear"], ["zoom"], *stops]
 
     stop_groups = [
         ("transit_stops_rail",      5),

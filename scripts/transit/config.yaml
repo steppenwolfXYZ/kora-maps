@@ -316,16 +316,27 @@ stop_dot_sizing:
     ferry:         3.0
   score_range:
     min: 2.16   # ~p20 of the observed stop_score distribution
-    max: 180    # below the dataset max (~304 = Zürich HB) so Zürich / Bern
-                # clamp to the max size while the next tier (Olten / Basel /
-                # etc.) spreads below.
+    max: 230    # below the dataset max (~304 = Zürich HB) but high enough
+                # that only the very top tier (Zürich) hits the cap and the
+                # next-tier hubs spread underneath.
   size_px:
     z7:
       min: 2
-      max: 8
+      max: 7
     z13:
       min: 4
-      max: 20
+      max: 18
+
+# ── Far-zoom dot dedup ───────────────────────────────────────────────────────
+# At each far-zoom level (z7–z12), overlapping dot pairs are merged: the
+# higher-score dot absorbs the lower, the absorbed dot disappears at that
+# zoom and below, its contribution is added to the absorber's score. See
+# `.claude/concepts/far-zoom-stop-dot-redesign.md` § "Dedup of overlapping
+# dots". `min_spacing_px` is the required edge-to-edge clearance between
+# surviving discs. A single value covers all zooms since disc sizes already
+# scale with zoom.
+stop_dot_dedup:
+  min_spacing_px: 0.0
 
 # ── Minimum active days ──────────────────────────────────────────────────────
 # A line whose service runs on fewer than this many distinct calendar dates
