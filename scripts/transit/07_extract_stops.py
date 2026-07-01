@@ -388,13 +388,24 @@ def load_atlas_attributes() -> dict:
 
 
 def load_stop_scores() -> dict:
-    """Return {parent_uic: stop_score} from step 06's stop_size_scores.json.
-    Empty dict if the file is missing — every dot then renders at the
-    minimum diameter and a `WARNING` is printed by the caller.
+    """Return {parent_uic: {"score": float, "tier": str}} from step 06's
+    stop_size_scores.json. Empty dict if the file is missing — every dot
+    then falls back to the `small_bus` tier and a `WARNING` is printed by
+    the caller.
     """
     if not STOP_SCORES.exists():
         return {}
-    return {k: float(v) for k, v in json.loads(STOP_SCORES.read_text()).items()}
+    raw = json.loads(STOP_SCORES.read_text())
+    out = {}
+    for uic, v in raw.items():
+        if isinstance(v, dict):
+            out[uic] = {
+                "score": float(v.get("score", 0.0)),
+                "tier": str(v.get("tier", "small_bus")),
+            }
+        else:
+            out[uic] = {"score": float(v), "tier": "small_bus"}
+    return out
 
 
 def write_stop_attributes_diag(line_stops: dict) -> dict:
@@ -5670,24 +5681,36 @@ def apply_stop_dedup(dot_features):
     `.claude/concepts/far-zoom-stop-dot-redesign.md` § "Dedup of overlapping
     dots".
 
-    For each integer zoom z ∈ {12, 11, …, 7} (descending), the higher-score
-    dot absorbs lower-score neighbours whose discs touch (edge-to-edge ≤
-    `min_spacing_px`). Absorbed contributions add to the absorber's score
-    at zoom z and every lower zoom. Absorbed dots are hidden from the
-    far-zoom layer by raising their `tippecanoe.minzoom`.
+    For each integer zoom z ∈ {12, 11, …, 7} (descending), each surviving
+    dot may absorb touching lower-priority neighbours. Priority is:
 
-    Mutates `dot_features` in place. Adds `score_z7..score_z12` properties
-    to every participating feature (point dots with valid coordinates).
+      1. Mode hierarchy — train > mountain/ferry > everything else. A
+         strictly higher-ranked dot absorbs a lower-ranked neighbour
+         regardless of score.
+      2. Within the same rank, higher score absorbs lower score.
+      3. Tiebreak on equal score by `stop_id` (lower absorbs).
+
+    Absorption is VISUAL only — the absorber's tier and diameter are NOT
+    touched. Only the per-zoom popup list (`lines_json_zN`) grows. The
+    absorbed dot's `tippecanoe.minzoom` is raised so it disappears at the
+    zoom it was eaten and below.
+
+    Mutates `dot_features` in place. Adds `score_z7..score_z12` (debug
+    only) and `lines_json_z7..lines_json_z12` (popup) to participating
+    features.
     """
     sd_cfg = _transit_cfg.get("stop_dot_sizing") or {}
-    score_range_cfg = sd_cfg.get("score_range") or {}
-    score_min = float(score_range_cfg.get("min", 1.0))
-    score_max = float(score_range_cfg.get("max", 300.0))
-    size_px_cfg = sd_cfg.get("size_px") or {}
-    z7_min  = float(((size_px_cfg.get("z7") or {}).get("min", 2)))
-    z7_max  = float(((size_px_cfg.get("z7") or {}).get("max", 8)))
-    z13_min = float(((size_px_cfg.get("z13") or {}).get("min", 4)))
-    z13_max = float(((size_px_cfg.get("z13") or {}).get("max", 20)))
+    tier_sizes_cfg = sd_cfg.get("tier_sizes") or {}
+    tier_diam = {}
+    for name, corners in tier_sizes_cfg.items():
+        if not isinstance(corners, dict):
+            continue
+        try:
+            tier_diam[name] = (float(corners.get("z7", 2.0)),
+                               float(corners.get("z13", 4.0)))
+        except (TypeError, ValueError):
+            continue
+    default_tier = "small_bus"
 
     dedup_cfg = _transit_cfg.get("stop_dot_dedup") or {}
     min_spacing_px = float(dedup_cfg.get("min_spacing_px", 2.0))
@@ -5696,17 +5719,13 @@ def apply_stop_dedup(dot_features):
     MEAN_LAT_DEG = 46.5
     cos_lat = cos(radians(MEAN_LAT_DEG))
 
-    def diameter_at(zoom, score):
+    def tier_diameter_at(zoom, tier):
+        corners = tier_diam.get(tier) or tier_diam.get(default_tier, (2.0, 4.0))
         z = max(7.0, min(13.0, float(zoom)))
         t = (z - 7.0) / 6.0
-        d_min = z7_min + t * (z13_min - z7_min)
-        d_max = z7_max + t * (z13_max - z7_max)
-        if score_max > score_min:
-            s = max(score_min, min(score_max, score))
-            f = (s - score_min) / (score_max - score_min)
-        else:
-            f = 0.0
-        return d_min + f * (d_max - d_min)
+        return corners[0] + t * (corners[1] - corners[0])
+
+    max_z13_diam = max((c[1] for c in tier_diam.values()), default=18.0)
 
     def m_per_px(zoom):
         # MapLibre renders at half the standard Web Mercator m/px (it uses
@@ -5714,6 +5733,14 @@ def apply_stop_dedup(dot_features):
         # one zoom higher under the standard 256-px convention). Verified
         # against `map.project([lng, lat])` at z=13 in the browser.
         return (EARTH_M * cos_lat) / (512.0 * (2 ** zoom))
+
+    # Mode hierarchy for dedup. Higher = stronger absorber.
+    def _dedup_rank(mode: str) -> int:
+        if mode == "train":
+            return 2
+        if mode in ("mountain", "ferry"):
+            return 1
+        return 0
 
     states = []
     for i, feat in enumerate(dot_features):
@@ -5725,6 +5752,9 @@ def apply_stop_dedup(dot_features):
             continue
         p = feat["properties"]
         base_score = float(p.get("stop_score", 0))
+        tier = p.get("stop_tier") or default_tier
+        mode = p.get("mode", "")
+        rank = _dedup_rank(mode)
         lines_raw = p.get("lines_json") or ""
         try:
             lines = json.loads(lines_raw) if lines_raw else []
@@ -5738,7 +5768,6 @@ def apply_stop_dedup(dot_features):
         # tippecanoe.minzoom (which may have been raised by salience).
         # A stop not visible at zoom z must not participate in dedup at
         # zoom z — neither as absorber nor as absorbed.
-        mode = p.get("mode", "")
         layer_floor = MODE_MINZOOM.get(mode, 11)
         tipp_minzoom = int((feat.get("tippecanoe") or {}).get("minzoom", layer_floor))
         eff_minzoom = max(layer_floor, tipp_minzoom)
@@ -5747,6 +5776,12 @@ def apply_stop_dedup(dot_features):
             "lon": float(coords[0]),
             "lat": float(coords[1]),
             "stop_id": str(p.get("stop_id", "") or i),
+            "tier": tier,
+            "rank": rank,
+            "base_score": base_score,
+            # Per-zoom score: starts at base, grows with absorption. The
+            # absorber's own diameter does NOT read this — it stays fixed
+            # via `tier`. Kept for popup / debug diagnostics only.
             "score": {z: base_score for z in range(7, 13)},
             "alive": {z: (z >= eff_minzoom) for z in range(7, 13)},
             "eff_minzoom": eff_minzoom,
@@ -5763,13 +5798,15 @@ def apply_stop_dedup(dot_features):
         mpp = m_per_px(z)
         # Cell size in degrees lat covering the max possible touch distance
         # (two largest possible radii + spacing).
-        max_touch_px = z13_max + min_spacing_px
+        max_touch_px = max_z13_diam + min_spacing_px
         max_touch_m = max_touch_px * mpp
         cell_deg = max(0.001, max_touch_m / 111320.0)
 
         for _ in range(20):  # inner stability loop; converges in 2–3 normally
             survivors = [s for s in states if s["alive"][z]]
-            survivors.sort(key=lambda s: (-s["score"][z], s["stop_id"]))
+            # Sort by (rank desc, score desc, stop_id asc) — highest priority
+            # absorbers processed first so their claim over an area is stable.
+            survivors.sort(key=lambda s: (-s["rank"], -s["score"][z], s["stop_id"]))
 
             grid = defaultdict(list)
             for s in survivors:
@@ -5781,7 +5818,7 @@ def apply_stop_dedup(dot_features):
             for sa in survivors:
                 if not sa["alive"][z]:
                     continue
-                ra = diameter_at(z, sa["score"][z]) / 2.0
+                ra = tier_diameter_at(z, sa["tier"]) / 2.0
                 cx_a = int(sa["lon"] / cell_deg)
                 cy_a = int(sa["lat"] / cell_deg)
                 for dx in (-1, 0, 1):
@@ -5789,13 +5826,19 @@ def apply_stop_dedup(dot_features):
                         for sb in grid.get((cx_a + dx, cy_a + dy), ()):
                             if sb is sa or not sb["alive"][z]:
                                 continue
-                            score_a = sa["score"][z]
-                            score_b = sb["score"][z]
-                            if score_b > score_a:
+                            # Mode hierarchy gate. Higher-rank never gets
+                            # absorbed by lower-rank, regardless of score.
+                            if sb["rank"] > sa["rank"]:
                                 continue
-                            if score_b == score_a and sb["stop_id"] < sa["stop_id"]:
-                                continue
-                            rb = diameter_at(z, score_b) / 2.0
+                            # Within same rank, break by score / stop_id.
+                            if sb["rank"] == sa["rank"]:
+                                score_a = sa["score"][z]
+                                score_b = sb["score"][z]
+                                if score_b > score_a:
+                                    continue
+                                if score_b == score_a and sb["stop_id"] < sa["stop_id"]:
+                                    continue
+                            rb = tier_diameter_at(z, sb["tier"]) / 2.0
                             dist_m = haversine_km(sa["lon"], sa["lat"],
                                                   sb["lon"], sb["lat"]) * 1000.0
                             dist_px = dist_m / mpp
@@ -5805,17 +5848,15 @@ def apply_stop_dedup(dot_features):
                             # where B itself would render. At zooms below B's
                             # effective minzoom, B isn't visible — absorbing
                             # it there has no visual meaning and must not
-                            # inflate the absorber's score.
+                            # inflate the absorber's debug score.
                             z_lo_start = max(7, sb["eff_minzoom"])
                             for z_lo in range(z_lo_start, z + 1):
                                 sa["score"][z_lo] += sb["score"][z_lo]
                                 sb["alive"][z_lo] = False
                                 # Merge absorbed lines into the absorber AT
-                                # THIS zoom only — so the popup at zoom k
-                                # only shows the lines actually folded in at
-                                # or above k, not the union across every
-                                # zoom (a stop visible at z=12 shouldn't be
-                                # listed in the absorber's z=12 popup).
+                                # THIS zoom only — the popup at zoom k only
+                                # shows lines folded in at or above k, not
+                                # the union across every zoom.
                                 # Dedup by (ref, mode) at this zoom.
                                 sa_lines = sa["lines_per_z"][z_lo]
                                 existing_keys = {(ln.get("ref", ""), ln.get("mode", ""))
@@ -5831,7 +5872,8 @@ def apply_stop_dedup(dot_features):
                                                     else max(sb["absorbed_max_z"], z))
                             absorbed_any = True
                             n_absorptions += 1
-                            ra = diameter_at(z, sa["score"][z]) / 2.0
+                            # Absorber diameter does NOT grow with score.
+                            # `ra` stays as the tier's fixed radius at z.
             if not absorbed_any:
                 break
 
@@ -6672,13 +6714,13 @@ def main():
     dot_features = rail_features + other_features + nonrail_dot_features
 
     # ==========================================================================
-    # Attach per-stop "size score" (far-zoom-stop-dot-redesign.md)
+    # Attach per-stop tier + score (far-zoom-stop-dot-redesign.md)
     # ==========================================================================
-    # The style's dot-radius expression interpolates between min/max diameters
-    # using `stop_score`. Score is per parent UIC; for each dot we resolve the
-    # UIC from `parent_station` (falling back to the platform-stripped
-    # `stop_id`) and stamp the score onto the feature. Dots without a
-    # resolvable UIC default to score 0 → minimum dot size.
+    # The style reads `stop_tier` and looks up the diameter from a per-tier
+    # table. `stop_score` is kept alongside for debug / diagnostics. Both
+    # are per parent UIC; for each dot we resolve the UIC from
+    # `parent_station` (falling back to the platform-stripped `stop_id`).
+    # Dots without a resolvable UIC fall back to `small_bus`.
     stop_scores_lookup = load_stop_scores()
     if stop_scores_lookup:
         n_scored = 0
@@ -6686,17 +6728,23 @@ def main():
             p = feat["properties"]
             uic = p.get("parent_station") or (
                 (p.get("stop_id") or "").split(":")[0])
-            score = stop_scores_lookup.get(uic, 0.0) if uic else 0.0
-            p["stop_score"] = round(score, 4)
-            if score > 0:
-                n_scored += 1
-        print(f"  stop_score attached to {n_scored:,}/{len(dot_features):,} "
-              f"dot features")
+            record = stop_scores_lookup.get(uic) if uic else None
+            if record:
+                p["stop_score"] = round(record["score"], 4)
+                p["stop_tier"] = record["tier"]
+                if record["score"] > 0:
+                    n_scored += 1
+            else:
+                p["stop_score"] = 0.0
+                p["stop_tier"] = "small_bus"
+        print(f"  stop_score/stop_tier attached to {len(dot_features):,} "
+              f"dot features ({n_scored:,} with non-zero score)")
     else:
         print(f"  WARNING: {STOP_SCORES.name} not found — every dot will "
-              "render at the minimum diameter")
+              "render at the smallest tier")
         for feat in dot_features:
             feat["properties"]["stop_score"] = 0.0
+            feat["properties"]["stop_tier"] = "small_bus"
 
     if stop_salience:
         n_applied = 0

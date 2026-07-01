@@ -9,8 +9,13 @@ DATA="$ROOT/data/transit"
 STATIC="$ROOT/static"
 
 echo "=== Building transit_lines → tl_lines.pmtiles ==="
+# maxzoom z18: same rationale as tl_stop_pills below. Upscaling z14 tiles
+# 16× at z18+ triggers MapLibre's line-tessellation artifact — the line
+# visibly drifts from its true geographic position and no longer aligns
+# with the stop dots (which use a different rasterization path). Native
+# z18 tiles eliminate the drift at z18 and reduce it at higher zooms.
 tippecanoe -o "$STATIC/tl_lines.pmtiles" --force \
-  -z14 -Z4 -d18 \
+  -z18 -Z4 -d18 \
   --drop-densest-as-needed \
   --extend-zooms-if-still-dropping \
   "$DATA/transit_lines.geojson"
@@ -40,29 +45,33 @@ PYEOF
 
 echo ""
 echo "=== Building tl_stops_rail.pmtiles (minzoom 5) ==="
+# maxzoom z18: same rationale as tl_lines and tl_stop_pills — upscaling
+# z14 tiles at z18+ views drifts point coords enough that the parent
+# stop circle no longer aligns with the natively-tiled line and pill
+# indicator. Native z18 tiles keep all three sources in agreement.
 tippecanoe -o "$STATIC/tl_stops_rail.pmtiles" --force \
-  -z14 -Z5 -d18 --layer transit_stops \
+  -z18 -Z5 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_rail.geojson"
 
 echo ""
 echo "=== Building tl_stops_tram.pmtiles (minzoom 10) ==="
 tippecanoe -o "$STATIC/tl_stops_tram.pmtiles" --force \
-  -z14 -Z10 -d18 --layer transit_stops \
+  -z18 -Z10 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_tram.geojson"
 
 echo ""
 echo "=== Building tl_stops_regional.pmtiles (minzoom 9) ==="
 tippecanoe -o "$STATIC/tl_stops_regional.pmtiles" --force \
-  -z14 -Z9 -d18 --layer transit_stops \
+  -z18 -Z9 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_regional.geojson"
 
 echo ""
 echo "=== Building tl_stops_bus.pmtiles (minzoom 11) ==="
 tippecanoe -o "$STATIC/tl_stops_bus.pmtiles" --force \
-  -z14 -Z11 -d18 --layer transit_stops \
+  -z18 -Z11 -d18 --layer transit_stops \
   --drop-densest-as-needed \
   "$DATA/transit_stops_bus.geojson"
 

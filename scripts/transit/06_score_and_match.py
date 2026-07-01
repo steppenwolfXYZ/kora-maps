@@ -1989,56 +1989,212 @@ def main():
     kept_ids = {f["properties"]["osm_id"] for f in features}
     line_stops_out = {oid: v for oid, v in line_stops_out.items() if oid in kept_ids}
 
-    # ── Per-stop "size score" for far-zoom dot rendering ─────────────────────
-    # See .claude/concepts/far-zoom-stop-dot-redesign.md. Each emitted feature
-    # contributes `mode_weight × (1 + freq_score)` once to every non-terminal
-    # stop on its sequence — the (1 + freq_score) multiplier ranges from 1 at
-    # worst_freq to 2 at best_freq, so a high-frequency line is worth twice
-    # a low-frequency line of the same mode but a low-frequency line still
-    # counts. Per direction: bidirectional service contributes from both
-    # features. Terminal arrivals are excluded — a feature only counts at a
-    # stop if it actually departs that stop. Loop pass-throughs do not
-    # multiply: one contribution per feature regardless of how many times
-    # the feature's stop sequence visits the stop. Aggregated per parent UIC
-    # so platforms of the same physical station combine.
-    stop_size_mw = (cfg.get("stop_dot_sizing") or {}).get("mode_weights") or {}
-    stop_score: dict = defaultdict(float)
+    # ── Per-stop score + tier for far-zoom dot rendering ─────────────────────
+    # See .claude/concepts/far-zoom-stop-dot-redesign.md. The score is
+    # aggregated per parent UIC using
+    #
+    #   effective_weight × terminal_multiplier × (1 + freq_score)
+    #
+    # where `effective_weight` = `mode_weights[mode]`, replaced by the
+    # matching `train_class_weights` entry for `mode == train`.
+    # `terminal_multiplier` fires at the feature's first / last stop.
+    # Per UIC, dedup is by `ref` only — sub-variants of the same line
+    # collapse to one entry (their highest contribution wins). Loop
+    # pass-throughs collapse via `seen_uics` — one entry per feature per UIC.
+    #
+    # The score feeds the tier assignment (top-down first-match) alongside
+    # the base line composition at the UIC. Tier is fixed at emit time and
+    # not touched by the visual dedup pass in step 07.
+    sds_cfg = cfg.get("stop_dot_sizing") or {}
+    stop_size_mw = sds_cfg.get("mode_weights") or {}
+    terminal_multiplier = float(sds_cfg.get("terminal_multiplier", 1.0))
+    train_class_weights = sds_cfg.get("train_class_weights") or {}
+    train_default_weight = float(stop_size_mw.get("train", 0.0))
+    ic_weight = float(train_class_weights.get("ic", train_default_weight))
+    ir_weight = float(train_class_weights.get("ir", train_default_weight))
+    re_weight = float(train_class_weights.get("re", train_default_weight))
+    ic_prefixes = tuple(
+        p.upper() for p in
+        ((cfg.get("zoom_level_rules") or {}).get("intercity_route_prefixes") or [])
+    )
+
+    tier_thresh = sds_cfg.get("tier_thresholds") or {}
+    th_major_train      = float(tier_thresh.get("major_train",     100))
+    th_main_train       = float(tier_thresh.get("main_train",       40))
+    th_important_train  = float(tier_thresh.get("important_train",  20))
+    th_train_station    = float(tier_thresh.get("train_station",    10))
+    th_major_mountain   = float(tier_thresh.get("major_mountain",    2.0))
+    th_major_hub        = float(tier_thresh.get("major_hub",        15))
+    th_big_station      = float(tier_thresh.get("big_station",       6))
+    th_normal_stop      = float(tier_thresh.get("normal_stop",       1.5))
+
+    mlc_cfg = sds_cfg.get("mountain_line_count") or {}
+    mlc_mountain_through = float(mlc_cfg.get("mountain_through", 1.0))
+    mlc_mountain_term    = float(mlc_cfg.get("mountain_term",    0.9))
+    mlc_ferry            = float(mlc_cfg.get("ferry",            1.0))
+    mlc_tram_bus         = float(mlc_cfg.get("tram_bus",         0.5))
+
+    tier_overrides: dict = {}
+    for entry in (sds_cfg.get("tier_overrides") or []):
+        try:
+            tier_overrides[str(entry["uic"])] = str(entry["tier"])
+        except (KeyError, TypeError):
+            continue
+
+    def _is_ic_ref(ref_upper: str) -> bool:
+        if not (ref_upper and ic_prefixes):
+            return False
+        return any(ref_upper.startswith(pfx) for pfx in ic_prefixes)
+
+    def _uic_of(entry):
+        sid = entry[2] if len(entry) >= 3 else ""
+        if not sid:
+            return ""
+        meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+        parent = meta[1] if meta else ""
+        return parent if parent else sid.split(":")[0]
+
+    # stop_contribs[uic][ref] = max contribution at this uic for that line.
+    # stop_line_index[uic][(ref, mode)] = True if any variant terminates here.
+    stop_contribs: dict = defaultdict(lambda: defaultdict(float))
+    stop_line_index: dict = defaultdict(dict)
     for f in features:
         p = f["properties"]
-        mw = float(stop_size_mw.get(p.get("mode", ""), 0.0))
-        if mw <= 0:
-            continue
+        mode = p.get("mode", "")
+        mw = float(stop_size_mw.get(mode, 0.0))
+        ref = p.get("ref", "") or ""
+        ref_upper = ref.upper()
+        if mode == "train" and ref_upper:
+            if _is_ic_ref(ref_upper):
+                mw = ic_weight
+            elif ref_upper.startswith("IR"):
+                mw = ir_weight
+            elif ref_upper.startswith("RE"):
+                mw = re_weight
+            elif ref_upper.startswith("R") and (
+                    len(ref_upper) == 1 or not ref_upper[1].isalpha()):
+                mw = re_weight
         fs = float(p.get("freq_score", 0.0))
-        contribution = mw * (1.0 + fs)
+        base_contribution = mw * (1.0 + fs)
         feat_id = p["osm_id"]
         feat_stops = (line_stops_out.get(feat_id) or {}).get("stops") or []
         if len(feat_stops) < 2:
             continue
+        first_uic = _uic_of(feat_stops[0])
+        last_uic = _uic_of(feat_stops[-1])
         seen_uics: set = set()
-        for entry in feat_stops[:-1]:
-            sid = entry[2] if len(entry) >= 3 else ""
-            if not sid:
-                continue
-            meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
-            parent = meta[1] if meta else ""
-            uic = parent if parent else sid.split(":")[0]
-            if uic in seen_uics:
+        for entry in feat_stops:
+            uic = _uic_of(entry)
+            if not uic or uic in seen_uics:
                 continue
             seen_uics.add(uic)
-            stop_score[uic] += contribution
+            is_terminus = (uic == first_uic) or (uic == last_uic)
 
-    stop_score_out = {uic: round(v, 4) for uic, v in sorted(stop_score.items())}
-    OUT_STOP_SCORES.write_text(json.dumps(stop_score_out, ensure_ascii=False))
-    print(f"  {len(stop_score_out):,} stops scored → {OUT_STOP_SCORES.name}")
+            # Line composition index (mode-aware, needed for tier evaluation).
+            # Terminal-status is aggregated over every variant of the line at
+            # this stop: if ANY variant terminates, treat as terminal for the
+            # mountain-line count.
+            line_mode_key = (ref, mode)
+            prev_term = stop_line_index[uic].get(line_mode_key, False)
+            stop_line_index[uic][line_mode_key] = prev_term or is_terminus
 
-    # Print 20th / 80th percentile for re-pinning stop_dot_sizing.score_range.
-    if stop_score_out:
-        sorted_scores = sorted(stop_score_out.values())
+            # Contribution to score. Only non-zero mode-weights contribute,
+            # but the line composition index above must still register a
+            # zero-weighted mode (there is no such mode today; every mode in
+            # `mode_weights` is > 0, so this is defensive).
+            if mw <= 0:
+                continue
+            mult = terminal_multiplier if is_terminus else 1.0
+            contribution = base_contribution * mult
+            cur = stop_contribs[uic].get(ref, 0.0)
+            if contribution > cur:
+                stop_contribs[uic][ref] = contribution
+
+    stop_score: dict = {uic: sum(cs.values()) for uic, cs in stop_contribs.items()}
+    # UICs that appear only through the line-composition index (mw == 0 mode)
+    # still get a zero score so they land in `small_*` tiers rather than
+    # falling out entirely.
+    for uic in stop_line_index:
+        stop_score.setdefault(uic, 0.0)
+
+    def _assign_tier(uic: str, score: float, line_idx: dict) -> str:
+        override = tier_overrides.get(uic)
+        if override:
+            return override
+        modes_at = {m for (_r, m) in line_idx}
+        has_train    = "train" in modes_at
+        has_metro    = "metro" in modes_at
+        has_mountain = "mountain" in modes_at
+        has_ferry    = "ferry" in modes_at
+        has_tram_bus = bool(modes_at & {"tram", "bus", "regional_bus"})
+        has_ic = any(m == "train" and _is_ic_ref((r or "").upper())
+                     for (r, m) in line_idx)
+
+        if has_train and has_ic and score >= th_major_train:
+            return "major_train"
+        if has_train and has_ic and score >= th_main_train:
+            return "main_train"
+        if has_train and score >= th_important_train:
+            return "important_train"
+        if has_train and score >= th_train_station:
+            return "train_station"
+        if has_train:
+            return "small_train"
+        # (metro tiers deferred — a metro-only stop currently lands in
+        # `major_hub` via the metro-OR placeholder below.)
+        if has_mountain:
+            mlc = 0.0
+            for (_r, m), terminates in line_idx.items():
+                if m == "mountain":
+                    mlc += mlc_mountain_term if terminates else mlc_mountain_through
+                elif m == "ferry":
+                    mlc += mlc_ferry
+                elif m in ("tram", "bus", "regional_bus"):
+                    mlc += mlc_tram_bus
+            if mlc >= th_major_mountain:
+                return "major_mountain"
+            return "mountain_stop"
+        if has_ferry:
+            return "ferry_stop"
+        if score >= th_major_hub or has_metro:
+            return "major_hub"
+        if score >= th_big_station:
+            return "big_station"
+        if score >= th_normal_stop:
+            return "normal_stop"
+        if has_tram_bus:
+            return "small_bus"
+        return "small_bus"
+
+    stop_size_records: dict = {}
+    tier_counts: dict = defaultdict(int)
+    for uic in sorted(set(stop_score.keys()) | set(stop_line_index.keys())):
+        score = stop_score.get(uic, 0.0)
+        tier = _assign_tier(uic, score, stop_line_index.get(uic, {}))
+        stop_size_records[uic] = {"score": round(score, 4), "tier": tier}
+        tier_counts[tier] += 1
+    OUT_STOP_SCORES.write_text(json.dumps(stop_size_records, ensure_ascii=False))
+    print(f"  {len(stop_size_records):,} stops scored → {OUT_STOP_SCORES.name}")
+
+    # Tier distribution — quick sanity check.
+    _tier_order = ["major_train", "main_train", "important_train",
+                   "train_station", "small_train",
+                   "major_mountain", "mountain_stop", "ferry_stop",
+                   "major_hub", "big_station", "normal_stop", "small_bus"]
+    dist_parts = [f"{t}={tier_counts[t]:,}" for t in _tier_order if tier_counts.get(t)]
+    print(f"  Tier distribution: {', '.join(dist_parts)}")
+
+    # Print percentile bands for tuning the threshold cutoffs.
+    scored_only = [v["score"] for v in stop_size_records.values() if v["score"] > 0]
+    if scored_only:
+        sorted_scores = sorted(scored_only)
         n = len(sorted_scores)
-        p20 = sorted_scores[max(0, min(n - 1, int(0.20 * n)))]
-        p80 = sorted_scores[max(0, min(n - 1, int(0.80 * n)))]
-        print(f"  stop_score percentiles: p20 = {p20:.3f}, p80 = {p80:.3f}  "
-              f"(pin into config stop_dot_sizing.score_range)")
+        def _pct(p):
+            return sorted_scores[max(0, min(n - 1, int(p * n)))]
+        print(f"  stop_score percentiles (non-zero): "
+              f"p20 = {_pct(0.20):.2f}, p50 = {_pct(0.50):.2f}, "
+              f"p80 = {_pct(0.80):.2f}, p95 = {_pct(0.95):.2f}, "
+              f"p99 = {_pct(0.99):.2f}, max = {sorted_scores[-1]:.2f}")
 
     # ── Salience score (geometric, linear-falloff) ───────────────────────────
     # See .claude/concepts/zoom-level-rules.md § "Salience score".

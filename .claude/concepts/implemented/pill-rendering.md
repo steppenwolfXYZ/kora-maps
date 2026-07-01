@@ -232,7 +232,7 @@ At a multi-line stop cluster, only the **cluster centroid dot** is emitted (`min
 
 ### Tippecanoe encoding
 
-`tl_stop_pills.pmtiles` is built with `-z18 -Z11 -d18` (other transit pmtiles stay at `-z14`). The bump to native z18 maxzoom is what allows densely-sampled curved connectors to render without visible wobble at z18+ — at the prior `-z14` maxzoom each high-zoom view was a 16× upscale of the z14 tile, magnifying every sub-tile vertex layout into something visibly wavy. Curved-connector samples and the per-mode pill widths now render at native resolution where MapLibre's line tessellation is well-behaved.
+`tl_stop_pills.pmtiles` is built with `-z18 -Z11 -d18`. `tl_lines.pmtiles` and the four `tl_stops_*` (rail / tram / regional / bus) sources also build at `-z18` for the same reason. The bump to native z18 maxzoom is what allows densely-sampled curved connectors to render without visible wobble at z18+ — at the prior `-z14` maxzoom each high-zoom view was a 16× upscale of the z14 tile, magnifying every sub-tile vertex layout into something visibly wavy. Straight transit lines exhibit the same tessellation drift (the line visibly slides off the stops it passes through), and stop-dot point coords over-zoomed from z14 drift enough at z22+ that the parent white circle no longer aligns with the line or the pill indicator. Bringing every transit source to native z18 keeps line, stop dot, and indicator in coordinate agreement, and lets MapLibre's line tessellation stay well-behaved at the pill and connector widths.
 
 ### Pill grouping (which dots a pill connects)
 

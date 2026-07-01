@@ -282,29 +282,15 @@ stop_width_base_floor:
   mountain:      2.50
 
 # ── Far-zoom stop dot sizing ─────────────────────────────────────────────────
-# Per-stop "size score" used to size dots at zooms 7–z12.99. Reuses the same
-# windowed f_weighted math used for line widths, but aggregated per parent
-# UIC instead of per line, and weighted by `mode_weights` so a train hub
-# scores higher than a bus stop with comparable trips/hour. Each emitted
-# feature contributes `mode_weight × f_weighted` to every non-terminal stop
-# on its sequence (terminal arrivals don't contribute — passengers can't
-# continue from a trip's last stop). Computed in step 06, attached to dot
-# features in step 07. See `.claude/concepts/far-zoom-stop-dot-redesign.md`.
+# Per-stop tier assignment used to size dots at zooms 7–z12.99. See
+# `.claude/concepts/far-zoom-stop-dot-redesign.md`. The score itself does not
+# drive size — it feeds the tier assignment (top-down first-match). Each tier
+# has a fixed z7 / z13 diameter; the size interpolates linearly with zoom
+# between those corners. Tier is assigned once per UIC in step 06.
 #
-# `score_range.min` / `.max` are the score values that map to the minimum
-# and maximum dot size. The mapping is **linear** in score. With a low
-# `size_px.z13.min` (sub-pixel diameters are still visible at retina) and
-# `score_range.max` near the dataset top, the upper tail spreads visually
-# without needing log compression.
-# Pick `min` near the lower end of "interesting" stops (around p20 of the
-# observed distribution) and `max` near the upper end of the actual
-# distribution (close to the dataset max, not the p80 or p95). Scores
-# outside the range clamp to the edge sizes. Step 06 prints percentiles
-# after each rebuild.
-#
-# `size_px` are dot DIAMETERS in screen pixels at each zoom corner. The
-# generator converts to radius (÷2) for `circle-radius`. Size grows
-# linearly with zoom between z7 and z13; clamped past either edge.
+# `mode_weights`, `train_class_weights`, and `terminal_multiplier` drive the
+# per-line contribution formula (see the concept doc). The score is
+# aggregated at the parent UIC and stored on every dot in that UIC.
 stop_dot_sizing:
   mode_weights:
     bus:           1.0
@@ -314,27 +300,95 @@ stop_dot_sizing:
     train:         3.0
     mountain:      3.0
     ferry:         3.0
-  score_range:
-    min: 2.16   # ~p20 of the observed stop_score distribution
-    max: 230    # below the dataset max (~304 = Zürich HB) but high enough
-                # that only the very top tier (Zürich) hits the cap and the
-                # next-tier hubs spread underneath.
-  size_px:
-    z7:
-      min: 2
-      max: 7
-    z13:
-      min: 4
-      max: 18
+  # Train class weights: absolute weight overrides for `mode == train`
+  # based on the line's `ref`. When a train feature's `ref` matches one
+  # of these prefixes, the class weight REPLACES `mode_weights.train`
+  # (not multiplied) — so an IC contribution lands at exactly 6 × (1 +
+  # freq_score), not at `train_weight × multiplier`. S-Bahn / other
+  # trains that don't match any class fall back to `mode_weights.train`.
+  #
+  # Resolution order: IC prefixes → IR → RE → single-letter "R" (where
+  # the character after R is a digit / space / end, so RJ and RB don't
+  # fall into the RE/R bucket).
+  #
+  # IC prefixes come from `zoom_level_rules.intercity_route_prefixes`
+  # (currently IC / ICE / EC).
+  train_class_weights:
+    ic: 6.0    # IC / ICE / EC
+    ir: 5.0    # IR
+    re: 4.0    # RE or bare-R lines
+  # Terminal multiplier: applied when the stop is the first OR last entry
+  # in a feature's stop sequence (the feature terminates at this stop in
+  # this direction). Mid-line passthroughs use 1.0. The boost compensates
+  # for terminal arrivals normally being silently dropped (a line that
+  # ends here still represents a real service relation) and lifts
+  # endpoints over through-stops in the same line's score.
+  terminal_multiplier: 1.5
+
+  # Score thresholds and mountain-line-count threshold used by the tier
+  # assignment. See the concept § "Tier assignment". Rules are evaluated
+  # top-down; the first match wins (train family → mountain → ferry →
+  # tram/bus). Change these to move tier boundaries without a data-only
+  # rebuild — updating a threshold requires `--start 6` because the tier
+  # is baked into the feature.
+  tier_thresholds:
+    major_train:      100   # IC line + score >= this → major_train
+    main_train:        40   # IC line + score >= this → main_train
+    important_train:   20   # any train + score >= this → important_train
+    train_station:     10   # any train + score >= this → train_station
+    major_mountain:     2.0 # mountain_line_count >= this → major_mountain
+    major_hub:         15   # score >= this (no train/mountain/ferry) → major_hub
+    big_station:        6
+    normal_stop:        1.5
+
+  # Mountain-line-count weighting (Major-vs-regular mountain check only).
+  # A stop's mountain_line_count sums the per-line values below across
+  # its own base line composition. Train lines don't participate — a
+  # stop with any train line is already in a train tier.
+  mountain_line_count:
+    mountain_through: 1.0   # non-terminating mountain line
+    mountain_term:    0.9   # terminating mountain line
+    ferry:            1.0   # ferry (always)
+    tram_bus:         0.5   # tram / bus / regional_bus (each)
+
+  # Optional per-UIC tier overrides for hand-fixed edge cases. Each entry
+  # forces the listed UIC into a specific tier regardless of the
+  # score / composition rules. Not expected to be heavily used.
+  tier_overrides: []
+  # - uic: "8500010"
+  #   tier: main_train
+  #   reason: "Example: force Basel-Kleinhüningen into main_train"
+
+  # Per-tier fixed diameters (CSS pixels) at z7 and z13. Within a tier
+  # there is no per-stop size variation. Linear interpolate between the
+  # corners for intermediate zooms; clamped past either edge. Diameter
+  # tweaks here are style-only: after editing, re-run
+  # `python3 scripts/generate_style.py` and reload.
+  tier_sizes:
+    major_train:      { z7: 7,   z13: 18 }
+    main_train:       { z7: 6,   z13: 15 }
+    important_train:  { z7: 5,   z13: 12 }
+    train_station:    { z7: 4,   z13: 9 }
+    small_train:      { z7: 3,   z13: 7 }
+    major_mountain:   { z7: 3,   z13: 6 }
+    mountain_stop:    { z7: 2.5, z13: 5 }
+    ferry_stop:       { z7: 3,   z13: 6 }
+    major_hub:        { z7: 5,   z13: 12 }
+    big_station:      { z7: 3.5, z13: 8 }
+    normal_stop:      { z7: 2.5, z13: 5.5 }
+    small_bus:        { z7: 2,   z13: 4 }
 
 # ── Far-zoom dot dedup ───────────────────────────────────────────────────────
-# At each far-zoom level (z7–z12), overlapping dot pairs are merged: the
-# higher-score dot absorbs the lower, the absorbed dot disappears at that
-# zoom and below, its contribution is added to the absorber's score. See
-# `.claude/concepts/far-zoom-stop-dot-redesign.md` § "Dedup of overlapping
-# dots". `min_spacing_px` is the required edge-to-edge clearance between
-# surviving discs. A single value covers all zooms since disc sizes already
-# scale with zoom.
+# At each far-zoom level (z7–z12), overlapping dot pairs are merged. Mode
+# hierarchy gates the absorber side first: `train` outranks `mountain` /
+# `ferry`, which outrank everything else. Within the same rank the
+# higher-score dot absorbs the lower; across ranks a strictly higher-ranked
+# dot absorbs a lower-ranked neighbour regardless of score. Absorption is
+# visual only — the absorber's tier and size stay fixed; only its per-zoom
+# popup line list grows. See `.claude/concepts/far-zoom-stop-dot-redesign.md`
+# § "Dedup of overlapping dots". `min_spacing_px` is the required edge-to-
+# edge clearance between surviving discs. A single value covers all zooms
+# since disc sizes already scale with zoom.
 stop_dot_dedup:
   min_spacing_px: 0.0
 

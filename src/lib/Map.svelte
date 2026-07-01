@@ -181,10 +181,11 @@
 					} catch { /* ignore malformed */ }
 				}
 
-				// Stop score line. Far-zoom dots carry per-zoom scores
-				// (score_z7..z12) — pick the one matching the current zoom
-				// and show the base alongside if dedup absorbed something
-				// at this zoom. Pill-zoom features only carry `stop_score`.
+				// Stop score line. `score_zN` is a debug-only per-zoom score
+				// written by step 07's dedup pass — the absorber's tier and
+				// diameter stay fixed, so the per-zoom score just reveals
+				// how much a hub absorbed at that zoom. Show base + per-zoom
+				// if they differ; otherwise just the base.
 				const scoreAtZoom = (p as Record<string, unknown>)[`score_z${zoomFloor}`];
 				const baseScore = p.stop_score;
 				let scoreLine = '';
@@ -200,10 +201,14 @@
 					scoreLine = `<br>score: ${baseScore.toFixed(1)}`;
 				}
 
+				const tierLine = p.stop_tier
+					? `<br>tier: ${fmt(p.stop_tier)}`
+					: '';
+
 				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
 					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)} ${kind}]${countLine}<br>
 					id: ${fmt(p.stop_id)}<br>
-					parent: ${fmt(p.parent_station)}${scoreLine}
+					parent: ${fmt(p.parent_station)}${tierLine}${scoreLine}
 					${linesHtml}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '320px' })

@@ -1078,53 +1078,52 @@ def build_station_layers(cfg) -> list:
             20,             ["*", ["get", "width_base"], 6.0],
         ]
 
-    # Far-zoom dot (z7–z12.99): score-driven diameter. See
-    # `.claude/concepts/far-zoom-stop-dot-redesign.md`. `size_px` carries
-    # DIAMETERS at the z7 / z13 corners; circle-radius is half that.
-    # The score axis is **linear** — the stop_score distribution is
-    # heavy-tailed, but a low floor and a high upper cap give plenty of
-    # visual differentiation across the tail without log compression.
-    # Inner interpolate clamps past score_min / score_max. Dots without a
-    # `stop_score` (e.g. mountain straight-line embedded gtfs_stops) fall
-    # back to score 0 → minimum diameter.
+    # Far-zoom dot (z7–z12.99): tier-driven diameter. See
+    # `.claude/concepts/far-zoom-stop-dot-redesign.md`. Each tier defines
+    # a fixed diameter at the z7 and z13 corners; the size interpolates
+    # linearly with zoom between those corners. `stop_tier` is baked onto
+    # every dot by step 06 (via step 07's `load_stop_scores`); dots with
+    # an unknown or missing tier fall through to the `small_bus` default.
     stop_dot_cfg = (cfg.get("transit_pipeline", {})
                        .get("stop_dot_sizing") or {})
-    score_range = stop_dot_cfg.get("score_range") or {}
-    score_min = float(score_range.get("min", 1.0))
-    score_max = float(score_range.get("max", 30.0))
-    sizes = stop_dot_cfg.get("size_px") or {}
-    z7 = sizes.get("z7") or {}
-    z13 = sizes.get("z13") or {}
-    r7_min  = float(z7.get("min", 2)) / 2.0
-    r7_max  = float(z7.get("max", 8)) / 2.0
-    r13_min = float(z13.get("min", 4))  / 2.0
-    r13_max = float(z13.get("max", 20)) / 2.0
+    tier_sizes_cfg = stop_dot_cfg.get("tier_sizes") or {}
+
+    # {tier_name: (z7_diameter, z13_diameter)} — corners as configured.
+    tier_diameters = {}
+    for name, corners in tier_sizes_cfg.items():
+        if not isinstance(corners, dict):
+            continue
+        try:
+            tier_diameters[name] = (float(corners.get("z7", 2.0)),
+                                    float(corners.get("z13", 4.0)))
+        except (TypeError, ValueError):
+            continue
+    if "small_bus" not in tier_diameters:
+        tier_diameters["small_bus"] = (2.0, 4.0)
+
+    def _match_radius_at(zoom):
+        """MapLibre `match` on stop_tier returning circle-radius (px) at
+        the given integer zoom. Uses linear interpolation between each
+        tier's z7 and z13 corner."""
+        t = (zoom - 7) / 6.0
+        cases = []
+        for name, (d7, d13) in tier_diameters.items():
+            if name == "small_bus":
+                continue
+            d = d7 + t * (d13 - d7)
+            cases.extend([name, round(d / 2.0, 4)])
+        d7_def, d13_def = tier_diameters["small_bus"]
+        default_radius = round((d7_def + t * (d13_def - d7_def)) / 2.0, 4)
+        return ["match", ["get", "stop_tier"], *cases, default_radius]
 
     def dot_radius_far_zoom():
-        # Step 07's dedup pass writes `score_z{N}` per integer far-zoom
-        # level (N ∈ 7..12); at each integer zoom the dot's radius is the
-        # score→radius interpolation using THAT zoom's score and THAT
-        # zoom's min/max radius corners (themselves linearly interpolated
-        # between the z7 and z13 anchors). The outer top-level `zoom`
-        # interpolation blends those per-zoom stops smoothly across
-        # sub-zoom values. Per-zoom-zoom nesting is required because
-        # MapLibre forbids `zoom` inside a non-top-level expression.
-        # Features without per-zoom props (e.g. mountain straight-line
-        # embedded gtfs_stops) fall back to `stop_score`, then 0.
+        # Outer `interpolate zoom` blends between per-zoom tier lookups. At
+        # each integer zoom z ∈ 7..13 the inner `match` picks the tier's
+        # diameter (halved to radius). MapLibre requires `zoom` at the
+        # top-level, so the match sits inside each zoom stop.
         stops = []
-        for z in range(7, 14):  # z=7..13 inclusive
-            t = (z - 7) / 6.0
-            r_min_z = r7_min + t * (r13_min - r7_min)
-            r_max_z = r7_max + t * (r13_max - r7_max)
-            # z=13 uses score_z12 — dedup writes z7..z12 and the layer's
-            # maxzoom is 13 anyway; the z13 stop only matters for the
-            # sub-zoom blend immediately below z13.
-            score_prop = f"score_z{min(z, 12)}"
-            stops.extend([z, ["interpolate", ["linear"],
-                ["coalesce", ["get", score_prop], ["get", "stop_score"], 0],
-                score_min, r_min_z,
-                score_max, r_max_z,
-            ]])
+        for z in range(7, 14):
+            stops.extend([z, _match_radius_at(z)])
         return ["interpolate", ["linear"], ["zoom"], *stops]
 
     stop_groups = [
