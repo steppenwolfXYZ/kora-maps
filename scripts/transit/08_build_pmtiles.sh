@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Build all transit pmtiles from the current GeoJSON outputs.
-# Outputs go to static/tl_*.pmtiles as referenced by static/style.json.
+# Outputs go to static/map-assets/tl_*.pmtiles as referenced by static/map-assets/style.json.
 # Run from the project root.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DATA="$ROOT/data/transit"
-STATIC="$ROOT/static"
+STATIC="$ROOT/static/map-assets"
+mkdir -p "$STATIC"
 
 echo "=== Building transit_lines → tl_lines.pmtiles ==="
 # maxzoom z18: same rationale as tl_stop_pills below. Upscaling z14 tiles

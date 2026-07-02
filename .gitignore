@@ -6,5 +6,6 @@ build/
 .env.*
 !.env.example
 data/
+static/map-assets/
 __pycache__/
 *.pyc

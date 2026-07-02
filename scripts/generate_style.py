@@ -5,7 +5,7 @@ Car-Free Map Style Generator
 Reads config.yaml and produces a MapLibre GL style JSON.
 
 Usage:
-    python generate_style.py                    # reads ./config.yaml, writes ../static/style.json
+    python generate_style.py                    # reads ./config.yaml, writes ../static/map-assets/style.json
     python generate_style.py -c myconfig.yaml   # custom config path
     python generate_style.py -o output.json     # custom output path
 """
@@ -1179,8 +1179,8 @@ def build_station_layers(cfg) -> list:
 
     def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.6],
-            14,            ["*", ["get", "width_base"], 1.5],
+            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.8],
+            14,            ["*", ["get", "width_base"], 2.0],
             20,            ["*", ["get", "width_base"], 12.0],
         ]
 
@@ -1202,8 +1202,8 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "line-color": "#000000",
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.6], 2.0],
-                14,            ["+", ["*", ["get", "width_base"], 1.5], 2.0],
+                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.8], 2.0],
+                14,            ["+", ["*", ["get", "width_base"], 2.0], 2.0],
                 20,            ["+", ["*", ["get", "width_base"], 12.0], 2.0],
             ],
         }
@@ -1254,8 +1254,8 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "circle-color": "#ffffff",
             "circle-radius": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM, ["*", ["get", "width_base"], 0.3],
-                14,           ["*", ["get", "width_base"], 0.75],
+                PILL_MINZOOM, ["*", ["get", "width_base"], 0.4],
+                14,           ["*", ["get", "width_base"], 1.0],
                 20,           ["*", ["get", "width_base"], 6.0],
             ],
             "circle-stroke-color": "#000000",
@@ -1331,11 +1331,11 @@ def build_station_layers(cfg) -> list:
     # Default text-size curve is anchored at z13 → 4.5 and z20 → 36; the
     # z14 anchor is the linearly interpolated value (9.0). The
     # parent-diameter curve must match `pill_disc_width()` above
-    # (PILL_MINZOOM=13 → 0.6, z14 → 1.5, z20 → 12.0) since the indicator
+    # (PILL_MINZOOM=13 → 0.8, z14 → 2.0, z20 → 12.0) since the indicator
     # row sits inside that diameter.
     text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        13, _indicator_size_at_zoom(4.5,  0.6),
-        14, _indicator_size_at_zoom(9.0,  1.5),
+        13, _indicator_size_at_zoom(4.5,  0.8),
+        14, _indicator_size_at_zoom(9.0,  2.0),
         20, _indicator_size_at_zoom(36.0, 12.0),
     ]
 
@@ -1453,27 +1453,27 @@ def generate_style(cfg) -> dict:
             "openmaptiles": source_def,
             "transit_lines": {
                 "type": "vector",
-                "url": "pmtiles:///tl_lines.pmtiles"
+                "url": "pmtiles:///map-assets/tl_lines.pmtiles"
             },
             "transit_stops_rail": {
                 "type": "vector",
-                "url": "pmtiles:///tl_stops_rail.pmtiles"
+                "url": "pmtiles:///map-assets/tl_stops_rail.pmtiles"
             },
             "transit_stops_tram": {
                 "type": "vector",
-                "url": "pmtiles:///tl_stops_tram.pmtiles"
+                "url": "pmtiles:///map-assets/tl_stops_tram.pmtiles"
             },
             "transit_stops_regional": {
                 "type": "vector",
-                "url": "pmtiles:///tl_stops_regional.pmtiles"
+                "url": "pmtiles:///map-assets/tl_stops_regional.pmtiles"
             },
             "transit_stops_bus": {
                 "type": "vector",
-                "url": "pmtiles:///tl_stops_bus.pmtiles"
+                "url": "pmtiles:///map-assets/tl_stops_bus.pmtiles"
             },
             "transit_stop_pills": {
                 "type": "vector",
-                "url": "pmtiles:///tl_stop_pills.pmtiles"
+                "url": "pmtiles:///map-assets/tl_stop_pills.pmtiles"
             },
         },
         "glyphs": g["glyphs"],
@@ -1488,15 +1488,15 @@ def generate_style(cfg) -> dict:
     if cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         style["sources"]["transit_debug_platforms"] = {
             "type": "vector",
-            "url": "pmtiles:///tl_debug_platforms.pmtiles"
+            "url": "pmtiles:///map-assets/tl_debug_platforms.pmtiles"
         }
         style["sources"]["transit_debug_stops"] = {
             "type": "vector",
-            "url": "pmtiles:///tl_debug_stops.pmtiles"
+            "url": "pmtiles:///map-assets/tl_debug_stops.pmtiles"
         }
         style["sources"]["transit_debug_bars"] = {
             "type": "vector",
-            "url": "pmtiles:///tl_debug_bars.pmtiles"
+            "url": "pmtiles:///map-assets/tl_debug_bars.pmtiles"
         }
 
     style["layers"].append(build_background_layer(cfg))
@@ -1522,7 +1522,7 @@ def main():
     script_dir = Path(__file__).parent
     parser = argparse.ArgumentParser(description="Generate car-free map style")
     parser.add_argument("-c", "--config", default=script_dir / "config.yaml", help="Config YAML path")
-    parser.add_argument("-o", "--output", default=script_dir / "../static/style.json", help="Output style JSON path")
+    parser.add_argument("-o", "--output", default=script_dir / "../static/map-assets/style.json", help="Output style JSON path")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
