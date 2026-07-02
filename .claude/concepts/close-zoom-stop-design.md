@@ -15,7 +15,7 @@ We have three zoom levels of stop representation. Pill-zoom is finished, far-zoo
 A single transparent yellow polygon per station, sitting behind everything else at this zoom.
 
 - **Shape derivation** — union of the following, then buffered with equal padding and rounded outer corners:
-  - **Rail stations (train + mountain rack rail)**: the actual platform shapes plus the existing debug station/platform geometries.
+  - **Rail stations (train + mountain rack rail)**: the pill-arrows themselves (positioned off the line at the platform) plus the platform's projected extent along the line (the same platform-extent geometry currently emitted as a debug overlay).
   - **All other modes (bus, tram, aerial, funicular, ferry)**: the pill-arrows themselves plus the line segments adjacent to each pill-arrow.
 - **Padding**: equal distance around every pill-arrow and every line section that sits next to a pill-arrow. Initial seed value picked to look right at z17; refine after first render. Scales with zoom on the same curve as the rest of the close-zoom layer.
 - **Outer border**: very round corners.

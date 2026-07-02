@@ -1158,12 +1158,14 @@ def build_station_layers(cfg) -> list:
             },
         })
         # Pill-zoom cluster centroid dot: z14+ so the two layers do not overlap.
+        # Capped at z17 (exclusive) — close-zoom design takes over.
         layers.append({
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
             "source": source,
             "source-layer": "transit_stops",
             "minzoom": 14,
+            "maxzoom": 17,
             "paint": {
                 "circle-color": "#ffffff",
                 "circle-radius": dot_radius_pill_zoom(source_minzoom),
@@ -1225,6 +1227,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "pill"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
@@ -1246,6 +1249,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "connector"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
@@ -1266,6 +1270,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "pill"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
@@ -1282,6 +1287,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "endpoint"],
         "paint": {
             "circle-color": "#ffffff",
@@ -1303,6 +1309,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": PILL_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "connector"],
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
@@ -1384,6 +1391,7 @@ def build_station_layers(cfg) -> list:
         "source": "transit_stop_pills",
         "source-layer": "transit_stop_pills",
         "minzoom": INDICATOR_MINZOOM,
+        "maxzoom": 17,
         "filter": ["==", ["get", "feature_type"], "indicator"],
         "layout": {
             "text-field": "●",
@@ -1398,6 +1406,103 @@ def build_station_layers(cfg) -> list:
         },
         "paint": {
             "text-color": ["get", "color"],
+        }
+    })
+
+    # =========================================================================
+    # Close-zoom (z17+) — see .claude/concepts/close-zoom-stop-design.md
+    # =========================================================================
+    # Hard cut at z16 → z17: pill-zoom / far-zoom stop layers stop at z17
+    # (via their own maxzoom), the close-zoom layers below start at z17.
+    CLOSE_ZOOM_MIN = 17
+
+    # 1. Yellow station backdrop. Rendered as a wide translucent yellow line
+    # over every "backdrop" LineString; overlapping strokes with round caps
+    # merge into a rounded polygon-like shape at typical z17+ zooms.
+    layers.append({
+        "id": "close-zoom-station-backdrop",
+        "type": "line",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": CLOSE_ZOOM_MIN,
+        "filter": ["==", ["get", "feature_type"], "backdrop"],
+        "layout": {"line-cap": "round", "line-join": "round"},
+        "paint": {
+            "line-color": "#ffe566",
+            "line-opacity": 0.4,
+            "line-width": ["interpolate", ["linear"], ["zoom"],
+                17, 30,
+                20, 90,
+            ],
+        }
+    })
+
+    # 2. Pill-arrow casing (white).
+    layers.append({
+        "id": "close-zoom-pill-arrow-casing",
+        "type": "line",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": CLOSE_ZOOM_MIN,
+        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
+        "layout": {"line-cap": "round", "line-join": "round"},
+        "paint": {
+            "line-color": "#ffffff",
+            "line-width": ["interpolate", ["linear"], ["zoom"],
+                17, 2.0,
+                20, 4.0,
+            ],
+        }
+    })
+
+    # 3. Pill-arrow fill (mode color).
+    layers.append({
+        "id": "close-zoom-pill-arrow-fill",
+        "type": "fill",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": CLOSE_ZOOM_MIN,
+        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
+        "paint": {
+            "fill-color": ["get", "color"],
+            "fill-antialias": True,
+        }
+    })
+
+    # 4. Pill-arrow line ref (short label rendered centred, aligned with pill
+    # heading). Uses the "heading_deg" property (map-space bearing, 0 = north).
+    layers.append({
+        "id": "close-zoom-pill-arrow-ref",
+        "type": "symbol",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": CLOSE_ZOOM_MIN,
+        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
+        "layout": {
+            "text-field": ["concat",
+                ["get", "ref"], "  ",
+                ["case",
+                    ["has", "destination"],
+                        ["get", "destination"],
+                        ""],
+            ],
+            "text-font": ["Noto Sans Regular"],
+            "text-size": ["interpolate", ["linear"], ["zoom"],
+                17, 10,
+                20, 16,
+            ],
+            "text-max-width": 8,
+            "text-rotate": ["-", ["get", "heading_deg"], 90],
+            "text-rotation-alignment": "map",
+            "text-pitch-alignment": "map",
+            "text-allow-overlap": True,
+            "text-ignore-placement": True,
+            "symbol-placement": "point",
+        },
+        "paint": {
+            "text-color": "#ffffff",
+            "text-halo-color": ["get", "color"],
+            "text-halo-width": 1.2,
         }
     })
 
@@ -1507,6 +1612,10 @@ def generate_style(cfg) -> dict:
             "transit_stop_pills": {
                 "type": "vector",
                 "url": "pmtiles:///map-assets/tl_stop_pills.pmtiles"
+            },
+            "transit_close_zoom": {
+                "type": "vector",
+                "url": "pmtiles:///map-assets/tl_close_zoom.pmtiles"
             },
         },
         "glyphs": g["glyphs"],

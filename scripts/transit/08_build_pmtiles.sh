@@ -90,6 +90,16 @@ tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
   "$DATA/transit_stop_pills.geojson"
 
 echo ""
+echo "=== Building tl_close_zoom.pmtiles ==="
+# minzoom z15 so features exist a couple of zoom levels below the z17
+# activation point (used by tippecanoe's simplification headroom).
+# maxzoom z18 like the other high-zoom transit bundles.
+tippecanoe -o "$STATIC/tl_close_zoom.pmtiles" --force \
+  -z18 -Z15 -d18 --layer transit_close_zoom \
+  --drop-densest-as-needed \
+  "$DATA/transit_close_zoom.geojson"
+
+echo ""
 echo "=== Building tl_debug_platforms.pmtiles ==="
 tippecanoe -o "$STATIC/tl_debug_platforms.pmtiles" --force \
   -z14 -Z5 -d18 --layer transit_debug_platforms \

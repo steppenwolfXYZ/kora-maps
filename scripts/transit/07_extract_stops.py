@@ -59,6 +59,7 @@ OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
 OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
 OUT_DEBUG_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
 OUT_DEBUG_BARS      = ROOT / "data" / "transit" / "transit_debug_bars.geojson"
+OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 
 # Diagnostic state populated by coordinate_dots_global_stab:
 # - _DIAG_BARS: list of (endpoint1, endpoint2) tuples for each max-stab bar.
@@ -3103,6 +3104,351 @@ def write_debug_bars() -> None:
         "features": feats,
     }, ensure_ascii=False))
     print(f"  Debug bars: {len(feats):,} features → {OUT_DEBUG_BARS}")
+
+
+# =============================================================================
+# Close-zoom stop design (z17+): pill-arrows + yellow station backdrop
+# See .claude/concepts/close-zoom-stop-design.md
+# =============================================================================
+
+# First-draft seed values. Refine after visual review.
+CLOSE_ZOOM_PILL_LENGTH_M       = 25.0   # pill arrow total length (chevron tip to back)
+CLOSE_ZOOM_PILL_WIDTH_M        = 8.0    # pill arrow across-body width
+CLOSE_ZOOM_STACK_GAP_M         = 2.0    # gap between adjacent pill-arrows in a stack
+CLOSE_ZOOM_RAIL_PERP_OFFSET_M  = 8.0    # perpendicular offset off the rail track
+CLOSE_ZOOM_ONTRACK_OFFSET_M    = 8.0    # offset when non-rail pill sits on track
+CLOSE_ZOOM_ONTRACK_THRESH_M    = 1.5    # "on line" threshold to trigger offset
+CLOSE_ZOOM_BACKDROP_HALF_W_M   = 6.0    # visual pad meters that get buffered → yellow
+
+# Modes handled by the rail-style placement (centered on platform axis).
+CLOSE_ZOOM_RAIL_MODES = {"train"}
+CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS = {"rack", "rebucketed_rail"}
+
+# Modes that get a close-zoom pill-arrow at all.
+CLOSE_ZOOM_PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus", "ferry"}
+
+
+def _build_pill_arrow_polygon(cx, cy, heading_rad, length_m, width_m,
+                               cos_lat_cached=None, n_arc=6):
+    """Return list of (lon, lat) vertices for a pill-arrow polygon.
+
+    (cx, cy):      pill centre in lon/lat
+    heading_rad:   direction the chevron tip points (math angle, ccw from east)
+    length_m:      total length (chevron tip to back-round-tip)
+    width_m:       across-body width
+    n_arc:         arc segments for the rounded back (higher = smoother)
+
+    Shape in local frame (x = forward, y = left):
+        chevron tip → top-right corner → top-left corner → rounded back
+        → bottom-left corner → bottom-right corner → back to tip
+
+    Ring winding is counter-clockwise, tip closes the ring.
+    """
+    L, W = length_m, width_m
+    R = W / 2.0
+    verts_local = []
+    # Chevron tip
+    verts_local.append((L / 2.0, 0.0))
+    # Top-right corner (chevron neck)
+    verts_local.append((L / 2.0 - R, +W / 2.0))
+    # Top-left corner (back-arc start)
+    verts_local.append((-L / 2.0 + R, +W / 2.0))
+    # Rounded back — CCW arc θ ∈ (π/2, 3π/2)
+    for i in range(1, n_arc):
+        theta = pi / 2.0 + i * pi / n_arc
+        verts_local.append((-L / 2.0 + R + R * cos(theta),
+                             R * sin(theta)))
+    # Bottom-left corner (back-arc end)
+    verts_local.append((-L / 2.0 + R, -W / 2.0))
+    # Bottom-right corner (chevron neck)
+    verts_local.append((L / 2.0 - R, -W / 2.0))
+
+    cos_h = cos(heading_rad)
+    sin_h = sin(heading_rad)
+    if cos_lat_cached is None:
+        cos_lat_cached = cos(radians(cy))
+    m_per_deg_lat = 111320.0
+    m_per_deg_lon = 111320.0 * cos_lat_cached
+    if m_per_deg_lon <= 0.0:
+        m_per_deg_lon = 111320.0
+
+    ring = []
+    for x, y in verts_local:
+        xr = x * cos_h - y * sin_h
+        yr = x * sin_h + y * cos_h
+        lon = cx + xr / m_per_deg_lon
+        lat = cy + yr / m_per_deg_lat
+        ring.append([lon, lat])
+    ring.append(ring[0])  # close
+    return ring
+
+
+def _tangent_at_stop(stop_lon, stop_lat, polyline):
+    """Return the (dx, dy) unit vector of the polyline tangent at the
+    projection of (stop_lon, stop_lat) onto the polyline, expressed in
+    local metres (east-positive x, north-positive y). Returns None if the
+    polyline is degenerate.
+    """
+    if len(polyline) < 2:
+        return None
+    dists = _cum_dist_m(polyline)
+    if dists[-1] <= 0:
+        return None
+    t = _project_meters(stop_lon, stop_lat, polyline, dists)
+    tan = _directional_tangent_at(polyline, dists, t, window_m=20.0)
+    if tan is None:
+        return None
+    # tan is (dlon/m, dlat/m). Convert to metric unit vector.
+    cos_lat = cos(radians(stop_lat))
+    if cos_lat <= 0.0:
+        cos_lat = 1.0
+    dx = tan[0] * 111320.0 * cos_lat
+    dy = tan[1] * 111320.0
+    n = sqrt(dx * dx + dy * dy)
+    if n <= 0.0:
+        return None
+    return (dx / n, dy / n)
+
+
+def _local_offset_to_lonlat(cx, cy, dx_m, dy_m, cos_lat_cached=None):
+    if cos_lat_cached is None:
+        cos_lat_cached = cos(radians(cy))
+    m_per_deg_lat = 111320.0
+    m_per_deg_lon = 111320.0 * cos_lat_cached
+    if m_per_deg_lon <= 0.0:
+        m_per_deg_lon = 111320.0
+    return (cx + dx_m / m_per_deg_lon, cy + dy_m / m_per_deg_lat)
+
+
+def _line_distance_m(px, py, polyline):
+    """Perpendicular distance in metres from (px, py) to nearest point on polyline."""
+    if len(polyline) < 2:
+        return float("inf")
+    dists = _cum_dist_m(polyline)
+    if dists[-1] <= 0:
+        return float("inf")
+    t = _project_meters(px, py, polyline, dists)
+    sx, sy = _interp_at(polyline, dists, t)
+    cos_lat = cos(radians(py))
+    if cos_lat <= 0.0:
+        cos_lat = 1.0
+    dx_m = (px - sx) * 111320.0 * cos_lat
+    dy_m = (py - sy) * 111320.0
+    return sqrt(dx_m * dx_m + dy_m * dy_m)
+
+
+def write_close_zoom_features(line_stops: dict, line_lookup: dict,
+                                stop_meta: dict, skip_first_oids: set,
+                                skip_last_oids: set) -> None:
+    """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
+    line-segments that together produce the close-zoom (z17+) station
+    representation. See .claude/concepts/close-zoom-stop-design.md.
+
+    Every emitted feature carries `feature_type` ∈ {"pill_arrow",
+    "backdrop"} to gate style layers.
+    """
+    # Per-line origin/destination display names.
+    line_dest = {}
+    for oid, entry in line_stops.items():
+        triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
+        if not triplets or len(triplets[-1]) < 3:
+            continue
+        last_sid = triplets[-1][2]
+        line_dest[str(oid)] = stop_meta.get(last_sid, {}).get("name", "")
+
+    # Build per-stop visit list: {stop_id: [ {osm_id, line info, stop coords,
+    # local tangent, direction_key}, ... ]}. Each entry is one (line-feature,
+    # stop) visit; we sort per stop_id by speed_kmh desc and stack from there.
+    per_stop_visits: dict = defaultdict(list)
+    for osm_id_raw, ls_entry in line_stops.items():
+        osm_id = str(osm_id_raw)
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id_raw) or line_lookup.get(osm_id)
+        if not line:
+            continue
+        mode = line["mode"]
+        mo = line.get("mountain_origin")
+        if mode not in CLOSE_ZOOM_PILL_MODES and not (
+                mode == "mountain" and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS):
+            continue
+        polyline = flatten_coords(line["coords"])
+        if len(polyline) < 2:
+            continue
+        skip_first_here = osm_id in skip_first_oids
+        skip_last_here = osm_id in skip_last_oids
+        last_idx = len(triplets) - 1
+        for idx, trip in enumerate(triplets):
+            if len(trip) < 3:
+                continue
+            if idx == 0 and skip_first_here:
+                continue
+            if idx == last_idx and skip_last_here:
+                continue
+            stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
+            if not sid:
+                continue
+            slon, slat = snap_to_line(stop_lon, stop_lat, polyline)
+            tan = _tangent_at_stop(stop_lon, stop_lat, polyline)
+            if tan is None:
+                continue
+            per_stop_visits[sid].append({
+                "osm_id":       osm_id,
+                "mode":         mode,
+                "mountain_origin": mo,
+                "color":        line["color"],
+                "ref":          line.get("ref", ""),
+                "speed_kmh":    line.get("speed_kmh") or 0.0,
+                "slon":         slon,
+                "slat":         slat,
+                "tangent":      tan,
+                "polyline":     polyline,
+                "destination":  line_dest.get(osm_id, ""),
+            })
+
+    features = []
+    L = CLOSE_ZOOM_PILL_LENGTH_M
+    W = CLOSE_ZOOM_PILL_WIDTH_M
+    stack_step = L + CLOSE_ZOOM_STACK_GAP_M
+    perp_rail = CLOSE_ZOOM_RAIL_PERP_OFFSET_M
+    perp_ontrack = CLOSE_ZOOM_ONTRACK_OFFSET_M
+    ontrack_thresh = CLOSE_ZOOM_ONTRACK_THRESH_M
+
+    for sid, visits in per_stop_visits.items():
+        visits.sort(key=lambda v: (-(v.get("speed_kmh") or 0.0), v["osm_id"]))
+        for stack_idx, v in enumerate(visits):
+            mode = v["mode"]
+            mo = v.get("mountain_origin")
+            slon, slat = v["slon"], v["slat"]
+            tdx, tdy = v["tangent"]
+            cos_lat = cos(radians(slat))
+            heading = atan2(tdy, tdx)  # forward direction of travel
+            # Right-perpendicular (in direction of travel): rotate tangent −90°.
+            #   (tdx, tdy) → (tdy, -tdx)
+            right_dx, right_dy = tdy, -tdx
+
+            is_rail_like = (
+                mode in CLOSE_ZOOM_RAIL_MODES
+                or (mode == "mountain" and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS)
+            )
+
+            if is_rail_like:
+                # Anchor sits perpendicular to the track (fixed offset), then
+                # stack forward along the direction of travel — fastest at
+                # stack_idx=0 sits closest to the platform middle in the
+                # direction of travel; slower lines queue upstream behind it.
+                # Full outward-fan bidirectional split is deferred.
+                perp_off = perp_rail
+                stack_offset = -stack_idx * stack_step  # slower behind (upstream)
+                # Actually: fastest in front → put stack_idx=0 furthest FORWARD.
+                # We want stack_idx=0 at max forward, higher indices behind.
+                # Center the whole stack around the platform middle:
+                stack_offset = (len(visits) - 1 - 2 * stack_idx) * (stack_step / 2.0)
+                anchor_dx = stack_offset * tdx + perp_off * right_dx
+                anchor_dy = stack_offset * tdy + perp_off * right_dy
+            else:
+                # Non-rail: anchor at stop point. Fastest closest to stop, slower
+                # queue upstream (opposite to direction of travel). If the pill
+                # would sit on the line itself, offset perpendicular by
+                # perp_ontrack.
+                on_line = _line_distance_m(slon, slat, v["polyline"]) < ontrack_thresh
+                perp_off = perp_ontrack if on_line else 0.0
+                # Fastest in front = stack_idx 0 anchored at stop; slower queue
+                # upstream. Pill CENTRE offset: stack_idx=0 → centred one L/2
+                # behind the anchor so the chevron tip lands at the stop.
+                fwd_off = -(L / 2.0) - stack_idx * stack_step
+                anchor_dx = fwd_off * tdx + perp_off * right_dx
+                anchor_dy = fwd_off * tdy + perp_off * right_dy
+
+            cx, cy = _local_offset_to_lonlat(slon, slat, anchor_dx, anchor_dy, cos_lat)
+            poly_ring = _build_pill_arrow_polygon(cx, cy, heading, L, W, cos_lat)
+
+            heading_deg_map = (90.0 - degrees(heading)) % 360.0
+
+            features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+                "geometry": {"type": "Polygon", "coordinates": [poly_ring]},
+                "properties": {
+                    "feature_type":    "pill_arrow",
+                    "mode":            mode,
+                    "mountain_origin": mo or "",
+                    "color":           v["color"],
+                    "ref":             v["ref"],
+                    "destination":     v["destination"],
+                    "speed_kmh":       v["speed_kmh"],
+                    "stop_id":         sid,
+                    "osm_id":          v["osm_id"],
+                    "heading_deg":     round(heading_deg_map, 2),
+                    "stack_idx":       stack_idx,
+                },
+            })
+
+            # Backdrop: a short segment along the pill's forward axis,
+            # centred on the pill centre and spanning the pill length. When
+            # rendered as a wide yellow stroke this fuses adjacent pill-arrows
+            # and adjacent line geometry into the yellow station shape.
+            back_len = L
+            back_dx = (back_len / 2.0) * tdx
+            back_dy = (back_len / 2.0) * tdy
+            b1 = _local_offset_to_lonlat(cx, cy, -back_dx, -back_dy, cos_lat)
+            b2 = _local_offset_to_lonlat(cx, cy, +back_dx, +back_dy, cos_lat)
+            features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+                "geometry": {"type": "LineString",
+                             "coordinates": [list(b1), list(b2)]},
+                "properties": {
+                    "feature_type": "backdrop",
+                    "backdrop_kind": "pill",
+                    "stop_id":       sid,
+                },
+            })
+
+            # Rail backdrop: connect pill to the on-line platform extent, so
+            # the yellow shape spans from the platform onto the track.
+            if is_rail_like:
+                # Segment from pill centre back to the snapped stop position
+                # on the line — perpendicular to the track.
+                b3 = _local_offset_to_lonlat(cx, cy, -perp_rail * right_dx,
+                                              -perp_rail * right_dy, cos_lat)
+                features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+                    "geometry": {"type": "LineString",
+                                 "coordinates": [list(cx_cy) for cx_cy in [(cx, cy), b3]]},
+                    "properties": {
+                        "feature_type":  "backdrop",
+                        "backdrop_kind": "rail_connector",
+                        "stop_id":       sid,
+                    },
+                })
+                # Along-line platform extent: short segment along the track
+                # spanning the pill's along-track length.
+                on_line_pt = (slon, slat)
+                pl_dx = (L / 2.0) * tdx
+                pl_dy = (L / 2.0) * tdy
+                p1 = _local_offset_to_lonlat(*on_line_pt, -pl_dx, -pl_dy, cos_lat)
+                p2 = _local_offset_to_lonlat(*on_line_pt, +pl_dx, +pl_dy, cos_lat)
+                features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+                    "geometry": {"type": "LineString",
+                                 "coordinates": [list(p1), list(p2)]},
+                    "properties": {
+                        "feature_type":  "backdrop",
+                        "backdrop_kind": "rail_platform_track",
+                        "stop_id":       sid,
+                    },
+                })
+
+    OUT_CLOSE_ZOOM.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": features,
+    }, ensure_ascii=False))
+    pill_count = sum(1 for f in features if f["properties"]["feature_type"] == "pill_arrow")
+    back_count = sum(1 for f in features if f["properties"]["feature_type"] == "backdrop")
+    print(f"  Close-zoom: {pill_count:,} pill-arrows, {back_count:,} backdrop segments "
+          f"→ {OUT_CLOSE_ZOOM}")
 
 
 # =============================================================================
@@ -7136,6 +7482,10 @@ def main():
     pill_features.extend(ferry_pill_features)
     pill_features.extend(indicator_features)
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
+
+    print("Emitting close-zoom stop features...")
+    write_close_zoom_features(line_stops, line_lookup, stop_meta,
+                                skip_first_oids, skip_last_oids)
 
     # Summary
     mode_counts: dict = defaultdict(int)
