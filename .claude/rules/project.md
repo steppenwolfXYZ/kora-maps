@@ -2,12 +2,12 @@
 
 Car-Free Map — a MapLibre GL map style focused on walkability and car-free travel.
 
-**Stack:** SvelteKit frontend (`src/routes/`), MapLibre GL JS (`src/routes/Map.svelte`), style generated from `scripts/config.yaml` → `scripts/generate_style.py` → `static/style.json`.
+**Stack:** SvelteKit frontend (`src/routes/`), MapLibre GL JS (`src/routes/Map.svelte`), style generated from `scripts/config.yaml` → `scripts/generate_style.py` → `static/map-assets/style.json`.
 
 **Key files:**
 - `scripts/config.yaml` — all design tokens (colors, opacities, zoom levels, widths). Edit here, rerun generator, reload browser.
 - `scripts/generate_style.py` — generates MapLibre style JSON from config. All layer logic lives here.
-- `static/style.json` — generated output, committed and served directly.
+- `static/map-assets/style.json` — generated output, gitignored, served at `/map-assets/style.json`. Alongside it live the `tl_*.pmtiles` tile bundles, referenced from the style as `pmtiles:///map-assets/tl_*.pmtiles`.
 
 **Tile source:** OpenMapTiles schema (`openmaptiles` source, OpenFreeMap tiles).
 

@@ -1179,8 +1179,8 @@ def build_station_layers(cfg) -> list:
 
     def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.8],
-            14,            ["*", ["get", "width_base"], 2.0],
+            PILL_MINZOOM,  ["*", ["get", "width_base"], 1.2],
+            14,            ["*", ["get", "width_base"], 3.0],
             20,            ["*", ["get", "width_base"], 12.0],
         ]
 
@@ -1202,8 +1202,8 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "line-color": "#000000",
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.8], 2.0],
-                14,            ["+", ["*", ["get", "width_base"], 2.0], 2.0],
+                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 1.2], 2.0],
+                14,            ["+", ["*", ["get", "width_base"], 3.0], 2.0],
                 20,            ["+", ["*", ["get", "width_base"], 12.0], 2.0],
             ],
         }
@@ -1254,8 +1254,8 @@ def build_station_layers(cfg) -> list:
         "paint": {
             "circle-color": "#ffffff",
             "circle-radius": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM, ["*", ["get", "width_base"], 0.4],
-                14,           ["*", ["get", "width_base"], 1.0],
+                PILL_MINZOOM, ["*", ["get", "width_base"], 0.6],
+                14,           ["*", ["get", "width_base"], 1.5],
                 20,           ["*", ["get", "width_base"], 6.0],
             ],
             "circle-stroke-color": "#000000",
@@ -1331,11 +1331,11 @@ def build_station_layers(cfg) -> list:
     # Default text-size curve is anchored at z13 → 4.5 and z20 → 36; the
     # z14 anchor is the linearly interpolated value (9.0). The
     # parent-diameter curve must match `pill_disc_width()` above
-    # (PILL_MINZOOM=13 → 0.8, z14 → 2.0, z20 → 12.0) since the indicator
+    # (PILL_MINZOOM=13 → 1.2, z14 → 3.0, z20 → 12.0) since the indicator
     # row sits inside that diameter.
     text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        13, _indicator_size_at_zoom(4.5,  0.8),
-        14, _indicator_size_at_zoom(9.0,  2.0),
+        13, _indicator_size_at_zoom(4.5,  1.2),
+        14, _indicator_size_at_zoom(9.0,  3.0),
         20, _indicator_size_at_zoom(36.0, 12.0),
     ]
 

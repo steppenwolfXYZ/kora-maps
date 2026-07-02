@@ -2,9 +2,9 @@
 
 ## Problem
 
-At far zoom (below z12 for train, below z13 for every other mode) every station cluster shows one **centroid dot**, currently positioned at the arithmetic mean of cluster members' positions after the medium-zoom pill-placement algorithm has run. Those positions reflect platform geometry, so at a bus-tram crossroads the dot lands at the platform-group middle rather than at the junction itself — even though at far zoom the marker's job is to identify the service node, not the platform group. A bus dot can sit 50–100 m to the side of the intersection where its lines actually meet.
+At far zoom (below z14, uniform across every mode) every station cluster shows one **centroid dot**, currently positioned at the arithmetic mean of cluster members' positions after the medium-zoom pill-placement algorithm has run. Those positions reflect platform geometry, so at a bus-tram crossroads the dot lands at the platform-group middle rather than at the junction itself — even though at far zoom the marker's job is to identify the service node, not the platform group. A bus dot can sit 50–100 m to the side of the intersection where its lines actually meet.
 
-A separate ferry inconsistency: at z11–z12 ferry clusters currently render their **medium-zoom endpoint disc** (drawn through the pill paint stack) as the de-facto far-zoom marker. Every other non-train mode uses a low-zoom dot feature for this purpose at the same zooms. The two paint stacks have different visual weight, so the ferry disc reads inconsistently next to neighbouring modes' far-zoom dots.
+A separate ferry inconsistency: below z14 ferry clusters currently render their **medium-zoom endpoint disc** (drawn through the pill paint stack) as the de-facto far-zoom marker. Every other non-train mode uses a low-zoom dot feature for this purpose at the same zooms. The two paint stacks have different visual weight, so the ferry disc reads inconsistently next to neighbouring modes' far-zoom dots.
 
 ## Requirements
 
@@ -78,11 +78,11 @@ The ferry far-zoom marker must be a low-zoom dot rendered through the same paint
 Concretely:
 
 - Ferry clusters emit a far-zoom dot positioned per the intersection-search rule above. In practice this equals the canonical pier position the existing ferry code computes.
-- The ferry endpoint disc's appear-zoom moves to **z13** so the medium-zoom ferry view begins at the same zoom as every other non-train pill mode. At z11–z12 only the far-zoom dot is visible for ferry, matching every other non-train mode at the same zoom range.
+- The ferry endpoint disc's appear-zoom moves to **z14** so the medium-zoom ferry view begins at the same zoom as every other pill mode. Below z14 only the far-zoom dot is visible for ferry, matching every other mode at the same zoom range.
 
 ### No-jump invariant
 
-Across the dot-to-pill switch zoom (z12 for train, z13 otherwise) the far-zoom dot's position must not produce a perceptible jump:
+Across the dot-to-pill switch zoom (uniform z14 for every mode) the far-zoom dot's position must not produce a perceptible jump:
 
 - When the rule returns a pill centre or disc position, that point is part of the medium-zoom geometry — the marker visually resolves into the pill / disc, not jumps.
 - When the rule falls all the way through to the existing-centroid fallback, the medium-zoom view at that cluster has no pill and no disc to take over (this case is exactly the pill-collapse path). The dot remains at the same centroid coordinate above and below `mz`.

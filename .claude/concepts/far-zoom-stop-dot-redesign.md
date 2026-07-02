@@ -2,7 +2,7 @@
 
 ## Problem
 
-At zooms 7–12.99 the map shows stops as plain dots (pills take over from z13). Today every dot is the same size — a busy interchange and a once-an-hour halt look identical. The dot should encode how important the stop is, so that hubs read as hubs at a glance.
+At zooms 7–13.99 the map shows stops as plain dots (pills take over from z14). Today every dot is the same size — a busy interchange and a once-an-hour halt look identical. The dot should encode how important the stop is, so that hubs read as hubs at a glance.
 
 ## Requirements
 
@@ -77,7 +77,7 @@ Example outcomes: 2 terminating mountain lines → 1.8 → **Mountain**. 3 termi
 
 ### Size per tier
 
-Each tier has a fixed diameter (in CSS px) at z7 and z13; linear-in-zoom interpolation between them, clamped past either edge. Within a tier there is **no per-stop size variation** — the continuous score decides which tier a stop lands in; once the tier is fixed the size follows the tier table.
+Each tier has a fixed diameter (in CSS px) at z7 and z13; linear-in-zoom interpolation between them, clamped past either edge (so z13 to z13.99 all render the tier's z13 diameter). Within a tier there is **no per-stop size variation** — the continuous score decides which tier a stop lands in; once the tier is fixed the size follows the tier table.
 
 | Tier | z7 diameter | z13 diameter |
 |---|---|---|
@@ -121,9 +121,9 @@ Stops that visually touch at a given far-zoom level merge into one. The classic 
 
 **Direction.** Mode hierarchy gates the absorber side first: `train` outranks `mountain` / `ferry`, which outrank everything else. A dot can absorb a neighbour only if its mode rank is greater than or equal to the neighbour's. Within the same rank, the higher-score dot absorbs the lower; tiebreak on equal scores by `stop_id`. Across ranks, a strictly higher-ranked dot absorbs a lower-ranked neighbour even when the lower-ranked one has the higher raw score — so a busy bus interchange next to a small train station gets absorbed into the train station, never the other way around. The absorbed dot disappears at the zoom level where it was touched, and at every lower zoom. Its lines merge into the absorber's per-zoom popup listing (`lines_json_zN`) so a click on the absorber shows what is currently rolled up at that zoom. The absorber's **score, tier, and size are not affected** — dedup is a visual cleanup, not a rescoring.
 
-**Absorber identity is preserved.** The absorber keeps its own mode, color, position, and `stop_id`. Absorbed dots are removed from the far-zoom output entirely — they do not influence the absorber's appearance beyond the score. At z13+ they still render via the pill-zoom layer (dedup does not touch z13+).
+**Absorber identity is preserved.** The absorber keeps its own mode, color, position, and `stop_id`. Absorbed dots are removed from the far-zoom output entirely — they do not influence the absorber's appearance beyond the score. At z14+ they still render via the pill-zoom layer (dedup does not touch z14+).
 
-**Per-zoom scope.** Dedup runs per integer zoom level z ∈ {7, 8, …, 12}, descending from z12 → z7. Disc radii grow with zoom but real-world distance per pixel grows faster, so absorption is **monotonic downward**: once a dot is eaten at zoom z, it stays eaten at every z′ < z.
+**Per-zoom scope.** Dedup runs per integer zoom level z ∈ {7, 8, …, 13}, descending from z13 → z7. Disc radii grow with zoom but real-world distance per pixel grows faster, so absorption is **monotonic downward**: once a dot is eaten at zoom z, it stays eaten at every z′ < z.
 
 At each zoom z (in descending order):
 1. Compute the current disc radius for every surviving stop at z from its current tier's z-diameter (linear interpolate between the tier's z7 and z13 anchors).
@@ -131,11 +131,11 @@ At each zoom z (in descending order):
 3. Iterate within zoom z until stable — an absorber that grew by eating one neighbour may now reach another.
 4. Carry the surviving set forward to z−1.
 
-**Per-zoom lines on the feature.** A stop that absorbs neighbours at low zoom but not at high zoom accumulates a different line set at each zoom. The feature stores per-zoom line lists (`lines_json_z7`..`lines_json_z12`) so the popup shows exactly what is currently rolled up at the rendered zoom. A stop with no absorption carries the same list at every zoom.
+**Per-zoom lines on the feature.** A stop that absorbs neighbours at low zoom but not at high zoom accumulates a different line set at each zoom. The feature stores per-zoom line lists (`lines_json_z7`..`lines_json_z13`) so the popup shows exactly what is currently rolled up at the rendered zoom. A stop with no absorption carries the same list at every zoom.
 
-**Per-zoom score (debug-only).** The pipeline continues to write `score_z7`..`score_z12` per surviving stop for now, but nothing renders from them — tier and size are fixed at the base state and do not respond to per-zoom score changes. These properties are kept temporarily for debugging (they make it easy to inspect how much a hub absorbed at each zoom) and should be dropped once the tier system is stable. TODO: remove `score_zN` from the feature output.
+**Per-zoom score (debug-only).** The pipeline continues to write `score_z7`..`score_z13` per surviving stop for now, but nothing renders from them — tier and size are fixed at the base state and do not respond to per-zoom score changes. These properties are kept temporarily for debugging (they make it easy to inspect how much a hub absorbed at each zoom) and should be dropped once the tier system is stable. TODO: remove `score_zN` from the feature output.
 
-**Visibility encoding.** Absorbed-everywhere stops get `tippecanoe.minzoom: 13` — they disappear from the far-zoom layer entirely and only render via the pill-zoom layer. Partially-absorbed stops (absorbed at z ≤ k, surviving at z > k) get `tippecanoe.minzoom: k + 1`.
+**Visibility encoding.** Absorbed-everywhere stops get `tippecanoe.minzoom: 14` — they disappear from the far-zoom layer entirely and only render via the pill-zoom layer. Partially-absorbed stops (absorbed at z ≤ k, surviving at z > k) get `tippecanoe.minzoom: k + 1`.
 
 **New config block:**
 
@@ -148,5 +148,5 @@ stop_dot_dedup:
 
 - **Visibility logic is unchanged.** Which stops appear at which zoom (e.g. train-only between z7 and z9, all stops from z10) is governed by the existing thresholds and stays as is. The redesign affects only the size of dots that are already drawn, and the dedup pass which removes overlapping ones.
 - **Stop eligibility is unchanged.** Dots are drawn only for stops served by at least one emitted (drawn) line. The score is computed only over those stops, and percentile defaults are taken from that same set.
-- **Dedup is far-zoom only.** Absorption operates at z7–z12. At z13+ all stops render via the pill-zoom layer, regardless of whether they were absorbed at far-zoom.
-- **z13+ rendering belongs to the pill design concept and is not touched here.** The far-zoom redesign owns z7–z12.99 exclusively. The two ranges are drawn as two separate style layers reading the same `transit_stops` PMTiles source: the new far-zoom layer (`-far` suffix, tier-driven sizes, `maxzoom: 13`) and the existing dot layer (unchanged expression, now `minzoom: 13` so the two layers do not overlap). At z13+ the rendering is identical to before this redesign.
+- **Dedup is far-zoom only.** Absorption operates at z7–z13. At z14+ all stops render via the pill-zoom layer, regardless of whether they were absorbed at far-zoom.
+- **z14+ rendering belongs to the pill design concept and is not touched here.** The far-zoom redesign owns z7–z13.99 exclusively. The two ranges are drawn as two separate style layers reading the same `transit_stops` PMTiles source: the far-zoom layer (`-far` suffix, tier-driven sizes, `maxzoom: 14`) and the pill-zoom layer (`minzoom: 14`) so the two layers do not overlap.

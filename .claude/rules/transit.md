@@ -13,7 +13,7 @@ Numbered 1–8 in `scripts/transit/`; the rebuild script runs them in order.
 - `05_run_pfaedle.py` — runs pfaedle in Docker (`carfree-pfaedle:latest`, built from `scripts/transit/pfaedle/Dockerfile`) → `data/gtfs_routed/` with `shapes.txt`.
 - `06_score_and_match.py` — loads `data/gtfs_routed/`, runs trip-grouping inside `stream_stop_times`, dedupes per `(line_key, agency_id, trip_group_id, merged_stop_set, direction_key)` so each direction emits its own feature (applies to all buckets including ferry / aerial / funicular mountain since the EXEMPT_DIRECTION_KEY removal — see `remove-exempt-direction-key.md`), then writes `data/transit/transit_lines.geojson` + `line_stops.json`.
 - `07_extract_stops.py` — builds stop dots, pills and connectors → `transit_stops.geojson`, `transit_stop_pills.geojson`. Also loads `data/osm/rail_ways.geojson` and rewrites `transit_lines.geojson` with terminal train polylines extended via the OSM rail walk (see pill-rendering concept § "Missing-range fill (rail only)").
-- `08_build_pmtiles.sh` — tippecanoe → `static/tl_*.pmtiles`.
+- `08_build_pmtiles.sh` — tippecanoe → `static/map-assets/tl_*.pmtiles`.
 
 `scripts/generate_style.py` is not numbered — it lives outside `scripts/transit/` because it generates the whole MapLibre style, not transit-only — and runs as a fixed step inside step 7 of the rebuild flow (between extract-stops and pmtiles).
 
