@@ -82,31 +82,31 @@ Each tier has a fixed diameter (in CSS px) at z7 and z13; linear-in-zoom interpo
 | Tier | z7 diameter | z13 diameter |
 |---|---|---|
 | Major train station | 7 | 18 |
-| Main train station | 6 | 15 |
-| Important train station | 5 | 12 |
-| Train station | 4 | 9 |
-| Small train station | 3 | 7 |
+| Main train station | 6.5 | 15 |
+| Important train station | 6 | 13 |
+| Train station | 5 | 11 |
+| Small train station | 4 | 9 |
 | Major mountain stop | 3 | 6 |
 | Mountain stop | 2.5 | 5 |
 | Ferry stop | 3 | 6 |
-| Major tram/bus hub | 5 | 12 |
-| Big tram/bus station | 3.5 | 8 |
+| Major tram/bus hub | 4.5 | 10 |
+| Big tram/bus station | 3.5 | 7.5 |
 | Normal tram/bus stop | 2.5 | 5.5 |
 | Small bus stop | 2 | 4 |
 
 Anchors that fix the rest of the table:
 
 - **Major train station** at `7 / 18` = the current cap. Country-top hubs (Zürich HB / Bern HB / Basel SBB) hit this.
-- **Small train station** at `3 / 7` = what a score-50 stop rendered as under the old linear score-to-size mapping.
+- **Small train station** at `4 / 9` = the lowest train tier, deliberately sized just above **Major tram/bus hub** so any train stop is visually heavier than any pure bus interchange.
 - **Small bus stop** at `2 / 4` = the current lower floor.
-- **Major tram/bus hub** at `5 / 12` = same size as Important train station, deliberate parity: the two tiers are visually equivalent, differentiated by color / casing later.
+- **Major tram/bus hub** at `4.5 / 10` = sized just below **Small train station**; a busy multi-line bus interchange is prominent but never outranks a real train stop.
 - **Major mountain stop** and **Ferry stop** both at `3 / 6` — deliberately identical size; differentiation is by mode symbol, not diameter.
 
 ### Implementation split
 
-- **Pipeline (step 06)** computes each dot's tier from `stop_score` + base line composition (per the tier assignment rules) and writes it as a single `tier` property on the feature. Line composition inputs (`has_ic`, `has_train`, `mountain_line_count`, …) are consumed at tier-computation time; they do not need to be exposed as feature properties. Tier is fixed here — the step 07 dedup pass does not re-assign it.
+- **Pipeline (step 06)** computes each UIC's tier from `stop_score` + base line composition (per the tier assignment rules) and writes it into `stop_size_scores.json` (`{uic: {"score": …, "tier": …}}`). Step 07 reads that file and stamps `stop_tier` onto every dot feature alongside `stop_score`. The property is named `stop_tier` (not `tier`) to avoid collision with the pre-existing `tier` from `stop_salience`. Line composition inputs (`has_ic`, `has_train`, `mountain_line_count`, …) are consumed at tier-computation time; they do not need to be exposed as feature properties. Tier is fixed here — the step 07 dedup pass does not re-assign it.
 - **Pipeline (step 07 — dedup)** merges absorbed dots into their absorber for popup listing only (`lines_json_zN`) and hides absorbed features via `tippecanoe.minzoom`. It does not modify tier or score.
-- **Style (`generate_style.py`)** holds the tier → diameter mapping and the per-zoom interpolation. A single `match ["get", "tier"] …` expression on `circle-radius` looks up the right z7 / z13 corners; the outer `interpolate zoom` blends between them.
+- **Style (`generate_style.py`)** holds the tier → diameter mapping and the per-zoom interpolation. A single `match ["get", "stop_tier"] …` expression on `circle-radius` looks up the right z7 / z13 corners; the outer `interpolate zoom` blends between them.
 
 Consequences:
 

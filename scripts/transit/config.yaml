@@ -157,6 +157,8 @@ pill_design_bands:
     curve_min_radius_m: 15
     dedup_tol_m: 5.0            # ~0.75 px at z14; collapse sub-pixel twins
     pill_simplify_tol_m: 4.0    # flatten sub-pixel detours in the polyline
+    pill_min_d_px: 4.5          # for pill-diameter-aware kink removal
+    pill_slope_px_per_wb: 2.3
   B:
     zoom_min: 15
     zoom_max: 15
@@ -164,7 +166,9 @@ pill_design_bands:
     pill_gap_angled_m: 30
     curve_min_radius_m: 10
     dedup_tol_m: 2.5
-    pill_simplify_tol_m: 2.0
+    pill_simplify_tol_m: 3.0
+    pill_min_d_px: 6.0
+    pill_slope_px_per_wb: 3.2
   C:
     zoom_min: 16
     zoom_max: null
@@ -173,6 +177,8 @@ pill_design_bands:
     curve_min_radius_m: 5
     dedup_tol_m: 0.5
     pill_simplify_tol_m: 0.1
+    pill_min_d_px: 8.0
+    pill_slope_px_per_wb: 4.4
 
 # ── Ferry stop rendering ────────────────────────────────────────────────────
 # Ferries don't get pills (no platform). Instead each parent_station emits:

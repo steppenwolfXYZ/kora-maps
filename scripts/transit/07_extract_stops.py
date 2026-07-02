@@ -102,19 +102,32 @@ for _band_id in ("A", "B", "C"):
         "pill_gap_angled_m": float(_band_cfg.get("pill_gap_angled_m", {"A": 60, "B": 30, "C": 15}[_band_id])),
         "curve_min_radius_m": float(_band_cfg.get("curve_min_radius_m", {"A": 8, "B": 6, "C": 5}[_band_id])),
         "dedup_tol_m": float(_band_cfg.get("dedup_tol_m", {"A": 5.0, "B": 2.5, "C": 0.5}[_band_id])),
-        "pill_simplify_tol_m": float(_band_cfg.get("pill_simplify_tol_m", {"A": 4.0, "B": 2.0, "C": 0.1}[_band_id])),
+        "pill_simplify_tol_m": float(_band_cfg.get("pill_simplify_tol_m", {"A": 4.0, "B": 3.0, "C": 0.1}[_band_id])),
+        "pill_min_d_px": float(_band_cfg.get("pill_min_d_px", {"A": 4.5, "B": 6.0, "C": 8.0}[_band_id])),
+        "pill_slope_px_per_wb": float(_band_cfg.get("pill_slope_px_per_wb", {"A": 2.3, "B": 3.2, "C": 4.4}[_band_id])),
     }
 del _PILL_DESIGN_BANDS_RAW
+
+PILL_WB_HIGH = 5.0   # matches WB_HIGH in generate_style.py — dataset's max width_base
+
+# Per-cluster pill diameter (in metres, at the current band's target zoom),
+# set by `make_pill_features` right after it computes the cluster's max_wb
+# and cos_lat. Read by `_tangent_candidates` (deep inside `_curve_connector`)
+# so its internal `_simplify_pill_lonlat` call uses the same kink-aware
+# simplification as the pill emission. Reset per (cluster, band) pair.
+_CURRENT_CLUSTER_PILL_DIAMETER_M = None
 
 def _set_pill_design_band(band_cfg):
     """Swap the module-level constants that pill construction consults.
 
     `PILL_GAP_STRAIGHT_M`, `PILL_GAP_ANGLED_M`, `CURVE_MIN_RADIUS_M`,
-    `DEDUP_TOL_M`, and `PILL_SIMPLIFY_TOL_M` are read by
-    `_should_split_at_gap`, `_dedup_stop_positions`,
-    `_simplify_pill_lonlat`, and the connector-curving helpers. Setting
-    them here before a `make_pill_features()` call runs that call under
-    the given band's thresholds + radius.
+    `DEDUP_TOL_M`, `PILL_SIMPLIFY_TOL_M`, and the pill-sizing
+    coefficients (`PILL_MIN_D_PX`, `PILL_SLOPE_PX_PER_WB`,
+    `PILL_BAND_ZOOM`) are read by `_should_split_at_gap`,
+    `_dedup_stop_positions`, `_simplify_pill_lonlat`, the
+    connector-curving helpers, and `_remove_pill_kinks`. Setting them
+    here before a `make_pill_features()` call runs that call under the
+    given band's thresholds + radius.
     """
     g = globals()
     g["PILL_GAP_STRAIGHT_M"] = band_cfg["pill_gap_straight_m"]
@@ -122,6 +135,9 @@ def _set_pill_design_band(band_cfg):
     g["CURVE_MIN_RADIUS_M"] = band_cfg["curve_min_radius_m"]
     g["DEDUP_TOL_M"] = band_cfg["dedup_tol_m"]
     g["PILL_SIMPLIFY_TOL_M"] = band_cfg["pill_simplify_tol_m"]
+    g["PILL_MIN_D_PX"] = band_cfg["pill_min_d_px"]
+    g["PILL_SLOPE_PX_PER_WB"] = band_cfg["pill_slope_px_per_wb"]
+    g["PILL_BAND_ZOOM"] = band_cfg["zoom_min"]
 
 def _tag_band_features(feats, band_id, band_cfg):
     """Stamp `design_band` and per-feature tippecanoe zoom limits."""
@@ -4002,16 +4018,79 @@ def _polyline_length_xy(poly):
     return total
 
 
-def _simplify_pill_lonlat(coords, cos_lat, tol_m=None):
-    """Iterative Douglas-Peucker simplification on a pill polyline. An
-    interior vertex is kept only if its perpendicular deviation from the
-    chord through the nearest retained neighbours exceeds `tol_m`. Works in
-    metric (x, y) space anchored at the first vertex so the tolerance is in
-    true metres. Bar-placed dots fall onto a single line in design, so
-    sub-line-width deviations are float / leftover-dot noise; genuine
-    bent pills deviate well above `tol_m` and survive. `tol_m=None` reads
-    the current band's `PILL_SIMPLIFY_TOL_M` at call time (band-swapped
-    via `_set_pill_design_band`).
+def _remove_pill_kinks(coords, cos_lat, pill_diameter_m):
+    """Post-DP cleanup: iteratively drop any interior vertex where both
+    adjacent arm segments are shorter than the pill's rendered diameter
+    at the current band's target zoom.
+
+    Rationale: when an interior arm is shorter than the pill's width,
+    the arm can't extend beyond the round join at the corner — it's
+    buried inside the pill body — so the vertex can only produce a
+    "kink" bulge, never a real corner. A real L- or T-shape platform
+    has arms much longer than the pill diameter, so its corner is
+    preserved. No angle threshold: a shallow bend with sub-diameter
+    arms is still a bulge; a steep bend with long arms is still a
+    corner.
+
+    `pill_diameter_m` is the pill's estimated diameter in metres for
+    the current cluster and band (computed from `PILL_MIN_D_PX`,
+    `PILL_SLOPE_PX_PER_WB`, `PILL_BAND_ZOOM`, cluster wb, and cluster
+    cos_lat). Convergence: at most one vertex dropped per pass; loop
+    until stable.
+    """
+    if len(coords) <= 2 or pill_diameter_m is None or pill_diameter_m <= 0:
+        return list(coords)
+    result = list(coords)
+    while len(result) >= 3:
+        lon0 = result[0][0]
+        lat0 = result[0][1]
+        xy = [_lonlat_to_xy(p[0], p[1], lon0, lat0, cos_lat) for p in result]
+        drop_i = -1
+        for i in range(1, len(xy) - 1):
+            dx_in = xy[i][0] - xy[i-1][0]
+            dy_in = xy[i][1] - xy[i-1][1]
+            dx_out = xy[i+1][0] - xy[i][0]
+            dy_out = xy[i+1][1] - xy[i][1]
+            arm_in = sqrt(dx_in * dx_in + dy_in * dy_in)
+            arm_out = sqrt(dx_out * dx_out + dy_out * dy_out)
+            if arm_in < pill_diameter_m and arm_out < pill_diameter_m:
+                drop_i = i
+                break
+        if drop_i < 0:
+            break
+        result = result[:drop_i] + result[drop_i+1:]
+    return result
+
+
+def _current_pill_diameter_m(wb, cos_lat):
+    """Pill diameter estimate in metres for a stop with width_base `wb`
+    at the currently-set band's target zoom (via `_set_pill_design_band`)
+    and the given cluster latitude. Formula matches the paint expression
+    in `generate_style.py`: `min_d + slope × min(wb, WB_HIGH)`, then
+    convert pixels to metres using the standard Web-Mercator m/px."""
+    wb_clamped = min(wb, PILL_WB_HIGH)
+    d_px = PILL_MIN_D_PX + PILL_SLOPE_PX_PER_WB * wb_clamped
+    # Web-Mercator m/px at latitude with MapLibre's 512-px tiles.
+    # Matches `apply_stop_dedup`'s `m_per_px` (EARTH_M = 40075016.7).
+    mp_per_px = (40075016.7 * cos_lat) / (512.0 * (2 ** PILL_BAND_ZOOM))
+    return d_px * mp_per_px
+
+
+def _simplify_pill_lonlat(coords, cos_lat, tol_m=None, pill_diameter_m=None):
+    """Douglas-Peucker simplification of a pill polyline followed by
+    kink removal. DP drops interior vertices whose perpendicular
+    deviation from the chord through kept neighbours is below `tol_m`;
+    `_remove_pill_kinks` then drops any surviving vertex whose adjacent
+    arm segments are both shorter than `pill_diameter_m` (the pill's
+    rendered diameter at the current band's target zoom). Works in
+    metric (x, y) space anchored at the first vertex so the tolerance
+    is in true metres.
+
+    `tol_m=None` reads the current band's `PILL_SIMPLIFY_TOL_M` at call
+    time (band-swapped via `_set_pill_design_band`).
+    `pill_diameter_m=None` disables kink removal — callers that don't
+    know the pill diameter (e.g. `_tangent_candidates` when the wb
+    isn't threaded through) get DP-only simplification.
     """
     if tol_m is None:
         tol_m = PILL_SIMPLIFY_TOL_M
@@ -4056,7 +4135,10 @@ def _simplify_pill_lonlat(coords, cos_lat, tol_m=None):
             keep[max_i] = True
             stack.append((s, max_i))
             stack.append((max_i, e))
-    return [coords[i] for i in range(n) if keep[i]]
+    simplified = [coords[i] for i in range(n) if keep[i]]
+    if pill_diameter_m is None:
+        return simplified
+    return _remove_pill_kinks(simplified, cos_lat, pill_diameter_m)
 
 
 def _dedup_polyline_xy(poly, tol_m=DEDUP_TOL_M):
@@ -4136,7 +4218,8 @@ def _tangent_candidates(group, endpoint, lon0, lat0, cos_lat):
     # the raw NN-path group. The path can zig-zag through pill vertices (e.g.
     # disc → middle → south → north at Bethlehem Kirche), which makes the raw
     # next-vertex point into the pill body instead of away from it.
-    simplified = _simplify_pill_lonlat(group, cos_lat)
+    simplified = _simplify_pill_lonlat(group, cos_lat,
+                                       pill_diameter_m=_CURRENT_CLUSTER_PILL_DIAMETER_M)
     if len(simplified) < 2:
         return []
 
@@ -4876,11 +4959,6 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     positions = _dedup_stop_positions(cluster_stops)
     n = len(positions)
 
-    if n < 2:
-        return []
-
-    path = nearest_neighbor_path(positions)
-
     stop_props = {
         "color":          color,
         "mode":           mode,
@@ -4908,6 +4986,26 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
             "properties": {**stop_props, "feature_type": "endpoint"},
         }
 
+    if n == 0:
+        return []
+
+    if n == 1:
+        # Multi-platform cluster whose dots all collapsed under the current
+        # band's DEDUP_TOL_M. Emit a single endpoint disc at the surviving
+        # position so the station stays visible; without this, wide-band
+        # tolerances (band A's 5 m) silently drop 3-5 m rail-terminal pills
+        # like Basel Dreispitz at z14.
+        pos = positions[0]
+        feats = [make_endpoint(pos)]
+        if line_lookup is not None:
+            feats.extend(build_indicator_features(
+                cluster_stops, pos[0], pos[1], line_lookup,
+                parent_width_base=stop_props["width_base"],
+                parent_mode=stop_props["mode"]))
+        return feats
+
+    path = nearest_neighbor_path(positions)
+
     # Find every gap that splits the NN-path into separate pills.
     # _should_split_at_gap applies the per-shape threshold (PILL_GAP_STRAIGHT_M
     # for dead-straight in-line continuations or gaps along a bar's
@@ -4918,6 +5016,13 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
     mean_lat = sum(p[1] for p in positions) / len(positions)
     cluster_cos_lat = cos(radians(mean_lat))
+    # Pill diameter estimate in metres at the current band's target zoom,
+    # for length-aware kink removal in `_simplify_pill_lonlat`. Same
+    # value for every group in this cluster (they share max_wb). Also
+    # stashed on the module-level context so `_tangent_candidates` (deep
+    # inside `_curve_connector`) can pass it into its own simplification.
+    pill_diameter_m = _current_pill_diameter_m(max_wb, cluster_cos_lat)
+    globals()["_CURRENT_CLUSTER_PILL_DIAMETER_M"] = pill_diameter_m
     split_indices = [
         k for k in range(len(path) - 1)
         if _should_split_at_gap(
@@ -4935,7 +5040,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         return out
 
     if not split_indices:
-        simp = _simplify_pill_lonlat(path, cluster_cos_lat)
+        simp = _simplify_pill_lonlat(path, cluster_cos_lat, pill_diameter_m=pill_diameter_m)
         (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
         feats = [make_feat(simp, "pill")]
         if line_lookup is not None:
@@ -4963,7 +5068,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     mid_attach_tangents = {}  # (lon, lat) → outer_tangent_xy for _curve_connector
     for grp in groups:
         if len(grp) >= 2:
-            simp = _simplify_pill_lonlat(grp, cluster_cos_lat)
+            simp = _simplify_pill_lonlat(grp, cluster_cos_lat, pill_diameter_m=pill_diameter_m)
             feats.append(make_feat(simp, "pill"))
             if line_lookup is not None:
                 (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
@@ -5059,6 +5164,59 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         if ri != rj:
             parent[ri] = rj
             chosen_edges.append((ca, cb, i, j))
+
+    # Overshoot rescan. For each chosen edge, compute the actual curved
+    # connector length (with disc tangents free). If it exceeds
+    # OVERSHOOT_FACTOR × chord length, the chord metric picked a
+    # candidate whose forced arc geometry produces a large loop — rescan
+    # the (i, j) group pair's candidates using curved length as the
+    # metric, replacing (ca, cb) if a strictly shorter curve is found.
+    # Topology is unchanged (edge still connects the same group pair).
+    # See pill-rendering.md § "Curved-length overshoot rescan".
+    OVERSHOOT_FACTOR = 1.5
+
+    def _connector_length_m(coords):
+        tot = 0.0
+        for k in range(1, len(coords)):
+            tot += haversine_km(coords[k-1][0], coords[k-1][1],
+                                coords[k][0],   coords[k][1]) * 1000.0
+        return tot
+
+    def _curve_length_for(p1, p2, i, j):
+        coords, _, _, _ = _curve_connector(
+            p1, p2, groups[i], groups[j], cluster_cos_lat, mode,
+            anchor_a=None, anchor_b=None,
+            mid_attach_tangents=mid_attach_tangents)
+        return _connector_length_m(coords)
+
+    rescanned = []
+    for edge in chosen_edges:
+        ca, cb, i, j = edge
+        chord_m = haversine_km(ca[0], ca[1], cb[0], cb[1]) * 1000.0
+        if chord_m == 0.0:
+            rescanned.append(edge)
+            continue
+        curved_m = _curve_length_for(ca, cb, i, j)
+        if curved_m <= OVERSHOOT_FACTOR * chord_m:
+            rescanned.append(edge)
+            continue
+        # Overshoot — rescan (i, j) candidates by curved length.
+        ea = _candidates(i)
+        eb = _candidates(j)
+        best_len = curved_m
+        best_pair = (ca, cb)
+        for p1 in ea:
+            for p2 in eb:
+                if not _outer_side_ok(p1, p2) or not _outer_side_ok(p2, p1):
+                    continue
+                if p1 == ca and p2 == cb:
+                    continue
+                l = _curve_length_for(p1, p2, i, j)
+                if l < best_len:
+                    best_len = l
+                    best_pair = (p1, p2)
+        rescanned.append((best_pair[0], best_pair[1], i, j))
+    chosen_edges = rescanned
 
     # Sort chosen edges by disc-anchoring priority. Pill ↔ pill connectors
     # touch no disc state and run first in any order. Disc-incident connectors

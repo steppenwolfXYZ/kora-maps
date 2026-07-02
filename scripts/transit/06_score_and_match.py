@@ -1542,13 +1542,10 @@ def main():
                 for tg in members:
                     if tg in kept_set:
                         continue
-                    # Mountain bucket and CC-train carve-out: same exemption
-                    # the freq-score gate applies. Never drop these via the
-                    # rare-group filter.
+                    # Mountain bucket: same exemption the freq-score gate
+                    # applies. Never drop mountain via the rare-group filter.
                     line_key_drop = tg[0]
-                    if line_key_drop[2] == "mountain" or (
-                        line_key_drop[0] == "CC" and line_key_drop[2] == "train"
-                    ):
+                    if line_key_drop[2] == "mountain":
                         continue
                     rare_group_dropped.add(tg)
                 break
@@ -1748,9 +1745,7 @@ def main():
         raw_annual = seasonal.get("annual") \
             or {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
         worst_f = worst_freq_map.get(mode_approx, 0.0)
-        exempt = _freq_gate_exempt(bucket, tg_mountain_origin.get(tg_key)) or (
-            line_key[0] == "CC" and bucket == "train"
-        )
+        exempt = _freq_gate_exempt(bucket, tg_mountain_origin.get(tg_key))
         is_rescued_group = bool(regional_bus_rescued.get(tg_key))
         passed = False
         if exempt:
@@ -2798,7 +2793,7 @@ def main():
 
     # gtfs_unmatched: trip groups with no emitted feature (after grouping).
     # Drawable tg_keys come straight from drawable_groups — that dict has
-    # already passed the freq-score / mountain / CC exemptions used during
+    # already passed the freq-score / mountain exemptions used during
     # emission, so the difference against matched_tg_keys is exactly the set
     # of trip groups that we thought we should draw but pfaedle never shaped
     # (or whose polylines collapsed to < 2 coords).
@@ -2855,9 +2850,7 @@ def main():
             group_reason = "rare_group_dropped"
         elif tg_key in tg_keys_all_short_active:
             group_reason = "short_active_period"
-        elif _freq_gate_exempt(bucket, mountain_origin) or (
-            short_name == "CC" and bucket == "train"
-        ):
+        elif _freq_gate_exempt(bucket, mountain_origin):
             # These should have been drawable; only here if neither emitted
             # nor low-freq. Real shouldn't-happen branch — record it.
             group_reason = "unknown_skipped"
