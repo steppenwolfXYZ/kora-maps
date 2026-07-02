@@ -373,8 +373,8 @@ stop_dot_sizing:
     major_mountain:   { z7: 3,   z13: 6 }
     mountain_stop:    { z7: 2.5, z13: 5 }
     ferry_stop:       { z7: 3,   z13: 6 }
-    major_hub:        { z7: 5,   z13: 12 }
-    big_station:      { z7: 3.5, z13: 8 }
+    major_hub:        { z7: 4.5,   z13: 10 }
+    big_station:      { z7: 3.5, z13: 7.5 }
     normal_stop:      { z7: 2.5, z13: 5.5 }
     small_bus:        { z7: 2,   z13: 4 }
 
