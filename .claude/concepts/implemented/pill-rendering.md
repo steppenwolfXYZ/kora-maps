@@ -109,30 +109,45 @@ Leftovers whose `platform_code` is missing or non-numeric AND whose extent doesn
 
 ### Pills and connectors
 
-Pill geometry is built from the placed dots by the existing greedy nearest-neighbour path through every dot in the cluster. Each NN-path segment is a candidate gap; whether it actually splits the path into separate pills depends on the gap's length and the shape of the surrounding NN-path. Connectors only ever attach at a pill's two endpoint dots — the first and last dot of the NN-path group, never an interior dot. The MST candidate set per group is therefore the two ends (or the sole point for a singleton). The generous straight-threshold `PILL_GAP_STRAIGHT_M` (50 m absolute, zoom-invariant) applies when **either** of these holds:
+Pill geometry is built from the placed dots by the existing greedy nearest-neighbour path through every dot in the cluster. Each NN-path segment is a candidate gap; whether it actually splits the path into separate pills depends on the gap's length and the shape of the surrounding NN-path. Connectors attach at a pill's two endpoint dots (the first and last dot of the NN-path group) and, additionally, at any **interior vertex where the pill polyline bends by at least 60°** — see § Mid-pill connector attach below. The MST candidate set per group is therefore the two ends plus any qualifying mid-attach vertices (or the sole point for a singleton). The generous straight-threshold `PILL_GAP_STRAIGHT_M` applies when **either** of these holds:
 
 - From each gap-adjacent dot, the NN-path continues **dead straight** in line with the gap direction for at least the gap length, walking into the rest of the path away from the gap on each side (no angle tolerance — any bend at all stops the walk).
 - **Perpendicular-platforms rule:** both gap-adjacent dots have at least one platform whose **local** extent tangent — averaged over `TANGENT_WINDOW_M` (10 m) at the dot position, same definition the perpendicular-sweep uses — is 90° ± `perp_platform_tol_deg` (config, currently 5°) from the gap direction. The full-extent chord must not be used: on long curved approaches (Bern HB western platforms) it deviates several degrees from the local direction, and the bar was placed using the local tangent, so the perp test must too. The gap lies along a bar's perpendicular axis, so the bar continues through the gap even when the surrounding NN-path is too sparse to prove it via the walk. When multiple platforms stack at the same dot, only **one** needs to satisfy the perpendicularity check.
 
 If neither holds, the tighter `PILL_GAP_ANGLED_M` threshold applies — the gap is an angled or T-junction connector. The gap splits the NN path iff its length exceeds the chosen threshold. Both thresholds are absolute metres — they do **not** scale with `width_base` (which controls pill / disc width, not gap length).
 
-**`PILL_GAP_ANGLED_M` is zoom-band-tagged.** At low pill zooms the pill body is thick relative to the natural gap between angled dots, so the tight 15 m threshold produces "smushed" disc-connector-disc constructions where the connector is shorter than the disc diameter. To avoid that, three variants of the pill / connector layout are baked at pipeline time under different `PILL_GAP_ANGLED_M` values, and paint layers filter by the feature's `design_band` tag:
+**Both thresholds are zoom-band-tagged.** At low pill zooms the pill body is thick relative to the natural gap between dots, so the base thresholds (used at z16+) produce "smushed" disc-connector-disc constructions where the connector is shorter than the disc diameter. To avoid that, three variants of the pill / connector layout are baked at pipeline time under different `PILL_GAP_STRAIGHT_M` + `PILL_GAP_ANGLED_M` values, tagged onto each emitted feature as `design_band`:
 
-| Band | Zoom | `PILL_GAP_ANGLED_M` |
-|---|---|---:|
-| A | z14 | 45 m |
-| B | z15 | 25 m |
-| C | z16+ | 15 m (current) |
+| Band | Zoom | `PILL_GAP_STRAIGHT_M` | `PILL_GAP_ANGLED_M` |
+|---|---|---:|---:|
+| A | z14 | 100 m | 60 m |
+| B | z15 | 75 m | 30 m |
+| C | z16+ | 50 m (current) | 15 m (current) |
 
-Rationale for the numbers: 15 m at z16 renders at roughly 9 px at Swiss latitudes; the z15 / z14 values are chosen so that the same 9-px count corresponds to slightly less (25 m instead of 30 m at z15; 45 m instead of 60 m at z14) — the pixel-equivalence rule is loosened at low zoom because a pure translation of the threshold would fuse platforms that a viewer still expects to see as separate.
+Rationale: 15 m at z16 renders at ~9 px at Swiss latitudes; the same 9-px count would be 30 m at z15 and 60 m at z14. The angled thresholds are set exactly to that pixel-equivalent count. The straight thresholds don't scale linearly with zoom — a pure pixel-equivalent translation would fuse platforms that a viewer still expects to see as separate — so they grow more gently (100 m at z14 rather than the ~200 m pixel-equivalent).
 
-`PILL_GAP_STRAIGHT_M` is not band-tagged (yet). The dead-straight walk and perpendicular-platforms rules already exclude the "smushed disc" case at any threshold in that range; if a real regression shows up during tuning, `PILL_GAP_STRAIGHT_M` may join the tagging scheme, but the current band split targets `_ANGLED` only.
-
-Everything else about pill construction — NN-path, group split, MST connector selection, dedup, curving — is identical across the three variants; the only pipeline-time input that differs per variant is `PILL_GAP_ANGLED_M` (and `CURVE_MIN_RADIUS_M`, per § Connector curving).
+Everything else about pill construction — NN-path, group split, MST connector selection, dedup, curving — is identical across the three variants; the only pipeline-time inputs that differ per variant are `PILL_GAP_STRAIGHT_M`, `PILL_GAP_ANGLED_M`, and `CURVE_MIN_RADIUS_M` (per § Connector curving).
 
 Each post-split group of ≥ 2 dots is emitted as a pill; a singleton group is emitted as an `endpoint` Point feature whose dedicated style layer is drawn between connector-casing and connector-fill, so the connector's fill covers the disc's stroke at the junction rather than the connector's casing crossing the disc's outline. Singletons also participate in MST connector selection. MST connectors (Kruskal's) join all groups — pill groups and singleton (endpoint) groups alike — at their nearest dot pair.
 
-Before the NN-path runs, stop positions within **`DEDUP_TOL_M` (0.5 m)** of each other are collapsed to a single position. Without this collapse, two stops that the bar coordination snaps onto the same logical spot — but which the `cos_lat` scale / unscale in `coordinate_dots_global_stab` leaves at slightly different float values — survive as two unique positions and emit as a 2-point near-degenerate pill. MapLibre cannot render such a pill reliably: with both vertices effectively coincident, the line direction vector is zero and the round caps that should form the disc fail to draw. The tolerance is set small enough to leave legitimate 3–6 m short pills intact and large enough to catch the observed twin spreads (sub-µm float noise up to ~11 cm bar-coordination drift).
+**Mid-pill connector attach.** For any pill polyline, every interior vertex `v` whose adjacent segments bend by at least 60° from straight (`cos(bend_angle) ≤ 0.5`, i.e. the two segments at `v` make an interior angle of ≤ 120°) is added to that pill's MST candidate set alongside the endpoint dots. This lets a connector arrive at the sharp corner of an L- or T-shaped pill directly, instead of forcing a longer detour to one of the endpoint dots. Rule details:
+
+- **Attach point** is exactly the vertex `v` — no sliding along the polyline. Simplest to reason about, and the vertex is where the pill's centerline actually turns, so the connector meets the visual corner.
+- **Outer normal only.** The connector's tangent at `v` is the outward-pointing bisector of the corner (`-normalize(u_v_prev + u_v_next)` in cluster-xy space, where `u_v_prev` and `u_v_next` are unit vectors from `v` to its polyline neighbours). This is the analog of the axial tangent at a pill endpoint. No perpendicular alternatives — the outer normal is the only sensible tangent at a corner.
+- **Outer-side gate.** A mid-attach vertex `v` is only eligible for a specific pair `(v, other)` if the direction from `v` to `other` lies within 90° of the outer normal (`dot(outer_normal, other − v) > 0`). This keeps the connector on the **outer side** of the corner, matching the visual expectation and avoiding connectors that would have to detour inward around the pill body.
+- **Competes on length.** Mid-attach and endpoint candidates go through the same MST length metric — the shortest edge (or the one producing the shortest curved connector after `_curve_connector` runs) wins. Applied at every zoom band; it materially affects z14 (band A) most since that's where wide pills over short LineStrings produced the "smushed" corners.
+
+If every candidate pair between two groups fails the outer-side gate (very rare; endpoints always pass), the MST falls back to endpoint-only candidates for that pair.
+
+Before the NN-path runs, stop positions within `DEDUP_TOL_M` of each other are collapsed to a single position. Without this collapse, two stops that the bar coordination snaps onto the same logical spot — but which the `cos_lat` scale / unscale in `coordinate_dots_global_stab` leaves at slightly different float values — survive as two unique positions and emit as a 2-point near-degenerate pill. MapLibre cannot render such a pill reliably: with both vertices effectively coincident, the line direction vector is zero and the round caps that should form the disc fail to draw.
+
+**`DEDUP_TOL_M` is zoom-band-tagged.** At low pill zooms multiple metres of ground distance still map to a single pixel, so two dots that are 3–5 m apart (well above the C-band tolerance) render on top of each other with a sub-pixel end-leg that produces a spurious "second cap" bulge — the visual defect seen at Bern Weltpostverein at band A. Raising the tolerance at low zoom collapses these sub-pixel twins before they reach the LineString:
+
+| Band | Zoom | `DEDUP_TOL_M` | approx pixel size (Swiss lat) |
+|---|---|---:|---:|
+| A | z14 | 5.0 m | ~0.75 px |
+| B | z15 | 2.5 m | ~0.75 px |
+| C | z16+ | 0.5 m | ~0.3 px (current) |
 
 The same `DEDUP_TOL_M` tolerance also governs **per-position dot dedup at the dot-emission stage**: at single-platform multi-line halts (e.g. Guarda with R15 + RE4), `coordinate_dots_global_stab` correctly snaps every cluster member to the same physical platform position, but the multi-line dot-emission loop iterates `cluster` directly and would emit one feature per member. Members with different `width_base` then render as concentric circles in the data-driven `circle-radius` layer. Members within `DEDUP_TOL_M` of each other are therefore grouped into one feature per unique placed position, with `dominant_line` applied per group (max `width_base`, dominant mode's darkest color) — same policy as the cluster-centroid dot.
 
@@ -142,44 +157,36 @@ Stop-related features — stop dots, pill bodies, connectors, endpoint discs —
 
 All borders / casings are **constant in pixels** and do not scale with zoom.
 
-**Sizes are derived from the line width.** Let `line_zoom_curve(z, wb)` be the pixel width a transit line of width_base `wb` renders at at zoom `z` (its existing `width_base`-driven curve, unchanged). The stop family scales as a multiplier of that curve, evaluated at an `effective_wb` that includes the low-zoom minimum-size floor described below:
+**Sizes come from a per-zoom design range; line width positions each stop within the range.** Each stop-family element (pill body, dot, endpoint disc, connector, casing rim, indicator) has a designed `min_d(z)` and `max_d(z)`. `min_d(z)` is the pill diameter at wb=0; `max_d(z)` is the diameter at the top of the actual dataset range. Diameter is linear in `width_base`, clamped at the top by `WB_HIGH = 5.0` — the dataset's true max (largest `line_width.max` across modes in `scripts/transit/config.yaml`, currently `train.max = 5.0`). Because no real line ever exceeds `WB_HIGH`, the clamp is a design guard that never fires in practice; it just guarantees the top of the range is reached exactly at wb=5.
 
-- **Dot, endpoint-disc, and pill diameter:** `m(z) × line_zoom_curve(z, effective_wb)`.
-- **Connector width:** `0.75 × line_zoom_curve(z, effective_wb)` at every zoom — narrower than the line so the connector reads as subordinate to the stops at both ends.
+`d(z, wb) = min_d(z) + (max_d(z) - min_d(z)) × min(wb, WB_HIGH) / WB_HIGH`
 
-The **stop multiplier** `m(z)` steps down from low to high zoom, matching the three pill design variants A / B / C (see § Pills and connectors and § Connector curving):
+Equivalent form used in the paint expressions:
 
-| Zoom | m(z) | Design variant |
-|---|---:|---|
-| z14 | 5.0 | A |
-| z15 | 4.0 | B |
-| z16 | 3.0 | C |
-| z17+ | 3.0 (until `close-zoom-stop-design.md` replaces the pill layers) | C |
+`d(z, wb) = min_d(z) + slope(z) × min(wb, WB_HIGH)` where `slope(z) = (max_d(z) - min_d(z)) / WB_HIGH`.
 
-Between the anchor zooms `m(z)` interpolates linearly (so z14.5 = 4.5, z15.5 = 3.5). Past z16, `m(z)` holds at 3.0 — pill paint layers stay uncapped for now (no explicit `maxzoom`) so pills remain inspectable above z17 until the close-zoom design is wired in. The z14/z15 numbers are deliberately generous because at those zooms the natural line width is small — a 1.5×-line stop would sit near the pixel grid and be hard to read; 5× at z14 gives a legible stop over a legible line. The hierarchy `connector < line < dot/pill` is fixed at every zoom.
+**Pill / dot / endpoint-disc diameter anchors.** `min_d` grows with zoom (4.5 / 6 / 8 / 14) so thin-line stops stay proportional to the zoom level's overall pill size — at close zoom a 4-px stop next to a 36-px stop reads as an unbalanced range. `max_d(z14)` = 16 px sits close to (but slightly below) the far-zoom tier's largest linearly-extrapolated diameter at z13.99 (Major train station ≈ 19.8 px) — the ~4 px handoff step is deliberate, keeping the far-zoom "big station" moment while the pill takes over cleanly. `max_d(z17)` = 36 px sits about 20 % below the value the original `m × line_curve × wb` formulation produced for wb=5 at that zoom. `min_d(z17)` = 14 px is the compression step: the wb=0.7 (thinnest actual bus/tram) pill at z17 is 17 px — noticeably visible without being lost next to a wb=5 train stop.
 
-The transit line itself keeps its raw `width_base` — only the stop family consumes `effective_wb`. The floor exists to keep stops visible on thin lines, not to fatten the line.
+| Zoom | `min_d` | `max_d` | `slope` |
+|------|---:|---:|---:|
+| z14 | 4.5 | 16 | 2.3 |
+| z15 | 6 | 22 | 3.2 |
+| z16 | 8 | 30 | 4.4 |
+| z17+ | 14 | 36 | 4.4 |
 
-**Minimum stop size at low zoom.** At low pill zooms the natural pill diameter for a thin-line stop collapses below the pixel grid. To keep every stop visible without erasing the visual difference between thin and slightly-less-thin lines, the stop family consumes:
+Above z17 the anchors hold at the z17 values — pill paint layers stay uncapped for now (no explicit `maxzoom`) so pills remain inspectable past z17 until the close-zoom design (`close-zoom-stop-design.md`) is wired in. The design bands A / B / C (see § Pills and connectors and § Connector curving) tag pipeline-baked features by zoom; the paint curve is one continuous expression across all zooms, so the tag doesn't gate the paint sizing — only which pill / connector geometry is present in the tile at each zoom.
 
-`effective_wb = width_base + wb_floor(z)`
+**Casing** (black rim under fill): `casing_width(z, wb) = d(z, wb) + 2 px`. Constant 2 px rim (1 px per side) at every zoom.
 
-`wb_floor(z)` is a zoom-decaying additive term:
+**Endpoint disc radius** = `d(z, wb) / 2`.
 
-| Zoom | `wb_floor(z)` |
-|---|---:|
-| z14 | 0.8 |
-| z15 | 0.5 |
-| z16 | 0.2 |
-| z17+ | 0.0 |
+**Connector width** = `d(z, wb) / 3`. Subordinate to the stops at both ends, preserving the `connector < line < dot/pill` hierarchy from the old formulation. Connector casing = connector fill + 2 px.
 
-Between anchor zooms `wb_floor(z)` interpolates linearly (z14.5 = 0.65, z16.5 = 0.1). At and above z17 the floor is 0 — a pill at close zoom is naturally large enough that thin lines are already visible without help.
+**Indicator size** (color-group dots inside the pill / disc) is bounded by `parent_diameter × INDICATOR_INNER_MARGIN`, where `parent_diameter` uses the same `min_d(z) + slope(z) × min(parent_wb, WB_HIGH)` curve as the pill. The default text-size ceiling stays anchored at z14 = 9 px and z20 = 36 px; intermediate anchors are linearly interpolated (z15 = 13.5, z16 = 18, z17 = 22.5).
 
-At z14 with `m = 5.0`, the smallest lines (`width_base` near 0) yield a pill of `5.0 × line_zoom_curve(z14, 0.8) ≈ 4 px`, meeting the minimum-visibility target. Because the floor is additive, a `width_base = 2.0` line at the same zoom yields `5.0 × line_zoom_curve(z14, 2.8)` — visibly larger than the thin-line stop, so the freq-driven identity is preserved. A hard `max(width_base, floor)` clamp would collapse both to the same size and erase that gap.
+**Line width stays raw.** Only the stop family reads from the range-mapped curve; the transit line itself keeps its `width_base` unchanged. The stop range being decoupled from the line's zoom curve prevents runaway growth on the fattest lines (the pain point the old `m × line_curve × wb` formulation produced at z14) while keeping line width the primary input into stop size (via the `slope × wb` term).
 
-The floor applies uniformly to dot / endpoint disc / pill body / indicator sizing AND to connector width — the entire stop family stays proportional through the floor.
-
-**Scope.** `wb_floor(z)` is the only stop-width minimum mechanism. The per-mode hard clamp described in `pill-zoom-stop-tweaks.md` § "Width-base floor for stop sizing" (`stop_width_base_floor` in `scripts/transit/config.yaml`, `_clamp_stop_wb` in step 07) is removed as part of this concept — the additive per-zoom floor covers the visibility problem the per-mode clamp existed to solve, without erasing within-mode variability. The far-zoom dot layer is unaffected: it uses tier-based diameters (`far-zoom-stop-dot-redesign.md`), not `width_base`.
+**Scope.** The per-mode hard clamp described in `pill-zoom-stop-tweaks.md` § "Width-base floor for stop sizing" (`stop_width_base_floor` in `scripts/transit/config.yaml`, `_clamp_stop_wb` in step 07) is removed. `min_d(z)` in the paint expression is the sole minimum-visibility mechanism now. The far-zoom dot layer is unaffected: it uses tier-based diameters (`far-zoom-stop-dot-redesign.md`), not `width_base`.
 
 **Painter order.** Casing layers for dots, pills, and connectors render first, forming one unified black outer rim wherever the stop construct overlaps itself; the white fill layers render on top. The mechanism — wider casing beneath narrower fill, with all casings drawn before any fill — is unchanged from the prior white-on-coloured scheme; only the constants invert.
 
@@ -211,8 +218,8 @@ For pill ↔ pill, tangent selection is joint across the two ends — when a per
 
 | Band | Zoom | `CURVE_MIN_RADIUS_M` |
 |---|---|---:|
-| A | z14 | 8 m |
-| B | z15 | 6 m |
+| A | z14 | 15 m |
+| B | z15 | 10 m |
 | C | z16+ | 5 m (current) |
 
 At low pill zooms the disc / pill diameter is large relative to a 5 m arc, so the arc looks pinched between the two features it connects. Growing the minimum radius by a small amount at z14/z15 keeps the curve visibly a curve. `CURVE_MAX_RADIUS_M_BY_MODE` is unchanged across bands.
@@ -265,7 +272,15 @@ Clusters with no disc (pure pill ↔ pill connectors) skip the comparison and ru
 
 ### Pill polyline simplification
 
-After the NN-path through the placed dots produces a pill polyline, each pill is passed through Douglas-Peucker simplification with tolerance `PILL_SIMPLIFY_TOL_M` (`0.1 m`). Bar-placed dots are intended to be exactly collinear on the perpendicular bar, but float-precision noise (`cos_lat` scale/unscale round-trips) and the occasional off-bar leftover dot landing in the same pill polyline leave interior vertices a few centimetres off the chord. The deviation is sub-line-width at native zoom but visible as a wobble or kink at z18+. Vertices whose perpendicular distance from the chord through their kept neighbours is below `PILL_SIMPLIFY_TOL_M` are dropped; pills with genuine multi-bar / curved-track geometry deviate well above the tolerance and survive intact.
+After the NN-path through the placed dots produces a pill polyline, each pill is passed through Douglas-Peucker simplification with tolerance `PILL_SIMPLIFY_TOL_M`. Bar-placed dots are intended to be exactly collinear on the perpendicular bar, but float-precision noise (`cos_lat` scale/unscale round-trips) and the occasional off-bar leftover dot landing in the same pill polyline leave interior vertices a few centimetres off the chord. The deviation is sub-line-width at native zoom but visible as a wobble or kink at z18+. Vertices whose perpendicular distance from the chord through their kept neighbours is below `PILL_SIMPLIFY_TOL_M` are dropped; pills with genuine multi-bar / curved-track geometry deviate well above the tolerance and survive intact.
+
+**`PILL_SIMPLIFY_TOL_M` is zoom-band-tagged.** At low pill zoom the pill body is thick relative to the ground distance a stub segment can span, so an interior vertex only a few metres off the chord produces the direction-shift bulge at the pill's end (the second failure mode behind Bern Weltpostverein). A higher tolerance at low zoom flattens these sub-pixel detours:
+
+| Band | Zoom | `PILL_SIMPLIFY_TOL_M` |
+|---|---|---:|
+| A | z14 | 4.0 m |
+| B | z15 | 2.0 m |
+| C | z16+ | 0.1 m (current) |
 
 ### Dot-to-pill zoom switch
 

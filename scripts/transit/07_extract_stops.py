@@ -79,17 +79,58 @@ FERRY_COLLAPSE_M       = float(FERRY_STOPS_CFG.get("collapse_threshold_m", 15.0)
 FERRY_CONVERGE_M       = float(FERRY_STOPS_CFG.get("convergence_threshold_m", 20.0))
 FERRY_ENDPOINT_PULL_M  = float(FERRY_STOPS_CFG.get("endpoint_pull_threshold_m", 75.0))
 
-# Per-mode width_base floor for stop sizing. See
-# `.claude/concepts/pill-zoom-stop-tweaks.md` § "Width-base floor for stop
-# sizing". Applied to dot / endpoint disc / pill body width_base; connectors
-# are not clamped.
-STOP_WIDTH_BASE_FLOOR = {
-    k: float(v) for k, v in (_transit_cfg.get("stop_width_base_floor", {}) or {}).items()
-}
+# Stops carry their raw `width_base` on the tile — no per-mode floor is
+# baked in. The low-zoom minimum-size floor is applied at paint time via
+# the additive per-zoom `wb_floor(z)` mechanism in `generate_style.py`
+# (see pill-rendering.md § "Minimum stop size at low zoom").
+def _stop_wb(wb: float, mode: str) -> float:
+    return wb
 
-def _clamp_stop_wb(wb: float, mode: str) -> float:
-    floor = STOP_WIDTH_BASE_FLOOR.get(mode)
-    return max(wb, floor) if floor is not None else wb
+
+# Pill design bands (see pill-rendering.md § "Pills and connectors" and
+# § "Tippecanoe encoding"). Each band re-runs the pill construction with
+# its own `pill_gap_angled_m` and `curve_min_radius_m`; emitted features
+# carry `design_band` and per-feature `tippecanoe.minzoom`/`maxzoom`.
+_PILL_DESIGN_BANDS_RAW = (_transit_cfg.get("pill_design_bands") or {})
+PILL_DESIGN_BANDS = {}
+for _band_id in ("A", "B", "C"):
+    _band_cfg = _PILL_DESIGN_BANDS_RAW.get(_band_id) or {}
+    PILL_DESIGN_BANDS[_band_id] = {
+        "zoom_min": int(_band_cfg.get("zoom_min", {"A": 14, "B": 15, "C": 16}[_band_id])),
+        "zoom_max": _band_cfg.get("zoom_max", {"A": 14, "B": 15, "C": None}[_band_id]),
+        "pill_gap_straight_m": float(_band_cfg.get("pill_gap_straight_m", {"A": 100, "B": 75, "C": 50}[_band_id])),
+        "pill_gap_angled_m": float(_band_cfg.get("pill_gap_angled_m", {"A": 60, "B": 30, "C": 15}[_band_id])),
+        "curve_min_radius_m": float(_band_cfg.get("curve_min_radius_m", {"A": 8, "B": 6, "C": 5}[_band_id])),
+        "dedup_tol_m": float(_band_cfg.get("dedup_tol_m", {"A": 5.0, "B": 2.5, "C": 0.5}[_band_id])),
+        "pill_simplify_tol_m": float(_band_cfg.get("pill_simplify_tol_m", {"A": 4.0, "B": 2.0, "C": 0.1}[_band_id])),
+    }
+del _PILL_DESIGN_BANDS_RAW
+
+def _set_pill_design_band(band_cfg):
+    """Swap the module-level constants that pill construction consults.
+
+    `PILL_GAP_STRAIGHT_M`, `PILL_GAP_ANGLED_M`, `CURVE_MIN_RADIUS_M`,
+    `DEDUP_TOL_M`, and `PILL_SIMPLIFY_TOL_M` are read by
+    `_should_split_at_gap`, `_dedup_stop_positions`,
+    `_simplify_pill_lonlat`, and the connector-curving helpers. Setting
+    them here before a `make_pill_features()` call runs that call under
+    the given band's thresholds + radius.
+    """
+    g = globals()
+    g["PILL_GAP_STRAIGHT_M"] = band_cfg["pill_gap_straight_m"]
+    g["PILL_GAP_ANGLED_M"] = band_cfg["pill_gap_angled_m"]
+    g["CURVE_MIN_RADIUS_M"] = band_cfg["curve_min_radius_m"]
+    g["DEDUP_TOL_M"] = band_cfg["dedup_tol_m"]
+    g["PILL_SIMPLIFY_TOL_M"] = band_cfg["pill_simplify_tol_m"]
+
+def _tag_band_features(feats, band_id, band_cfg):
+    """Stamp `design_band` and per-feature tippecanoe zoom limits."""
+    for f in feats:
+        f["properties"]["design_band"] = band_id
+        tipp = f.setdefault("tippecanoe", {})
+        tipp["minzoom"] = max(int(tipp.get("minzoom", 0)), band_cfg["zoom_min"])
+        if band_cfg["zoom_max"] is not None:
+            tipp["maxzoom"] = band_cfg["zoom_max"]
 
 # Far-zoom dot positioning: see config.yaml `far_zoom_marker` and
 # .claude/concepts/far-zoom-stop-markers.md.
@@ -187,12 +228,13 @@ PILL_CLUSTER_NONRAIL_KM = 0.050   # all other modes combined: 50 m
 
 # Absolute-metre gap thresholds for splitting the NN path into separate
 # pills + connectors. Not scaled by width_base — `wb` controls disc/pill
-# width, not gap length.
-PILL_GAP_STRAIGHT_M = 50   # gap threshold when the NN-path continues dead
-                           # straight into the gap on either side (gap is
-                           # an in-line pill continuation).
-PILL_GAP_ANGLED_M = 15      # gap threshold otherwise (gap is an angled /
-                           # T-junction connector).
+# width, not gap length. Both are design-band-dependent — swapped via
+# `_set_pill_design_band()` before each bake pass in `main()`. See
+# pill-rendering.md § "Pills and connectors".
+#   PILL_GAP_STRAIGHT_M: A=100, B=75, C=50
+#   PILL_GAP_ANGLED_M:   A=60,  B=30, C=15
+PILL_GAP_STRAIGHT_M = 50    # placeholder default; overwritten per band
+PILL_GAP_ANGLED_M = 15      # placeholder default; overwritten per band
 
 # Bar-axis gap above which a single-distinct-position scoring member on one
 # side of the bar is dropped (kicked to leftover-fill). Distinct from
@@ -268,8 +310,9 @@ CURVE_MAX_SAMPLES = 64
 # sub-metre circle land within line-width of each other, and MapLibre's
 # line tessellation produces visible wobble where the round-join bulges
 # overlap. Below the floor the caller falls back to the straight 2-point
-# connector.
-CURVE_MIN_RADIUS_M = 5.0
+# connector. Design-band-dependent: A=8, B=6, C=5 (set per-band via
+# `_set_pill_design_band()` before each bake pass in `main()`).
+CURVE_MIN_RADIUS_M = 5.0  # placeholder default; overwritten per band
 # Minimum inter-vertex spacing for a curved connector polyline. Catches the
 # pathological recovery-shrunk arcs (sub-millimetre chords clustering all 13
 # samples at a point) but stays close to the stop dedup so genuine curves
@@ -3755,14 +3798,14 @@ def pill_minzoom(mode, stop_count):
     Return the zoom level at which pills appear for a stop cluster,
     or None if the cluster should not get a pill (single line).
 
-    Uniform z13 for every mode — see
-    `.claude/concepts/pill-zoom-stop-tweaks.md` § "Uniform pill
-    appear-zoom". Previously train pills came in at z12 and every other
-    mode at z13; the split is removed.
+    Uniform z14 for every mode — see `pill-rendering.md`
+    § "Dot-to-pill zoom switch". Design bands A/B/C tag features with
+    per-band minzoom/maxzoom on top of this — see the pill-design-band
+    bake in `main()`.
     """
     if stop_count < 2:
         return None
-    return 13
+    return 14
 
 
 def color_luminance(hex_color: str) -> float:
@@ -3879,7 +3922,7 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup,
         if parent_mode is None:
             parent_mode = derived_mode
         if parent_width_base is None:
-            parent_width_base = _clamp_stop_wb(derived_max_wb, parent_mode)
+            parent_width_base = _stop_wb(derived_max_wb, parent_mode)
 
     groups_present = [g for g in COLOR_GROUP_ORDER if g in by_group]
     n = len(groups_present)
@@ -3959,15 +4002,19 @@ def _polyline_length_xy(poly):
     return total
 
 
-def _simplify_pill_lonlat(coords, cos_lat, tol_m=PILL_SIMPLIFY_TOL_M):
+def _simplify_pill_lonlat(coords, cos_lat, tol_m=None):
     """Iterative Douglas-Peucker simplification on a pill polyline. An
     interior vertex is kept only if its perpendicular deviation from the
     chord through the nearest retained neighbours exceeds `tol_m`. Works in
     metric (x, y) space anchored at the first vertex so the tolerance is in
     true metres. Bar-placed dots fall onto a single line in design, so
     sub-line-width deviations are float / leftover-dot noise; genuine
-    bent pills deviate well above `tol_m` and survive.
+    bent pills deviate well above `tol_m` and survive. `tol_m=None` reads
+    the current band's `PILL_SIMPLIFY_TOL_M` at call time (band-swapped
+    via `_set_pill_design_band`).
     """
+    if tol_m is None:
+        tol_m = PILL_SIMPLIFY_TOL_M
     if len(coords) <= 2:
         return list(coords)
     lon0 = coords[0][0]
@@ -4030,6 +4077,44 @@ def _dedup_polyline_xy(poly, tol_m=DEDUP_TOL_M):
         dy = p[1] - out[-1][1]
         if dx * dx + dy * dy > tol_sq:
             out.append(p)
+    return out
+
+
+def _pill_mid_attach_candidates(simp, cluster_cos_lat, max_cos_bend=0.5):
+    """For a simplified pill polyline (>= 3 vertices), return a list of
+    (pos, outer_tangent_xy) for interior vertices where the bend angle
+    is at least 60° (cos(bend) <= 0.5 with the default). Bend angle is
+    the deviation from a straight continuation: 0° = straight, 90° =
+    right angle, 180° = U-turn.
+
+    `pos` is the (lon, lat) tuple of the vertex.
+    `outer_tangent_xy` is the outward unit tangent in cluster-xy space
+    (opposite the bisector of the interior angle, so it points away
+    from the concave side of the corner).
+    """
+    if len(simp) < 3:
+        return []
+    lon0, lat0 = simp[0][0], simp[0][1]
+    xy = [_lonlat_to_xy(p[0], p[1], lon0, lat0, cluster_cos_lat) for p in simp]
+    out = []
+    for i in range(1, len(simp) - 1):
+        prev_xy, v_xy, next_xy = xy[i - 1], xy[i], xy[i + 1]
+        u_in = _norm2((v_xy[0] - prev_xy[0], v_xy[1] - prev_xy[1]))
+        u_out = _norm2((next_xy[0] - v_xy[0], next_xy[1] - v_xy[1]))
+        if u_in is None or u_out is None:
+            continue
+        cos_bend = u_in[0] * u_out[0] + u_in[1] * u_out[1]
+        if cos_bend > max_cos_bend:
+            continue  # not bent enough
+        u_v_prev = _norm2((prev_xy[0] - v_xy[0], prev_xy[1] - v_xy[1]))
+        u_v_next = _norm2((next_xy[0] - v_xy[0], next_xy[1] - v_xy[1]))
+        if u_v_prev is None or u_v_next is None:
+            continue
+        bisector = (u_v_prev[0] + u_v_next[0], u_v_prev[1] + u_v_next[1])
+        outer = _norm2((-bisector[0], -bisector[1]))
+        if outer is None:
+            continue
+        out.append((simp[i], outer))
     return out
 
 
@@ -4429,7 +4514,7 @@ def _pill_disc_picker(pill_xy, pill_cands, disc_xy, r_max):
 
 
 def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
-                     anchor_a=None, anchor_b=None):
+                     anchor_a=None, anchor_b=None, mid_attach_tangents=None):
     """Post-process an MST connector from `ca` (in group_a) to `cb` (in group_b)
     into a curved (lon, lat) polyline.
 
@@ -4463,13 +4548,19 @@ def _curve_connector(ca, cb, group_a, group_b, cluster_cos_lat, mode,
     B_xy = _lonlat_to_xy(cb[0], cb[1], lon0, lat0, cluster_cos_lat)
 
     if len(group_a) > 1:
-        cands_a = _tangent_candidates(group_a, ca, lon0, lat0, cluster_cos_lat)
+        if mid_attach_tangents and ca in mid_attach_tangents:
+            cands_a = [(mid_attach_tangents[ca], True)]
+        else:
+            cands_a = _tangent_candidates(group_a, ca, lon0, lat0, cluster_cos_lat)
     elif anchor_a is not None:
         cands_a = _cardinal_tangents(anchor_a)
     else:
         cands_a = []
     if len(group_b) > 1:
-        cands_b = _tangent_candidates(group_b, cb, lon0, lat0, cluster_cos_lat)
+        if mid_attach_tangents and cb in mid_attach_tangents:
+            cands_b = [(mid_attach_tangents[cb], True)]
+        else:
+            cands_b = _tangent_candidates(group_b, cb, lon0, lat0, cluster_cos_lat)
     elif anchor_b is not None:
         cands_b = _cardinal_tangents(anchor_b)
     else:
@@ -4568,7 +4659,7 @@ _FIXED_CARDINAL_SEED = (0.0, 1.0)
 
 
 def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal,
-                     snap_anchors=True):
+                     snap_anchors=True, mid_attach_tangents=None):
     """Run the per-connector emission loop with a chosen disc-tangent strategy.
 
     `fixed_cardinal=False` — anchoring strategy: discs start unanchored; each
@@ -4627,7 +4718,8 @@ def _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode, fixed_cardinal
         )
         coords, arrival_a, arrival_b, is_fallback = _curve_connector(
             ca, cb, grp_a, grp_b, cluster_cos_lat, mode,
-            anchor_a=anchor_a, anchor_b=anchor_b)
+            anchor_a=anchor_a, anchor_b=anchor_b,
+            mid_attach_tangents=mid_attach_tangents)
         out.append((coords, is_fallback))
         if not fixed_cardinal:
             if skip_snap or not snap_anchors:
@@ -4792,7 +4884,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     stop_props = {
         "color":          color,
         "mode":           mode,
-        "width_base":     _clamp_stop_wb(max_wb, mode),
+        "width_base":     _stop_wb(max_wb, mode),
         "stop_count":     len(cluster_stops),
         "stop_id":        dom_stop.get("stop_id", ""),
         "stop_name":      dom_stop.get("stop_name", ""),
@@ -4867,6 +4959,8 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     # colored disc (drawn between connector-casing and connector-fill in
     # the style layer stack). Singletons still participate in the MST.
     feats = []
+    group_mid_attach = []  # per group: list of (pos, outer_tangent_xy)
+    mid_attach_tangents = {}  # (lon, lat) → outer_tangent_xy for _curve_connector
     for grp in groups:
         if len(grp) >= 2:
             simp = _simplify_pill_lonlat(grp, cluster_cos_lat)
@@ -4878,6 +4972,10 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                     tangent_deg=tan_deg, parent_type="pill",
                     parent_width_base=stop_props["width_base"],
                     parent_mode=stop_props["mode"]))
+            mids = _pill_mid_attach_candidates(simp, cluster_cos_lat)
+            group_mid_attach.append(mids)
+            for pos, tan in mids:
+                mid_attach_tangents[pos] = tan
         else:
             pos = grp[0]
             feats.append(make_endpoint(pos))
@@ -4887,25 +4985,63 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                     pos[0], pos[1], line_lookup,
                     parent_width_base=stop_props["width_base"],
                     parent_mode=stop_props["mode"]))
+            group_mid_attach.append([])
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than
     # a forced chain when groups fan out from a hub rather than lying in a sequence.
-    # Connectors attach only at pill endpoints (first / last NN-path dot), so
-    # the candidate set per group is the two ends — or the sole point for a
-    # singleton.
+    # Connectors attach at pill endpoints (first / last NN-path dot) AND at
+    # interior pill vertices where the bend angle is at least 60° — see
+    # `_pill_mid_attach_candidates` and pill-rendering.md § "Pills and
+    # connectors". Mid-attach candidates are gated by the outer-side rule:
+    # the direction from the vertex to the other endpoint must lie within
+    # 90° of the vertex's outer normal, so the connector always exits on
+    # the outer side of the corner.
+    def _candidates(i):
+        if len(groups[i]) == 1:
+            return [groups[i][0]]
+        ends = [groups[i][0], groups[i][-1]]
+        return ends + [pos for pos, _ in group_mid_attach[i]]
+
+    def _outer_side_ok(p1, p2):
+        """True iff the direction from p1 toward p2 is on the outer side of
+        p1's mid-attach corner. Endpoints (not in mid_attach_tangents) always
+        pass."""
+        tan = mid_attach_tangents.get(p1)
+        if tan is None:
+            return True
+        dx = (p2[0] - p1[0]) * cluster_cos_lat
+        dy = (p2[1] - p1[1])
+        return tan[0] * dx + tan[1] * dy > 0
+
     n_g = len(groups)
     mst_edges = []   # (dist, ca, cb) for all candidate edges, sorted
     for i in range(n_g):
         for j in range(i + 1, n_g):
-            ea = [groups[i][0]] if len(groups[i]) == 1 else [groups[i][0], groups[i][-1]]
-            eb = [groups[j][0]] if len(groups[j]) == 1 else [groups[j][0], groups[j][-1]]
+            ea = _candidates(i)
+            eb = _candidates(j)
             best_d = float("inf")
-            ca, cb = ea[0], eb[0]
+            ca, cb = None, None
             for p1 in ea:
                 for p2 in eb:
+                    if not _outer_side_ok(p1, p2) or not _outer_side_ok(p2, p1):
+                        continue
                     d = haversine_km(p1[0], p1[1], p2[0], p2[1])
                     if d < best_d:
                         best_d, ca, cb = d, p1, p2
+            if ca is None:
+                # No candidate pair passed the outer-side filter — fall back
+                # to endpoint-only (should be rare; mid-attach filters only
+                # ever remove candidates, never all of them, since endpoints
+                # are always eligible).
+                ea_ends = [groups[i][0]] if len(groups[i]) == 1 else [groups[i][0], groups[i][-1]]
+                eb_ends = [groups[j][0]] if len(groups[j]) == 1 else [groups[j][0], groups[j][-1]]
+                ca, cb = ea_ends[0], eb_ends[0]
+                best_d = haversine_km(ca[0], ca[1], cb[0], cb[1])
+                for p1 in ea_ends:
+                    for p2 in eb_ends:
+                        d = haversine_km(p1[0], p1[1], p2[0], p2[1])
+                        if d < best_d:
+                            best_d, ca, cb = d, p1, p2
             mst_edges.append((best_d, ca, cb, i, j))
     mst_edges.sort()
 
@@ -4960,9 +5096,11 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         lines = _collect_cluster_line_polylines(cluster_stops, line_lookup)
         tol_sq = (SCORE_ON_LINE_TOL_M / 111000.0) ** 2
         connectors_anchor = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
-                                             fixed_cardinal=False)
+                                             fixed_cardinal=False,
+                                             mid_attach_tangents=mid_attach_tangents)
         connectors_cardinal = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
-                                               fixed_cardinal=True)
+                                               fixed_cardinal=True,
+                                               mid_attach_tangents=mid_attach_tangents)
         score_anchor = _score_connectors(connectors_anchor, lines, tol_sq)
         score_cardinal = _score_connectors(connectors_cardinal, lines, tol_sq)
         if score_cardinal < score_anchor:
@@ -5007,7 +5145,8 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     else:
         chosen_connectors = _emit_connectors(chosen_edges, groups, cluster_cos_lat, mode,
                                              fixed_cardinal=False,
-                                             snap_anchors=not is_rail_cluster)
+                                             snap_anchors=not is_rail_cluster,
+                                             mid_attach_tangents=mid_attach_tangents)
 
     for coords, _ in chosen_connectors:
         feats.append(make_feat(coords, "connector"))
@@ -5681,7 +5820,7 @@ def apply_stop_dedup(dot_features):
     `.claude/concepts/far-zoom-stop-dot-redesign.md` § "Dedup of overlapping
     dots".
 
-    For each integer zoom z ∈ {12, 11, …, 7} (descending), each surviving
+    For each integer zoom z ∈ {13, 12, …, 7} (descending), each surviving
     dot may absorb touching lower-priority neighbours. Priority is:
 
       1. Mode hierarchy — train > mountain/ferry > everything else. A
@@ -5695,8 +5834,8 @@ def apply_stop_dedup(dot_features):
     absorbed dot's `tippecanoe.minzoom` is raised so it disappears at the
     zoom it was eaten and below.
 
-    Mutates `dot_features` in place. Adds `score_z7..score_z12` (debug
-    only) and `lines_json_z7..lines_json_z12` (popup) to participating
+    Mutates `dot_features` in place. Adds `score_z7..score_z13` (debug
+    only) and `lines_json_z7..lines_json_z13` (popup) to participating
     features.
     """
     sd_cfg = _transit_cfg.get("stop_dot_sizing") or {}
@@ -5720,8 +5859,11 @@ def apply_stop_dedup(dot_features):
     cos_lat = cos(radians(MEAN_LAT_DEG))
 
     def tier_diameter_at(zoom, tier):
+        # Slope-continue past z13 so the far-zoom layer keeps growing
+        # linearly through z13.99 (the pill takes over at z14). Clamp
+        # only at the lower edge z7.
         corners = tier_diam.get(tier) or tier_diam.get(default_tier, (2.0, 4.0))
-        z = max(7.0, min(13.0, float(zoom)))
+        z = max(7.0, float(zoom))
         t = (z - 7.0) / 6.0
         return corners[0] + t * (corners[1] - corners[0])
 
@@ -5782,11 +5924,11 @@ def apply_stop_dedup(dot_features):
             # Per-zoom score: starts at base, grows with absorption. The
             # absorber's own diameter does NOT read this — it stays fixed
             # via `tier`. Kept for popup / debug diagnostics only.
-            "score": {z: base_score for z in range(7, 13)},
-            "alive": {z: (z >= eff_minzoom) for z in range(7, 13)},
+            "score": {z: base_score for z in range(7, 14)},
+            "alive": {z: (z >= eff_minzoom) for z in range(7, 14)},
             "eff_minzoom": eff_minzoom,
             "absorbed_max_z": None,
-            "lines_per_z": {z: list(lines) for z in range(7, 13)},
+            "lines_per_z": {z: list(lines) for z in range(7, 14)},
             "lines_dirty": False,
         })
 
@@ -5794,7 +5936,7 @@ def apply_stop_dedup(dot_features):
         return
 
     n_absorptions = 0
-    for z in range(12, 6, -1):
+    for z in range(13, 6, -1):
         mpp = m_per_px(z)
         # Cell size in degrees lat covering the max possible touch distance
         # (two largest possible radii + spacing).
@@ -5881,14 +6023,14 @@ def apply_stop_dedup(dot_features):
     for s in states:
         feat = dot_features[s["idx"]]
         p = feat["properties"]
-        for z in range(7, 13):
+        for z in range(7, 14):
             p[f"score_z{z}"] = round(s["score"][z], 4)
         if s["absorbed_max_z"] is not None:
             new_minzoom = s["absorbed_max_z"] + 1
             tipp = feat.setdefault("tippecanoe", {})
             old_minzoom = int(tipp.get("minzoom", 0))
             tipp["minzoom"] = max(old_minzoom, new_minzoom)
-            if new_minzoom >= 13:
+            if new_minzoom >= 14:
                 n_full += 1
             else:
                 n_partial += 1
@@ -5896,9 +6038,9 @@ def apply_stop_dedup(dot_features):
             # Per-zoom lines_json: each `lines_json_zN` reflects the lines
             # this dot represents at zoom N (base lines plus everything
             # absorbed at or above N). Base `lines_json` is left untouched
-            # — the pill-zoom layer (z=13+) reads it and shows the dot's
+            # — the pill-zoom layer (z=14+) reads it and shows the dot's
             # native lines without any far-zoom dedup growth.
-            for z in range(7, 13):
+            for z in range(7, 14):
                 lns_sorted = sorted(s["lines_per_z"][z], key=lambda ln: (
                     MODE_RANK.get(ln.get("mode", ""), 99),
                     ln.get("ref", "")))
@@ -6125,12 +6267,12 @@ def main():
                 "tippecanoe": {"minzoom": minzoom},
                 "geometry": {"type": "Point", "coordinates": [slon, slat]},
                 "properties": {"color": color, "mode": mode,
-                               "width_base": _clamp_stop_wb(wb, mode)},
+                               "width_base": _stop_wb(wb, mode)},
             })
             indicator_features.extend(build_indicator_features(
                 [{"osm_id": oid, "width_base": wb, "mode": mode}],
                 slon, slat, line_lookup,
-                parent_width_base=_clamp_stop_wb(wb, mode), parent_mode=mode))
+                parent_width_base=_stop_wb(wb, mode), parent_mode=mode))
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
@@ -6289,7 +6431,7 @@ def main():
                     "properties": {
                         "color":          color,
                         "mode":           mode,
-                        "width_base":     _clamp_stop_wb(width_base, mode),
+                        "width_base":     _stop_wb(width_base, mode),
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
@@ -6299,7 +6441,7 @@ def main():
                 indicator_features.extend(build_indicator_features(
                     [{"osm_id": str(osm_id), "width_base": width_base, "mode": mode}],
                     slon, slat, line_lookup,
-                    parent_width_base=_clamp_stop_wb(width_base, mode),
+                    parent_width_base=_stop_wb(width_base, mode),
                     parent_mode=mode))
 
     # --- Ferry stop aggregation (parent_station → one disc) ---------------
@@ -6339,13 +6481,15 @@ def main():
     n_ferry_collapsed = 0
     n_ferry_split = 0
     n_ferry_diverged = 0
-    # Pill (medium-zoom) and pair (split detail) both appear from z13 — the
-    # same zoom every other non-train pill mode starts at. The z9–z12
-    # far-zoom marker for ferry is a low-zoom dot emitted into
-    # `other_features` below, matching every other mode's far-zoom
-    # behaviour. See far-zoom-stop-markers.md § "Ferry far-zoom marker".
-    FERRY_PILL_MZ = 13        # convergence-point endpoint, per-line endpoints
-    FERRY_PAIR_MZ = 13        # split-case GTFS endpoint + connector
+    # Pill (medium-zoom) and pair (split detail) both appear from z14 — the
+    # same zoom every other mode starts at (see pill-rendering.md § "Dot-to-
+    # pill zoom switch"). The z9–z13 far-zoom marker for ferry is a low-zoom
+    # dot emitted into `other_features` below, matching every other mode's
+    # far-zoom behaviour. See far-zoom-stop-markers.md § "Ferry far-zoom
+    # marker". Ferry uses a single variant only (no design bands — see
+    # pill-rendering.md § "Ferry stops").
+    FERRY_PILL_MZ = 14        # convergence-point endpoint, per-line endpoints
+    FERRY_PAIR_MZ = 14        # split-case GTFS endpoint + connector
     FERRY_FAR_ZOOM_MZ = MODE_MINZOOM.get("ferry", 9)
     for pier_key, cands in ferry_by_pier.items():
         gtfs_repr = (cands[0]["gtfs_lon"], cands[0]["gtfs_lat"])
@@ -6375,7 +6519,7 @@ def main():
         base_props = {
             "color":          rep["color"],
             "mode":           "ferry",
-            "width_base":     _clamp_stop_wb(FERRY_DOT_WB, "ferry"),
+            "width_base":     _stop_wb(FERRY_DOT_WB, "ferry"),
             "stop_id":        rep["stop_id"],
             "stop_name":      rep["stop_name"],
             "parent_station": rep["parent_station"],
@@ -6539,7 +6683,7 @@ def main():
         centroid_props = {
             "color":          color,
             "mode":           mode,
-            "width_base":     _clamp_stop_wb(max_wb, mode),
+            "width_base":     _stop_wb(max_wb, mode),
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
@@ -6559,14 +6703,26 @@ def main():
             indicator_features.extend(build_indicator_features(
                 cluster, centroid_lon, centroid_lat, line_lookup))
         else:
-            feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
-            if feats:
-                # Multi-line station with a real pill: far-zoom dot at low
-                # zoom, pill takes over at mz. Rail-like family skips the
+            # Bake band C first — its features drive the far-zoom-dot
+            # decision and the pill-collapse fallback (matches previous
+            # behavior). Then bake A and B on top with different
+            # PILL_GAP_ANGLED_M / CURVE_MIN_RADIUS_M values, tagged with
+            # per-feature `design_band` + tippecanoe zoom range.
+            _set_pill_design_band(PILL_DESIGN_BANDS["C"])
+            c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+            if c_feats:
+                _tag_band_features(c_feats, "C", PILL_DESIGN_BANDS["C"])
+                all_band_feats = list(c_feats)
+                for _band_id in ("A", "B"):
+                    _set_pill_design_band(PILL_DESIGN_BANDS[_band_id])
+                    _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+                    _tag_band_features(_bfeats, _band_id, PILL_DESIGN_BANDS[_band_id])
+                    all_band_feats.extend(_bfeats)
+                # Far-zoom dot from band C. Rail-like family skips the
                 # intersection search; rule picks largest pill (by line
                 # count) → largest disc → centroid.
                 dot_lon, dot_lat = far_zoom_dot_position(
-                    cluster, feats, line_lookup,
+                    cluster, c_feats, line_lookup,
                     (centroid_lon, centroid_lat), rail_like=True)
                 rail_features.append({
                     "type": "Feature",
@@ -6574,11 +6730,13 @@ def main():
                     "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
                     "properties": centroid_props,
                 })
-                pill_features_rail.extend(feats)
+                pill_features_rail.extend(all_band_feats)
             else:
                 # Multi-line cluster whose pill collapsed (all positions
                 # deduped to one point) — no pill is emitted, so the
                 # cluster dot stays visible at all zooms at the centroid.
+                # Bands A and B share the same dot placement so they
+                # collapse identically; no fallback bake needed.
                 rail_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": 5},
@@ -6651,7 +6809,7 @@ def main():
         centroid_props = {
             "color":          color,
             "mode":           dom_mode,
-            "width_base":     _clamp_stop_wb(max_wb, dom_mode),
+            "width_base":     _stop_wb(max_wb, dom_mode),
             "stop_id":        dom_stop.get("stop_id", ""),
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
@@ -6670,14 +6828,24 @@ def main():
             indicator_features.extend(build_indicator_features(
                 cluster, centroid_lon, centroid_lat, line_lookup))
         else:
-            feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
-            if feats:
-                # Multi-line stop with a real pill: far-zoom dot at low
-                # zoom, pill from `mz` up. Non-rail family runs the
-                # intersection search first — at a crossroads the dot
-                # sits at the junction, not at the platform centroid.
+            # Bake band C first (its features drive the far-zoom-dot and
+            # collapse decision); then bake A and B on top with per-band
+            # thresholds. See rail block above for rationale.
+            _set_pill_design_band(PILL_DESIGN_BANDS["C"])
+            c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+            if c_feats:
+                _tag_band_features(c_feats, "C", PILL_DESIGN_BANDS["C"])
+                all_band_feats = list(c_feats)
+                for _band_id in ("A", "B"):
+                    _set_pill_design_band(PILL_DESIGN_BANDS[_band_id])
+                    _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+                    _tag_band_features(_bfeats, _band_id, PILL_DESIGN_BANDS[_band_id])
+                    all_band_feats.extend(_bfeats)
+                # Non-rail family runs the intersection search first — at
+                # a crossroads the dot sits at the junction, not at the
+                # platform centroid.
                 dot_lon, dot_lat = far_zoom_dot_position(
-                    cluster, feats, line_lookup,
+                    cluster, c_feats, line_lookup,
                     (centroid_lon, centroid_lat),
                     rail_like=cluster_rail_like)
                 nonrail_dot_features.append({
@@ -6686,8 +6854,8 @@ def main():
                     "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
                     "properties": centroid_props,
                 })
-                pill_features.extend(feats)
-                nonrail_pill_count += len(feats)
+                pill_features.extend(all_band_feats)
+                nonrail_pill_count += len(all_band_feats)
             else:
                 # Pill collapsed — cluster dot stays at all zooms at the
                 # centroid (no pill, no disc, fall-through case).

@@ -140,6 +140,40 @@ pill_rendering:
   osm_match_max_tangent_diff_deg: 15.0
   osm_fallback_max_straight_m: 50.0
 
+# ── Pill design bands ───────────────────────────────────────────────────────
+# Three baked variants of the pill / connector layout, one per zoom band.
+# See pill-rendering.md § "Pills and connectors" and § "Connector curving".
+# Each band re-runs the pill construction with its own pill_gap_angled_m
+# and curve_min_radius_m. Features carry `design_band` and per-feature
+# tippecanoe.minzoom / tippecanoe.maxzoom limiting them to their band's
+# zoom range. `zoom_max: null` on band C means no maxzoom (pill layers
+# stay visible at every zoom above z16 for inspection).
+pill_design_bands:
+  A:
+    zoom_min: 14
+    zoom_max: 14
+    pill_gap_straight_m: 100
+    pill_gap_angled_m: 60
+    curve_min_radius_m: 15
+    dedup_tol_m: 5.0            # ~0.75 px at z14; collapse sub-pixel twins
+    pill_simplify_tol_m: 4.0    # flatten sub-pixel detours in the polyline
+  B:
+    zoom_min: 15
+    zoom_max: 15
+    pill_gap_straight_m: 75
+    pill_gap_angled_m: 30
+    curve_min_radius_m: 10
+    dedup_tol_m: 2.5
+    pill_simplify_tol_m: 2.0
+  C:
+    zoom_min: 16
+    zoom_max: null
+    pill_gap_straight_m: 50
+    pill_gap_angled_m: 15
+    curve_min_radius_m: 5
+    dedup_tol_m: 0.5
+    pill_simplify_tol_m: 0.1
+
 # ── Ferry stop rendering ────────────────────────────────────────────────────
 # Ferries don't get pills (no platform). Instead each parent_station emits:
 # a big white dot at the canonical on-line snap, and — if the GTFS coord sits
@@ -263,26 +297,8 @@ line_width:
     min: 1.50
     max: 2.50
 
-# ── Per-mode width_base floor for stop sizing ────────────────────────────────
-# Stops (dots, endpoint discs, pill bodies) clamp their `width_base` up to
-# this per-mode floor when computing the stop's diameter. The transit line
-# itself keeps its true `width_base`; the floor exists so a stop on a thin
-# line is visibly larger than the line. Connectors are NOT clamped — they
-# stay subordinate to the stops at either end. See
-# `.claude/concepts/pill-zoom-stop-tweaks.md` § "Width-base floor for stop
-# sizing". Starter values are the per-mode 20th percentile projected against
-# the current `line_width` config; tune visually after rebuild.
-stop_width_base_floor:
-  bus:           1.23
-  regional_bus:  1.62
-  train:         3.47
-  tram:          3.00
-  metro:         3.00
-  ferry:         2.50
-  mountain:      2.50
-
 # ── Far-zoom stop dot sizing ─────────────────────────────────────────────────
-# Per-stop tier assignment used to size dots at zooms 7–z12.99. See
+# Per-stop tier assignment used to size dots at zooms 7–z13.99. See
 # `.claude/concepts/far-zoom-stop-dot-redesign.md`. The score itself does not
 # drive size — it feeds the tier assignment (top-down first-match). Each tier
 # has a fixed z7 / z13 diameter; the size interpolates linearly with zoom
@@ -366,10 +382,10 @@ stop_dot_sizing:
   # `python3 scripts/generate_style.py` and reload.
   tier_sizes:
     major_train:      { z7: 7,   z13: 18 }
-    main_train:       { z7: 6,   z13: 15 }
-    important_train:  { z7: 5,   z13: 12 }
-    train_station:    { z7: 4,   z13: 9 }
-    small_train:      { z7: 3,   z13: 7 }
+    main_train:       { z7: 6.5, z13: 15 }
+    important_train:  { z7: 6,   z13: 13 }
+    train_station:    { z7: 5,   z13: 11 }
+    small_train:      { z7: 4,   z13: 9 }
     major_mountain:   { z7: 3,   z13: 6 }
     mountain_stop:    { z7: 2.5, z13: 5 }
     ferry_stop:       { z7: 3,   z13: 6 }
@@ -379,7 +395,7 @@ stop_dot_sizing:
     small_bus:        { z7: 2,   z13: 4 }
 
 # ── Far-zoom dot dedup ───────────────────────────────────────────────────────
-# At each far-zoom level (z7–z12), overlapping dot pairs are merged. Mode
+# At each far-zoom level (z7–z13), overlapping dot pairs are merged. Mode
 # hierarchy gates the absorber side first: `train` outranks `mountain` /
 # `ferry`, which outrank everything else. Within the same rank the
 # higher-score dot absorbs the lower; across ranks a strictly higher-ranked

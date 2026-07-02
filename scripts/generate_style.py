@@ -1070,12 +1070,16 @@ def build_station_layers(cfg) -> list:
     # `far-zoom-stop-dot-redesign.md` concept's domain — score-driven dot
     # sizes at z7–z12.99 only.
 
-    # Pill-zoom dot (z13+): width_base × zoom curve. Pill design concept.
+    # Pill-zoom dot (z14+): radius = pill diameter / 2. Matches
+    # endpoint-disc radius above (see pill-rendering.md § "Visual style").
+    # `source_minzoom` is unused here — the layer's own `minzoom` gates
+    # visibility; expression anchors start at z14.
     def dot_radius_pill_zoom(source_minzoom):
         return ["interpolate", ["linear"], ["zoom"],
-            source_minzoom, ["*", ["get", "width_base"], 0.3],
-            14,             ["*", ["get", "width_base"], 0.75],
-            20,             ["*", ["get", "width_base"], 6.0],
+            14, ["+", 2.25, ["*", ["min", ["get", "width_base"], 5.0], 1.15]],
+            15, ["+", 3.0,  ["*", ["min", ["get", "width_base"], 5.0], 1.6]],
+            16, ["+", 4.0,  ["*", ["min", ["get", "width_base"], 5.0], 2.2]],
+            17, ["+", 7.0,  ["*", ["min", ["get", "width_base"], 5.0], 2.2]],
         ]
 
     # Far-zoom dot (z7–z12.99): tier-driven diameter. See
@@ -1118,11 +1122,15 @@ def build_station_layers(cfg) -> list:
 
     def dot_radius_far_zoom():
         # Outer `interpolate zoom` blends between per-zoom tier lookups. At
-        # each integer zoom z ∈ 7..13 the inner `match` picks the tier's
-        # diameter (halved to radius). MapLibre requires `zoom` at the
-        # top-level, so the match sits inside each zoom stop.
+        # each integer zoom z ∈ 7..14 the inner `match` picks the tier's
+        # diameter (halved to radius). z14 anchor is a linear extrapolation
+        # of the z7→z13 slope so the dot keeps growing through z13.99;
+        # the layer's `maxzoom: 14` hides everything at z14 and above, so
+        # the z14 anchor is only ever reached via interpolation from z13.
+        # MapLibre requires `zoom` at the top-level, so the match sits
+        # inside each zoom stop.
         stops = []
-        for z in range(7, 14):
+        for z in range(7, 15):
             stops.extend([z, _match_radius_at(z)])
         return ["interpolate", ["linear"], ["zoom"], *stops]
 
@@ -1134,14 +1142,14 @@ def build_station_layers(cfg) -> list:
     ]
 
     for source, source_minzoom in stop_groups:
-        # Far-zoom: new score-driven layer, z(source_minzoom)–z12.99.
+        # Far-zoom: score-driven layer, z(source_minzoom)–z13.99.
         layers.append({
             "id": f"transit-stop-fill-{source}-far",
             "type": "circle",
             "source": source,
             "source-layer": "transit_stops",
             "minzoom": source_minzoom,
-            "maxzoom": 13,
+            "maxzoom": 14,
             "paint": {
                 "circle-color": "#ffffff",
                 "circle-radius": dot_radius_far_zoom(),
@@ -1149,14 +1157,13 @@ def build_station_layers(cfg) -> list:
                 "circle-stroke-width": 1.0,
             },
         })
-        # Pill-zoom: original layer, expression untouched, zoom-capped to
-        # z13+ so the two layers do not overlap.
+        # Pill-zoom cluster centroid dot: z14+ so the two layers do not overlap.
         layers.append({
             "id": f"transit-stop-fill-{source}",
             "type": "circle",
             "source": source,
             "source-layer": "transit_stops",
-            "minzoom": 13,
+            "minzoom": 14,
             "paint": {
                 "circle-color": "#ffffff",
                 "circle-radius": dot_radius_pill_zoom(source_minzoom),
@@ -1165,30 +1172,51 @@ def build_station_layers(cfg) -> list:
             },
         })
 
-    # Ferry stops follow the same two-tier pattern as every other non-train
-    # mode: a low-zoom dot at z9–z12 (rendered through the regional source
-    # above) and a medium-zoom endpoint disc + optional connector + GTFS
-    # endpoint at z13+ (rendered through the pill paint stack below). The
+    # Ferry stops follow the same two-tier pattern as every other mode:
+    # a low-zoom dot at z9–z13 (rendered through the regional source above)
+    # and a medium-zoom endpoint disc + optional connector + GTFS endpoint
+    # at z14+ (rendered through the pill paint stack below). The
     # far-zoom dot is emitted at the canonical pier vertex; the pill paint
     # stack carries the connector seam handling. See
     # far-zoom-stop-markers.md § "Ferry far-zoom marker".
 
-    # Hard cut at the appear-zoom — no opacity fade. Uniform z13 for
-    # every mode per `.claude/concepts/pill-zoom-stop-tweaks.md`.
-    PILL_MINZOOM = 13
+    # Hard cut at the appear-zoom — no opacity fade. Uniform z14 for
+    # every mode per `pill-rendering.md` § "Dot-to-pill zoom switch".
+    PILL_MINZOOM = 14
+
+    # Diameter formula from `pill-rendering.md` § "Visual style":
+    #   d(z, wb) = min_d(z) + slope(z) × min(wb, WB_HIGH)
+    # WB_HIGH = 5.0 is the dataset's max width_base (config `line_width`
+    # top for train). Per-zoom anchors:
+    #                 min_d   max_d   slope = (max_d - min_d) / WB_HIGH
+    #   z14         4.5     16      2.3
+    #   z15         6       22      3.2
+    #   z16         8       30      4.4
+    #   z17         14      36      4.4
+    # Below z14 pills aren't drawn; above z17 the close-zoom design will
+    # take over (holds at z17 values for now).
+    WB_HIGH = 5.0
+    def _wb_clamped():
+        return ["min", ["get", "width_base"], WB_HIGH]
+    def _parent_wb_clamped():
+        return ["min", ["get", "parent_width_base"], WB_HIGH]
 
     def pill_disc_width():
         return ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM,  ["*", ["get", "width_base"], 1.2],
-            14,            ["*", ["get", "width_base"], 3.0],
-            20,            ["*", ["get", "width_base"], 12.0],
+            PILL_MINZOOM,  ["+", 4.5,  ["*", _wb_clamped(), 2.3]],
+            15,            ["+", 6.0,  ["*", _wb_clamped(), 3.2]],
+            16,            ["+", 8.0,  ["*", _wb_clamped(), 4.4]],
+            17,            ["+", 14.0, ["*", _wb_clamped(), 4.4]],
         ]
 
+    # Connector width = pill diameter / 3 — subordinate to the stops at
+    # either end. Preserves the connector < line < dot/pill hierarchy.
     def connector_width():
         return ["interpolate", ["linear"], ["zoom"],
-            PILL_MINZOOM,  ["*", ["get", "width_base"], 0.3],
-            14,            ["*", ["get", "width_base"], 0.75],
-            18,            ["*", ["get", "width_base"], 3.0],
+            PILL_MINZOOM,  ["+", 1.5,   ["*", _wb_clamped(), 0.767]],
+            15,            ["+", 2.0,   ["*", _wb_clamped(), 1.067]],
+            16,            ["+", 2.667, ["*", _wb_clamped(), 1.467]],
+            17,            ["+", 4.667, ["*", _wb_clamped(), 1.467]],
         ]
 
     layers.append({
@@ -1201,10 +1229,12 @@ def build_station_layers(cfg) -> list:
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
             "line-color": "#000000",
+            # Casing = pill fill + 2.0 for the 1 px black rim on each side.
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 1.2], 2.0],
-                14,            ["+", ["*", ["get", "width_base"], 3.0], 2.0],
-                20,            ["+", ["*", ["get", "width_base"], 12.0], 2.0],
+                PILL_MINZOOM,  ["+", 6.5,  ["*", _wb_clamped(), 2.3]],
+                15,            ["+", 8.0,  ["*", _wb_clamped(), 3.2]],
+                16,            ["+", 10.0, ["*", _wb_clamped(), 4.4]],
+                17,            ["+", 16.0, ["*", _wb_clamped(), 4.4]],
             ],
         }
     })
@@ -1220,10 +1250,12 @@ def build_station_layers(cfg) -> list:
         "layout": {"line-cap": "round", "line-join": "round"},
         "paint": {
             "line-color": "#000000",
+            # Casing = connector fill + 2.0 for the 1 px black rim on each side.
             "line-width": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM,  ["+", ["*", ["get", "width_base"], 0.3], 2.0],
-                14,            ["+", ["*", ["get", "width_base"], 0.75], 2.0],
-                18,            ["+", ["*", ["get", "width_base"], 3.0], 2.0],
+                PILL_MINZOOM,  ["+", 3.5,   ["*", _wb_clamped(), 0.767]],
+                15,            ["+", 4.0,   ["*", _wb_clamped(), 1.067]],
+                16,            ["+", 4.667, ["*", _wb_clamped(), 1.467]],
+                17,            ["+", 6.667, ["*", _wb_clamped(), 1.467]],
             ],
         }
     })
@@ -1253,10 +1285,12 @@ def build_station_layers(cfg) -> list:
         "filter": ["==", ["get", "feature_type"], "endpoint"],
         "paint": {
             "circle-color": "#ffffff",
+            # Radius = pill diameter / 2 = (min_d(z) + slope(z) × min(wb, WB_HIGH)) / 2.
             "circle-radius": ["interpolate", ["linear"], ["zoom"],
-                PILL_MINZOOM, ["*", ["get", "width_base"], 0.6],
-                14,           ["*", ["get", "width_base"], 1.5],
-                20,           ["*", ["get", "width_base"], 6.0],
+                PILL_MINZOOM, ["+", 2.25, ["*", _wb_clamped(), 1.15]],
+                15,           ["+", 3.0,  ["*", _wb_clamped(), 1.6]],
+                16,           ["+", 4.0,  ["*", _wb_clamped(), 2.2]],
+                17,           ["+", 7.0,  ["*", _wb_clamped(), 2.2]],
             ],
             "circle-stroke-color": "#000000",
             "circle-stroke-width": 1.0,
@@ -1277,7 +1311,7 @@ def build_station_layers(cfg) -> list:
         }
     })
 
-    # --- Color indicators (z13+) ---------------------------------------------
+    # --- Color indicators (z14+) ---------------------------------------------
     # Mini per-color-group dots inside stop dots, endpoint discs, and pills.
     # See `.claude/concepts/stop-color-indicators.md` and
     # `.claude/concepts/pill-zoom-stop-tweaks.md`.
@@ -1287,12 +1321,12 @@ def build_station_layers(cfg) -> list:
     # n=2 → {-1, +1}; n=3 → {-2, 0, +2}) and `tangent_deg` (0 for
     # dots/discs, pill tangent for pill indicators).
     #
-    # Indicators appear at the same zoom as pills (z13) with no opacity
+    # Indicators appear at the same zoom as pills (z14) with no opacity
     # fade. Each feature carries `parent_width_base` (the floor-clamped
     # width_base of the parent stop) and `n_indicators` (count in the
     # row) so the text-size expression can shrink the row to fit when
     # the parent is too thin for the default size.
-    INDICATOR_MINZOOM = 13
+    INDICATOR_MINZOOM = 14
 
     # half_spacing_em and vert_em compensate for the "●" glyph's vertical
     # asymmetry inside its em-box. The row span across N indicators is
@@ -1310,33 +1344,32 @@ def build_station_layers(cfg) -> list:
     # diameter). See `.claude/concepts/pill-zoom-stop-tweaks.md`
     # § "Indicators must not overflow the parent".
 
-    # Per-zoom anchor: min(default_size_at_z, parent_wb * margin * mult / row).
-    # MapLibre requires zoom only at the top-level interpolate, so the
-    # min/fit math is baked separately into each anchor — `default_size`
-    # and `parent_diameter_multiplier` are evaluated at the anchor's
-    # specific zoom, and only the resulting expression goes into the
-    # interpolate stops.
-    def _indicator_size_at_zoom(default_size, parent_diameter_mult):
+    # Per-zoom anchor: min(default_size_at_z, parent_diameter * margin / row).
+    # Parent diameter matches `pill_disc_width()` above:
+    #   d(z, wb) = parent_min_d + parent_slope × min(wb, WB_HIGH)
+    def _indicator_size_at_zoom(default_size, parent_min_d, parent_slope):
         return ["min",
             default_size,
             ["/",
                 ["*",
-                    ["get", "parent_width_base"],
-                    parent_diameter_mult * INDICATOR_INNER_MARGIN,
+                    ["+", parent_min_d,
+                          ["*", _parent_wb_clamped(), parent_slope]],
+                    INDICATOR_INNER_MARGIN,
                 ],
                 ["get", "row_factor"],
             ],
         ]
 
-    # Default text-size curve is anchored at z13 → 4.5 and z20 → 36; the
-    # z14 anchor is the linearly interpolated value (9.0). The
-    # parent-diameter curve must match `pill_disc_width()` above
-    # (PILL_MINZOOM=13 → 1.2, z14 → 3.0, z20 → 12.0) since the indicator
-    # row sits inside that diameter.
+    # Parent-diameter anchors mirror `pill_disc_width()` above (min_d
+    # 4.5/6/8/14 at z14/z15/z16/z17; slopes 2.3/3.2/4.4/4.4). Default
+    # text-size curve stays 9.0 at z14 → 36.0 at z20; intermediate values
+    # are linearly interpolated.
     text_size_expr = ["interpolate", ["linear"], ["zoom"],
-        13, _indicator_size_at_zoom(4.5,  1.2),
-        14, _indicator_size_at_zoom(9.0,  3.0),
-        20, _indicator_size_at_zoom(36.0, 12.0),
+        14, _indicator_size_at_zoom(9.0,  4.5,  2.3),
+        15, _indicator_size_at_zoom(13.5, 6.0,  3.2),
+        16, _indicator_size_at_zoom(18.0, 8.0,  4.4),
+        17, _indicator_size_at_zoom(22.5, 14.0, 4.4),
+        20, _indicator_size_at_zoom(36.0, 14.0, 4.4),
     ]
 
     text_offset_expr = ["match", ["get", "slot_units"]]
