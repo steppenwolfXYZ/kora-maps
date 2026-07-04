@@ -92,10 +92,13 @@ tippecanoe -o "$STATIC/tl_stop_pills.pmtiles" --force \
 echo ""
 echo "=== Building tl_close_zoom.pmtiles ==="
 # minzoom z15 so features exist a couple of zoom levels below the z17
-# activation point (used by tippecanoe's simplification headroom).
-# maxzoom z18 like the other high-zoom transit bundles.
+# activation point. maxzoom z18 like the other high-zoom transit bundles;
+# overzoomed to z22 in the client, which needs the full vertex density —
+# hence --no-line-simplification (pill arcs otherwise get faceted on the
+# non-maxzoom tiles that MapLibre shows at z17.x).
 tippecanoe -o "$STATIC/tl_close_zoom.pmtiles" --force \
   -z18 -Z15 -d18 --layer transit_close_zoom \
+  --no-line-simplification \
   --drop-densest-as-needed \
   "$DATA/transit_close_zoom.geojson"
 

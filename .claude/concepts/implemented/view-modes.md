@@ -14,7 +14,10 @@ myself geographically" and "read the transit network" at once.
 - The map has exactly two views: **`standard`** and **`transit-focus`**. These two
   identifiers are the canonical names for the modes everywhere (UI state, code,
   docs).
-- **`standard` is the default view** on page load.
+- **`standard` is the default view** on page load. *(Implementation note: while
+  stop rendering is under active development, the code temporarily defaults to
+  `transit-focus` via a `DEFAULT_VIEW` dev override. Flip it back to `standard`
+  before shipping.)*
 - The user switches views via a visible control on the map UI (frontend,
   `Map.svelte` level). Switching is instant and client-side: no page reload, no
   style re-fetch, no loss of camera position or zoom.

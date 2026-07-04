@@ -1054,6 +1054,28 @@ def build_transit_layers() -> list:
     return layers
 
 
+def build_close_zoom_backdrop_layers() -> list:
+    """Station-area tint for the close-zoom design (z17+): one rounded hull
+    polygon per parent station, emitted by step 07 with a `bg_color` — the
+    line's color, or a blend of all serving lines' colors (MapLibre cannot
+    gradient-fill a polygon, so the blend stands in for a gradient).
+    Inserted BELOW the transit lines so the tint sits behind them (and
+    behind the pill-arrows, which live in build_station_layers)."""
+    return [{
+        "id": "close-zoom-station-backdrop",
+        "type": "fill",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": 17,
+        "filter": ["==", ["get", "feature_type"], "backdrop"],
+        "paint": {
+            "fill-color": ["coalesce", ["get", "bg_color"], "#ffe566"],
+            "fill-opacity": 0.35,
+            "fill-antialias": True,
+        },
+    }]
+
+
 def build_station_layers(cfg) -> list:
     """
     Stop dots per mode group, each appearing at the same zoom as its line.
@@ -1414,97 +1436,148 @@ def build_station_layers(cfg) -> list:
     # =========================================================================
     # Hard cut at z16 → z17: pill-zoom / far-zoom stop layers stop at z17
     # (via their own maxzoom), the close-zoom layers below start at z17.
-    CLOSE_ZOOM_MIN = 17
+    # The yellow station backdrop is NOT here — it renders below the transit
+    # lines via build_close_zoom_backdrop_layers().
 
-    # 1. Yellow station backdrop. Rendered as a wide translucent yellow line
-    # over every "backdrop" LineString; overlapping strokes with round caps
-    # merge into a rounded polygon-like shape at typical z17+ zooms.
-    layers.append({
-        "id": "close-zoom-station-backdrop",
-        "type": "line",
-        "source": "transit_close_zoom",
-        "source-layer": "transit_close_zoom",
-        "minzoom": CLOSE_ZOOM_MIN,
-        "filter": ["==", ["get", "feature_type"], "backdrop"],
-        "layout": {"line-cap": "round", "line-join": "round"},
-        "paint": {
-            "line-color": "#ffe566",
-            "line-opacity": 0.4,
-            "line-width": ["interpolate", ["linear"], ["zoom"],
-                17, 30,
-                20, 90,
-            ],
-        }
-    })
+    # Geometry-locked sizing: pill geometry is metres, so borders and labels
+    # convert their metre dimensions to px on the map's own exponential
+    # scale. 1 m = 2.455 px at z17 (lat 47°, 512px tiles), doubling per zoom.
+    PX_PER_M_Z17 = 2.455
+    PX_PER_M_Z22 = PX_PER_M_Z17 * 32.0
 
-    # 2. Pill-arrow casing (white).
-    layers.append({
-        "id": "close-zoom-pill-arrow-casing",
-        "type": "line",
-        "source": "transit_close_zoom",
-        "source-layer": "transit_close_zoom",
-        "minzoom": CLOSE_ZOOM_MIN,
-        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
-        "layout": {"line-cap": "round", "line-join": "round"},
-        "paint": {
-            "line-color": "#ffffff",
-            "line-width": ["interpolate", ["linear"], ["zoom"],
-                17, 2.0,
-                20, 4.0,
-            ],
-        }
-    })
+    def _metric_px(m):
+        return ["interpolate", ["exponential", 2], ["zoom"],
+                17, m * PX_PER_M_Z17,
+                22, m * PX_PER_M_Z22]
 
-    # 3. Pill-arrow fill (mode color).
-    layers.append({
-        "id": "close-zoom-pill-arrow-fill",
-        "type": "fill",
-        "source": "transit_close_zoom",
-        "source-layer": "transit_close_zoom",
-        "minzoom": CLOSE_ZOOM_MIN,
-        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
-        "paint": {
-            "fill-color": ["get", "color"],
-            "fill-antialias": True,
-        }
-    })
+    font_px_expr = ["interpolate", ["exponential", 2], ["zoom"],
+        17, ["*", ["get", "font_m"], PX_PER_M_Z17],
+        22, ["*", ["get", "font_m"], PX_PER_M_Z22],
+    ]
 
-    # 4. Pill-arrow line ref (short label rendered centred, aligned with pill
-    # heading). Uses the "heading_deg" property (map-space bearing, 0 = north).
-    layers.append({
-        "id": "close-zoom-pill-arrow-ref",
-        "type": "symbol",
-        "source": "transit_close_zoom",
-        "source-layer": "transit_close_zoom",
-        "minzoom": CLOSE_ZOOM_MIN,
-        "filter": ["==", ["get", "feature_type"], "pill_arrow"],
-        "layout": {
-            "text-field": ["concat",
-                ["get", "ref"], "  ",
-                ["case",
-                    ["has", "destination"],
-                        ["get", "destination"],
-                        ""],
-            ],
-            "text-font": ["Noto Sans Regular"],
-            "text-size": ["interpolate", ["linear"], ["zoom"],
-                17, 10,
-                20, 16,
-            ],
-            "text-max-width": 8,
-            "text-rotate": ["-", ["get", "heading_deg"], 90],
-            "text-rotation-alignment": "map",
-            "text-pitch-alignment": "map",
-            "text-allow-overlap": True,
-            "text-ignore-placement": True,
-            "symbol-placement": "point",
-        },
-        "paint": {
-            "text-color": "#ffffff",
-            "text-halo-color": ["get", "color"],
-            "text-halo-width": 1.2,
-        }
-    })
+    # Zoom bands (must mirror CLOSE_ZOOM_BANDS in 07_extract_stops.py):
+    # each pill exists once per band in the tiles; the style shows exactly
+    # one band per display-zoom range. Bands B and C share the z18 tiles
+    # (z19+ overzooms them), so the zoom gates + band filter do the switch.
+    # Band A is the solid variant: whole pill in the line color with a white
+    # border, number only, no disc (step 07 emits none for it).
+    #   (band, display minzoom, display maxzoom, dest text-max-width in em,
+    #    body fill color, border color)
+    # Line breaks are baked into the destination text by step 07 (build-time
+    # wrap with abbreviation of over-long words), so MapLibre's own wrapping
+    # is disabled via a huge text-max-width on every band.
+    CLOSE_ZOOM_STYLE_BANDS = [
+        ("A", 17, 18, None, ["get", "color"], "#ffffff"),
+        ("B", 18, 19, 1000, "#ffffff", ["get", "color"]),
+        ("C", 19, None, 1000, "#ffffff", ["get", "color"]),
+    ]
+
+    for band, band_min, band_max, dest_max_width, body_fill, border_color \
+            in CLOSE_ZOOM_STYLE_BANDS:
+        def _band_layer(layer):
+            layer["source"] = "transit_close_zoom"
+            layer["source-layer"] = "transit_close_zoom"
+            layer["minzoom"] = band_min
+            if band_max is not None:
+                layer["maxzoom"] = band_max
+            layers.append(layer)
+
+        # 1. Pill-arrow body fill (line color for the solid band A, white
+        # for the duo-tone bands).
+        _band_layer({
+            "id": f"close-zoom-pill-arrow-fill-{band}",
+            "type": "fill",
+            "filter": ["all",
+                       ["==", ["get", "feature_type"], "pill_arrow"],
+                       ["==", ["get", "band"], band]],
+            "paint": {
+                "fill-color": body_fill,
+                "fill-antialias": True,
+            }
+        })
+
+        # 2. Pill-arrow border (~0.4 m, scales with the pill geometry):
+        # white on the solid band A, line color on the duo-tone bands.
+        _band_layer({
+            "id": f"close-zoom-pill-arrow-border-{band}",
+            "type": "line",
+            "filter": ["all",
+                       ["==", ["get", "feature_type"], "pill_arrow"],
+                       ["==", ["get", "band"], band]],
+            "layout": {"line-cap": "round", "line-join": "round"},
+            "paint": {
+                "line-color": border_color,
+                "line-width": _metric_px(0.4),
+            }
+        })
+
+        # 3. Disc at the round end, filled with the line color (duo-tone
+        # bands only; band A emits no disc features).
+        _band_layer({
+            "id": f"close-zoom-pill-disc-{band}",
+            "type": "fill",
+            "filter": ["all",
+                       ["==", ["get", "feature_type"], "pill_disc"],
+                       ["==", ["get", "band"], band]],
+            "paint": {
+                "fill-color": ["get", "color"],
+                "fill-antialias": True,
+            }
+        })
+
+        # 4. Line number in the disc (white). `font_m`/`text_rot` are baked
+        # by step 07 so the label fits the disc and reads right-side-up.
+        _band_layer({
+            "id": f"close-zoom-pill-ref-{band}",
+            "type": "symbol",
+            "filter": ["all",
+                       ["==", ["get", "feature_type"], "pill_ref"],
+                       ["==", ["get", "band"], band]],
+            "layout": {
+                "text-field": ["get", "ref"],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": font_px_expr,
+                "text-rotate": ["get", "text_rot"],
+                "text-rotation-alignment": "map",
+                "text-pitch-alignment": "map",
+                "text-allow-overlap": True,
+                "text-ignore-placement": True,
+                "text-padding": 0,
+            },
+            "paint": {
+                "text-color": "#ffffff",
+            }
+        })
+
+        # 5. Destination in black along the white body (bands with
+        # destination text only).
+        if dest_max_width is not None:
+            _band_layer({
+                "id": f"close-zoom-pill-dest-{band}",
+                "type": "symbol",
+                "filter": ["all",
+                           ["==", ["get", "feature_type"], "pill_dest"],
+                           ["==", ["get", "band"], band]],
+                "layout": {
+                    "text-field": ["get", "destination"],
+                    "text-font": ["Noto Sans Regular"],
+                    "text-size": font_px_expr,
+                    "text-rotate": ["get", "text_rot"],
+                    "text-rotation-alignment": "map",
+                    "text-pitch-alignment": "map",
+                    "text-allow-overlap": True,
+                    "text-ignore-placement": True,
+                    "text-padding": 0,
+                    "text-max-width": dest_max_width,
+                    # Left-aligned: step 07 places the anchor at the text's
+                    # visual-left end of the text region (flip-aware).
+                    "text-anchor": "left",
+                    "text-justify": "left",
+                },
+                "paint": {
+                    "text-color": "#000000",
+                }
+            })
 
     if not cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         return layers
@@ -1652,6 +1725,7 @@ def generate_style(cfg) -> dict:
     style["layers"].extend(build_rail_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_road_layers(cfg, modes=["bridge"]))
     style["layers"].extend(build_path_layers(cfg, modes=["bridge"]))
+    style["layers"].extend(build_close_zoom_backdrop_layers())
     style["layers"].extend(build_transit_layers())
     style["layers"].extend(build_border_layers(cfg))
     style["layers"].extend(build_label_layers(cfg))

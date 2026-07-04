@@ -2439,9 +2439,7 @@ def _measure_pill_geometry(cluster_stops, cos_lat=1.0):
         return 0.0
     path = nearest_neighbor_path(positions)
 
-    pos_to_platforms = {}
-    for s in cluster_stops:
-        pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
+    pos_to_platforms = _pos_to_platforms(cluster_stops, positions)
 
     # Unique platform extents in this cluster (dedupe by object identity —
     # the same per-(line, stop) extent isn't shared, but we don't need to
@@ -3112,13 +3110,53 @@ def write_debug_bars() -> None:
 # =============================================================================
 
 # First-draft seed values. Refine after visual review.
-CLOSE_ZOOM_PILL_LENGTH_M       = 25.0   # pill arrow total length (chevron tip to back)
-CLOSE_ZOOM_PILL_WIDTH_M        = 8.0    # pill arrow across-body width
-CLOSE_ZOOM_STACK_GAP_M         = 2.0    # gap between adjacent pill-arrows in a stack
-CLOSE_ZOOM_RAIL_PERP_OFFSET_M  = 8.0    # perpendicular offset off the rail track
-CLOSE_ZOOM_ONTRACK_OFFSET_M    = 8.0    # offset when non-rail pill sits on track
-CLOSE_ZOOM_ONTRACK_THRESH_M    = 1.5    # "on line" threshold to trigger offset
-CLOSE_ZOOM_BACKDROP_HALF_W_M   = 6.0    # visual pad meters that get buffered → yellow
+CLOSE_ZOOM_STACK_GAP_FRAC      = 0.1    # stack gap as a fraction of pill width
+CLOSE_ZOOM_LINE_GAP_M          = 2.0    # clear gap between line and pill inner edge
+CLOSE_ZOOM_DIR_CLUSTER_COS     = cos(radians(45.0))  # same-direction threshold
+CLOSE_ZOOM_BACKDROP_PAD_M      = 8.0    # outward padding of the station hull
+CLOSE_ZOOM_ARC_STEP_DEG        = 12.0   # hull corner rounding granularity
+# Label sizing (glyph height in metres; the style converts to px per zoom).
+# Uniform within a band — destinations are pre-wrapped at build time (long
+# words hyphen-split) and get an ellipsis beyond the band's line budget.
+CLOSE_ZOOM_CHAR_W_EM           = 0.60   # avg glyph width as fraction of size
+
+# Zoom bands: each pill is emitted once per band with band-specific sizing;
+# the style gates them by display zoom (A: z17, B: z18, C: z19+). Bands B
+# and C both live in the z18 tiles (z19+ overzooms them), band A in the
+# z15–17 tiles.
+#
+# The arrow does NOT grow across bands (all 10 m long): zooming in itself
+# provides the extra pixels, which the higher bands spend on destination
+# text (B: one line, C: two lines) while the glyph height in metres shrinks.
+# Band A has no destination (font_dest_m None) — it renders as a solid pill
+# in the line color with just the centered line number, no disc.
+#   length_m / width_m — pill geometry
+#   font_ref_m         — line-number glyph height
+#   font_dest_m        — destination glyph height (None = number-only band)
+#   max_lines          — destination wrap limit before the ellipsis
+#   margin_disc_m      — text-region margin on the disc side
+#   margin_tip_m       — text-region margin on the chevron side (negative =
+#                        the text may extend past the neck into the tip base)
+#   tipp_min/tipp_max  — tippecanoe zoom range for the band's features
+# The margins encode "2 px more at the disc, 3–4 px less at the arrow" at
+# each band's native zoom (z18: 1 px ≈ 0.20 m, z19: 1 px ≈ 0.10 m) on top
+# of the previous ~0.2 m base inset.
+CLOSE_ZOOM_BANDS = {
+    "A": {"length_m": 10.0, "width_m": 5.0, "font_ref_m": 2.5,
+          "font_dest_m": None, "max_lines": 0,
+          "margin_disc_m": 0.0, "margin_tip_m": 0.0,
+          "tipp_min": 15, "tipp_max": 17},
+    "B": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.8,
+          "font_dest_m": 1.12, "max_lines": 1,
+          "margin_disc_m": 0.4, "margin_tip_m": -0.5,
+          "tipp_min": 18, "tipp_max": 18},
+    "C": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+          "font_dest_m": 0.84, "max_lines": 2,
+          "margin_disc_m": 0.3, "margin_tip_m": -0.15,
+          "tipp_min": 18, "tipp_max": 18},
+}
+# Band whose geometry feeds the backdrop hull (largest, so it covers all).
+CLOSE_ZOOM_HULL_BAND = "C"
 
 # Modes handled by the rail-style placement (centered on platform axis).
 CLOSE_ZOOM_RAIL_MODES = {"train"}
@@ -3126,88 +3164,6 @@ CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS = {"rack", "rebucketed_rail"}
 
 # Modes that get a close-zoom pill-arrow at all.
 CLOSE_ZOOM_PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus", "ferry"}
-
-
-def _build_pill_arrow_polygon(cx, cy, heading_rad, length_m, width_m,
-                               cos_lat_cached=None, n_arc=6):
-    """Return list of (lon, lat) vertices for a pill-arrow polygon.
-
-    (cx, cy):      pill centre in lon/lat
-    heading_rad:   direction the chevron tip points (math angle, ccw from east)
-    length_m:      total length (chevron tip to back-round-tip)
-    width_m:       across-body width
-    n_arc:         arc segments for the rounded back (higher = smoother)
-
-    Shape in local frame (x = forward, y = left):
-        chevron tip → top-right corner → top-left corner → rounded back
-        → bottom-left corner → bottom-right corner → back to tip
-
-    Ring winding is counter-clockwise, tip closes the ring.
-    """
-    L, W = length_m, width_m
-    R = W / 2.0
-    verts_local = []
-    # Chevron tip
-    verts_local.append((L / 2.0, 0.0))
-    # Top-right corner (chevron neck)
-    verts_local.append((L / 2.0 - R, +W / 2.0))
-    # Top-left corner (back-arc start)
-    verts_local.append((-L / 2.0 + R, +W / 2.0))
-    # Rounded back — CCW arc θ ∈ (π/2, 3π/2)
-    for i in range(1, n_arc):
-        theta = pi / 2.0 + i * pi / n_arc
-        verts_local.append((-L / 2.0 + R + R * cos(theta),
-                             R * sin(theta)))
-    # Bottom-left corner (back-arc end)
-    verts_local.append((-L / 2.0 + R, -W / 2.0))
-    # Bottom-right corner (chevron neck)
-    verts_local.append((L / 2.0 - R, -W / 2.0))
-
-    cos_h = cos(heading_rad)
-    sin_h = sin(heading_rad)
-    if cos_lat_cached is None:
-        cos_lat_cached = cos(radians(cy))
-    m_per_deg_lat = 111320.0
-    m_per_deg_lon = 111320.0 * cos_lat_cached
-    if m_per_deg_lon <= 0.0:
-        m_per_deg_lon = 111320.0
-
-    ring = []
-    for x, y in verts_local:
-        xr = x * cos_h - y * sin_h
-        yr = x * sin_h + y * cos_h
-        lon = cx + xr / m_per_deg_lon
-        lat = cy + yr / m_per_deg_lat
-        ring.append([lon, lat])
-    ring.append(ring[0])  # close
-    return ring
-
-
-def _tangent_at_stop(stop_lon, stop_lat, polyline):
-    """Return the (dx, dy) unit vector of the polyline tangent at the
-    projection of (stop_lon, stop_lat) onto the polyline, expressed in
-    local metres (east-positive x, north-positive y). Returns None if the
-    polyline is degenerate.
-    """
-    if len(polyline) < 2:
-        return None
-    dists = _cum_dist_m(polyline)
-    if dists[-1] <= 0:
-        return None
-    t = _project_meters(stop_lon, stop_lat, polyline, dists)
-    tan = _directional_tangent_at(polyline, dists, t, window_m=20.0)
-    if tan is None:
-        return None
-    # tan is (dlon/m, dlat/m). Convert to metric unit vector.
-    cos_lat = cos(radians(stop_lat))
-    if cos_lat <= 0.0:
-        cos_lat = 1.0
-    dx = tan[0] * 111320.0 * cos_lat
-    dy = tan[1] * 111320.0
-    n = sqrt(dx * dx + dy * dy)
-    if n <= 0.0:
-        return None
-    return (dx / n, dy / n)
 
 
 def _local_offset_to_lonlat(cx, cy, dx_m, dy_m, cos_lat_cached=None):
@@ -3220,34 +3176,310 @@ def _local_offset_to_lonlat(cx, cy, dx_m, dy_m, cos_lat_cached=None):
     return (cx + dx_m / m_per_deg_lon, cy + dy_m / m_per_deg_lat)
 
 
-def _line_distance_m(px, py, polyline):
-    """Perpendicular distance in metres from (px, py) to nearest point on polyline."""
-    if len(polyline) < 2:
-        return float("inf")
-    dists = _cum_dist_m(polyline)
-    if dists[-1] <= 0:
-        return float("inf")
-    t = _project_meters(px, py, polyline, dists)
-    sx, sy = _interp_at(polyline, dists, t)
-    cos_lat = cos(radians(py))
-    if cos_lat <= 0.0:
-        cos_lat = 1.0
-    dx_m = (px - sx) * 111320.0 * cos_lat
-    dy_m = (py - sy) * 111320.0
-    return sqrt(dx_m * dx_m + dy_m * dy_m)
+def _point_at_extrap(polyline, dists, t):
+    """Point at arc position t (metres), extrapolating straight beyond the
+    polyline ends using the end tangents. Returns (lon, lat)."""
+    poly_max = dists[-1]
+    if 0.0 <= t <= poly_max:
+        return _interp_at(polyline, dists, t)
+    if t < 0.0:
+        tan = _directional_tangent_at(polyline, dists, 0.0)
+        if tan is None:
+            return (polyline[0][0], polyline[0][1])
+        return (polyline[0][0] + tan[0] * t, polyline[0][1] + tan[1] * t)
+    tan = _directional_tangent_at(polyline, dists, poly_max)
+    if tan is None:
+        return (polyline[-1][0], polyline[-1][1])
+    ex = t - poly_max
+    return (polyline[-1][0] + tan[0] * ex, polyline[-1][1] + tan[1] * ex)
+
+
+def _unit_tangent_metric(polyline, dists, t, cos_lat):
+    """Unit tangent at arc position t (clamped to the polyline range) as a
+    metric (east, north) vector. None for degenerate geometry."""
+    t = min(max(t, 0.0), dists[-1])
+    tan = _directional_tangent_at(polyline, dists, t, window_m=20.0)
+    if tan is None:
+        return None
+    dx = tan[0] * 111320.0 * cos_lat
+    dy = tan[1] * 111320.0
+    n = sqrt(dx * dx + dy * dy)
+    if n <= 0.0:
+        return None
+    return (dx / n, dy / n)
+
+
+def _sample_ts(dists, t0, t1, max_step_m=3.0):
+    """Ordered arc positions from t0 to t1 (t0 < t1): endpoints, interior
+    polyline vertices, plus subdivisions so no gap exceeds max_step_m."""
+    ts = [t0]
+    for d in dists:
+        if t0 < d < t1:
+            ts.append(d)
+    ts.append(t1)
+    out = [ts[0]]
+    for a, b in zip(ts, ts[1:]):
+        n = int((b - a) // max_step_m)
+        for i in range(1, n + 1):
+            out.append(a + (b - a) * i / (n + 1))
+        out.append(b)
+    return out
+
+
+def _build_curved_pill_arrow(polyline, dists, t_rear, t_neck, perp_m,
+                              width_m, cos_lat, n_arc=16):
+    """Curved pill-arrow following `polyline`.
+
+    The pill body spans arc positions t_rear..t_neck, offset laterally by
+    perp_m (positive = right of the direction of travel). A chevron tip of
+    length width_m/2 extends beyond t_neck; a rounded cap closes t_rear.
+    Arc positions outside the polyline range are extrapolated straight.
+
+    Returns (ring, centerline) — the closed polygon ring and the pill's
+    centerline points (rear → apex), both as [lon, lat] lists — or None.
+    """
+    R = width_m / 2.0
+    if t_neck <= t_rear:
+        return None
+    ts = _sample_ts(dists, t_rear, t_neck)
+    pts = []
+    for t in ts:
+        base = _point_at_extrap(polyline, dists, t)
+        T = _unit_tangent_metric(polyline, dists, t, cos_lat)
+        if T is None:
+            return None
+        N = (T[1], -T[0])  # right normal (direction of travel)
+        pts.append((base, T, N))
+
+    def off(base, T, N, dt, dn):
+        return _local_offset_to_lonlat(base[0], base[1],
+                                       T[0] * dt + N[0] * dn,
+                                       T[1] * dt + N[1] * dn, cos_lat)
+
+    inner = [off(b, T, N, 0.0, perp_m - R) for (b, T, N) in pts]
+    outer = [off(b, T, N, 0.0, perp_m + R) for (b, T, N) in pts]
+    center = [off(b, T, N, 0.0, perp_m) for (b, T, N) in pts]
+
+    b_neck, T_neck, N_neck = pts[-1]
+    apex = off(b_neck, T_neck, N_neck, R, perp_m)
+
+    # Rounded back cap: half-circle around the rear centerline point, from
+    # the inner edge over the back pole to the outer edge.
+    b_rear, T_rear, N_rear = pts[0]
+    arc = []
+    for i in range(1, n_arc):
+        theta = pi * i / n_arc
+        arc.append(off(b_rear, T_rear, N_rear,
+                       -R * sin(theta), perp_m - R * cos(theta)))
+
+    ring = [list(apex)]
+    ring.extend(list(p) for p in reversed(inner))
+    ring.extend(list(p) for p in arc)
+    ring.extend(list(p) for p in outer)
+    ring.append(list(apex))
+
+    centerline = [list(p) for p in center] + [list(apex)]
+    return ring, centerline
+
+
+def _convex_hull_metric(pts):
+    """Convex hull (Andrew monotone chain) of (x, y) metric points, in
+    counter-clockwise order without the closing point."""
+    pts = sorted(set(pts))
+    if len(pts) <= 2:
+        return pts
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def _rounded_hull_polygon(lonlat_pts, pad_m, arc_step_deg=12.0):
+    """Rounded envelope around a point cloud: convex hull offset outward by
+    pad_m, with circular arcs at the corners. The outline is convex
+    everywhere — it never notches inward between the covered elements.
+    Returns a closed [lon, lat] ring, or None for an empty/degenerate cloud.
+    """
+    if not lonlat_pts:
+        return None
+    lon0, lat0 = lonlat_pts[0]
+    cl = cos(radians(lat0))
+    if cl <= 0.0:
+        cl = 1.0
+    # To metric coords, deduped on a 0.5 m grid to keep the hull cheap.
+    seen = set()
+    metric = []
+    for lon, lat in lonlat_pts:
+        x = (lon - lon0) * 111320.0 * cl
+        y = (lat - lat0) * 111320.0
+        key = (round(x * 2.0), round(y * 2.0))
+        if key in seen:
+            continue
+        seen.add(key)
+        metric.append((x, y))
+    hull = _convex_hull_metric(metric)
+    if not hull:
+        return None
+
+    step = radians(arc_step_deg)
+    out = []
+
+    def _arc(cx, cy, a1, a2):
+        """Arc points from angle a1 to a2 going counter-clockwise."""
+        sweep = (a2 - a1) % (2.0 * pi)
+        n = max(1, int(sweep / step))
+        for j in range(n + 1):
+            a = a1 + sweep * j / n
+            out.append((cx + pad_m * cos(a), cy + pad_m * sin(a)))
+
+    if len(hull) == 1:
+        _arc(hull[0][0], hull[0][1], 0.0, 2.0 * pi - 1e-9)
+    elif len(hull) == 2:
+        # Capsule around the two points.
+        (x1, y1), (x2, y2) = hull
+        base = atan2(y2 - y1, x2 - x1)
+        _arc(x2, y2, base - pi / 2.0, base + pi / 2.0)
+        _arc(x1, y1, base + pi / 2.0, base + 3.0 * pi / 2.0)
+    else:
+        m_ = len(hull)
+
+        def _norm_out(a, b):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            l = sqrt(dx * dx + dy * dy)
+            if l <= 0.0:
+                return None
+            # CCW polygon → outward normal is right of the edge direction.
+            return (dy / l, -dx / l)
+
+        for i in range(m_):
+            p_prev = hull[(i - 1) % m_]
+            p = hull[i]
+            p_next = hull[(i + 1) % m_]
+            n_in = _norm_out(p_prev, p)
+            n_out = _norm_out(p, p_next)
+            if n_in is None or n_out is None:
+                continue
+            _arc(p[0], p[1], atan2(n_in[1], n_in[0]), atan2(n_out[1], n_out[0]))
+
+    if len(out) < 3:
+        return None
+    ring = [list(_local_offset_to_lonlat(lon0, lat0, x, y, cl))
+            for (x, y) in out]
+    ring.append(ring[0])
+    return ring
+
+
+def _shorten_destination(dest: str, current_stop_name: str) -> str:
+    """Destination shortening for pill-arrow labels.
+
+    1. If the destination begins with the current stop's city — comma- or
+       space-separated ("Bern, …" or "Bern …" on a pill in Bern) — strip the
+       city prefix. The city is the part of the current stop's name before
+       its first comma. The separator requirement keeps "Berneck" intact.
+    2. If (afterwards) a comma remains, keep only the part before it
+       ("Wabern, Tram-Endstation" → "Wabern").
+    """
+    if not dest:
+        return dest
+    city = (current_stop_name or "").split(",")[0].strip()
+    d = dest.strip()
+    if city:
+        low_d, low_c = d.lower(), city.lower()
+        if low_d.startswith(low_c + ",") or low_d.startswith(low_c + " "):
+            d = d[len(city) + 1:].strip()
+    if "," in d:
+        d = d.split(",")[0].strip()
+    return d or dest
+
+
+def _wrap_label(text: str, line_cap: int, max_lines: int) -> str:
+    """Greedy-wrap `text` into at most `max_lines` lines of at most
+    `line_cap` characters, with baked "\\n" breaks (MapLibre honours them).
+    Words longer than a line are shortened with a single abbreviation dot
+    (no hyphen splitting — without linguistic hyphenation the break
+    positions would be nonsense). If text remains beyond the line budget,
+    the last line ends with an ellipsis."""
+    line_cap = max(line_cap, 2)
+    words = text.split()
+    lines = []
+    cur = ""
+    for w in words:
+        while w:
+            cand = (cur + " " + w) if cur else w
+            if len(cand) <= line_cap:
+                cur = cand
+                w = ""
+            elif not cur and len(w) > line_cap:
+                lines.append(w[:line_cap - 1] + ".")
+                w = ""
+            else:
+                lines.append(cur)
+                cur = ""
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = (lines[-1][:line_cap - 1].rstrip("…. ").rstrip() + "…")
+    return "\n".join(lines)
+
+
+def _blend_colors(hex_colors) -> str:
+    """Mean-RGB blend of a list of #rrggbb colors."""
+    rs = gs = bs = 0
+    n = 0
+    for h in hex_colors:
+        h = (h or "").lstrip("#")
+        if len(h) != 6:
+            continue
+        try:
+            rs += int(h[0:2], 16)
+            gs += int(h[2:4], 16)
+            bs += int(h[4:6], 16)
+            n += 1
+        except ValueError:
+            continue
+    if n == 0:
+        return "#ffe566"
+    return "#%02x%02x%02x" % (rs // n, gs // n, bs // n)
 
 
 def write_close_zoom_features(line_stops: dict, line_lookup: dict,
-                                stop_meta: dict, skip_first_oids: set,
-                                skip_last_oids: set) -> None:
+                                stop_meta: dict, stop_attrs: dict,
+                                sibling_groups: dict, oid_sibling_key: dict,
+                                end_of_platform_pairs: set) -> None:
     """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
     line-segments that together produce the close-zoom (z17+) station
     representation. See .claude/concepts/close-zoom-stop-design.md.
 
+    Pill-arrows are curved: the body follows the line polyline, laterally
+    offset by the stop's own distance from the line (minimum offset when the
+    stop sits on the line). One pill-arrow per (stop, line ref, agency,
+    direction) — same-direction variants collapse into a single pill listing
+    every destination.
+
+    The backdrop is one rounded convex-hull polygon per GTFS parent station,
+    covering every pill-arrow and the line sections next to them plus a
+    fixed outward padding — a single envelope shape with no overlaps and no
+    inward notches.
+
     Every emitted feature carries `feature_type` ∈ {"pill_arrow",
-    "backdrop"} to gate style layers.
+    "pill_disc", "pill_ref", "pill_dest", "backdrop"} to gate style layers.
+    Label features carry `font_m` (glyph height in metres, pre-shrunk so the
+    text fits its region) and `text_rot` (map-space rotation, flipped when it
+    would render upside-down).
     """
-    # Per-line origin/destination display names.
+    # Per-line destination display names.
     line_dest = {}
     for oid, entry in line_stops.items():
         triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
@@ -3256,9 +3488,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         last_sid = triplets[-1][2]
         line_dest[str(oid)] = stop_meta.get(last_sid, {}).get("name", "")
 
-    # Build per-stop visit list: {stop_id: [ {osm_id, line info, stop coords,
-    # local tangent, direction_key}, ... ]}. Each entry is one (line-feature,
-    # stop) visit; we sort per stop_id by speed_kmh desc and stack from there.
+    # ── Collect visits per stop_id ───────────────────────────────────────
     per_stop_visits: dict = defaultdict(list)
     for osm_id_raw, ls_entry in line_stops.items():
         osm_id = str(osm_id_raw)
@@ -3274,181 +3504,368 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         polyline = flatten_coords(line["coords"])
         if len(polyline) < 2:
             continue
-        skip_first_here = osm_id in skip_first_oids
-        skip_last_here = osm_id in skip_last_oids
+        dists = _cum_dist_m(polyline)
+        if dists[-1] <= 0:
+            continue
         last_idx = len(triplets) - 1
         for idx, trip in enumerate(triplets):
             if len(trip) < 3:
                 continue
-            if idx == 0 and skip_first_here:
-                continue
-            if idx == last_idx and skip_last_here:
+            # Departures only: the line's last stop is an arrival — no pill
+            # there ("17 to Bern, Bahnhof" at Bern, Bahnhof makes no sense).
+            if idx == last_idx:
                 continue
             stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
             if not sid:
                 continue
-            slon, slat = snap_to_line(stop_lon, stop_lat, polyline)
-            tan = _tangent_at_stop(stop_lon, stop_lat, polyline)
-            if tan is None:
+            cos_lat = cos(radians(stop_lat))
+            if cos_lat <= 0.0:
+                cos_lat = 1.0
+            t_stop = _project_meters(stop_lon, stop_lat, polyline, dists)
+            T = _unit_tangent_metric(polyline, dists, t_stop, cos_lat)
+            if T is None:
                 continue
-            per_stop_visits[sid].append({
-                "osm_id":       osm_id,
-                "mode":         mode,
-                "mountain_origin": mo,
-                "color":        line["color"],
-                "ref":          line.get("ref", ""),
-                "speed_kmh":    line.get("speed_kmh") or 0.0,
-                "slon":         slon,
-                "slat":         slat,
-                "tangent":      tan,
-                "polyline":     polyline,
-                "destination":  line_dest.get(osm_id, ""),
-            })
-
-    features = []
-    L = CLOSE_ZOOM_PILL_LENGTH_M
-    W = CLOSE_ZOOM_PILL_WIDTH_M
-    stack_step = L + CLOSE_ZOOM_STACK_GAP_M
-    perp_rail = CLOSE_ZOOM_RAIL_PERP_OFFSET_M
-    perp_ontrack = CLOSE_ZOOM_ONTRACK_OFFSET_M
-    ontrack_thresh = CLOSE_ZOOM_ONTRACK_THRESH_M
-
-    for sid, visits in per_stop_visits.items():
-        visits.sort(key=lambda v: (-(v.get("speed_kmh") or 0.0), v["osm_id"]))
-        for stack_idx, v in enumerate(visits):
-            mode = v["mode"]
-            mo = v.get("mountain_origin")
-            slon, slat = v["slon"], v["slat"]
-            tdx, tdy = v["tangent"]
-            cos_lat = cos(radians(slat))
-            heading = atan2(tdy, tdx)  # forward direction of travel
-            # Right-perpendicular (in direction of travel): rotate tangent −90°.
-            #   (tdx, tdy) → (tdy, -tdx)
-            right_dx, right_dy = tdy, -tdx
-
+            N = (T[1], -T[0])  # right normal in direction of travel
+            # Signed lateral offset of the raw GTFS coord from the line:
+            # positive = stop sits right of the line in direction of travel.
+            sx, sy = _interp_at(polyline, dists, t_stop)
+            dxm = (stop_lon - sx) * 111320.0 * cos_lat
+            dym = (stop_lat - sy) * 111320.0
+            signed_d = dxm * N[0] + dym * N[1]
             is_rail_like = (
                 mode in CLOSE_ZOOM_RAIL_MODES
                 or (mode == "mountain" and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS)
             )
-
+            # Full platform extent along the line (atlas length; same logic
+            # as the debug platform overlay) — feeds the backdrop hull so
+            # the yellow area covers the whole platform, not just the
+            # pill-arrow span.
+            extent = None
             if is_rail_like:
-                # Anchor sits perpendicular to the track (fixed offset), then
-                # stack forward along the direction of travel — fastest at
-                # stack_idx=0 sits closest to the platform middle in the
-                # direction of travel; slower lines queue upstream behind it.
-                # Full outward-fan bidirectional split is deferred.
-                perp_off = perp_rail
-                stack_offset = -stack_idx * stack_step  # slower behind (upstream)
-                # Actually: fastest in front → put stack_idx=0 furthest FORWARD.
-                # We want stack_idx=0 at max forward, higher indices behind.
-                # Center the whole stack around the platform middle:
-                stack_offset = (len(visits) - 1 - 2 * stack_idx) * (stack_step / 2.0)
-                anchor_dx = stack_offset * tdx + perp_off * right_dx
-                anchor_dy = stack_offset * tdy + perp_off * right_dy
-            else:
-                # Non-rail: anchor at stop point. Fastest closest to stop, slower
-                # queue upstream (opposite to direction of travel). If the pill
-                # would sit on the line itself, offset perpendicular by
-                # perp_ontrack.
-                on_line = _line_distance_m(slon, slat, v["polyline"]) < ontrack_thresh
-                perp_off = perp_ontrack if on_line else 0.0
-                # Fastest in front = stack_idx 0 anchored at stop; slower queue
-                # upstream. Pill CENTRE offset: stack_idx=0 → centred one L/2
-                # behind the anchor so the chevron tip lands at the stop.
-                fwd_off = -(L / 2.0) - stack_idx * stack_step
-                anchor_dx = fwd_off * tdx + perp_off * right_dx
-                anchor_dy = fwd_off * tdy + perp_off * right_dy
-
-            cx, cy = _local_offset_to_lonlat(slon, slat, anchor_dx, anchor_dy, cos_lat)
-            poly_ring = _build_pill_arrow_polygon(cx, cy, heading, L, W, cos_lat)
-
-            heading_deg_map = (90.0 - degrees(heading)) % 360.0
-
-            features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": 15, "maxzoom": 18},
-                "geometry": {"type": "Polygon", "coordinates": [poly_ring]},
-                "properties": {
-                    "feature_type":    "pill_arrow",
-                    "mode":            mode,
-                    "mountain_origin": mo or "",
-                    "color":           v["color"],
-                    "ref":             v["ref"],
-                    "destination":     v["destination"],
-                    "speed_kmh":       v["speed_kmh"],
-                    "stop_id":         sid,
-                    "osm_id":          v["osm_id"],
-                    "heading_deg":     round(heading_deg_map, 2),
-                    "stack_idx":       stack_idx,
-                },
+                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                sib_key = oid_sibling_key.get(osm_id)
+                siblings = sibling_groups.get(sib_key, []) if sib_key else []
+                extent = _platform_extent(
+                    stop_lon, stop_lat, polyline, mode, atlas_len, PILL_CFG,
+                    osm_id=osm_id, siblings=siblings,
+                    end_of_platform=(osm_id, sid) in end_of_platform_pairs,
+                    mountain_origin=mo)
+            per_stop_visits[sid].append({
+                "osm_id":          osm_id,
+                "mode":            mode,
+                "mountain_origin": mo,
+                "color":           line["color"],
+                "ref":             line.get("ref", ""),
+                "agency_id":       line.get("agency_id", ""),
+                "speed_kmh":       line.get("speed_kmh") or 0.0,
+                "polyline":        polyline,
+                "dists":           dists,
+                "t_stop":          t_stop,
+                "cos_lat":         cos_lat,
+                "tangent":         T,
+                "signed_d":        signed_d,
+                "is_rail_like":    is_rail_like,
+                "extent":          extent,
+                "destination":     _shorten_destination(
+                    line_dest.get(osm_id, ""),
+                    stop_meta.get(sid, {}).get("name", "")),
             })
 
-            # Backdrop: a short segment along the pill's forward axis,
-            # centred on the pill centre and spanning the pill length. When
-            # rendered as a wide yellow stroke this fuses adjacent pill-arrows
-            # and adjacent line geometry into the yellow station shape.
-            back_len = L
-            back_dx = (back_len / 2.0) * tdx
-            back_dy = (back_len / 2.0) * tdy
-            b1 = _local_offset_to_lonlat(cx, cy, -back_dx, -back_dy, cos_lat)
-            b2 = _local_offset_to_lonlat(cx, cy, +back_dx, +back_dy, cos_lat)
-            features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": 15, "maxzoom": 18},
-                "geometry": {"type": "LineString",
-                             "coordinates": [list(b1), list(b2)]},
-                "properties": {
-                    "feature_type": "backdrop",
-                    "backdrop_kind": "pill",
-                    "stop_id":       sid,
-                },
-            })
+    features = []
+    # Point cloud per parent station; hulled into the backdrop afterwards.
+    parent_cloud: dict = defaultdict(list)
+    # Distinct line colors per parent — the backdrop takes the single line
+    # color, or a blend when several lines with different colors call.
+    parent_colors: dict = defaultdict(set)
 
-            # Rail backdrop: connect pill to the on-line platform extent, so
-            # the yellow shape spans from the platform onto the track.
-            if is_rail_like:
-                # Segment from pill centre back to the snapped stop position
-                # on the line — perpendicular to the track.
-                b3 = _local_offset_to_lonlat(cx, cy, -perp_rail * right_dx,
-                                              -perp_rail * right_dy, cos_lat)
+    def _parent_of(sid):
+        return stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
+
+    for sid, visits in per_stop_visits.items():
+        parent = _parent_of(sid)
+
+        # ── Collapse variants: one pill per (ref, agency, direction) ────
+        # Same line number + agency in the same direction of travel (tangent
+        # dot product within 45°) merges into one pill; destinations are
+        # collected across the merged variants, fastest variant first.
+        visits.sort(key=lambda v: (-(v["speed_kmh"] or 0.0), v["osm_id"]))
+        clusters = []
+        for v in visits:
+            merged = False
+            for c in clusters:
+                if c["ref"] != v["ref"] or c["agency_id"] != v["agency_id"]:
+                    continue
+                dot = (c["tangent"][0] * v["tangent"][0]
+                       + c["tangent"][1] * v["tangent"][1])
+                if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                    if v["destination"] and v["destination"] not in c["destinations"]:
+                        c["destinations"].append(v["destination"])
+                    merged = True
+                    break
+            if not merged:
+                c = dict(v)
+                c["destinations"] = [v["destination"]] if v["destination"] else []
+                clusters.append(c)
+
+        # ── Direction groups ─────────────────────────────────────────────
+        # Clusters heading the same way (tangent dot within 45°) share a
+        # stack and, crucially, one path: when parallel lines (e.g. tram +
+        # bus on the same street) serve the same stop, every pill-arrow in
+        # the group follows the RIGHTMOST line so they line up.
+        groups = []
+        for c in clusters:
+            placed = False
+            for g in groups:
+                dot = (g[0]["tangent"][0] * c["tangent"][0]
+                       + g[0]["tangent"][1] * c["tangent"][1])
+                if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                    g.append(c)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([c])
+
+        # Per-pill work items: (cluster, path cluster, stack idx, group size).
+        # The path cluster is the group's rightmost line — the one whose
+        # on-line stop position sits furthest right (in direction of travel)
+        # in the frame of the group's first cluster.
+        work = []
+        for group in groups:
+            g0 = group[0]
+            N0 = (g0["tangent"][1], -g0["tangent"][0])
+            P0 = _interp_at(g0["polyline"], g0["dists"], g0["t_stop"])
+            path = g0
+            best_off = float("-inf")
+            for c in group:
+                Pj = _interp_at(c["polyline"], c["dists"], c["t_stop"])
+                dxm = (Pj[0] - P0[0]) * 111320.0 * g0["cos_lat"]
+                dym = (Pj[1] - P0[1]) * 111320.0
+                off = dxm * N0[0] + dym * N0[1]
+                if off > best_off:
+                    best_off = off
+                    path = c
+            for k, c in enumerate(group):
+                work.append((c, path, k, len(group)))
+
+        for c, path, k, n in work:
+            polyline, dists = path["polyline"], path["dists"]
+            t_stop, cos_lat = path["t_stop"], path["cos_lat"]
+
+            # Side of the line: bus/tram always to the right in direction of
+            # travel; rail on the side the GTFS stop position snapped from.
+            side = 1.0
+            if c["is_rail_like"] and path["signed_d"] < 0.0:
+                side = -1.0
+
+            dest_full = " / ".join(c["destinations"])
+            ref_text = c["ref"] or ""
+
+            common = {
+                "mode":           c["mode"],
+                "color":          c["color"],
+                "ref":            ref_text,
+                "stop_id":        sid,
+                "parent_station": parent,
+            }
+
+            parent_colors[parent].add(c["color"])
+
+            # Rail: the full platform extent joins the hull cloud so the
+            # backdrop covers the whole platform.
+            if c["is_rail_like"] and c.get("extent"):
+                parent_cloud[parent].extend(
+                    (p[0], p[1]) for p in c["extent"])
+
+            for band_id, bc in CLOSE_ZOOM_BANDS.items():
+                L = bc["length_m"]
+                W = bc["width_m"]
+                R = W / 2.0
+                # Full occupied length is exactly L: back cap (R) + body +
+                # chevron tip (R). The body is the arc range rear → neck.
+                body_len = L - 2.0 * R
+                stack_step = L + W * CLOSE_ZOOM_STACK_GAP_FRAC
+                tipp = {"minzoom": bc["tipp_min"], "maxzoom": bc["tipp_max"]}
+                # Consistent clear gap between the line and the pill's inner
+                # edge, on the side chosen above.
+                perp = side * (CLOSE_ZOOM_LINE_GAP_M + W / 2.0)
+
+                if c["is_rail_like"]:
+                    # Stack centered on the platform middle along the track;
+                    # fastest (k=0) sits furthest forward.
+                    center_t = t_stop + (n - 1 - 2 * k) * (stack_step / 2.0)
+                    t_neck = center_t + body_len / 2.0
+                    t_rear = center_t - body_len / 2.0
+                else:
+                    # Stack extends upstream from the stop point; the fastest
+                    # pill's chevron tip lands exactly on the stop.
+                    apex_t = t_stop - k * stack_step
+                    t_neck = apex_t - R
+                    t_rear = t_neck - body_len
+
+                built = _build_curved_pill_arrow(polyline, dists, t_rear,
+                                                 t_neck, perp, W, cos_lat)
+                if built is None:
+                    continue
+                ring, centerline = built
+
+                # Heading at the pill's mid position (map bearing, 0 = north).
+                t_mid = (t_rear + t_neck) / 2.0
+                T_mid = _unit_tangent_metric(polyline, dists, t_mid, cos_lat)
+                if T_mid is None:
+                    T_mid = c["tangent"]
+                heading_deg_map = (90.0
+                                   - degrees(atan2(T_mid[1], T_mid[0]))) % 360.0
+                # Label rotation: along the pill axis, flipped when upside-down.
+                text_rot = (heading_deg_map - 90.0) % 360.0
+                flipped = 90.0 < text_rot < 270.0
+                if flipped:
+                    text_rot = (text_rot + 180.0) % 360.0
+
+                # Destination, pre-wrapped at build time with baked line
+                # breaks. The text region runs from the disc's forward edge
+                # (plus margin) to the neck (minus margin; a negative tip
+                # margin lets text reach into the chevron base).
+                region_start = t_rear + R + bc["margin_disc_m"]
+                region_end = t_neck - bc["margin_tip_m"]
+                text_avail_m = max(region_end - region_start, 0.0)
+                dest_text = ""
+                if bc["font_dest_m"] and dest_full and text_avail_m > 0.0:
+                    line_cap = int(text_avail_m
+                                   / (CLOSE_ZOOM_CHAR_W_EM
+                                      * bc["font_dest_m"]))
+                    dest_text = _wrap_label(dest_full, line_cap,
+                                            bc["max_lines"])
+
                 features.append({
                     "type": "Feature",
-                    "tippecanoe": {"minzoom": 15, "maxzoom": 18},
-                    "geometry": {"type": "LineString",
-                                 "coordinates": [list(cx_cy) for cx_cy in [(cx, cy), b3]]},
+                    "tippecanoe": dict(tipp),
+                    "geometry": {"type": "Polygon", "coordinates": [ring]},
                     "properties": {
-                        "feature_type":  "backdrop",
-                        "backdrop_kind": "rail_connector",
-                        "stop_id":       sid,
+                        **common,
+                        "feature_type":    "pill_arrow",
+                        "band":            band_id,
+                        "mountain_origin": c["mountain_origin"] or "",
+                        "destination":     dest_text,
+                        "n_variants":      len(c["destinations"]),
+                        "speed_kmh":       c["speed_kmh"],
+                        "osm_id":          c["osm_id"],
+                        "heading_deg":     round(heading_deg_map, 2),
+                        "stack_idx":       k,
                     },
                 })
-                # Along-line platform extent: short segment along the track
-                # spanning the pill's along-track length.
-                on_line_pt = (slon, slat)
-                pl_dx = (L / 2.0) * tdx
-                pl_dy = (L / 2.0) * tdy
-                p1 = _local_offset_to_lonlat(*on_line_pt, -pl_dx, -pl_dy, cos_lat)
-                p2 = _local_offset_to_lonlat(*on_line_pt, +pl_dx, +pl_dy, cos_lat)
-                features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": 15, "maxzoom": 18},
-                    "geometry": {"type": "LineString",
-                                 "coordinates": [list(p1), list(p2)]},
-                    "properties": {
-                        "feature_type":  "backdrop",
-                        "backdrop_kind": "rail_platform_track",
-                        "stop_id":       sid,
-                    },
-                })
+
+                # Solid band (no destination): the whole pill renders in the
+                # line color with just the centered number — no disc.
+                solid = bc["font_dest_m"] is None
+
+                rear_cx, rear_cy = centerline[0]
+                if not solid:
+                    # Disc at the round end, filled with the line color.
+                    disc = []
+                    for i in range(24):
+                        a = 2.0 * pi * i / 24.0
+                        disc.append(list(_local_offset_to_lonlat(
+                            rear_cx, rear_cy, R * cos(a), R * sin(a), cos_lat)))
+                    disc.append(disc[0])
+                    features.append({
+                        "type": "Feature",
+                        "tippecanoe": dict(tipp),
+                        "geometry": {"type": "Polygon", "coordinates": [disc]},
+                        "properties": {**common,
+                                       "feature_type": "pill_disc",
+                                       "band":         band_id},
+                    })
+
+                # Line number: centered in the disc, or in the whole pill
+                # for solid bands.
+                if ref_text and bc["font_ref_m"]:
+                    if solid:
+                        base_c = _point_at_extrap(polyline, dists, t_mid)
+                        N_m = (T_mid[1], -T_mid[0])
+                        ref_x, ref_y = _local_offset_to_lonlat(
+                            base_c[0], base_c[1],
+                            N_m[0] * perp, N_m[1] * perp, cos_lat)
+                    else:
+                        ref_x, ref_y = rear_cx, rear_cy
+                    features.append({
+                        "type": "Feature",
+                        "tippecanoe": dict(tipp),
+                        "geometry": {"type": "Point",
+                                     "coordinates": [ref_x, ref_y]},
+                        "properties": {
+                            **common,
+                            "feature_type": "pill_ref",
+                            "band":         band_id,
+                            "font_m":       round(bc["font_ref_m"], 3),
+                            "text_rot":     round(text_rot, 2),
+                        },
+                    })
+
+                # Destination, left-aligned in the text region: the anchor
+                # sits at the region end that is the text's visual left —
+                # the disc side normally, the neck side when the label is
+                # flipped (the style anchors the text's left edge here).
+                if dest_text:
+                    t_text = region_end if flipped else region_start
+                    base = _point_at_extrap(polyline, dists, t_text)
+                    T_t = _unit_tangent_metric(polyline, dists, t_text, cos_lat)
+                    if T_t is not None:
+                        N_t = (T_t[1], -T_t[0])
+                        tx, ty = _local_offset_to_lonlat(
+                            base[0], base[1],
+                            N_t[0] * perp, N_t[1] * perp, cos_lat)
+                        features.append({
+                            "type": "Feature",
+                            "tippecanoe": dict(tipp),
+                            "geometry": {"type": "Point",
+                                         "coordinates": [tx, ty]},
+                            "properties": {
+                                **common,
+                                "feature_type": "pill_dest",
+                                "band":         band_id,
+                                "destination":  dest_text,
+                                "font_m":       round(bc["font_dest_m"], 3),
+                                "text_rot":     round(text_rot, 2),
+                            },
+                        })
+
+                # Hull cloud: pill outline plus the adjacent line section
+                # (largest band only — it covers the smaller ones).
+                if band_id == CLOSE_ZOOM_HULL_BAND:
+                    cloud = parent_cloud[parent]
+                    cloud.extend((p[0], p[1]) for p in ring)
+                    for t in _sample_ts(dists, t_rear, t_neck + R):
+                        cloud.append(_point_at_extrap(polyline, dists, t))
+
+    # ── Backdrop: one rounded hull polygon per parent station ────────────
+    n_backdrops = 0
+    for parent, cloud in parent_cloud.items():
+        hull_ring = _rounded_hull_polygon(cloud, CLOSE_ZOOM_BACKDROP_PAD_M,
+                                          CLOSE_ZOOM_ARC_STEP_DEG)
+        if hull_ring is None:
+            continue
+        colors = sorted(parent_colors.get(parent, set()))
+        bg_color = colors[0] if len(colors) == 1 else _blend_colors(colors)
+        features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+            "geometry": {"type": "Polygon", "coordinates": [hull_ring]},
+            "properties": {
+                "feature_type":   "backdrop",
+                "parent_station": parent,
+                "bg_color":       bg_color,
+                "n_colors":       len(colors),
+            },
+        })
+        n_backdrops += 1
 
     OUT_CLOSE_ZOOM.write_text(json.dumps({
         "type": "FeatureCollection",
         "features": features,
     }, ensure_ascii=False))
     pill_count = sum(1 for f in features if f["properties"]["feature_type"] == "pill_arrow")
-    back_count = sum(1 for f in features if f["properties"]["feature_type"] == "backdrop")
-    print(f"  Close-zoom: {pill_count:,} pill-arrows, {back_count:,} backdrop segments "
-          f"→ {OUT_CLOSE_ZOOM}")
+    print(f"  Close-zoom: {pill_count:,} pill-arrows, {n_backdrops:,} station "
+          f"backdrops → {OUT_CLOSE_ZOOM}")
 
 
 # =============================================================================
@@ -4112,6 +4529,32 @@ def _dedup_stop_positions(cluster_stops):
                    for u_lon, u_lat in unique):
             unique.append((lon, lat))
     return unique
+
+
+def _pos_to_platforms(cluster_stops, positions):
+    """Map each survivor position from `positions` to the list of every
+    cluster stop that dedup'd onto it. Keyed by survivor so downstream
+    lookups (`_stops_at_positions`, perpendicular-platforms check in
+    `_should_split_at_gap`) see every stop logically at that position —
+    not just the first-seen stop whose exact float made it into
+    `positions`. Without this redirect, stops within DEDUP_TOL_M of the
+    survivor would be silently dropped from indicator color emission and
+    from tangent lookups, which at band B (2.5 m) can lose real
+    same-cluster platforms."""
+    tol_km = DEDUP_TOL_M / 1000.0
+    out = {pos: [] for pos in positions}
+    for s in cluster_stops:
+        lon, lat = s["lon"], s["lat"]
+        for u_lon, u_lat in positions:
+            if haversine_km(lon, lat, u_lon, u_lat) < tol_km:
+                out[(u_lon, u_lat)].append(s)
+                break
+        else:
+            # Positions came from _dedup_stop_positions(cluster_stops), so
+            # every stop must have a survivor. Fall back to the stop's own
+            # coord as a defensive slot rather than silently dropping it.
+            out.setdefault((lon, lat), []).append(s)
+    return out
 
 
 def _dedup_cluster_members_by_position(cluster_stops):
@@ -5357,9 +5800,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     # for dead-straight in-line continuations or gaps along a bar's
     # perpendicular axis; PILL_GAP_ANGLED_M for angled / T-junction
     # connectors). Absolute metres — no width_base scaling.
-    pos_to_platforms = {}
-    for s in cluster_stops:
-        pos_to_platforms.setdefault((s["lon"], s["lat"]), []).append(s)
+    pos_to_platforms = _pos_to_platforms(cluster_stops, positions)
     mean_lat = sum(p[1] for p in positions) / len(positions)
     cluster_cos_lat = cos(radians(mean_lat))
     # Pill diameter estimate in metres at the current band's target zoom,
@@ -7484,8 +7925,9 @@ def main():
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
 
     print("Emitting close-zoom stop features...")
-    write_close_zoom_features(line_stops, line_lookup, stop_meta,
-                                skip_first_oids, skip_last_oids)
+    write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
+                              sibling_groups, oid_sibling_key,
+                              end_of_platform_pairs)
 
     # Summary
     mode_counts: dict = defaultdict(int)

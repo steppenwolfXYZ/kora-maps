@@ -43,6 +43,8 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 
 **Transit stop architecture:** All stop features (dots, pills, connectors) are `LineString` features in a single PMTile source (`tl_stop_pills.pmtiles`). Dots are `[pos, pos]` zero-length lines rendered as circles via `line-cap: round`. Layer paint order: dot-casing → connector-casing → pill-casing → dot-fill → pill-fill → connector-fill.
 
+**View modes:** The map has two views, `standard` (place labels visible, all stop symbology hidden) and `transit-focus` (place labels hidden, stops visible), toggled client-side in `src/lib/Map.svelte` via layer visibility — one shared `style.json`, no regeneration. Transit lines render identically in both. See `view-modes.md`. Shipped default is `standard`; the code currently carries a `DEFAULT_VIEW` dev override to `transit-focus` during stop-rendering development.
+
 ---
 
 # Transit Color Scheme

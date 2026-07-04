@@ -2,58 +2,64 @@
 
 ## Problem
 
-We have three zoom levels of stop representation. Pill-zoom is finished, far-zoom dots are near done. Close-zoom (high zoom levels) currently has no dedicated design — it just inherits the pill-zoom rendering, which wastes the available screen space at z17+. At close zoom we have room to show platform-level information: which line uses which platform, in which direction, and what the actual extent of the station is.
+We have three zoom levels of stop representation. Pill-zoom is finished, far-zoom dots are near done. Close-zoom (high zoom levels) previously had no dedicated design — it just inherited the pill-zoom rendering, which wastes the available screen space at z17+. At close zoom we have room to show platform-level information: which line stops where, in which direction, toward which destination, and what the actual extent of the station is.
 
 ## Requirements
 
-### Activation
+### Activation and zoom bands
 
 - Replaces pill-zoom rendering from z17 upward. Hard cut at the z16 → z17 boundary; no fade overlap.
-
-### Station background polygon
-
-A single transparent yellow polygon per station, sitting behind everything else at this zoom.
-
-- **Shape derivation** — union of the following, then buffered with equal padding and rounded outer corners:
-  - **Rail stations (train + mountain rack rail)**: the pill-arrows themselves (positioned off the line at the platform) plus the platform's projected extent along the line (the same platform-extent geometry currently emitted as a debug overlay).
-  - **All other modes (bus, tram, aerial, funicular, ferry)**: the pill-arrows themselves plus the line segments adjacent to each pill-arrow.
-- **Padding**: equal distance around every pill-arrow and every line section that sits next to a pill-arrow. Initial seed value picked to look right at z17; refine after first render. Scales with zoom on the same curve as the rest of the close-zoom layer.
-- **Outer border**: very round corners.
-- **Color**: fixed yellow regardless of which modes the station serves. The yellow is not mode-specific. Mode color appears only on the pill-arrows.
+- Three zoom bands with band-specific content. The arrow does **not** grow across bands (all bands are equally long in metres) — zooming in itself provides the extra pixels, which the higher bands spend on destination text while glyph heights (in metres) shrink:
+  - **Band A (z17)**: very small pill-arrow, solid in the line color with a white border, containing only the centered line number. No disc, no destination.
+  - **Band B (z18)**: slim single-line pill-arrow — white body, border in the line color, colored disc at the round end with the line number, one line of destination text.
+  - **Band C (z19+)**: same footprint as band B, destination may wrap to two lines; smaller glyph height (in metres) so the zoom gain is absorbed.
+- Band switches are hard cuts at integer zooms (A→B at z18, B→C at z19).
 
 ### Pill-arrow shape
 
-The visual element placed on each platform for each line+direction.
+The visual element placed beside the line for each line+direction at a stop.
 
-- Rounded rectangle ("pill") where the going-to end is replaced by a chevron tip — only the tip is pointed (a `>` shape), the body's long sides remain straight and parallel. The opposite end stays rounded as a normal pill end.
+- Rounded rectangle ("pill") where the going-to end is replaced by a chevron tip — only the tip is pointed (a `>` shape); the opposite end stays rounded.
+- The body is **curved**: it follows the line geometry (offset parallel to it), bending with the line where necessary. Never a rigid straight box on a curved line.
 - Chevron tip points in the direction of travel away from this stop.
-- Pill background uses the line's mode color (follows existing per-mode color logic; no special case for mountain).
-- Casing: white, per existing transit casing rule.
-- Contents: the line's short name (or equivalent) and the trip destination.
-- Destination text is truncated with ellipsis when it exceeds the pill's max width.
-- Pill width is fixed but scales slightly with zoom — from "just readable" at the lowest active zoom to "comfortably readable" at the highest.
+- The occupied length (back cap + body + tip) is exact — stacking math accounts for the rounded cap's bulge.
+- Geometry must render crisply through z22 (dense vertices, no tile simplification of the shapes).
+- **Duo-tone design (bands B/C)**: white body, border in the line color, a disc in the line color at the round end containing the line number, destination text in black on the white body.
+- **Solid design (band A)**: whole pill in the line color, white border, line number only.
+- Line numbers are always bold, white, and sized to fit their container.
+
+### Text
+
+- Destination text is left-aligned within its text region (anchored at the disc side; at the chevron side when the label is flipped for readability). Labels rotate with the pill axis and flip 180° when they would render upside-down.
+- The text region grants slightly more clearance on the disc side and extends slightly into the chevron base on the arrow side.
+- Glyph heights are defined in metres and convert to pixels on the map's zoom curve, so text scales exactly with the pill geometry and can never overflow it. Uniform size within a band — no per-label shrinking.
+- Line breaks are computed at build time (baked into the label). Words longer than a line are **abbreviated with a single dot** — no hyphen splitting, since without linguistic hyphenation the break positions would be nonsense. Text exceeding the band's line budget (B: one line, C: two lines) ends with an ellipsis.
+- **Destination shortening**: if the destination begins with the current stop's city (comma- or space-separated — "Bern, …" or "Bern …" on a pill in Bern), the city prefix is stripped; the separator requirement keeps names like "Berneck" intact. If a comma remains afterwards, everything from the comma on is dropped ("Wabern, Tram-Endstation" → "Wabern"). A destination that is exactly the city name is never emptied.
 
 ### Pill-arrow placement
 
-One pill-arrow per (line, direction, platform).
+One pill-arrow per (stop, line, direction). Same-direction variants of a line at a stop collapse into a single pill-arrow listing all their (deduplicated, shortened) destinations. **Departures only**: a line's final stop is an arrival and gets no pill-arrow there.
 
-- **Rail (train + mountain rack rail)**: positioned along the actual platform, centered on the platform's middle in the simple case. Multiple lines on the same platform stack along the platform axis.
-  - When a platform serves both directions, the stacks fan outward from the platform center — fastest line at each outer end, slower lines toward the middle. Arrows from opposite directions never point at each other (sort from outside in).
-  - When a platform serves only one direction, the stack sits with the fastest line forward (in direction of travel) and slower lines queued behind.
-- **All other modes (bus, tram, aerial, funicular, ferry)**: the leading pill-arrow starts at the platform point and the stack extends upstream, parallel to the local line tangent.
-  - Fastest line is in front (closest to the platform point in direction of travel); slower lines queue behind it.
-- **Sorting metric for "fastest"**: the same speed value that drives line thickness (`width_base`). Speed, not frequency.
-- **Atlas-missing fallback (rail)**: when a platform has no atlas data (`no_atlas_match`), fall back to the pfaedle-snapped stop position with the on-track offset rule below.
-- **On-track offset**: when the pill-arrow's anchor sits exactly on the pfaedle track geometry (no atlas offset placing it off to the side), shift the pill-arrow to the right of the line in direction of travel. Offset distance is whatever leaves a clean visible gap between the pill-arrow and the line — no overlap, enough air to read as "next to" not "on top of".
+- **Anchor**: always the snapped on-line stop position, shifted sideways by a fixed clear gap between the line and the pill's inner edge — a consistent visual gap everywhere.
+- **Side of the line**: bus and tram always to the right in direction of travel; rail on the side the GTFS stop position snapped from.
+- **Direction grouping**: pills at a stop heading the same way (within 45°) form one stack. Direction is derived from the line tangent at the stop, not from GTFS direction fields.
+- **Shared path for parallel lines**: when lines in one direction group run on parallel but non-overlapping map geometries (e.g. tram + bus on the same street), every pill-arrow in the group follows the group's **rightmost** line, so they line up on one path.
+- **Rail (train + mountain rack rail)**: stack centered on the platform middle along the track, fastest line furthest forward.
+- **All other modes**: the fastest line's chevron tip lands exactly on the stop point; slower lines queue upstream behind it.
+- **Stack gap**: about a tenth of the pill width between consecutive pill-arrows.
+- **Sorting metric for "fastest"**: the per-line speed value (speed, not frequency).
 
-### Identity per direction
+### Station background polygon
 
-Pill-arrows are emitted per `direction_key`. The same line through the same platform in opposite directions produces two distinct pill-arrows.
+One translucent polygon per parent station, sitting behind the transit lines (not just behind the stop layers).
+
+- **Shape**: a rounded convex envelope ("hull") around everything the station comprises: all pill-arrow outlines, the line sections adjacent to them, and — for rail — the **full platform extent** along the track (the same platform-extent logic used by the platform debug overlay), plus a fixed outward padding. The outline only bulges outward; it never notches inward between platforms. Covering somewhat more than the exact union is fine.
+- No overlapping shapes — exactly one polygon per parent station.
+- **Color**: the serving line's color. When lines of several colors serve the station, a blend of all their colors stands in for a gradient (a true polygon gradient fill is not possible in the rendering engine).
 
 ## Constraints
 
-- No mode-specific special-casing on the yellow background — it is one fixed color across all stations.
-- Mountain mode is not a special case in placement: mountain rack rail follows the rail platform rule; aerial and funicular mountain follow the bus/tram-style upstream-stack rule.
-- Casing remains white for every mode, including mountain.
-- Padding, on-track offset distance, and pill width zoom curve are seed-and-refine — exact values to be tuned after first render.
+- Mountain is not a special case: rack rail follows the rail rules; aerial and funicular follow the bus/tram-style rules.
+- Band A→B→C sizes, fonts, margins, gaps, and the backdrop padding are seed-and-refine — tune after visual review, but keep the band tables in the pipeline and in the style generator in sync.
+- The build-time text wrapping replaces renderer-side wrapping entirely — the renderer must not re-wrap.
 - Do not reintroduce an `intercity` bucket or any other mode key when extending the renderer.

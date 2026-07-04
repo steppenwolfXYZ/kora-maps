@@ -37,9 +37,65 @@
 		'transit-stop-pill-endpoint',
 	];
 
+	// Every stop-symbology layer, toggled as one unit by the view switch
+	// (see .claude/concepts/view-modes.md). Debug layers stay independent.
+	const STOP_SYMBOLOGY_LAYERS = [
+		...TRANSIT_STOP_DOT_LAYERS,
+		...TRANSIT_STOP_PILL_LAYERS,
+		'transit-stop-indicator',
+		'close-zoom-station-backdrop',
+		'close-zoom-pill-arrow-casing',
+		'close-zoom-pill-arrow-fill',
+		'close-zoom-pill-arrow-ref',
+	];
+
+	const PLACE_LABEL_LAYERS = ['label-place', 'label-state', 'label-country'];
+
+	type ViewMode = 'standard' | 'transit-focus';
+	// Dev override: transit-focus while stop rendering is under active work.
+	// The concept (view-modes.md) specifies 'standard' as the shipped default.
+	const DEFAULT_VIEW = 'transit-focus' as ViewMode;
+	let viewMode = $state<ViewMode>(DEFAULT_VIEW);
+	let mapRef: maplibregl.Map | null = null;
+
+	function applyViewMode(map: maplibregl.Map, mode: ViewMode) {
+		for (const id of STOP_SYMBOLOGY_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setLayoutProperty(id, 'visibility', mode === 'transit-focus' ? 'visible' : 'none');
+		}
+		for (const id of PLACE_LABEL_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setLayoutProperty(id, 'visibility', mode === 'standard' ? 'visible' : 'none');
+		}
+	}
+
+	function setView(mode: ViewMode) {
+		viewMode = mode;
+		if (mapRef) applyViewMode(mapRef, mode);
+	}
+
 	const DEBUG_STOP_LAYER = 'debug-stop-dot';
 
 	$effect(() => {
+		// Bake the default view into the style before map creation so the
+		// first frame already matches — no flash on load. DEFAULT_VIEW (a
+		// plain const, not the reactive viewMode) so this effect never
+		// re-runs (and recreates the map) on a view toggle.
+		for (const layer of style.layers) {
+			const l = layer as maplibregl.LayerSpecification & { layout?: object };
+			if (STOP_SYMBOLOGY_LAYERS.includes(layer.id)) {
+				l.layout = {
+					...l.layout,
+					visibility: DEFAULT_VIEW === 'transit-focus' ? 'visible' : 'none'
+				};
+			} else if (PLACE_LABEL_LAYERS.includes(layer.id)) {
+				l.layout = {
+					...l.layout,
+					visibility: DEFAULT_VIEW === 'standard' ? 'visible' : 'none'
+				};
+			}
+		}
+
 		const map = new maplibregl.Map({
 			container,
 			style,
@@ -50,6 +106,7 @@
 		});
 
 		(window as any).map = map;
+		mapRef = map;
 		// Navigation controls (zoom +/-, compass)
 		map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -70,6 +127,10 @@
 		let popup: maplibregl.Popup | null = null;
 
 		map.on('load', () => {
+			// Sync the view in case the user toggled before the style
+			// finished loading (the baked default only covers 'standard').
+			applyViewMode(map, viewMode);
+
 			// Pointer cursor when hovering transit lines and stops
 			const hoverLayers = [
 				...TRANSIT_LINE_LAYERS,
@@ -236,12 +297,26 @@
 				.addTo(map);
 		});
 
-		return () => map.remove();
+		return () => {
+			mapRef = null;
+			map.remove();
+		};
 	});
 </script>
 
 <div class="map-wrap">
 	<div bind:this={container} class="map"></div>
+
+	<div class="view-toggle" role="group" aria-label="Map view">
+		<button
+			class:active={viewMode === 'standard'}
+			onclick={() => setView('standard')}
+		>Standard</button>
+		<button
+			class:active={viewMode === 'transit-focus'}
+			onclick={() => setView('transit-focus')}
+		>Transit</button>
+	</div>
 
 	<div class="zoom-badge" aria-label="Current zoom level">
 		z&thinsp;{zoom}
@@ -258,6 +333,33 @@
 	.map {
 		width: 100%;
 		height: 100%;
+	}
+
+	.view-toggle {
+		position: absolute;
+		top: 1rem;
+		left: 1rem;
+		display: flex;
+		background: #ffffff;
+		border-radius: 999px;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		overflow: hidden;
+		user-select: none;
+	}
+
+	.view-toggle button {
+		border: none;
+		background: transparent;
+		font-family: 'Noto Sans', 'Helvetica Neue', Arial, sans-serif;
+		font-size: 0.8rem;
+		padding: 0.35rem 0.8rem;
+		cursor: pointer;
+		color: #333;
+	}
+
+	.view-toggle button.active {
+		background: #333;
+		color: #fff;
 	}
 
 	.zoom-badge {
