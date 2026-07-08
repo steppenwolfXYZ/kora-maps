@@ -57,6 +57,10 @@ Rebuild: `./scripts/rebuild_transit.sh [--start N] [--force | --force-gtfs | --f
 
 `_trip_group_export` (`trip_id → (line_key, tg_id, agency_id)`), `_trip_stops_export` (`trip_id → [stop_id, ...]`), `_trip_merged_export` (`trip_id → frozenset(merged stop ids)`), `_trip_weight_export` (`trip_id → sample-day activity count`), and `_trip_direction_export` (`trip_id → (first_uic, last_uic)`) expose the per-trip info the emission loop needs. They are populated as side effects of `stream_stop_times` and read by `main()`. They are the only export surface; there is no separate `_line_canonical_export` or `CanonEntry` table — the legacy short/long-name dual-index that used to live alongside them was removed once the pre-pfaedle OSM matcher (which was its only consumer) went away.
 
+## Close-zoom pill-arrows (z17+)
+
+Settled architecture: STRAIGHT metre-fixed polygons baked into the tiles, queued along the stop position line (the fitted extent re-used from the stop/dot placement — the arrival line's at terminals) extended dead straight beyond its range; per-pill axis from the average direction (chord) of the course part the pill spans. Curved bodies, sprite/symbol pills (pixel-fixed), and line-rendered bodies were each fully implemented and reverted — do not retry them; the reasons and renderer limitations are recorded in `close-zoom-stop-design.md`. Build-time text measuring uses `scripts/transit/glyph_widths.json` (regenerate with `gen_glyph_widths.py` when the font stack changes).
+
 ## Service area filter
 
 `is_in_service_area(stop_id)` filters by UIC prefix 85 (Swiss + Liechtenstein) with hardcoded `_SERVICE_AREA_EXCLUDE` / `_SERVICE_AREA_INCLUDE` overrides at the border. Kept in 05 but no longer called by the active main pipeline; available for stop-side filters if needed later.

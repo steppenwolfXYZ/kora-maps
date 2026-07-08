@@ -104,3 +104,6 @@ Do NOT include implementation steps, code snippets, or file/line references. Tho
 
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.
+
+## Where information belongs in the md files
+Business logic does not belong in `behavior.md` — this file is for process and behavioral rules only. The most basic business logic about transit goes into `transit.md`; all further detail stays in the relevant concept md and is linked from `transit.md`.

@@ -102,6 +102,7 @@
 			// Honor center & zoom from the style file; fall back to safe defaults
 			center: (style.center as [number, number]) ?? [0, 0],
 			zoom: style.zoom ?? 2,
+			hash: true,
 			attributionControl: false
 		});
 

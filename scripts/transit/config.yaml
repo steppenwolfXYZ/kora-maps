@@ -8,7 +8,7 @@ debug:
   # clickable GTFS-coord dots, and thick white max-stab bars. Development-time
   # visual aids — flip to false for production-style rendering. Read by
   # scripts/generate_style.py.
-  debug_overlay: false
+  debug_overlay: true
 
 # ── OSM bbox extract for pfaedle ─────────────────────────────────────────────
 # Switzerland bounding box with a small buffer. Pfaedle never routes outside

@@ -35,6 +35,7 @@ import csv
 import json
 import yaml
 from itertools import permutations
+from bisect import bisect_left
 from math import radians, cos, sin, sqrt, atan2, acos, degrees, floor, pi, log
 from pathlib import Path
 from collections import defaultdict
@@ -747,6 +748,28 @@ def _directional_tangent_at(polyline, dists, t, window_m=20.0):
     return ((hi[0] - lo[0]) / arc, (hi[1] - lo[1]) / arc)
 
 
+def _start_segment_tangent(polyline, dists, min_seg_m=1.0):
+    """Per-metre (dx, dy) direction of the polyline's very first segment
+    (poly[0] → poly[1]). Returns None if that segment is shorter than
+    `min_seg_m` — the caller then falls back to a windowed average, because a
+    pfaedle sub-metre stub at a line terminus would otherwise be used as the
+    extension direction and point wildly wrong.
+
+    Used for straight-line backward extrapolation from the polyline start —
+    the extension follows the actual arrival angle at the polyline's starting
+    vertex, not a chord averaged over a window that may cross a curve at the
+    platform.
+    """
+    if len(polyline) < 2:
+        return None
+    seg_len = dists[1] - dists[0]
+    if seg_len < min_seg_m:
+        return None
+    ax, ay = polyline[0]
+    bx, by = polyline[1]
+    return ((bx - ax) / seg_len, (by - ay) / seg_len)
+
+
 # =============================================================================
 # OSM rail walk (pill-rendering concept § "Missing-range fill (rail only)")
 # =============================================================================
@@ -1201,25 +1224,70 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
 # Platform extent (continued) — see pill-rendering concept § Platform extent
 # =============================================================================
 
-# Missing-range fill (tram/bus/regional_bus): sibling-borrow gates.
+# Missing-range fill (tram/bus/regional_bus): borrow gates.
 SIBLING_PROXIMITY_M = 2.0
-SIBLING_ANGLE_TOL_RAD = radians(15.0)
+SIBLING_ANGLE_TOL_RAD = radians(15.0)  # non-sibling tier only
+SIBLING_MAX_TURN_DEG = 120.0           # both tiers: reject candidates whose
+                                        # local turn at q_t exceeds this — the
+                                        # aligned/reversed cos_ang sign becomes
+                                        # unstable at hairpins.
+
+
+def _local_turn_angle_deg(polyline, dists, t, window_m=2.0):
+    """Turn angle in degrees between the polyline's backward and forward
+    one-sided tangents at arc-length t. 0 = straight-through, 180 = full
+    U-turn. Returns None when either side of the window is too short for
+    a stable estimate.
+    """
+    poly_max = dists[-1]
+    if poly_max <= 0:
+        return None
+    back_lo = max(0.0, t - window_m)
+    fwd_hi = min(poly_max, t + window_m)
+    back_arc = t - back_lo
+    fwd_arc = fwd_hi - t
+    if back_arc < window_m * 0.5 or fwd_arc < window_m * 0.5:
+        return None
+    p_back = _interp_at(polyline, dists, back_lo)
+    p_mid = _interp_at(polyline, dists, t)
+    p_fwd = _interp_at(polyline, dists, fwd_hi)
+    b_dx = p_mid[0] - p_back[0]
+    b_dy = p_mid[1] - p_back[1]
+    f_dx = p_fwd[0] - p_mid[0]
+    f_dy = p_fwd[1] - p_mid[1]
+    b_mag = sqrt(b_dx * b_dx + b_dy * b_dy)
+    f_mag = sqrt(f_dx * f_dx + f_dy * f_dy)
+    if b_mag == 0 or f_mag == 0:
+        return None
+    cos_ang = (b_dx * f_dx + b_dy * f_dy) / (b_mag * f_mag)
+    cos_ang = max(-1.0, min(1.0, cos_ang))
+    return degrees(acos(cos_ang))
 
 
 def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
                               my_dx, my_dy, t_on_self, L,
                               siblings, self_oid):
     """Try to borrow the missing `L - t_on_self` metres of backward extent from
-    a sibling line's polyline. Returns a list of (lon, lat) in backward→forward
-    order ending at (target_lon, target_lat), translated so the join with the
-    on-polyline portion is exact. Returns None if no sibling qualifies.
+    a same-line sibling's polyline. Returns a list of (lon, lat) in
+    backward→forward order ending at (target_lon, target_lat), translated so
+    the join with the on-polyline portion is exact. Returns None if nothing
+    qualifies.
 
-    Gates per concept (pill-rendering, missing-range fill):
-      • ~2 m proximity at the snapped GTFS coord p (rejects parallel-street siblings)
-      • ~15° tangent agreement at the sibling's nearest point (rejects diverging
-        siblings — e.g. tram turning loops at termini)
-      • aligned vs reversed direction: handled via the tangent dot product, with
-        the sibling walk reversed to keep our backward direction consistent.
+    Gates (concept § Missing-range fill, step 1):
+      • ~2 m proximity at the snapped GTFS coord `p` (rejects parallel-street
+        variants — e.g. one-way pairs on separate streets).
+      • Local turn at the sibling's nearest point ≤ SIBLING_MAX_TURN_DEG
+        (rejects hairpins where the aligned/reversed sign of cos_ang is
+        numerically unstable).
+      • NO hard tangent-agreement gate. Same-line siblings are the same route
+        by definition, so a big local angle at the shared point is a real
+        turn (Ardez Bröl-style corner terminal), not a wrong-alignment
+        signal. Candidates are ranked by tangent match instead: highest
+        `|cos(angle)|` wins, ties broken by shorter proximity.
+
+    Aligned vs reversed direction still comes from the sign of cos_ang; the
+    sibling walk is reversed for opposite-direction siblings so we always
+    move backward relative to our line.
 
     Circular lines are their own sibling (self_oid == sib_oid): the projection
     starts from the polyline's far end so a loop's "return to start" geometry
@@ -1234,8 +1302,8 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
     my_mag = sqrt(my_ex * my_ex + my_ey * my_ey)
     if my_mag == 0:
         return None
-    cos_tol = cos(SIBLING_ANGLE_TOL_RAD)
 
+    ranked = []
     for sib_oid, sib_poly in siblings:
         if len(sib_poly) < 2:
             continue
@@ -1251,10 +1319,15 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
             q_t = _project_meters(p_lon, p_lat, sib_poly, sib_dists)
             q_lon, q_lat = _interp_at(sib_poly, sib_dists, q_t)
 
-        if haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0 > SIBLING_PROXIMITY_M:
+        prox_m = haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0
+        if prox_m > SIBLING_PROXIMITY_M:
             continue
 
-        sib_tan = _directional_tangent_at(sib_poly, sib_dists, q_t)
+        turn = _local_turn_angle_deg(sib_poly, sib_dists, q_t, window_m=2.0)
+        if turn is not None and turn > SIBLING_MAX_TURN_DEG:
+            continue
+
+        sib_tan = _directional_tangent_at(sib_poly, sib_dists, q_t, window_m=2.0)
         if sib_tan is None:
             continue
         sib_dx, sib_dy = sib_tan
@@ -1264,22 +1337,182 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
             continue
 
         cos_ang = (my_ex * sib_ex + my_ey * sib_ey) / (my_mag * sib_mag)
-        if abs(cos_ang) < cos_tol:
-            continue
         aligned = cos_ang > 0
+        ranked.append((abs(cos_ang), prox_m, sib_oid, sib_poly, sib_dists,
+                       aligned, q_t))
 
+    # Best tangent match wins; ties broken by shorter proximity.
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+
+    for (_abs_cos, _prox_m, _sib_oid, sib_poly, sib_dists,
+         aligned, q_t) in ranked:
+        sib_total = sib_dists[-1]
         if aligned:
             walk_end_t = q_t - t_on_self
             walk_start_t = walk_end_t - fill_m
             if walk_start_t < 0:
                 continue
-            seg = list(_slice_polyline(sib_poly, sib_dists, walk_start_t, walk_end_t))
+            seg = list(_slice_polyline(sib_poly, sib_dists,
+                                        walk_start_t, walk_end_t))
         else:
             walk_start_t = q_t + t_on_self
             walk_end_t = walk_start_t + fill_m
             if walk_end_t > sib_total:
                 continue
-            seg = list(_slice_polyline(sib_poly, sib_dists, walk_start_t, walk_end_t))
+            seg = list(_slice_polyline(sib_poly, sib_dists,
+                                        walk_start_t, walk_end_t))
+            seg.reverse()
+
+        if len(seg) < 2:
+            continue
+
+        end_lon, end_lat = seg[-1]
+        dlon = target_lon - end_lon
+        dlat = target_lat - end_lat
+        return [(x + dlon, y + dlat) for x, y in seg]
+
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Non-sibling backward borrow (pill-rendering concept § Missing-range fill,
+# step 2). Widens the sibling-borrow candidate set from same-line variants to
+# any drawn line polyline within ~2 m of the snapped stop coord, kept honest
+# by the same ±15° tangent gate. Populated once by main() before pill / stop
+# extent building runs; None disables the tier.
+# -----------------------------------------------------------------------------
+
+_ALL_LINES_INDEX = None
+
+
+class _AllLinesIndex:
+    """Spatial grid over every drawn line polyline. Given (lon, lat) and a
+    radius in metres, returns candidate (osm_id, sib_key, polyline, dists)
+    tuples whose polyline touches a cell within radius of the point. Callers
+    do their own precise proximity + tangent gating on the returned set."""
+
+    _CELL_DEG = 0.0005
+
+    def __init__(self):
+        self._cells = defaultdict(set)
+        self._lookup = {}
+
+    def add(self, oid, sib_key, poly, dists):
+        self._lookup[str(oid)] = (sib_key, poly, dists)
+        cs = self._CELL_DEG
+        for i in range(len(poly) - 1):
+            ax, ay = poly[i]
+            bx, by = poly[i + 1]
+            lo_x = int(min(ax, bx) / cs); hi_x = int(max(ax, bx) / cs)
+            lo_y = int(min(ay, by) / cs); hi_y = int(max(ay, by) / cs)
+            for cx in range(lo_x, hi_x + 1):
+                for cy in range(lo_y, hi_y + 1):
+                    self._cells[(cx, cy)].add(str(oid))
+
+    def query(self, lon, lat, radius_m):
+        deg = radius_m / 111000.0 * 1.5
+        cs = self._CELL_DEG
+        lo_x = int((lon - deg) / cs); hi_x = int((lon + deg) / cs)
+        lo_y = int((lat - deg) / cs); hi_y = int((lat + deg) / cs)
+        seen = set()
+        for cx in range(lo_x, hi_x + 1):
+            for cy in range(lo_y, hi_y + 1):
+                seen |= self._cells.get((cx, cy), set())
+        out = []
+        for oid in seen:
+            entry = self._lookup.get(oid)
+            if entry is not None:
+                out.append((oid,) + entry)
+        return out
+
+    def own_sib_key(self, oid):
+        entry = self._lookup.get(str(oid))
+        return entry[0] if entry else None
+
+
+def _borrow_backward_nonsibling(p_lon, p_lat, target_lon, target_lat,
+                                 my_dx, my_dy, t_on_self, L,
+                                 self_oid, self_sib_key):
+    """Non-sibling backward borrow: widen the missing-range fill from
+    same-(ref, agency_id, mode) variants to any drawn line polyline within
+    ~2 m of `p`, keeping the ±15° tangent gate. Multiple qualifying
+    candidates are ranked by tangent match to (my_dx, my_dy) — highest
+    `|cos(angle)|` wins, with shorter proximity as tie-break. The picked
+    line is walked backward from its projection of `p` by the missing
+    arc-length and translated so the join with the on-polyline portion is
+    exact. Returns None when the tier is disabled, when no candidate
+    qualifies, or when every ranked candidate's polyline runs out before
+    fill_m.
+    """
+    if _ALL_LINES_INDEX is None or L <= t_on_self:
+        return None
+    fill_m = L - t_on_self
+
+    cos_lat = cos(radians(p_lat))
+    my_ex, my_ey = my_dx * cos_lat, my_dy
+    my_mag = sqrt(my_ex * my_ex + my_ey * my_ey)
+    if my_mag == 0:
+        return None
+    cos_tol = cos(SIBLING_ANGLE_TOL_RAD)
+
+    ranked = []
+    for (cand_oid, cand_key, cand_poly, cand_dists) in _ALL_LINES_INDEX.query(
+            p_lon, p_lat, SIBLING_PROXIMITY_M):
+        if cand_oid == str(self_oid):
+            continue
+        if cand_key == self_sib_key:
+            continue
+        cand_total = cand_dists[-1]
+        if cand_total <= 0:
+            continue
+
+        q_t = _project_meters(p_lon, p_lat, cand_poly, cand_dists)
+        q_lon, q_lat = _interp_at(cand_poly, cand_dists, q_t)
+        prox_m = haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0
+        if prox_m > SIBLING_PROXIMITY_M:
+            continue
+
+        turn = _local_turn_angle_deg(cand_poly, cand_dists, q_t, window_m=2.0)
+        if turn is not None and turn > SIBLING_MAX_TURN_DEG:
+            continue
+
+        cand_tan = _directional_tangent_at(cand_poly, cand_dists, q_t,
+                                            window_m=2.0)
+        if cand_tan is None:
+            continue
+        cand_dx, cand_dy = cand_tan
+        cand_ex, cand_ey = cand_dx * cos_lat, cand_dy
+        cand_mag = sqrt(cand_ex * cand_ex + cand_ey * cand_ey)
+        if cand_mag == 0:
+            continue
+
+        cos_ang = (my_ex * cand_ex + my_ey * cand_ey) / (my_mag * cand_mag)
+        abs_cos = abs(cos_ang)
+        if abs_cos < cos_tol:
+            continue
+        aligned = cos_ang > 0
+        ranked.append((abs_cos, prox_m, cand_oid, cand_poly, cand_dists,
+                       aligned, q_t))
+
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+
+    for (_abs_cos, _prox_m, _cand_oid, cand_poly, cand_dists,
+         aligned, q_t) in ranked:
+        cand_total = cand_dists[-1]
+        if aligned:
+            walk_end_t = q_t - t_on_self
+            walk_start_t = walk_end_t - fill_m
+            if walk_start_t < 0:
+                continue
+            seg = list(_slice_polyline(cand_poly, cand_dists,
+                                        walk_start_t, walk_end_t))
+        else:
+            walk_start_t = q_t + t_on_self
+            walk_end_t = walk_start_t + fill_m
+            if walk_end_t > cand_total:
+                continue
+            seg = list(_slice_polyline(cand_poly, cand_dists,
+                                        walk_start_t, walk_end_t))
             seg.reverse()
 
         if len(seg) < 2:
@@ -1369,6 +1602,18 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         return None
     t = _project_meters(stop_lon, stop_lat, polyline, dists)
 
+    # Closed-loop projection override. For a polyline whose endpoints coincide
+    # (a loop trip starting and ending at the same platform), `_project_meters`
+    # arbitrarily returns `t = 0` because poly[0] and poly[-1] tie on distance
+    # — but semantically the stop we're drawing is the LAST-entry arrival at
+    # the loop's close point, so it should sit at `t = poly_max`. Force that
+    # here; the extent then slices the last L m of the loop without any
+    # extrapolation / borrow.
+    if (t < 1.0
+            and haversine_km(polyline[0][0], polyline[0][1],
+                              polyline[-1][0], polyline[-1][1]) * 1000.0 < 1.0):
+        t = poly_max
+
     is_centred_extent = (
         mode in ("train", "metro")
         or (mode == "mountain" and mountain_origin in MOUNTAIN_EXTENT_ORIGINS)
@@ -1384,7 +1629,7 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         if len(on_slice) >= 2 and on_slice[0] == on_slice[-1]:
             on_slice = [on_slice[0]]
 
-        tan = _directional_tangent_at(polyline, dists, t)
+        tan = _directional_tangent_at(polyline, dists, t, window_m=2.0)
         if tan is None:
             return on_slice  # no usable tangent → can't fill
         dx_per_m, dy_per_m = tan
@@ -1401,10 +1646,29 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
                     return borrowed
                 return borrowed[:-1] + on_slice
 
-        # Straight-line tangent extrapolation backward.
+        # Non-sibling borrow (step 2 in the concept's missing-range fill).
+        # Widens the candidate set to every drawn line polyline within 2 m
+        # of `p`, excluding our own line and the same-(ref, agency_id, mode)
+        # siblings already tried above.
+        if _ALL_LINES_INDEX is not None and osm_id is not None:
+            own_key = _ALL_LINES_INDEX.own_sib_key(osm_id)
+            borrowed = _borrow_backward_nonsibling(
+                p[0], p[1], target[0], target[1],
+                dx_per_m, dy_per_m, t, L, osm_id, own_key)
+            if borrowed is not None:
+                if len(on_slice) <= 1:
+                    return borrowed
+                return borrowed[:-1] + on_slice
+
+        # Straight-line tangent extrapolation backward. Use the first
+        # non-stub segment's direction (arrival angle at the polyline start)
+        # rather than the ±20 m smoothed tangent — smoothing across a curve
+        # at the platform bends the extension away from the true street.
+        ext_tan = _start_segment_tangent(polyline, dists) or (dx_per_m, dy_per_m)
+        ext_dx, ext_dy = ext_tan
         missing_m = L - t
-        extrap = (target[0] - dx_per_m * missing_m,
-                  target[1] - dy_per_m * missing_m)
+        extrap = (target[0] - ext_dx * missing_m,
+                  target[1] - ext_dy * missing_m)
         if not on_slice:
             return [extrap, (p[0], p[1])]
         return [extrap] + on_slice
@@ -3114,11 +3378,26 @@ CLOSE_ZOOM_STACK_GAP_FRAC      = 0.1    # stack gap as a fraction of pill width
 CLOSE_ZOOM_LINE_GAP_M          = 2.0    # clear gap between line and pill inner edge
 CLOSE_ZOOM_DIR_CLUSTER_COS     = cos(radians(45.0))  # same-direction threshold
 CLOSE_ZOOM_BACKDROP_PAD_M      = 8.0    # outward padding of the station hull
+CLOSE_ZOOM_CURB_LATERAL_M      = 2.0    # same-curb: max lateral gap between stop position lines
+CLOSE_ZOOM_CURB_MERGE_FRAC     = 0.30   # same-curb: overlap share above which stops merge
 CLOSE_ZOOM_ARC_STEP_DEG        = 12.0   # hull corner rounding granularity
 # Label sizing (glyph height in metres; the style converts to px per zoom).
-# Uniform within a band — destinations are pre-wrapped at build time (long
-# words hyphen-split) and get an ellipsis beyond the band's line budget.
-CLOSE_ZOOM_CHAR_W_EM           = 0.60   # avg glyph width as fraction of size
+# Uniform within a band — destinations are pre-wrapped at build time and get
+# an ellipsis beyond the band's line budget. Wrapping measures real advance
+# widths from glyph_widths.json (see gen_glyph_widths.py); the flat fallback
+# below only applies when that table is missing.
+CLOSE_ZOOM_CHAR_W_EM           = 0.60   # fallback avg glyph width (em)
+
+GLYPH_WIDTHS_PATH = ROOT / "scripts" / "transit" / "glyph_widths.json"
+try:
+    _gw_raw = json.loads(GLYPH_WIDTHS_PATH.read_text())
+    GLYPH_WIDTHS = _gw_raw.get("regular") or {}
+    GLYPH_WIDTH_DEFAULT = float(_gw_raw.get("default_regular",
+                                            CLOSE_ZOOM_CHAR_W_EM))
+    del _gw_raw
+except (FileNotFoundError, ValueError):
+    GLYPH_WIDTHS = {}
+    GLYPH_WIDTH_DEFAULT = CLOSE_ZOOM_CHAR_W_EM
 
 # Zoom bands: each pill is emitted once per band with band-specific sizing;
 # the style gates them by display zoom (A: z17, B: z18, C: z19+). Bands B
@@ -3226,60 +3505,247 @@ def _sample_ts(dists, t0, t1, max_step_m=3.0):
     return out
 
 
-def _build_curved_pill_arrow(polyline, dists, t_rear, t_neck, perp_m,
-                              width_m, cos_lat, n_arc=16):
-    """Curved pill-arrow following `polyline`.
-
-    The pill body spans arc positions t_rear..t_neck, offset laterally by
-    perp_m (positive = right of the direction of travel). A chevron tip of
-    length width_m/2 extends beyond t_neck; a rounded cap closes t_rear.
-    Arc positions outside the polyline range are extrapolated straight.
-
-    Returns (ring, centerline) — the closed polygon ring and the pill's
-    centerline points (rear → apex), both as [lon, lat] lists — or None.
-    """
-    R = width_m / 2.0
-    if t_neck <= t_rear:
+def _unit_chord_metric(A, B, cos_lat):
+    """Unit metric direction from point A to point B (lon/lat pairs), or
+    None if degenerate."""
+    dxm = (B[0] - A[0]) * 111320.0 * cos_lat
+    dym = (B[1] - A[1]) * 111320.0
+    nrm = sqrt(dxm * dxm + dym * dym)
+    if nrm < 1e-9:
         return None
-    ts = _sample_ts(dists, t_rear, t_neck)
-    pts = []
-    for t in ts:
-        base = _point_at_extrap(polyline, dists, t)
+    return (dxm / nrm, dym / nrm)
+
+
+def _stop_course(extent, fwd_T, cos_lat, back_m, fwd_m, chord_w=10.0):
+    """Queue course for a pill-arrow stack: the stop position line `extent`
+    oriented in the queue's direction of travel, then extended DEAD
+    STRAIGHT at both ends (rear by back_m, front by fwd_m metres) along the
+    average direction (chord) of the extent's first / last chord_w metres.
+    Pills whose span lies inside the extent thus derive their angle from
+    the stop position line at their own segment; pills beyond it continue
+    straight in the direction of the last pills that fit.
+
+    NOTHING but the stop position line determines the placement — the raw
+    GTFS stop coordinate is never consulted here.
+
+    Orientation: the extent keeps its own point order (the travel
+    direction of the line it was sliced from — the departing lane at a
+    departure bay, the approach at an arrival-side terminal, the line
+    itself at a through stop). It is reversed only when that order runs
+    clearly AGAINST the group's travel direction `fwd_T` (a backbone
+    borrowed from an opposite-direction line at a through stop).
+
+    Returns (course_pts, course_dists, t_front, t_mid) or None if
+    degenerate. t_front is the stop position line's forward end in course
+    arc coordinates — where the lead pill's chevron tip anchors (the
+    vehicle pulled fully forward); t_mid is the line's middle — the rail
+    stack center."""
+    pts = [tuple(p) for p in extent]
+    if len(pts) < 2:
+        return None
+    d = _cum_dist_m(pts)
+    if d[-1] <= 0.0:
+        return None
+    ax = _unit_chord_metric(pts[0], pts[-1], cos_lat)
+    if ax is None:
+        return None
+    dot = ax[0] * fwd_T[0] + ax[1] * fwd_T[1]
+    if dot <= -CLOSE_ZOOM_DIR_CLUSTER_COS:
+        pts.reverse()
+        d = _cum_dist_m(pts)
+    t_front = back_m + d[-1]
+    t_mid = back_m + d[-1] / 2.0
+    w = min(chord_w, d[-1])
+    T0 = _unit_chord_metric(pts[0], _interp_at(pts, d, w), cos_lat)
+    T1 = _unit_chord_metric(_interp_at(pts, d, d[-1] - w), pts[-1], cos_lat)
+    if T0 is None or T1 is None:
+        return None
+    rear = _local_offset_to_lonlat(pts[0][0], pts[0][1],
+                                   -back_m * T0[0], -back_m * T0[1], cos_lat)
+    front = _local_offset_to_lonlat(pts[-1][0], pts[-1][1],
+                                    fwd_m * T1[0], fwd_m * T1[1], cos_lat)
+    course = [tuple(rear)] + pts + [tuple(front)]
+    return course, _cum_dist_m(course), t_front, t_mid
+
+
+def _slice_polyline(pts, dists, t0, t1):
+    """Sub-polyline of `pts` between arc positions t0 < t1 (interpolated
+    endpoints, interior vertices kept)."""
+    out = [tuple(_interp_at(pts, dists, t0))]
+    for p, t in zip(pts, dists):
+        if t0 < t < t1:
+            out.append(tuple(p))
+    out.append(tuple(_interp_at(pts, dists, t1)))
+    return out
+
+
+def _extent_overlap(extA, extB, cos_lat):
+    """Overlap metrics between two stop position lines. Returns
+    (fraction, lateral_m, ivA, ivB) — the shared length as a fraction of
+    the SHORTER line, the perpendicular separation sampled at the overlap
+    middle, and the overlap interval on each line's own arc — or None when
+    the lines don't overlap along their course."""
+    dA = _cum_dist_m(extA)
+    dB = _cum_dist_m(extB)
+    if dA[-1] <= 0.0 or dB[-1] <= 0.0:
+        return None
+    tb = [_project_meters(p[0], p[1], extA, dA) for p in (extB[0], extB[-1])]
+    lo_A, hi_A = max(0.0, min(tb)), min(dA[-1], max(tb))
+    if hi_A <= lo_A:
+        return None
+    ta = [_project_meters(p[0], p[1], extB, dB) for p in (extA[0], extA[-1])]
+    lo_B, hi_B = max(0.0, min(ta)), min(dB[-1], max(ta))
+    if hi_B <= lo_B:
+        return None
+    overlap = max(hi_A - lo_A, hi_B - lo_B)
+    frac = overlap / min(dA[-1], dB[-1])
+    Pm = _interp_at(extA, dA, (lo_A + hi_A) / 2.0)
+    Q = _interp_at(extB, dB, _project_meters(Pm[0], Pm[1], extB, dB))
+    dxm = (Q[0] - Pm[0]) * 111320.0 * cos_lat
+    dym = (Q[1] - Pm[1]) * 111320.0
+    lateral = sqrt(dxm * dxm + dym * dym)
+    return frac, lateral, (lo_A, hi_A), (lo_B, hi_B)
+
+
+def _union_extents(exts, cos_lat, chord_w=10.0):
+    """Union stop position line for merged same-curb stops: the longest
+    member line, extended straight along its end chords far enough to
+    cover every other member's endpoints (all members run within ~2 m of
+    each other, so projecting is safe)."""
+    base = max(exts, key=lambda e: _cum_dist_m(e)[-1])
+    d = _cum_dist_m(base)
+    w = min(chord_w, d[-1])
+    T0 = _unit_chord_metric(base[0], _interp_at(base, d, w), cos_lat)
+    T1 = _unit_chord_metric(_interp_at(base, d, d[-1] - w), base[-1],
+                            cos_lat)
+    if T0 is None or T1 is None:
+        return [tuple(p) for p in base]
+    back = fwd = 0.0
+    for e in exts:
+        if e is base:
+            continue
+        for p in (e[0], e[-1]):
+            dxm = (p[0] - base[0][0]) * 111320.0 * cos_lat
+            dym = (p[1] - base[0][1]) * 111320.0
+            s = dxm * T0[0] + dym * T0[1]
+            if s < 0.0:
+                back = max(back, -s)
+            dxm = (p[0] - base[-1][0]) * 111320.0 * cos_lat
+            dym = (p[1] - base[-1][1]) * 111320.0
+            s = dxm * T1[0] + dym * T1[1]
+            if s > 0.0:
+                fwd = max(fwd, s)
+    pts = [tuple(p) for p in base]
+    if back > 0.0:
+        pts.insert(0, tuple(_local_offset_to_lonlat(
+            base[0][0], base[0][1], -back * T0[0], -back * T0[1], cos_lat)))
+    if fwd > 0.0:
+        pts.append(tuple(_local_offset_to_lonlat(
+            base[-1][0], base[-1][1], fwd * T1[0], fwd * T1[1], cos_lat)))
+    return pts
+
+
+def _shorten_curb(rec, iv, min_len_m=2.0):
+    """Shorten a same-curb rec's stop position line to the middle of the
+    overlapping section `iv` (arc interval on the rec's own line), keeping
+    the side away from the overlap so the two neighbours end up just
+    touching. Records the cut point so the band loop can keep the queue
+    from crossing it. No-op when the remainder would fall below
+    min_len_m."""
+    ext = rec["ext"]
+    d = _cum_dist_m(ext)
+    lo, hi = iv
+    mid = (lo + hi) / 2.0
+    if mid > d[-1] / 2.0:
+        t0, t1 = 0.0, mid
+    else:
+        t0, t1 = mid, d[-1]
+    if t1 - t0 < min_len_m:
+        return
+    rec["cut_pts"].append(tuple(_interp_at(ext, d, mid)))
+    rec["ext"] = _slice_polyline(ext, d, t0, t1)
+
+
+def _offset_track(polyline, dists, t_lo, t_hi, offset_m, cos_lat,
+                  step_m=2.0):
+    """Placement track for pill-arrows: the centerline sampled over arc
+    range [t_lo, t_hi] (extrapolated past the ends) and shifted sideways
+    by offset_m (positive = right of travel). Returns (pts, odists, cts)
+    — the track polyline, its cumulative metre distances, and each
+    sample's centerline arc position — or None if degenerate."""
+    span = t_hi - t_lo
+    if span <= 0.0:
+        return None
+    n = max(int(span / step_m) + 2, 2)
+    pts, cts = [], []
+    for i in range(n):
+        t = t_lo + span * i / (n - 1)
         T = _unit_tangent_metric(polyline, dists, t, cos_lat)
         if T is None:
-            return None
-        N = (T[1], -T[0])  # right normal (direction of travel)
-        pts.append((base, T, N))
+            continue
+        px, py = _point_at_extrap(polyline, dists, t)
+        pts.append(_local_offset_to_lonlat(
+            px, py, offset_m * T[1], -offset_m * T[0], cos_lat))
+        cts.append(t)
+    if len(pts) < 2:
+        return None
+    return pts, _cum_dist_m(pts), cts
 
-    def off(base, T, N, dt, dn):
-        return _local_offset_to_lonlat(base[0], base[1],
-                                       T[0] * dt + N[0] * dn,
-                                       T[1] * dt + N[1] * dn, cos_lat)
 
-    inner = [off(b, T, N, 0.0, perp_m - R) for (b, T, N) in pts]
-    outer = [off(b, T, N, 0.0, perp_m + R) for (b, T, N) in pts]
-    center = [off(b, T, N, 0.0, perp_m) for (b, T, N) in pts]
+def _track_pos(x, xs, ys):
+    """Piecewise-linear map of x through the monotonic table xs → ys,
+    clamped at the ends. Converts centerline arc positions to track
+    positions and back (pass (cts, odists) or (odists, cts))."""
+    if x <= xs[0]:
+        return ys[0]
+    if x >= xs[-1]:
+        return ys[-1]
+    i = bisect_left(xs, x)
+    x0, x1 = xs[i - 1], xs[i]
+    if x1 <= x0:
+        return ys[i]
+    f = (x - x0) / (x1 - x0)
+    return ys[i - 1] + f * (ys[i] - ys[i - 1])
 
-    b_neck, T_neck, N_neck = pts[-1]
-    apex = off(b_neck, T_neck, N_neck, R, perp_m)
 
-    # Rounded back cap: half-circle around the rear centerline point, from
-    # the inner edge over the back pole to the outer edge.
-    b_rear, T_rear, N_rear = pts[0]
-    arc = []
+def _build_straight_pill_arrow(origin, T, N, cos_lat, x_rear, x_neck,
+                                perp_m, width_m, n_arc=16):
+    """Straight pill-arrow in the local frame spanned by the unit tangent T
+    (direction of travel) and right normal N at `origin` (lon, lat).
+
+    The body spans frame positions x_rear..x_neck (metres along T) at
+    lateral offset perp_m (positive = right of travel). A chevron tip of
+    length width_m/2 extends beyond x_neck; a rounded cap closes x_rear.
+    The whole shape shares ONE axis — no bending, so labels rotated by the
+    same tangent align exactly with the body.
+
+    Returns (ring, rear_center) — the closed polygon ring and the disc
+    anchor at the body's rear centerline point — or None.
+    """
+    R = width_m / 2.0
+    if x_neck <= x_rear:
+        return None
+    ox, oy = origin
+
+    def pt(dx, dy):
+        return _local_offset_to_lonlat(
+            ox, oy, dx * T[0] + dy * N[0], dx * T[1] + dy * N[1], cos_lat)
+
+    apex = pt(x_neck + R, perp_m)
+    ring = [list(apex)]
+    ring.append(list(pt(x_neck, perp_m - R)))
+    ring.append(list(pt(x_rear, perp_m - R)))
+    # Rounded back cap: half-circle from the inner edge over the back pole
+    # to the outer edge.
     for i in range(1, n_arc):
         theta = pi * i / n_arc
-        arc.append(off(b_rear, T_rear, N_rear,
-                       -R * sin(theta), perp_m - R * cos(theta)))
-
-    ring = [list(apex)]
-    ring.extend(list(p) for p in reversed(inner))
-    ring.extend(list(p) for p in arc)
-    ring.extend(list(p) for p in outer)
+        ring.append(list(pt(x_rear - R * sin(theta),
+                            perp_m - R * cos(theta))))
+    ring.append(list(pt(x_rear, perp_m + R)))
+    ring.append(list(pt(x_neck, perp_m + R)))
     ring.append(list(apex))
 
-    centerline = [list(p) for p in center] + [list(apex)]
-    return ring, centerline
+    return ring, pt(x_rear, perp_m)
 
 
 def _convex_hull_metric(pts):
@@ -3403,35 +3869,54 @@ def _shorten_destination(dest: str, current_stop_name: str) -> str:
     return d or dest
 
 
-def _wrap_label(text: str, line_cap: int, max_lines: int) -> str:
+def _text_width_em(s: str) -> float:
+    """Width of `s` in ems, from the baked Noto Sans advance widths
+    (kerning ignored). Falls back to a flat average per character when
+    glyph_widths.json is absent."""
+    return sum(GLYPH_WIDTHS.get(ch, GLYPH_WIDTH_DEFAULT) for ch in s)
+
+
+def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
     """Greedy-wrap `text` into at most `max_lines` lines of at most
-    `line_cap` characters, with baked "\\n" breaks (MapLibre honours them).
-    Words longer than a line are shortened with a single abbreviation dot
-    (no hyphen splitting — without linguistic hyphenation the break
-    positions would be nonsense). If text remains beyond the line budget,
-    the last line ends with an ellipsis."""
-    line_cap = max(line_cap, 2)
+    `max_w_em` measured ems, with baked "\\n" breaks (MapLibre honours
+    them). Words wider than a line are shortened with a single abbreviation
+    dot (no hyphen splitting — without linguistic hyphenation the break
+    positions would be nonsense).
+
+    The line breaks are computed FIRST; only then, if lines remain beyond
+    the budget, the last kept line is trimmed until it fits with a trailing
+    ellipsis — so the ellipsis lands at the true end of the last line, not
+    at a character count guessed without knowing the break position."""
     words = text.split()
     lines = []
     cur = ""
     for w in words:
-        while w:
-            cand = (cur + " " + w) if cur else w
-            if len(cand) <= line_cap:
-                cur = cand
-                w = ""
-            elif not cur and len(w) > line_cap:
-                lines.append(w[:line_cap - 1] + ".")
-                w = ""
-            else:
-                lines.append(cur)
-                cur = ""
+        cand = (cur + " " + w) if cur else w
+        if _text_width_em(cand) <= max_w_em:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur)
+            cur = ""
+        if _text_width_em(w) <= max_w_em:
+            cur = w
+        else:
+            # Single word wider than a line → abbreviate with a dot.
+            cut = len(w)
+            while cut > 1 and _text_width_em(w[:cut] + ".") > max_w_em:
+                cut -= 1
+            lines.append(w[:cut] + ".")
     if cur:
         lines.append(cur)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        lines[-1] = (lines[-1][:line_cap - 1].rstrip("…. ").rstrip() + "…")
-    return "\n".join(lines)
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    kept = lines[:max_lines]
+    last = kept[-1]
+    while last and _text_width_em(last + "…") > max_w_em:
+        last = last[:-1].rstrip()
+    last = last.rstrip(" .")
+    kept[-1] = (last + "…") if last else "…"
+    return "\n".join(kept)
 
 
 def _blend_colors(hex_colors) -> str:
@@ -3457,16 +3942,18 @@ def _blend_colors(hex_colors) -> str:
 def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                 stop_meta: dict, stop_attrs: dict,
                                 sibling_groups: dict, oid_sibling_key: dict,
-                                end_of_platform_pairs: set) -> None:
+                                end_of_platform_pairs: set,
+                                skip_first_oids: set,
+                                skip_last_oids: set) -> None:
     """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
     line-segments that together produce the close-zoom (z17+) station
     representation. See .claude/concepts/close-zoom-stop-design.md.
 
-    Pill-arrows are curved: the body follows the line polyline, laterally
-    offset by the stop's own distance from the line (minimum offset when the
-    stop sits on the line). One pill-arrow per (stop, line ref, agency,
-    direction) — same-direction variants collapse into a single pill listing
-    every destination.
+    Pill-arrows are straight polygons queued along the stop's position line
+    (the same fitted-to-the-line extent the debug platform lines draw),
+    extended dead straight beyond its range. One pill-arrow per (stop, line
+    ref, agency, direction) — same-direction variants collapse into a
+    single pill listing every destination.
 
     The backdrop is one rounded convex-hull polygon per GTFS parent station,
     covering every pill-arrow and the line sections next to them plus a
@@ -3488,6 +3975,93 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         last_sid = triplets[-1][2]
         line_dest[str(oid)] = stop_meta.get(last_sid, {}).get("name", "")
 
+    # Loop-line apexes (close-zoom-stop-design.md § Text): when first and
+    # last stop share a UIC, "to <terminus>" is useless at the terminus
+    # itself (Bad Zurzach buses 1-4 all showing "Bahnhof" at Bahnhof).
+    # Stops before the apex — the highest-scoring stop (far-zoom stop
+    # score) within the middle third of the sequence, ties to the
+    # midpoint — show the apex as destination instead; the apex and every
+    # later stop keep the terminus.
+    stop_scores = load_stop_scores()
+    line_loop_apex = {}   # osm_id → (apex_idx, apex_name)
+    for oid, entry in line_stops.items():
+        triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
+        n = len(triplets)
+        if n < 3 or len(triplets[0]) < 3 or len(triplets[-1]) < 3:
+            continue
+        first_sid, last_sid = triplets[0][2], triplets[-1][2]
+        if not first_sid or not last_sid:
+            continue
+        if first_sid.split(":")[0] != last_sid.split(":")[0]:
+            continue
+        lo = max(1, n // 3)
+        hi = min(n - 2, (2 * n) // 3)
+        mid = (n - 1) / 2.0
+        best = None
+        for i in range(lo, hi + 1):
+            sid = triplets[i][2] if len(triplets[i]) >= 3 else ""
+            if not sid:
+                continue
+            rec = stop_scores.get(sid.split(":")[0])
+            score = rec["score"] if rec else 0.0
+            key = (-score, abs(i - mid), i)
+            if best is None or key < best[0]:
+                best = (key, i, sid)
+        if best is None:
+            continue
+        apex_name = stop_meta.get(best[2], {}).get("name", "")
+        if apex_name:
+            line_loop_apex[str(oid)] = (best[1], apex_name)
+
+    # ── Stop position lines ──────────────────────────────────────────────
+    # Re-used from the stop/dot placement: the same fitted-to-the-line
+    # extents the debug platform lines draw, under the same skip rules.
+    # The skips are what make this find the right line automatically — at
+    # a terminal the departure-side entry is skipped (skip_first) and the
+    # ARRIVAL line's extent survives; its geometry approaches along the
+    # street and ends at the stop, so the slice covers exactly the ground
+    # behind the stop where the departing queue stands. Never extrapolated.
+    stop_lines: dict = defaultdict(list)
+    for osm_id_raw, ls_entry in line_stops.items():
+        osm_id = str(osm_id_raw)
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id_raw) or line_lookup.get(osm_id)
+        if not line or not triplets:
+            continue
+        mode = line["mode"]
+        mo = line.get("mountain_origin")
+        if _length_key(mode, mo) not in PILL_CFG.get("default_length_m", {}):
+            continue
+        polyline = flatten_coords(line["coords"])
+        if len(polyline) < 2:
+            continue
+        skip_first_here = osm_id in skip_first_oids
+        skip_last_here = osm_id in skip_last_oids
+        sib_key = oid_sibling_key.get(osm_id)
+        siblings = sibling_groups.get(sib_key, []) if sib_key else []
+        last_idx = len(triplets) - 1
+        for idx, trip in enumerate(triplets):
+            if idx == 0 and skip_first_here:
+                continue
+            if idx == last_idx and skip_last_here:
+                continue
+            if len(trip) < 3 or not trip[2]:
+                continue
+            stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
+            atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+            ext = _platform_extent(
+                stop_lon, stop_lat, polyline, mode, atlas_len, PILL_CFG,
+                osm_id=osm_id, siblings=siblings,
+                end_of_platform=(osm_id, sid) in end_of_platform_pairs,
+                mountain_origin=mo)
+            if ext is None or len(ext) < 2:
+                continue
+            stop_lines[sid].append(
+                {"osm_id": osm_id, "mode": mode,
+                 "ref": line.get("ref", ""),
+                 "agency_id": line.get("agency_id", ""),
+                 "extent": ext})
+
     # ── Collect visits per stop_id ───────────────────────────────────────
     per_stop_visits: dict = defaultdict(list)
     for osm_id_raw, ls_entry in line_stops.items():
@@ -3507,6 +4081,31 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         dists = _cum_dist_m(polyline)
         if dists[-1] <= 0:
             continue
+        # Layover-departure dedup — the departure-side mirror of the
+        # pill/dot arrival-drop rule 2 (see compute_terminus_skip_oids):
+        # the feature's FIRST stop is skipped when it has no platform_code
+        # and the same feature calls again at the same UIC at a
+        # platform-coded stop later (non-final, so the revisit itself gets
+        # the pill). Canonical case: Bern bus 30 departs the bare :10001
+        # layover, then serves platform :A of the same station — without
+        # the skip the line shows twice at the station. NOT copied from
+        # the dot side: skip_first_oids, which drops the departure whenever
+        # any sibling ARRIVES at the same stop_id — fine for dots (the
+        # arrival dot survives) but fatal here, where arrivals get no pill
+        # and the departure pill is the line's only presence at a terminus.
+        skip_first_layover = False
+        first_sid = triplets[0][2] if len(triplets[0]) >= 3 else ""
+        if first_sid and not (stop_meta.get(first_sid, {})
+                              or {}).get("platform_code"):
+            first_uic = first_sid.split(":")[0]
+            for later in triplets[1:-1]:
+                l_sid = later[2] if len(later) >= 3 else ""
+                if (l_sid and l_sid.split(":")[0] == first_uic
+                        and (stop_meta.get(l_sid, {})
+                             or {}).get("platform_code")):
+                    skip_first_layover = True
+                    break
+
         last_idx = len(triplets) - 1
         for idx, trip in enumerate(triplets):
             if len(trip) < 3:
@@ -3514,6 +4113,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # Departures only: the line's last stop is an arrival — no pill
             # there ("17 to Bern, Bahnhof" at Bern, Bahnhof makes no sense).
             if idx == last_idx:
+                continue
+            if idx == 0 and skip_first_layover:
                 continue
             stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
             if not sid:
@@ -3551,6 +4152,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     end_of_platform=(osm_id, sid) in end_of_platform_pairs,
                     mountain_origin=mo)
             per_stop_visits[sid].append({
+                "sid":             sid,
                 "osm_id":          osm_id,
                 "mode":            mode,
                 "mountain_origin": mo,
@@ -3561,13 +4163,18 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 "polyline":        polyline,
                 "dists":           dists,
                 "t_stop":          t_stop,
+                "stop_lon":        stop_lon,
+                "stop_lat":        stop_lat,
                 "cos_lat":         cos_lat,
                 "tangent":         T,
                 "signed_d":        signed_d,
                 "is_rail_like":    is_rail_like,
                 "extent":          extent,
                 "destination":     _shorten_destination(
-                    line_dest.get(osm_id, ""),
+                    (line_loop_apex[osm_id][1]
+                     if osm_id in line_loop_apex
+                     and idx < line_loop_apex[osm_id][0]
+                     else line_dest.get(osm_id, "")),
                     stop_meta.get(sid, {}).get("name", "")),
             })
 
@@ -3581,13 +4188,41 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
     def _parent_of(sid):
         return stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
 
-    for sid, visits in per_stop_visits.items():
-        parent = _parent_of(sid)
+    max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
+    max_step = max(bc["length_m"]
+                   + bc["width_m"] * CLOSE_ZOOM_STACK_GAP_FRAC
+                   for bc in CLOSE_ZOOM_BANDS.values())
+
+    def _rightmost(group):
+        """The group's rightmost cluster — the one whose on-line stop
+        position sits furthest right (in direction of travel) in the frame
+        of the group's first cluster."""
+        g0 = group[0]
+        N0 = (g0["tangent"][1], -g0["tangent"][0])
+        P0 = _interp_at(g0["polyline"], g0["dists"], g0["t_stop"])
+        path = g0
+        best_off = float("-inf")
+        for c in group:
+            Pj = _interp_at(c["polyline"], c["dists"], c["t_stop"])
+            dxm = (Pj[0] - P0[0]) * 111320.0 * g0["cos_lat"]
+            dym = (Pj[1] - P0[1]) * 111320.0
+            off = dxm * N0[0] + dym * N0[1]
+            if off > best_off:
+                best_off = off
+                path = c
+        return path
+
+    def _build_group_recs(sid):
+        """Per platform id: variant collapse → direction groups → one
+        record per group carrying its rightmost path and stop position
+        line."""
+        visits = per_stop_visits[sid]
 
         # ── Collapse variants: one pill per (ref, agency, direction) ────
-        # Same line number + agency in the same direction of travel (tangent
-        # dot product within 45°) merges into one pill; destinations are
-        # collected across the merged variants, fastest variant first.
+        # Same line number + agency in the same direction of travel
+        # (tangent dot product within 45°) merges into one pill;
+        # destinations are collected across the merged variants, fastest
+        # variant first.
         visits.sort(key=lambda v: (-(v["speed_kmh"] or 0.0), v["osm_id"]))
         clusters = []
         for v in visits:
@@ -3607,7 +4242,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 c["destinations"] = [v["destination"]] if v["destination"] else []
                 clusters.append(c)
 
-        # ── Direction groups ─────────────────────────────────────────────
+        # ── Direction groups ────────────────────────────────────────────
         # Clusters heading the same way (tangent dot within 45°) share a
         # stack and, crucially, one path: when parallel lines (e.g. tram +
         # bus on the same street) serve the same stop, every pill-arrow in
@@ -3625,31 +4260,186 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             if not placed:
                 groups.append([c])
 
-        # Per-pill work items: (cluster, path cluster, stack idx, group size).
-        # The path cluster is the group's rightmost line — the one whose
-        # on-line stop position sits furthest right (in direction of travel)
-        # in the frame of the group's first cluster.
-        work = []
+        recs = []
         for group in groups:
-            g0 = group[0]
-            N0 = (g0["tangent"][1], -g0["tangent"][0])
-            P0 = _interp_at(g0["polyline"], g0["dists"], g0["t_stop"])
-            path = g0
-            best_off = float("-inf")
-            for c in group:
-                Pj = _interp_at(c["polyline"], c["dists"], c["t_stop"])
-                dxm = (Pj[0] - P0[0]) * 111320.0 * g0["cos_lat"]
-                dym = (Pj[1] - P0[1]) * 111320.0
-                off = dxm * N0[0] + dym * N0[1]
-                if off > best_off:
-                    best_off = off
-                    path = c
-            for k, c in enumerate(group):
-                work.append((c, path, k, len(group)))
+            path = _rightmost(group)
 
-        for c, path, k, n in work:
-            polyline, dists = path["polyline"], path["dists"]
-            t_stop, cos_lat = path["t_stop"], path["cos_lat"]
+            # Backbone: the group's stop position line. Prefer the extent
+            # the stop/dot placement computed for the path line itself; a
+            # terminal departure has none (its entry is skip_first-skipped),
+            # so fall back to another extent at this stop — best is the
+            # same line's ARRIVAL counterpart (same ref + agency), whose
+            # geometry ends at the stop and covers exactly the ground
+            # behind it where the queue stands. No direction gate: at
+            # corner terminals the arrival approaches on a different
+            # street, near-perpendicular to the departure tangent, and
+            # that is precisely the ground the queue belongs on. Last
+            # resort: compute the extent from the path's own geometry
+            # (still fitted, never extrapolated).
+            ext = None
+            best_key = None
+            for cand in stop_lines.get(sid, []):
+                if cand["osm_id"] == path["osm_id"]:
+                    ext = cand["extent"]
+                    break
+                key = ((cand["ref"], cand["agency_id"])
+                       == (path["ref"], path["agency_id"]),
+                       cand["mode"] == path["mode"])
+                if best_key is None or key > best_key:
+                    best_key = key
+                    ext = cand["extent"]
+            if ext is None:
+                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                sib_key = oid_sibling_key.get(path["osm_id"])
+                sibs = sibling_groups.get(sib_key, []) if sib_key else []
+                ext = _platform_extent(
+                    path["stop_lon"], path["stop_lat"], path["polyline"],
+                    path["mode"], atlas_len, PILL_CFG,
+                    osm_id=path["osm_id"], siblings=sibs,
+                    end_of_platform=(path["osm_id"], sid)
+                                    in end_of_platform_pairs,
+                    mountain_origin=path["mountain_origin"])
+            if ext is None or len(ext) < 2:
+                continue
+            recs.append({"sid": sid, "group": group, "path": path,
+                         "ext": ext, "cut_pts": []})
+        return recs
+
+    per_parent_sids: dict = defaultdict(list)
+    for s in per_stop_visits:
+        per_parent_sids[_parent_of(s)].append(s)
+
+    for parent, parent_sids in per_parent_sids.items():
+        recs = []
+        for sid in sorted(parent_sids):
+            recs.extend(_build_group_recs(sid))
+
+        # ── Same-curb resolution (non-rail) ──────────────────────────────
+        # Same-direction groups of one station can sit on the same ground
+        # under different GTFS platform ids (Bern, Schanzenstrasse:
+        # southbound city bus 20 at :10001, southbound regional 100/101 at
+        # :10000, one curb). Stop position lines laterally closer than
+        # CLOSE_ZOOM_CURB_LATERAL_M resolve by along-line overlap: above
+        # the merge fraction → one stop with the union platform line;
+        # anything less → both lines shortened to the overlap middle so
+        # they just touch (queues that no longer fit shift forward past
+        # the stop — see the cut_pts handling in the band loop). Rail is
+        # excluded for now — rail overlap needs its own treatment later.
+        def _same_curb(a, b):
+            if a["path"]["is_rail_like"] or b["path"]["is_rail_like"]:
+                return None
+            dot = (a["path"]["tangent"][0] * b["path"]["tangent"][0]
+                   + a["path"]["tangent"][1] * b["path"]["tangent"][1])
+            if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
+                return None
+            m = _extent_overlap(a["ext"], b["ext"], a["path"]["cos_lat"])
+            if m is None or m[1] >= CLOSE_ZOOM_CURB_LATERAL_M:
+                return None
+            return m
+
+        if len(recs) > 1:
+            # Merge pass: transitive (union-find) on the original lines.
+            uf = list(range(len(recs)))
+
+            def _find(i):
+                while uf[i] != i:
+                    uf[i] = uf[uf[i]]
+                    i = uf[i]
+                return i
+
+            for i in range(len(recs)):
+                for j in range(i + 1, len(recs)):
+                    m = _same_curb(recs[i], recs[j])
+                    if m and m[0] > CLOSE_ZOOM_CURB_MERGE_FRAC:
+                        uf[_find(i)] = _find(j)
+            by_root: dict = defaultdict(list)
+            for i in range(len(recs)):
+                by_root[_find(i)].append(i)
+            new_recs = []
+            for idxs in by_root.values():
+                if len(idxs) == 1:
+                    new_recs.append(recs[idxs[0]])
+                    continue
+                members = [recs[i] for i in idxs]
+                # One stop: pool the clusters, re-collapse same
+                # (ref, agency, direction) across the platform ids,
+                # fastest first; rightmost path over the pooled set;
+                # union platform line.
+                pooled = []
+                for r in members:
+                    for c in r["group"]:
+                        tgt = None
+                        for p in pooled:
+                            if (p["ref"] != c["ref"]
+                                    or p["agency_id"] != c["agency_id"]):
+                                continue
+                            dot = (p["tangent"][0] * c["tangent"][0]
+                                   + p["tangent"][1] * c["tangent"][1])
+                            if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                                tgt = p
+                                break
+                        if tgt is None:
+                            pooled.append(c)
+                        else:
+                            for dst in c["destinations"]:
+                                if dst and dst not in tgt["destinations"]:
+                                    tgt["destinations"].append(dst)
+                pooled.sort(key=lambda c: (-(c["speed_kmh"] or 0.0),
+                                           c["osm_id"]))
+                path = _rightmost(pooled)
+                ext = _union_extents([r["ext"] for r in members],
+                                     path["cos_lat"], chord_w=max_L)
+                new_recs.append({"sid": path["sid"], "group": pooled,
+                                 "path": path, "ext": ext, "cut_pts": []})
+            recs = new_recs
+
+            # Shorten pass — pair by pair on the current (post-merge)
+            # geometry, recomputing the overlap before each cut.
+            for i in range(len(recs)):
+                for j in range(i + 1, len(recs)):
+                    m = _same_curb(recs[i], recs[j])
+                    if m is None:
+                        continue
+                    _shorten_curb(recs[i], m[2])
+                    _shorten_curb(recs[j], m[3])
+
+        # ── Queue course + per-pill work items ───────────────────────────
+        work = []
+        for rec in recs:
+            group, path, ext = rec["group"], rec["path"], rec["ext"]
+            # Queue course: the oriented stop position line extended dead
+            # straight far enough for the deepest band of this stack.
+            # Anchors come from the stop position line ALONE (its forward
+            # end for road-mode queues, its middle for rail stacks) — the
+            # raw GTFS stop coordinate plays no part in placement.
+            reach = (len(group) - 1) * max_step + max_L
+            built = _stop_course(ext, path["tangent"], path["cos_lat"],
+                                 back_m=reach + 2.0 * max_L,
+                                 fwd_m=reach / 2.0 + 2.0 * max_L,
+                                 chord_w=max_L)
+            if built is None:
+                continue
+            course, cdists, t_front, t_mid = built
+            for k, c in enumerate(group):
+                work.append((c, path, course, cdists, t_front, t_mid,
+                             rec["cut_pts"], k, len(group)))
+
+        # Offset placement tracks, shared per (group course, band, side) —
+        # valid within this station only (courses are per-group objects).
+        track_cache: dict = {}
+
+        for c, path, course, cdists, t_front, t_mid, cut_pts, k, n in work:
+            # Everything is placed along the group's queue course (stop
+            # position line + straight extensions), not the raw line.
+            polyline, dists = course, cdists
+            cos_lat = path["cos_lat"]
+            # Queue anchor on the course: rail stacks center on the stop
+            # position line's middle; road-mode queues put the lead tip at
+            # its forward end (the vehicle pulled fully forward).
+            t_stop = t_mid if c["is_rail_like"] else t_front
+            # Merged same-curb groups pool pills from several platform
+            # ids; each pill keeps its own.
+            sid = c["sid"]
 
             # Side of the line: bus/tram always to the right in direction of
             # travel; rail on the side the GTFS stop position snapped from.
@@ -3681,59 +4471,120 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 W = bc["width_m"]
                 R = W / 2.0
                 # Full occupied length is exactly L: back cap (R) + body +
-                # chevron tip (R). The body is the arc range rear → neck.
+                # chevron tip (R). The body is the frame range rear → neck.
                 body_len = L - 2.0 * R
                 stack_step = L + W * CLOSE_ZOOM_STACK_GAP_FRAC
                 tipp = {"minzoom": bc["tipp_min"], "maxzoom": bc["tipp_max"]}
-                # Consistent clear gap between the line and the pill's inner
-                # edge, on the side chosen above.
+                # Offset of the pill CENTER line from the path: consistent
+                # clear gap between the line and the pill's inner edge, on
+                # the side chosen above.
                 perp = side * (CLOSE_ZOOM_LINE_GAP_M + W / 2.0)
 
+                # Placement track: the path shifted sideways by perp — the
+                # curve the pill centers actually sit on. Stepping, spans
+                # and axes are all measured along THIS track, not the
+                # centerline: measured on the centerline, every degree of
+                # bend stretches the gaps between pills on the outside of
+                # the curve and squeezes them on the inside.
+                tkey = (id(course), band_id, side)
+                track = track_cache.get(tkey)
+                if track is None:
+                    reach = (n - 1) * stack_step + L
+                    track = _offset_track(polyline, dists,
+                                          t_stop - reach - L,
+                                          t_stop + reach / 2.0 + L,
+                                          perp, cos_lat)
+                    track_cache[tkey] = track if track else False
+                if not track:
+                    continue
+                tpts, tdists, tcts = track
+                o_stop = _track_pos(t_stop, tcts, tdists)
+
+                # Track span this pill occupies.
                 if c["is_rail_like"]:
                     # Stack centered on the platform middle along the track;
                     # fastest (k=0) sits furthest forward.
-                    center_t = t_stop + (n - 1 - 2 * k) * (stack_step / 2.0)
-                    t_neck = center_t + body_len / 2.0
-                    t_rear = center_t - body_len / 2.0
+                    o_center = o_stop + (n - 1 - 2 * k) * (stack_step / 2.0)
                 else:
+                    # Same-curb shorten overflow: the queue must not cross
+                    # a cut boundary (the neighbouring platform line starts
+                    # there). If it doesn't fit behind the stop, the whole
+                    # stack shifts forward past the stop point — better in
+                    # front than overlapping the neighbour.
+                    o_shift = 0.0
+                    if cut_pts:
+                        rear_lim = None
+                        for cp in cut_pts:
+                            t_cp = _project_meters(cp[0], cp[1],
+                                                   polyline, dists)
+                            o_cp = _track_pos(t_cp, tcts, tdists)
+                            if o_cp < o_stop and (rear_lim is None
+                                                  or o_cp > rear_lim):
+                                rear_lim = o_cp
+                        if rear_lim is not None:
+                            rear_need = o_stop - ((n - 1) * stack_step + L)
+                            if rear_need < rear_lim:
+                                o_shift = rear_lim - rear_need
                     # Stack extends upstream from the stop point; the fastest
-                    # pill's chevron tip lands exactly on the stop.
-                    apex_t = t_stop - k * stack_step
-                    t_neck = apex_t - R
-                    t_rear = t_neck - body_len
+                    # pill's chevron tip lands exactly on the stop (unless
+                    # shifted forward by the rule above).
+                    o_center = o_stop + o_shift - k * stack_step - L / 2.0
+                o0 = o_center - L / 2.0
+                o1 = o_center + L / 2.0
 
-                built = _build_curved_pill_arrow(polyline, dists, t_rear,
-                                                 t_neck, perp, W, cos_lat)
-                if built is None:
-                    continue
-                ring, centerline = built
+                # Per-pill straight frame: the axis is the AVERAGE direction
+                # of the track part the pill occupies (the chord over its
+                # own span), anchored at that part's midpoint. A
+                # single-point tangent at the stop tilts the whole stack
+                # against the line near bends, and deep stack positions can
+                # sit tens of metres from the stop.
+                A = _point_at_extrap(tpts, tdists, o0)
+                B = _point_at_extrap(tpts, tdists, o1)
+                dxm = (B[0] - A[0]) * 111320.0 * cos_lat
+                dym = (B[1] - A[1]) * 111320.0
+                norm = sqrt(dxm * dxm + dym * dym)
+                if norm > 1e-9:
+                    T = (dxm / norm, dym / norm)
+                else:
+                    T = path["tangent"]
+                N = (T[1], -T[0])  # right normal in direction of travel
+                origin = _point_at_extrap(tpts, tdists, o_center)
 
-                # Heading at the pill's mid position (map bearing, 0 = north).
-                t_mid = (t_rear + t_neck) / 2.0
-                T_mid = _unit_tangent_metric(polyline, dists, t_mid, cos_lat)
-                if T_mid is None:
-                    T_mid = c["tangent"]
-                heading_deg_map = (90.0
-                                   - degrees(atan2(T_mid[1], T_mid[0]))) % 360.0
-                # Label rotation: along the pill axis, flipped when upside-down.
+                heading_deg_map = (90.0 - degrees(atan2(T[1], T[0]))) % 360.0
+                # Label rotation: along the pill axis, flipped upside-down.
                 text_rot = (heading_deg_map - 90.0) % 360.0
                 flipped = 90.0 < text_rot < 270.0
                 if flipped:
                     text_rot = (text_rot + 180.0) % 360.0
 
+                def _frame_pt(dx, dy, origin=origin, T=T, N=N):
+                    return _local_offset_to_lonlat(
+                        origin[0], origin[1],
+                        dx * T[0] + dy * N[0], dx * T[1] + dy * N[1], cos_lat)
+
+                # Body range in the pill's own frame (origin = span middle;
+                # the lateral offset is already baked into the track, so the
+                # pill sits ON its frame axis at zero perpendicular offset).
+                x_neck = body_len / 2.0
+                x_rear = -body_len / 2.0
+
+                built = _build_straight_pill_arrow(origin, T, N, cos_lat,
+                                                   x_rear, x_neck, 0.0, W)
+                if built is None:
+                    continue
+                ring, rear_center = built
+
                 # Destination, pre-wrapped at build time with baked line
                 # breaks. The text region runs from the disc's forward edge
                 # (plus margin) to the neck (minus margin; a negative tip
                 # margin lets text reach into the chevron base).
-                region_start = t_rear + R + bc["margin_disc_m"]
-                region_end = t_neck - bc["margin_tip_m"]
+                region_start = x_rear + R + bc["margin_disc_m"]
+                region_end = x_neck - bc["margin_tip_m"]
                 text_avail_m = max(region_end - region_start, 0.0)
                 dest_text = ""
                 if bc["font_dest_m"] and dest_full and text_avail_m > 0.0:
-                    line_cap = int(text_avail_m
-                                   / (CLOSE_ZOOM_CHAR_W_EM
-                                      * bc["font_dest_m"]))
-                    dest_text = _wrap_label(dest_full, line_cap,
+                    avail_em = text_avail_m / bc["font_dest_m"]
+                    dest_text = _wrap_label(dest_full, avail_em,
                                             bc["max_lines"])
 
                 features.append({
@@ -3758,7 +4609,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # line color with just the centered number — no disc.
                 solid = bc["font_dest_m"] is None
 
-                rear_cx, rear_cy = centerline[0]
+                rear_cx, rear_cy = rear_center
                 if not solid:
                     # Disc at the round end, filled with the line color.
                     disc = []
@@ -3780,11 +4631,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # for solid bands.
                 if ref_text and bc["font_ref_m"]:
                     if solid:
-                        base_c = _point_at_extrap(polyline, dists, t_mid)
-                        N_m = (T_mid[1], -T_mid[0])
-                        ref_x, ref_y = _local_offset_to_lonlat(
-                            base_c[0], base_c[1],
-                            N_m[0] * perp, N_m[1] * perp, cos_lat)
+                        ref_x, ref_y = _frame_pt(0.0, 0.0)
                     else:
                         ref_x, ref_y = rear_cx, rear_cy
                     features.append({
@@ -3806,35 +4653,34 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # the disc side normally, the neck side when the label is
                 # flipped (the style anchors the text's left edge here).
                 if dest_text:
-                    t_text = region_end if flipped else region_start
-                    base = _point_at_extrap(polyline, dists, t_text)
-                    T_t = _unit_tangent_metric(polyline, dists, t_text, cos_lat)
-                    if T_t is not None:
-                        N_t = (T_t[1], -T_t[0])
-                        tx, ty = _local_offset_to_lonlat(
-                            base[0], base[1],
-                            N_t[0] * perp, N_t[1] * perp, cos_lat)
-                        features.append({
-                            "type": "Feature",
-                            "tippecanoe": dict(tipp),
-                            "geometry": {"type": "Point",
-                                         "coordinates": [tx, ty]},
-                            "properties": {
-                                **common,
-                                "feature_type": "pill_dest",
-                                "band":         band_id,
-                                "destination":  dest_text,
-                                "font_m":       round(bc["font_dest_m"], 3),
-                                "text_rot":     round(text_rot, 2),
-                            },
-                        })
+                    x_text = region_end if flipped else region_start
+                    tx, ty = _frame_pt(x_text, 0.0)
+                    features.append({
+                        "type": "Feature",
+                        "tippecanoe": dict(tipp),
+                        "geometry": {"type": "Point",
+                                     "coordinates": [tx, ty]},
+                        "properties": {
+                            **common,
+                            "feature_type": "pill_dest",
+                            "band":         band_id,
+                            "destination":  dest_text,
+                            "font_m":       round(bc["font_dest_m"], 3),
+                            "text_rot":     round(text_rot, 2),
+                        },
+                    })
 
                 # Hull cloud: pill outline plus the adjacent line section
-                # (largest band only — it covers the smaller ones).
+                # (largest band only — it covers the smaller ones; the line
+                # section stays arc-based since the LINE itself may curve).
                 if band_id == CLOSE_ZOOM_HULL_BAND:
                     cloud = parent_cloud[parent]
                     cloud.extend((p[0], p[1]) for p in ring)
-                    for t in _sample_ts(dists, t_rear, t_neck + R):
+                    # Map the pill's track span back to centerline arc
+                    # positions before sampling the line itself.
+                    ct0 = _track_pos(o0, tdists, tcts)
+                    ct1 = _track_pos(o1, tdists, tcts)
+                    for t in _sample_ts(dists, ct0, ct1):
                         cloud.append(_point_at_extrap(polyline, dists, t))
 
     # ── Backdrop: one rounded hull polygon per parent station ────────────
@@ -7033,14 +7879,22 @@ def main():
     # {(ref, agency_id, mode) → [(osm_id, flat_polyline)]}. The two-metre
     # proximity gate inside _borrow_backward_segment does the real filtering;
     # this index just bounds the search to same-line variants.
+    #
+    # The all-lines spatial index alongside is the non-sibling-borrow
+    # backing (concept step 2): same 2 m proximity + 15° tangent gates,
+    # widened to any drawn polyline. Built once, read by _platform_extent
+    # via the module-level `_ALL_LINES_INDEX`.
+    global _ALL_LINES_INDEX
     sibling_groups: dict = defaultdict(list)
     oid_sibling_key: dict = {}
+    _ALL_LINES_INDEX = _AllLinesIndex()
     for oid_s, info in line_lookup.items():
         key = (info.get("ref", ""), info.get("agency_id", ""), info.get("mode", ""))
         flat_poly = flatten_coords(info["coords"])
         if len(flat_poly) >= 2:
             sibling_groups[key].append((oid_s, flat_poly))
             oid_sibling_key[oid_s] = key
+            _ALL_LINES_INDEX.add(oid_s, key, flat_poly, _cum_dist_m(flat_poly))
 
     print("Loading stop coordinates and metadata...")
     line_stops = json.loads(LINE_STOPS.read_text())
@@ -7927,7 +8781,8 @@ def main():
     print("Emitting close-zoom stop features...")
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
                               sibling_groups, oid_sibling_key,
-                              end_of_platform_pairs)
+                              end_of_platform_pairs,
+                              skip_first_oids, skip_last_oids)
 
     # Summary
     mode_counts: dict = defaultdict(int)
