@@ -44,18 +44,29 @@ gtfs_stop_overrides:
 
 # ── GTFS trip overrides ──────────────────────────────────────────────────────
 # Routes where every trip should be structurally rewritten before pfaedle runs.
-# Currently the only supported action is `split_at_stop`: split each trip at a
-# named transfer stop into two new trips so a service running on two physically
-# separate vehicle legs (joined only by a passenger transfer) is drawn as two
-# independent lines meeting at the transfer stop. See
-# .claude/concepts/gtfs-trip-split-at-stop.md for the requirements; matching is
-# (agency_id, route_short_name).
+# Actions (see gtfs-trip-overrides.md for the requirements; matching is
+# (agency_id, route_short_name)):
+#   • split_at_stop — split each trip at a named transfer stop into two new
+#     trips so a service running on two physically separate vehicle legs
+#     (joined only by a passenger transfer) is drawn as two independent lines
+#     meeting at the transfer stop.
+#   • insert_waypoint — insert a synthetic WPT: stop between two consecutive
+#     stops so pfaedle is forced onto the intended path; the waypoint is
+#     dropped by everything after routing. Coordinate must sit on the routable
+#     OSM way. Matching on the ordered stop pair scopes it to one direction.
 gtfs_trip_overrides:
   - agency_id: "135"            # Niesenbahn AG
     route_short_name: "2405"
     action: split_at_stop
     transfer_stop_id: "8507458" # Schwandegg
     reason: "Two cables, mandatory transfer at Schwandegg; OSM ways are not node-connected, so pfaedle can only route the leg adjacent to the start terminal."
+  - agency_id: "37"             # Baselland Transport
+    route_short_name: "56"
+    action: insert_waypoint
+    after_stop_id: "8500692:0:E"    # Dornach, Bahnhof platform E
+    before_stop_id: "8572205"       # Dornach, Gwändweg (parent)
+    waypoint: [7.61093, 47.489587]  # vertex of OSM way 379902479 — forecourt exit lane ~25 m north of platform E
+    reason: "Platform E departures must leave the forecourt northbound (doors toward the platform) and turn around via Amthausstrasse; the bay lane is two-way in OSM, so pfaedle otherwise exits south directly and poisons the direction at the platform."
 
 # ── GTFS preprocessing: agency denylists ─────────────────────────────────────
 # Both lists key on substrings of agency_name (case-insensitive) as found in

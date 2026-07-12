@@ -99,9 +99,11 @@ def load_stop_coords(overrides: dict) -> dict:
     return out
 
 
-def write_filtered_stops(overrides: dict) -> int:
+def write_filtered_stops(overrides: dict, waypoint_overrides: list) -> int:
     """Copy stops.txt to GTFS_OUT, replacing stop_lon/stop_lat for any row
-    whose stop_id matches an override. Returns the count of overridden rows.
+    whose stop_id matches an override, and appending one synthetic `WPT:`
+    stop row per insert_waypoint override so pfaedle can route through it.
+    Returns the count of overridden rows.
     """
     src = GTFS_IN / "stops.txt"
     dst = GTFS_OUT / "stops.txt"
@@ -118,6 +120,17 @@ def write_filtered_stops(overrides: dict) -> int:
                 row["stop_lon"] = f"{ov[0]:.8f}"
                 row["stop_lat"] = f"{ov[1]:.8f}"
                 n += 1
+            writer.writerow(row)
+        for e in waypoint_overrides:
+            row = {k: "" for k in reader.fieldnames}
+            row["stop_id"] = e["wpt_sid"]
+            if "stop_name" in row:
+                row["stop_name"] = (f"WPT {e['route_short_name']} "
+                                    f"after {e['after_stop_id']}")
+            row["stop_lon"] = f"{e['lon']:.8f}"
+            row["stop_lat"] = f"{e['lat']:.8f}"
+            if "location_type" in row:
+                row["location_type"] = "0"
             writer.writerow(row)
     return n
 
@@ -171,6 +184,55 @@ def _stop_matches_transfer(row_sid: str, transfer_sid: str) -> bool:
     if ":" not in transfer_sid and ":" in row_sid:
         return row_sid.split(":")[0] == transfer_sid
     return False
+
+
+def load_waypoint_overrides(cfg: dict) -> list:
+    """Normalized list of `gtfs_trip_overrides` entries with action
+    `insert_waypoint` (see gtfs-trip-overrides concept). Entries missing
+    required fields are skipped. Each entry carries a mutable
+    `matched_trips` counter filled during the stop_times stream."""
+    out: list = []
+    for entry in (cfg.get("gtfs_trip_overrides") or []):
+        action = (entry.get("action") or "").strip()
+        if action != "insert_waypoint":
+            continue
+        agency_id = str(entry.get("agency_id", "")).strip()
+        rsn = str(entry.get("route_short_name", "")).strip()
+        after = str(entry.get("after_stop_id", "")).strip()
+        before = str(entry.get("before_stop_id", "")).strip()
+        wp = entry.get("waypoint") or []
+        if not (agency_id and rsn and after and before and len(wp) == 2):
+            continue
+        out.append({
+            "agency_id": agency_id,
+            "route_short_name": rsn,
+            "after_stop_id": after,
+            "before_stop_id": before,
+            "lon": float(wp[0]),
+            "lat": float(wp[1]),
+            "wpt_sid": f"WPT:{agency_id}:{rsn}:{after}",
+            "matched_trips": 0,
+            "reason": entry.get("reason", ""),
+        })
+    return out
+
+
+def identify_waypoint_routes(waypoint_overrides: list) -> dict:
+    """{route_id: [override entries]} for every route_id whose
+    (agency_id, route_short_name) matches an insert_waypoint entry."""
+    if not waypoint_overrides:
+        return {}
+    by_key: dict = defaultdict(list)
+    for e in waypoint_overrides:
+        by_key[(e["agency_id"], e["route_short_name"])].append(e)
+    out: dict = defaultdict(list)
+    with open(GTFS_IN / "routes.txt", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            key = (row.get("agency_id", "").strip(),
+                   (row.get("route_short_name") or "").strip())
+            for e in by_key.get(key, []):
+                out[row["route_id"]].append(e)
+    return dict(out)
 
 
 def identify_excluded_agencies(excluded_tokens: list) -> set:
@@ -230,12 +292,17 @@ def load_trips_index(excluded_route_ids: set) -> tuple:
 def stream_filter_stop_times(stop_coords: dict, bbox: dict,
                              trips_excluded_by_route: set,
                              split_routes: dict,
+                             waypoint_routes: dict,
                              trip_to_route: dict) -> tuple:
     """
     Streams stop_times.txt once, writes the filtered version to GTFS_OUT,
     and returns (foreign_terminus_trips, total_trips, kept_trips,
     n_time_repairs, split_map, split_warnings). Decides per-trip when the
     trip_id changes (relies on rows being contiguous per trip_id).
+
+    For trips whose route is in `waypoint_routes`, a synthetic `WPT:` stop
+    is inserted per matching insert_waypoint override — before the split
+    handling, so both overrides compose on one route.
 
     For trips whose route is in `split_routes`, the trip is rewritten into two
     new trips with `__1` and `__2` suffixes on trip_id, split at the
@@ -270,6 +337,10 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
         seq_idx = header.index("stop_sequence") if "stop_sequence" in header else None
         dist_idx = (header.index("shape_dist_traveled")
                     if "shape_dist_traveled" in header else None)
+        pickup_idx = (header.index("pickup_type")
+                      if "pickup_type" in header else None)
+        dropoff_idx = (header.index("drop_off_type")
+                       if "drop_off_type" in header else None)
 
         cur_trip = None
         cur_rows: list = []
@@ -283,10 +354,16 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
             if cur_excluded or cur_any_foreign:
                 return
             rid = trip_to_route.get(cur_trip, "")
+            rows = cur_rows
+            wp_entries = waypoint_routes.get(rid)
+            if wp_entries:
+                rows = _insert_waypoint_rows(
+                    rows, wp_entries, stop_idx, arr_idx, dep_idx,
+                    seq_idx, dist_idx, pickup_idx, dropoff_idx)
             tsid = split_routes.get(rid)
             if tsid:
                 split = _split_trip_rows(
-                    cur_trip, cur_rows, tsid,
+                    cur_trip, rows, tsid,
                     trip_idx, stop_idx, seq_idx, dist_idx,
                     split_warnings, rid)
                 if split is not None:
@@ -298,7 +375,7 @@ def stream_filter_stop_times(stop_coords: dict, bbox: dict,
                     split_map[cur_trip] = [new_tid_1, new_tid_2]
                     kept_trips += 2
                     return
-            for line in cur_rows:
+            for line in rows:
                 fout.write(line)
             kept_trips += 1
 
@@ -420,6 +497,64 @@ def _split_trip_rows(orig_tid: str, cur_rows: list, transfer_sid: str,
     leg1 = emit(parsed[:transfer_pos + 1], new_tid_1)
     leg2 = emit(parsed[transfer_pos:],     new_tid_2)
     return leg1, leg2, new_tid_1, new_tid_2
+
+
+def _insert_waypoint_rows(cur_rows: list, entries: list,
+                           stop_idx: int, arr_idx: int, dep_idx: int,
+                           seq_idx, dist_idx, pickup_idx, dropoff_idx):
+    """Insert one synthetic `WPT:` stop row per matching override entry into
+    a trip's rows, between `after_stop_id` and `before_stop_id` where they
+    appear consecutively (gtfs-trip-overrides concept, insert_waypoint).
+
+    The synthetic row is a copy of the after-stop's row with the waypoint
+    stop_id, arrival = departure = the after-stop's departure (keeps times
+    non-decreasing), no pickup/drop-off, and no shape_dist. Trips without
+    the ordered pair are returned unchanged — short workings and variants
+    are expected, so no per-trip warning. On insertion, stop_sequence is
+    renumbered 1..n. Increments each applied entry's `matched_trips`."""
+    parsed = []
+    for line in cur_rows:
+        if '"' in line:
+            parsed.append((next(csv.reader([line])), True))
+        else:
+            parsed.append((line.rstrip("\n\r").split(","), False))
+
+    inserted = False
+    for e in entries:
+        for i in range(len(parsed) - 1):
+            if (_stop_matches_transfer(parsed[i][0][stop_idx],
+                                       e["after_stop_id"])
+                    and _stop_matches_transfer(parsed[i + 1][0][stop_idx],
+                                               e["before_stop_id"])):
+                r = list(parsed[i][0])
+                r[stop_idx] = e["wpt_sid"]
+                r[arr_idx] = parsed[i][0][dep_idx]
+                r[dep_idx] = parsed[i][0][dep_idx]
+                if dist_idx is not None:
+                    r[dist_idx] = ""
+                if pickup_idx is not None:
+                    r[pickup_idx] = "1"
+                if dropoff_idx is not None:
+                    r[dropoff_idx] = "1"
+                parsed.insert(i + 1, (r, parsed[i][1]))
+                e["matched_trips"] += 1
+                inserted = True
+                break
+    if not inserted:
+        return cur_rows
+
+    out = []
+    for new_seq, (row, quoted) in enumerate(parsed, 1):
+        r = list(row)
+        if seq_idx is not None:
+            r[seq_idx] = str(new_seq)
+        needs_quote = quoted or any(
+            ("," in f or '"' in f or "\n" in f) for f in r)
+        if needs_quote:
+            out.append(",".join(_csv_escape(f) for f in r) + "\n")
+        else:
+            out.append(",".join(r) + "\n")
+    return out
 
 
 def _csv_escape(field: str) -> str:
@@ -604,6 +739,17 @@ def main() -> None:
     if split_overrides:
         print(f"  matched {len(split_routes):,} route_id(s) in routes.txt")
 
+    waypoint_overrides = load_waypoint_overrides(cfg)
+    if waypoint_overrides:
+        print(f"Loaded {len(waypoint_overrides)} GTFS waypoint override(s)")
+        for e in waypoint_overrides:
+            print(f"  • agency={e['agency_id']} route={e['route_short_name']} "
+                  f"→ waypoint between {e['after_stop_id']} and "
+                  f"{e['before_stop_id']}")
+    waypoint_routes = identify_waypoint_routes(waypoint_overrides)
+    if waypoint_overrides:
+        print(f"  matched {len(waypoint_routes):,} route_id(s) in routes.txt")
+
     print(f"Loading stops…")
     stop_coords = load_stop_coords(stop_overrides)
     print(f"  {len(stop_coords):,} stops with coords")
@@ -627,11 +773,12 @@ def main() -> None:
           f"{len(trips_excluded_by_route):,} via excluded routes")
 
     print(f"Streaming stop_times.txt → filter foreign-terminus trips"
-          + (" + split overridden routes" if split_routes else "") + "…")
+          + (" + split overridden routes" if split_routes else "")
+          + (" + insert waypoints" if waypoint_routes else "") + "…")
     (foreign_terminus, total_trips, kept_trips, n_time_repairs,
      split_map, split_warnings) = stream_filter_stop_times(
         stop_coords, bbox, trips_excluded_by_route,
-        split_routes, trip_to_route)
+        split_routes, waypoint_routes, trip_to_route)
     print(f"  {total_trips:,} trips scanned, "
           f"{len(foreign_terminus):,} foreign-terminus, "
           f"{kept_trips:,} kept (post-split count)")
@@ -640,6 +787,9 @@ def main() -> None:
               "(clamped dep = arr)")
     if split_map:
         print(f"  Split {len(split_map):,} trip(s) → {len(split_map)*2:,} legs")
+    for e in waypoint_overrides:
+        print(f"  Waypoint {e['wpt_sid']}: inserted into "
+              f"{e['matched_trips']:,} trip(s)")
     if split_warnings:
         by_reason: dict = defaultdict(int)
         for w in split_warnings:
@@ -668,8 +818,10 @@ def main() -> None:
     print(f"  {n_agencies:,} agencies")
 
     print(f"Writing filtered stops.txt …")
-    n_overridden = write_filtered_stops(stop_overrides)
-    print(f"  {n_overridden:,} stop rows overridden")
+    n_overridden = write_filtered_stops(stop_overrides, waypoint_overrides)
+    print(f"  {n_overridden:,} stop rows overridden"
+          + (f", {len(waypoint_overrides)} waypoint stop(s) appended"
+             if waypoint_overrides else ""))
 
     print(f"Copying remaining GTFS files…")
     for name in ("calendar.txt", "calendar_dates.txt", "feed_info.txt"):
@@ -706,7 +858,8 @@ def main() -> None:
     DIAG_OUT.write_text(json.dumps(summary, ensure_ascii=False))
     print(f"  Diagnostic: {len(summary):,} routes affected → {DIAG_OUT}")
 
-    # Diagnostic: trip split map (original → legs) + any unsplit warnings.
+    # Diagnostic: trip split map (original → legs) + any unsplit warnings,
+    # plus the per-entry waypoint insertion counts.
     split_diag = {
         "splits": [
             {"original_trip_id": orig,
@@ -715,6 +868,16 @@ def main() -> None:
             for orig, legs in sorted(split_map.items())
         ],
         "warnings": split_warnings,
+        "waypoints": [
+            {"agency_id": e["agency_id"],
+             "route_short_name": e["route_short_name"],
+             "after_stop_id": e["after_stop_id"],
+             "before_stop_id": e["before_stop_id"],
+             "wpt_sid": e["wpt_sid"],
+             "matched_trips": e["matched_trips"],
+             "reason": e["reason"]}
+            for e in waypoint_overrides
+        ],
     }
     SPLIT_DIAG_OUT.write_text(json.dumps(split_diag, ensure_ascii=False))
     print(f"  Diagnostic: {len(split_map):,} split trip(s) → {SPLIT_DIAG_OUT}")

@@ -1469,7 +1469,9 @@ def build_station_layers(cfg) -> list:
     CLOSE_ZOOM_STYLE_BANDS = [
         ("A", 17, 18, None, ["get", "color"], "#ffffff"),
         ("B", 18, 19, 1000, "#ffffff", ["get", "color"]),
-        ("C", 19, None, 1000, "#ffffff", ["get", "color"]),
+        ("C", 19, 20, 1000, "#ffffff", ["get", "color"]),
+        ("D", 20, 21, 1000, "#ffffff", ["get", "color"]),
+        ("E", 21, None, 1000, "#ffffff", ["get", "color"]),
     ]
 
     for band, band_min, band_max, dest_max_width, body_fill, border_color \

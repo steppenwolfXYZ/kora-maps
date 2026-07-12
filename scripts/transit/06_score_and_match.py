@@ -885,6 +885,11 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
             except (ValueError, IndexError):
                 continue
             stop_id = row["stop_id"]
+            # Synthetic waypoints (gtfs-trip-overrides, insert_waypoint)
+            # exist only to steer pfaedle — invisible to everything after
+            # routing.
+            if stop_id.startswith("WPT:"):
+                continue
             seq = int(row["stop_sequence"])
 
             if tid != current_trip_id:

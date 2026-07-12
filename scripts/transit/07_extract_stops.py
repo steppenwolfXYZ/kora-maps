@@ -1225,8 +1225,15 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
 # =============================================================================
 
 # Missing-range fill (tram/bus/regional_bus): borrow gates.
-SIBLING_PROXIMITY_M = 2.0
-SIBLING_ANGLE_TOL_RAD = radians(15.0)  # non-sibling tier only
+SIBLING_PROXIMITY_M = 1.0
+# Non-sibling tier admission gate. 45° (was 15°) because the own anchor
+# tangent can be rotated toward an imminent turn (Herrliberg Bhf West: the
+# 974 departs into its loop, skewing the tangent 34° off the road, which
+# rejected the perfect 972 donor ending at the stop). Ranking is by best
+# angle first, so worse-angle candidates admitted by the looser gate are
+# only used when nothing better fits; perpendicular crossings (~90°,
+# Sevgein) stay rejected.
+SIBLING_ANGLE_TOL_RAD = radians(45.0)
 SIBLING_MAX_TURN_DEG = 120.0           # both tiers: reject candidates whose
                                         # local turn at q_t exceeds this — the
                                         # aligned/reversed cos_ang sign becomes
@@ -1264,18 +1271,68 @@ def _local_turn_angle_deg(polyline, dists, t, window_m=2.0):
     return degrees(acos(cos_ang))
 
 
-def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
-                              my_dx, my_dy, t_on_self, L,
+def _projections_at(anchor_lon, anchor_lat, cand_poly, cand_dists,
+                     collect_m=SIBLING_PROXIMITY_M, merge_arc_m=20.0):
+    """Return every `q_t` at which `cand_poly` passes within `collect_m` of
+    the anchor — one entry per distinct pass (local minimum of distance),
+    merged when consecutive qualifying segments lie within `merge_arc_m` of
+    arc-length. A polyline that visits the anchor several times (a loop
+    departing, transiting mid-route, and returning — Bad Zurzach's bus 4 is
+    the canonical case) exposes a distinct tangent at each pass; each must
+    enter the borrow ranking separately, because the pass whose walk fits is
+    often not the globally nearest one.
+
+    Falls back to the single global-nearest projection when no pass is
+    within `collect_m` — the caller's proximity gate then rejects it, which
+    keeps calling code free of a special empty case.
+    """
+    passes = []  # [q_t_of_best_point, best_dist_m, t_of_last_qualifying_seg]
+    for i in range(len(cand_poly) - 1):
+        ax, ay = cand_poly[i]
+        bx, by = cand_poly[i + 1]
+        dx, dy = bx - ax, by - ay
+        seg_sq = dx * dx + dy * dy
+        if seg_sq == 0:
+            tt = 0.0
+        else:
+            tt = max(0.0, min(1.0, ((anchor_lon - ax) * dx
+                                     + (anchor_lat - ay) * dy) / seg_sq))
+        cx, cy = ax + tt * dx, ay + tt * dy
+        dist_m = haversine_km(anchor_lon, anchor_lat, cx, cy) * 1000.0
+        if dist_m > collect_m:
+            continue
+        t_here = cand_dists[i] + tt * (cand_dists[i + 1] - cand_dists[i])
+        if passes and t_here - passes[-1][2] < merge_arc_m:
+            if dist_m < passes[-1][1]:
+                passes[-1][0] = t_here
+                passes[-1][1] = dist_m
+            passes[-1][2] = t_here
+        else:
+            passes.append([t_here, dist_m, t_here])
+    if not passes:
+        return [_project_meters(anchor_lon, anchor_lat, cand_poly, cand_dists)]
+    return [p[0] for p in passes]
+
+
+def _borrow_backward_segment(anchor_lon, anchor_lat,
+                              anchor_dx, anchor_dy, t_on_self, L,
                               siblings, self_oid):
     """Try to borrow the missing `L - t_on_self` metres of backward extent from
-    a same-line sibling's polyline. Returns a list of (lon, lat) in
-    backward→forward order ending at (target_lon, target_lat), translated so
-    the join with the on-polyline portion is exact. Returns None if nothing
-    qualifies.
+    a same-line sibling's polyline. The search anchor is the on-polyline
+    extent's backward endpoint — i.e. `poly[0]`, the far end reached after
+    consuming the on-polyline portion — not the snap of the stop. This way,
+    when the stop sits mid-polyline (t > 0), we still look for candidates at
+    the point where the extension actually begins.
+
+    Returns the borrowed sequence (lon, lat) in backward→forward order, in
+    the donor polyline's true coordinates — never translated onto the
+    anchor, so the fill always lies exactly on a drawn line (a sub-gate jog
+    at the join is acceptable; a parallel offset next to the line is not).
+    Returns None if nothing qualifies.
 
     Gates (concept § Missing-range fill, step 1):
-      • ~2 m proximity at the snapped GTFS coord `p` (rejects parallel-street
-        variants — e.g. one-way pairs on separate streets).
+      • ~2 m proximity between the anchor and the sibling's nearest-point
+        projection of the anchor (rejects parallel-street variants).
       • Local turn at the sibling's nearest point ≤ SIBLING_MAX_TURN_DEG
         (rejects hairpins where the aligned/reversed sign of cos_ang is
         numerically unstable).
@@ -1289,16 +1346,19 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
     sibling walk is reversed for opposite-direction siblings so we always
     move backward relative to our line.
 
-    Circular lines are their own sibling (self_oid == sib_oid): the projection
-    starts from the polyline's far end so a loop's "return to start" geometry
-    fills its own first stop's backward extent.
+    Circular lines are their own sibling (self_oid == sib_oid): multi-pass
+    projection surfaces the polyline's far end (and any mid-loop transits)
+    as passes, so a loop's "return to start" geometry fills its own first
+    stop's backward extent. The pass at the loop's own start is harmless —
+    its tangent is identical to ours (aligned), so its backward walk runs
+    off the polyline start and is skipped.
     """
     if L <= t_on_self:
         return None
     fill_m = L - t_on_self
 
-    cos_lat = cos(radians(p_lat))
-    my_ex, my_ey = my_dx * cos_lat, my_dy
+    cos_lat = cos(radians(anchor_lat))
+    my_ex, my_ey = anchor_dx * cos_lat, anchor_dy
     my_mag = sqrt(my_ex * my_ex + my_ey * my_ey)
     if my_mag == 0:
         return None
@@ -1312,34 +1372,34 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
         if sib_total <= 0:
             continue
 
-        if sib_oid == self_oid:
-            q_t = sib_total
-            q_lon, q_lat = sib_poly[-1]
-        else:
-            q_t = _project_meters(p_lon, p_lat, sib_poly, sib_dists)
+        for q_t in _projections_at(anchor_lon, anchor_lat,
+                                     sib_poly, sib_dists):
             q_lon, q_lat = _interp_at(sib_poly, sib_dists, q_t)
 
-        prox_m = haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0
-        if prox_m > SIBLING_PROXIMITY_M:
-            continue
+            prox_m = haversine_km(anchor_lon, anchor_lat,
+                                    q_lon, q_lat) * 1000.0
+            if prox_m > SIBLING_PROXIMITY_M:
+                continue
 
-        turn = _local_turn_angle_deg(sib_poly, sib_dists, q_t, window_m=2.0)
-        if turn is not None and turn > SIBLING_MAX_TURN_DEG:
-            continue
+            turn = _local_turn_angle_deg(sib_poly, sib_dists, q_t,
+                                          window_m=2.0)
+            if turn is not None and turn > SIBLING_MAX_TURN_DEG:
+                continue
 
-        sib_tan = _directional_tangent_at(sib_poly, sib_dists, q_t, window_m=2.0)
-        if sib_tan is None:
-            continue
-        sib_dx, sib_dy = sib_tan
-        sib_ex, sib_ey = sib_dx * cos_lat, sib_dy
-        sib_mag = sqrt(sib_ex * sib_ex + sib_ey * sib_ey)
-        if sib_mag == 0:
-            continue
+            sib_tan = _directional_tangent_at(sib_poly, sib_dists, q_t,
+                                                window_m=2.0)
+            if sib_tan is None:
+                continue
+            sib_dx, sib_dy = sib_tan
+            sib_ex, sib_ey = sib_dx * cos_lat, sib_dy
+            sib_mag = sqrt(sib_ex * sib_ex + sib_ey * sib_ey)
+            if sib_mag == 0:
+                continue
 
-        cos_ang = (my_ex * sib_ex + my_ey * sib_ey) / (my_mag * sib_mag)
-        aligned = cos_ang > 0
-        ranked.append((abs(cos_ang), prox_m, sib_oid, sib_poly, sib_dists,
-                       aligned, q_t))
+            cos_ang = (my_ex * sib_ex + my_ey * sib_ey) / (my_mag * sib_mag)
+            aligned = cos_ang > 0
+            ranked.append((abs(cos_ang), prox_m, sib_oid, sib_poly,
+                            sib_dists, aligned, q_t))
 
     # Best tangent match wins; ties broken by shorter proximity.
     ranked.sort(key=lambda x: (-x[0], x[1]))
@@ -1347,16 +1407,18 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
     for (_abs_cos, _prox_m, _sib_oid, sib_poly, sib_dists,
          aligned, q_t) in ranked:
         sib_total = sib_dists[-1]
+        # Anchor sits at the on-polyline extent's far end (poly[0]), so the
+        # walk on the sibling starts at q_t itself — no t_on_self shift.
         if aligned:
-            walk_end_t = q_t - t_on_self
-            walk_start_t = walk_end_t - fill_m
+            walk_end_t = q_t
+            walk_start_t = q_t - fill_m
             if walk_start_t < 0:
                 continue
             seg = list(_slice_polyline(sib_poly, sib_dists,
                                         walk_start_t, walk_end_t))
         else:
-            walk_start_t = q_t + t_on_self
-            walk_end_t = walk_start_t + fill_m
+            walk_start_t = q_t
+            walk_end_t = q_t + fill_m
             if walk_end_t > sib_total:
                 continue
             seg = list(_slice_polyline(sib_poly, sib_dists,
@@ -1366,10 +1428,11 @@ def _borrow_backward_segment(p_lon, p_lat, target_lon, target_lat,
         if len(seg) < 2:
             continue
 
-        end_lon, end_lat = seg[-1]
-        dlon = target_lon - end_lon
-        dlat = target_lat - end_lat
-        return [(x + dlon, y + dlat) for x, y in seg]
+        # The segment keeps the donor's true coordinates — never translate
+        # it onto the anchor. Where the donor sits slightly off the anchor
+        # (within the proximity gate), the extent has a small jog at the
+        # join instead of running parallel next to the drawn line.
+        return seg
 
     return None
 
@@ -1430,26 +1493,27 @@ class _AllLinesIndex:
         return entry[0] if entry else None
 
 
-def _borrow_backward_nonsibling(p_lon, p_lat, target_lon, target_lat,
-                                 my_dx, my_dy, t_on_self, L,
+def _borrow_backward_nonsibling(anchor_lon, anchor_lat,
+                                 anchor_dx, anchor_dy, t_on_self, L,
                                  self_oid, self_sib_key):
     """Non-sibling backward borrow: widen the missing-range fill from
     same-(ref, agency_id, mode) variants to any drawn line polyline within
-    ~2 m of `p`, keeping the ±15° tangent gate. Multiple qualifying
-    candidates are ranked by tangent match to (my_dx, my_dy) — highest
+    ~2 m of the anchor (the on-polyline extent's far end, `poly[0]`),
+    keeping the ±15° tangent gate. Multiple qualifying candidates are
+    ranked by tangent match to (anchor_dx, anchor_dy) — highest
     `|cos(angle)|` wins, with shorter proximity as tie-break. The picked
-    line is walked backward from its projection of `p` by the missing
-    arc-length and translated so the join with the on-polyline portion is
-    exact. Returns None when the tier is disabled, when no candidate
-    qualifies, or when every ranked candidate's polyline runs out before
-    fill_m.
+    line is walked from its projection of the anchor by the missing
+    arc-length; the segment keeps the donor's true coordinates (never
+    translated onto the anchor — see _borrow_backward_segment). Returns
+    None when the tier is disabled, when no candidate qualifies, or when
+    every ranked candidate's polyline runs out before fill_m.
     """
     if _ALL_LINES_INDEX is None or L <= t_on_self:
         return None
     fill_m = L - t_on_self
 
-    cos_lat = cos(radians(p_lat))
-    my_ex, my_ey = my_dx * cos_lat, my_dy
+    cos_lat = cos(radians(anchor_lat))
+    my_ex, my_ey = anchor_dx * cos_lat, anchor_dy
     my_mag = sqrt(my_ex * my_ex + my_ey * my_ey)
     if my_mag == 0:
         return None
@@ -1457,7 +1521,7 @@ def _borrow_backward_nonsibling(p_lon, p_lat, target_lon, target_lat,
 
     ranked = []
     for (cand_oid, cand_key, cand_poly, cand_dists) in _ALL_LINES_INDEX.query(
-            p_lon, p_lat, SIBLING_PROXIMITY_M):
+            anchor_lon, anchor_lat, SIBLING_PROXIMITY_M):
         if cand_oid == str(self_oid):
             continue
         if cand_key == self_sib_key:
@@ -1466,49 +1530,53 @@ def _borrow_backward_nonsibling(p_lon, p_lat, target_lon, target_lat,
         if cand_total <= 0:
             continue
 
-        q_t = _project_meters(p_lon, p_lat, cand_poly, cand_dists)
-        q_lon, q_lat = _interp_at(cand_poly, cand_dists, q_t)
-        prox_m = haversine_km(p_lon, p_lat, q_lon, q_lat) * 1000.0
-        if prox_m > SIBLING_PROXIMITY_M:
-            continue
+        for q_t in _projections_at(anchor_lon, anchor_lat,
+                                    cand_poly, cand_dists):
+            q_lon, q_lat = _interp_at(cand_poly, cand_dists, q_t)
+            prox_m = haversine_km(anchor_lon, anchor_lat,
+                                    q_lon, q_lat) * 1000.0
+            if prox_m > SIBLING_PROXIMITY_M:
+                continue
 
-        turn = _local_turn_angle_deg(cand_poly, cand_dists, q_t, window_m=2.0)
-        if turn is not None and turn > SIBLING_MAX_TURN_DEG:
-            continue
+            turn = _local_turn_angle_deg(cand_poly, cand_dists, q_t,
+                                          window_m=2.0)
+            if turn is not None and turn > SIBLING_MAX_TURN_DEG:
+                continue
 
-        cand_tan = _directional_tangent_at(cand_poly, cand_dists, q_t,
-                                            window_m=2.0)
-        if cand_tan is None:
-            continue
-        cand_dx, cand_dy = cand_tan
-        cand_ex, cand_ey = cand_dx * cos_lat, cand_dy
-        cand_mag = sqrt(cand_ex * cand_ex + cand_ey * cand_ey)
-        if cand_mag == 0:
-            continue
+            cand_tan = _directional_tangent_at(cand_poly, cand_dists, q_t,
+                                                window_m=2.0)
+            if cand_tan is None:
+                continue
+            cand_dx, cand_dy = cand_tan
+            cand_ex, cand_ey = cand_dx * cos_lat, cand_dy
+            cand_mag = sqrt(cand_ex * cand_ex + cand_ey * cand_ey)
+            if cand_mag == 0:
+                continue
 
-        cos_ang = (my_ex * cand_ex + my_ey * cand_ey) / (my_mag * cand_mag)
-        abs_cos = abs(cos_ang)
-        if abs_cos < cos_tol:
-            continue
-        aligned = cos_ang > 0
-        ranked.append((abs_cos, prox_m, cand_oid, cand_poly, cand_dists,
-                       aligned, q_t))
+            cos_ang = (my_ex * cand_ex + my_ey * cand_ey) / (my_mag * cand_mag)
+            abs_cos = abs(cos_ang)
+            if abs_cos < cos_tol:
+                continue
+            aligned = cos_ang > 0
+            ranked.append((abs_cos, prox_m, cand_oid, cand_poly, cand_dists,
+                            aligned, q_t))
 
     ranked.sort(key=lambda x: (-x[0], x[1]))
 
     for (_abs_cos, _prox_m, _cand_oid, cand_poly, cand_dists,
          aligned, q_t) in ranked:
         cand_total = cand_dists[-1]
+        # Anchor is at poly[0], so the walk starts at q_t itself.
         if aligned:
-            walk_end_t = q_t - t_on_self
-            walk_start_t = walk_end_t - fill_m
+            walk_end_t = q_t
+            walk_start_t = q_t - fill_m
             if walk_start_t < 0:
                 continue
             seg = list(_slice_polyline(cand_poly, cand_dists,
                                         walk_start_t, walk_end_t))
         else:
-            walk_start_t = q_t + t_on_self
-            walk_end_t = walk_start_t + fill_m
+            walk_start_t = q_t
+            walk_end_t = q_t + fill_m
             if walk_end_t > cand_total:
                 continue
             seg = list(_slice_polyline(cand_poly, cand_dists,
@@ -1518,10 +1586,8 @@ def _borrow_backward_nonsibling(p_lon, p_lat, target_lon, target_lat,
         if len(seg) < 2:
             continue
 
-        end_lon, end_lat = seg[-1]
-        dlon = target_lon - end_lon
-        dlat = target_lat - end_lat
-        return [(x + dlon, y + dlat) for x, y in seg]
+        # Donor coordinates are kept as-is — see _borrow_backward_segment.
+        return seg
 
     return None
 
@@ -1602,18 +1668,6 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         return None
     t = _project_meters(stop_lon, stop_lat, polyline, dists)
 
-    # Closed-loop projection override. For a polyline whose endpoints coincide
-    # (a loop trip starting and ending at the same platform), `_project_meters`
-    # arbitrarily returns `t = 0` because poly[0] and poly[-1] tie on distance
-    # — but semantically the stop we're drawing is the LAST-entry arrival at
-    # the loop's close point, so it should sit at `t = poly_max`. Force that
-    # here; the extent then slices the last L m of the loop without any
-    # extrapolation / borrow.
-    if (t < 1.0
-            and haversine_km(polyline[0][0], polyline[0][1],
-                              polyline[-1][0], polyline[-1][1]) * 1000.0 < 1.0):
-        t = poly_max
-
     is_centred_extent = (
         mode in ("train", "metro")
         or (mode == "mountain" and mountain_origin in MOUNTAIN_EXTENT_ORIGINS)
@@ -1629,18 +1683,24 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         if len(on_slice) >= 2 and on_slice[0] == on_slice[-1]:
             on_slice = [on_slice[0]]
 
-        tan = _directional_tangent_at(polyline, dists, t, window_m=2.0)
-        if tan is None:
-            return on_slice  # no usable tangent → can't fill
-        dx_per_m, dy_per_m = tan
-
+        # Anchor for both the borrow search and the straight-line extension
+        # is the on-polyline extent's backward endpoint (poly[0]) — the point
+        # at which the extension actually needs to begin. Its direction is the
+        # first non-stub segment's tangent from poly[0], falling back to the
+        # ±2 m averaged tangent at t when the first segment is a sub-metre
+        # pfaedle stub.
         p = _interp_at(polyline, dists, t)
         target = on_slice[0] if on_slice else (polyline[0][0], polyline[0][1])
+        anchor_tan = (_start_segment_tangent(polyline, dists)
+                      or _directional_tangent_at(polyline, dists, t, window_m=2.0))
+        if anchor_tan is None:
+            return on_slice  # no usable tangent → can't fill
+        anchor_dx, anchor_dy = anchor_tan
 
         if siblings:
             borrowed = _borrow_backward_segment(
-                p[0], p[1], target[0], target[1],
-                dx_per_m, dy_per_m, t, L, siblings, osm_id)
+                target[0], target[1],
+                anchor_dx, anchor_dy, t, L, siblings, osm_id)
             if borrowed is not None:
                 if len(on_slice) <= 1:
                     return borrowed
@@ -1648,27 +1708,25 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
 
         # Non-sibling borrow (step 2 in the concept's missing-range fill).
         # Widens the candidate set to every drawn line polyline within 2 m
-        # of `p`, excluding our own line and the same-(ref, agency_id, mode)
-        # siblings already tried above.
+        # of the anchor, excluding our own line and the same-(ref, agency_id,
+        # mode) siblings already tried above.
         if _ALL_LINES_INDEX is not None and osm_id is not None:
             own_key = _ALL_LINES_INDEX.own_sib_key(osm_id)
             borrowed = _borrow_backward_nonsibling(
-                p[0], p[1], target[0], target[1],
-                dx_per_m, dy_per_m, t, L, osm_id, own_key)
+                target[0], target[1],
+                anchor_dx, anchor_dy, t, L, osm_id, own_key)
             if borrowed is not None:
                 if len(on_slice) <= 1:
                     return borrowed
                 return borrowed[:-1] + on_slice
 
-        # Straight-line tangent extrapolation backward. Use the first
-        # non-stub segment's direction (arrival angle at the polyline start)
-        # rather than the ±20 m smoothed tangent — smoothing across a curve
-        # at the platform bends the extension away from the true street.
-        ext_tan = _start_segment_tangent(polyline, dists) or (dx_per_m, dy_per_m)
-        ext_dx, ext_dy = ext_tan
+        # Straight-line tangent extrapolation backward using the same anchor
+        # direction. The extension follows the actual arrival angle at the
+        # polyline's starting vertex, not a chord smoothed across a curve at
+        # the platform.
         missing_m = L - t
-        extrap = (target[0] - ext_dx * missing_m,
-                  target[1] - ext_dy * missing_m)
+        extrap = (target[0] - anchor_dx * missing_m,
+                  target[1] - anchor_dy * missing_m)
         if not on_slice:
             return [extrap, (p[0], p[1])]
         return [extrap] + on_slice
@@ -3374,7 +3432,7 @@ def write_debug_bars() -> None:
 # =============================================================================
 
 # First-draft seed values. Refine after visual review.
-CLOSE_ZOOM_STACK_GAP_FRAC      = 0.1    # stack gap as a fraction of pill width
+CLOSE_ZOOM_STACK_GAP_M         = 0.8    # polygon-edge gap; 0.4 m outside-border visible after the 0.4 m centered border
 CLOSE_ZOOM_LINE_GAP_M          = 2.0    # clear gap between line and pill inner edge
 CLOSE_ZOOM_DIR_CLUSTER_COS     = cos(radians(45.0))  # same-direction threshold
 CLOSE_ZOOM_BACKDROP_PAD_M      = 8.0    # outward padding of the station hull
@@ -3433,6 +3491,14 @@ CLOSE_ZOOM_BANDS = {
           "font_dest_m": 0.84, "max_lines": 2,
           "margin_disc_m": 0.3, "margin_tip_m": -0.15,
           "tipp_min": 18, "tipp_max": 18},
+    "D": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+          "font_dest_m": 0.63, "max_lines": 3,
+          "margin_disc_m": 0.15, "margin_tip_m": -0.08,
+          "tipp_min": 18, "tipp_max": 18},
+    "E": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+          "font_dest_m": 0.47, "max_lines": 4,
+          "margin_disc_m": 0.08, "margin_tip_m": -0.04,
+          "tipp_min": 18, "tipp_max": 18},
 }
 # Band whose geometry feeds the backdrop hull (largest, so it covers all).
 CLOSE_ZOOM_HULL_BAND = "C"
@@ -3443,6 +3509,21 @@ CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS = {"rack", "rebucketed_rail"}
 
 # Modes that get a close-zoom pill-arrow at all.
 CLOSE_ZOOM_PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus", "ferry"}
+
+# Modes whose variant priority (representative pick + pill stacking order)
+# is frequency rather than speed. Frequency is the better proxy for "the
+# canonical variant" on road modes: a rare short-turn variant terminating
+# mid-route must not out-rank the through variants.
+CLOSE_ZOOM_FREQ_PRIORITY_MODES = {"tram", "bus", "regional_bus"}
+
+
+def _variant_priority(v):
+    """Sort value for variant representative selection and pill-arrow
+    stacking: f_weighted (trips/h) for tram / bus / regional_bus,
+    speed_kmh for rail-like modes."""
+    if v.get("mode") in CLOSE_ZOOM_FREQ_PRIORITY_MODES:
+        return v.get("f_weighted") or 0.0
+    return v.get("speed_kmh") or 0.0
 
 
 def _local_offset_to_lonlat(cx, cy, dx_m, dy_m, cos_lat_cached=None):
@@ -3516,24 +3597,27 @@ def _unit_chord_metric(A, B, cos_lat):
     return (dxm / nrm, dym / nrm)
 
 
-def _stop_course(extent, fwd_T, cos_lat, back_m, fwd_m, chord_w=10.0):
+def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0):
     """Queue course for a pill-arrow stack: the stop position line `extent`
-    oriented in the queue's direction of travel, then extended DEAD
-    STRAIGHT at both ends (rear by back_m, front by fwd_m metres) along the
-    average direction (chord) of the extent's first / last chord_w metres.
-    Pills whose span lies inside the extent thus derive their angle from
-    the stop position line at their own segment; pills beyond it continue
-    straight in the direction of the last pills that fit.
+    extended DEAD STRAIGHT at both ends (rear by back_m, front by fwd_m
+    metres) along the average direction (chord) of the extent's first /
+    last chord_w metres. Pills whose span lies inside the extent thus
+    derive their angle from the stop position line at their own segment;
+    pills beyond it continue straight in the direction of the last pills
+    that fit.
 
     NOTHING but the stop position line determines the placement — the raw
     GTFS stop coordinate is never consulted here.
 
-    Orientation: the extent keeps its own point order (the travel
-    direction of the line it was sliced from — the departing lane at a
-    departure bay, the approach at an arrival-side terminal, the line
-    itself at a through stop). It is reversed only when that order runs
-    clearly AGAINST the group's travel direction `fwd_T` (a backbone
-    borrowed from an opposite-direction line at a through stop).
+    Orientation: the extent's own point order, always. Every non-rail
+    extent ends at the stop position by construction (backward-anchored
+    [t-L, t] slices and borrowed fills alike), so the front end is the
+    stop end with no travel-direction guessing. A previous version
+    reversed the order when it opposed the group's ±20 m travel tangent;
+    that misfired at stops where the vehicle turns right after departing
+    (Herrliberg Bhf West — tangent skewed ~north by the turn, course
+    flipped, tip anchored at the wrong end) and never produced a better
+    outcome in the cases it was meant for.
 
     Returns (course_pts, course_dists, t_front, t_mid) or None if
     degenerate. t_front is the stop position line's forward end in course
@@ -3546,13 +3630,6 @@ def _stop_course(extent, fwd_T, cos_lat, back_m, fwd_m, chord_w=10.0):
     d = _cum_dist_m(pts)
     if d[-1] <= 0.0:
         return None
-    ax = _unit_chord_metric(pts[0], pts[-1], cos_lat)
-    if ax is None:
-        return None
-    dot = ax[0] * fwd_T[0] + ax[1] * fwd_T[1]
-    if dot <= -CLOSE_ZOOM_DIR_CLUSTER_COS:
-        pts.reverse()
-        d = _cum_dist_m(pts)
     t_front = back_m + d[-1]
     t_mid = back_m + d[-1] / 2.0
     w = min(chord_w, d[-1])
@@ -3978,11 +4055,12 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
     # Loop-line apexes (close-zoom-stop-design.md § Text): when first and
     # last stop share a UIC, "to <terminus>" is useless at the terminus
     # itself (Bad Zurzach buses 1-4 all showing "Bahnhof" at Bahnhof).
-    # Stops before the apex — the highest-scoring stop (far-zoom stop
-    # score) within the middle third of the sequence, ties to the
-    # midpoint — show the apex as destination instead; the apex and every
-    # later stop keep the terminus.
-    stop_scores = load_stop_scores()
+    # Stops before the apex — the stop geographically furthest from the
+    # terminus — show the apex as destination instead; the apex and every
+    # later stop keep the terminus. Stops sharing the terminus UIC are
+    # never apex candidates: loops may pass through the terminus mid-route
+    # (Bad Zurzach bus 4), and picking that call would relabel the whole
+    # outbound leg with the terminus name.
     line_loop_apex = {}   # osm_id → (apex_idx, apex_name)
     for oid, entry in line_stops.items():
         triplets = entry.get("stops", []) if isinstance(entry, dict) else entry
@@ -3992,21 +4070,23 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         first_sid, last_sid = triplets[0][2], triplets[-1][2]
         if not first_sid or not last_sid:
             continue
-        if first_sid.split(":")[0] != last_sid.split(":")[0]:
+        term_uic = first_sid.split(":")[0]
+        if term_uic != last_sid.split(":")[0]:
             continue
-        lo = max(1, n // 3)
-        hi = min(n - 2, (2 * n) // 3)
-        mid = (n - 1) / 2.0
+        t_lon, t_lat = triplets[0][0], triplets[0][1]
+        cos_lat = cos(radians(t_lat))
+        if cos_lat <= 0.0:
+            cos_lat = 1.0
         best = None
-        for i in range(lo, hi + 1):
+        for i in range(1, n - 1):
             sid = triplets[i][2] if len(triplets[i]) >= 3 else ""
-            if not sid:
+            if not sid or sid.split(":")[0] == term_uic:
                 continue
-            rec = stop_scores.get(sid.split(":")[0])
-            score = rec["score"] if rec else 0.0
-            key = (-score, abs(i - mid), i)
-            if best is None or key < best[0]:
-                best = (key, i, sid)
+            dx = (triplets[i][0] - t_lon) * 111320.0 * cos_lat
+            dy = (triplets[i][1] - t_lat) * 111320.0
+            d2 = dx * dx + dy * dy
+            if best is None or d2 > best[0]:
+                best = (d2, i, sid)
         if best is None:
             continue
         apex_name = stop_meta.get(best[2], {}).get("name", "")
@@ -4160,6 +4240,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 "ref":             line.get("ref", ""),
                 "agency_id":       line.get("agency_id", ""),
                 "speed_kmh":       line.get("speed_kmh") or 0.0,
+                "f_weighted":      line.get("f_weighted") or 0.0,
                 "polyline":        polyline,
                 "dists":           dists,
                 "t_stop":          t_stop,
@@ -4189,8 +4270,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         return stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
 
     max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
-    max_step = max(bc["length_m"]
-                   + bc["width_m"] * CLOSE_ZOOM_STACK_GAP_FRAC
+    max_step = max(bc["length_m"] + CLOSE_ZOOM_STACK_GAP_M
                    for bc in CLOSE_ZOOM_BANDS.values())
 
     def _rightmost(group):
@@ -4212,18 +4292,52 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 path = c
         return path
 
-    def _build_group_recs(sid):
-        """Per platform id: variant collapse → direction groups → one
-        record per group carrying its rightmost path and stop position
-        line."""
-        visits = per_stop_visits[sid]
+    def _build_group_recs(pool_sids):
+        """Per track (list of stop_ids pooled into one queue for rail
+        platform-sector merge; a one-item list for every other case):
+        variant collapse → direction groups → recs carrying the group's
+        chosen path and its stop position line.
+
+        Rail platform-sector merge (close-zoom-stop-design.md § Rail
+        platform-sector merge): stop_ids at one parent whose platform_code
+        shares the same numeric leading-digit run refer to one physical
+        track; their visits pool into one queue on the full platform
+        extent. The rep sid — used for atlas length / extent lookups — is
+        the pooled sid with the longest atlas length, so the queue rides
+        the full platform, not a sector's sub-extent.
+
+        Rail direction ordering (close-zoom-stop-design.md § Rail): all
+        rail clusters at one track form ONE stack. Same-direction pills
+        stay contiguous, and opposite-direction sub-groups sit at
+        opposite ends of the stack with their fastest line at the
+        outward-most position, so no two adjacent pills point at each
+        other and each sub-group's chevrons point outward from the
+        platform middle."""
+        visits = []
+        for s in pool_sids:
+            visits.extend(per_stop_visits.get(s, []))
+        if not visits:
+            return []
+        # Rep sid for extent / atlas-length lookups. For a rail pool, the
+        # longest atlas length is the full-platform stop_id (a "7" sid
+        # over a "7A-C" sid); solo sids pick themselves.
+        if len(pool_sids) == 1:
+            rep_sid = pool_sids[0]
+        else:
+            rep_sid = max(
+                pool_sids,
+                key=lambda s: float(
+                    (stop_attrs.get(s, {}) or {}).get("length") or 0.0))
 
         # ── Collapse variants: one pill per (ref, agency, direction) ────
         # Same line number + agency in the same direction of travel
         # (tangent dot product within 45°) merges into one pill;
-        # destinations are collected across the merged variants, fastest
-        # variant first.
-        visits.sort(key=lambda v: (-(v["speed_kmh"] or 0.0), v["osm_id"]))
+        # destinations are collected across the merged variants, highest-
+        # priority variant first. Priority is frequency (f_weighted) for
+        # tram / bus / regional_bus — a rare short-turn variant terminating
+        # mid-route must not out-rank the through variants and hijack the
+        # pill's geometry (Sevgein) — and speed for rail-like modes.
+        visits.sort(key=lambda v: (-_variant_priority(v), v["osm_id"]))
         clusters = []
         for v in visits:
             merged = False
@@ -4240,29 +4354,71 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             if not merged:
                 c = dict(v)
                 c["destinations"] = [v["destination"]] if v["destination"] else []
+                c["dir_forward"] = True
                 clusters.append(c)
 
         # ── Direction groups ────────────────────────────────────────────
-        # Clusters heading the same way (tangent dot within 45°) share a
-        # stack and, crucially, one path: when parallel lines (e.g. tram +
-        # bus on the same street) serve the same stop, every pill-arrow in
-        # the group follows the RIGHTMOST line so they line up.
-        groups = []
-        for c in clusters:
-            placed = False
-            for g in groups:
-                dot = (g[0]["tangent"][0] * c["tangent"][0]
-                       + g[0]["tangent"][1] * c["tangent"][1])
-                if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
-                    g.append(c)
-                    placed = True
-                    break
-            if not placed:
-                groups.append([c])
+        # Non-rail: clusters heading the same way (tangent dot within 45°)
+        # share a stack and, crucially, one path — when parallel lines
+        # (e.g. tram + bus on the same street) serve the same stop, every
+        # pill-arrow in the group follows the RIGHTMOST line so they line
+        # up. Opposite directions form their own stack on the other side.
+        #
+        # Rail: ALL clusters at one track form ONE stack — opposite
+        # directions do not form a separate group. cluster[0] (fastest
+        # overall) defines the "forward" direction. Forward clusters
+        # queue fastest→slowest from the forward end; reverse clusters
+        # queue slowest→fastest from the same end, so at the boundary the
+        # two sub-groups meet round-cap-to-round-cap and each sub-group's
+        # fastest sits at the outward-most position with its chevron
+        # pointing out. The dir_forward flag is read later by the pill
+        # build loop, which flips T for reverse pills so their chevrons
+        # actually point backward.
+        rail_pool = clusters and clusters[0]["is_rail_like"]
+        if rail_pool:
+            fwd_ref = clusters[0]["tangent"]
+            forwards, reverses = [], []
+            for c in clusters:
+                dot = (fwd_ref[0] * c["tangent"][0]
+                       + fwd_ref[1] * c["tangent"][1])
+                if dot >= 0.0:
+                    c["dir_forward"] = True
+                    forwards.append(c)
+                else:
+                    c["dir_forward"] = False
+                    reverses.append(c)
+            # forwards already sorted highest-priority-first by the visits
+            # sort; reverses need lowest-first so their highest-priority
+            # pill lands at the outward (backward) end of the stack.
+            groups = [forwards + list(reversed(reverses))]
+        else:
+            groups = []
+            for c in clusters:
+                placed = False
+                for g in groups:
+                    dot = (g[0]["tangent"][0] * c["tangent"][0]
+                           + g[0]["tangent"][1] * c["tangent"][1])
+                    if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                        g.append(c)
+                        placed = True
+                        break
+                if not placed:
+                    groups.append([c])
 
         recs = []
         for group in groups:
-            path = _rightmost(group)
+            if not group:
+                continue
+            # Rail: path is the fastest forward cluster (cluster[0]) — its
+            # tangent orients the queue course. _rightmost across a
+            # mixed-direction group would be meaningless (opposite tangents
+            # skew the right-normal projection). Non-rail groups are
+            # single-direction, so _rightmost picks the rightmost parallel
+            # line as before.
+            if rail_pool:
+                path = group[0]
+            else:
+                path = _rightmost(group)
 
             # Backbone: the group's stop position line. Prefer the extent
             # the stop/dot placement computed for the path line itself; a
@@ -4275,33 +4431,44 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # street, near-perpendicular to the departure tangent, and
             # that is precisely the ground the queue belongs on. Last
             # resort: compute the extent from the path's own geometry
-            # (still fitted, never extrapolated).
+            # (still fitted, never extrapolated). For a rail pool, the
+            # search widens across every pooled sid's stop_lines and, at
+            # equal key rank, prefers the LONGEST extent — the full
+            # platform beats any sector's sub-extent.
+            pool_lines = []
+            for s in pool_sids:
+                pool_lines.extend(stop_lines.get(s, []))
             ext = None
             best_key = None
-            for cand in stop_lines.get(sid, []):
-                if cand["osm_id"] == path["osm_id"]:
+            best_len = -1.0
+            for cand in pool_lines:
+                if cand["osm_id"] == path["osm_id"] and not rail_pool:
                     ext = cand["extent"]
                     break
                 key = ((cand["ref"], cand["agency_id"])
                        == (path["ref"], path["agency_id"]),
-                       cand["mode"] == path["mode"])
-                if best_key is None or key > best_key:
+                       cand["mode"] == path["mode"],
+                       cand["osm_id"] == path["osm_id"])
+                cand_len = _cum_dist_m(cand["extent"])[-1] if cand["extent"] and len(cand["extent"]) >= 2 else 0.0
+                if (best_key is None or key > best_key
+                        or (key == best_key and cand_len > best_len)):
                     best_key = key
+                    best_len = cand_len
                     ext = cand["extent"]
             if ext is None:
-                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+                atlas_len = (stop_attrs.get(rep_sid, {}) or {}).get("length")
                 sib_key = oid_sibling_key.get(path["osm_id"])
                 sibs = sibling_groups.get(sib_key, []) if sib_key else []
                 ext = _platform_extent(
                     path["stop_lon"], path["stop_lat"], path["polyline"],
                     path["mode"], atlas_len, PILL_CFG,
                     osm_id=path["osm_id"], siblings=sibs,
-                    end_of_platform=(path["osm_id"], sid)
+                    end_of_platform=(path["osm_id"], rep_sid)
                                     in end_of_platform_pairs,
                     mountain_origin=path["mountain_origin"])
             if ext is None or len(ext) < 2:
                 continue
-            recs.append({"sid": sid, "group": group, "path": path,
+            recs.append({"sid": rep_sid, "group": group, "path": path,
                          "ext": ext, "cut_pts": []})
         return recs
 
@@ -4311,8 +4478,24 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
 
     for parent, parent_sids in per_parent_sids.items():
         recs = []
+        # Rail platform-sector merge: rail sids at this parent whose
+        # platform_code shares a numeric leading-digit run pool into one
+        # track queue; non-rail sids and rail sids without a numeric
+        # prefix stay solo.
+        track_pool: dict = defaultdict(list)
         for sid in sorted(parent_sids):
-            recs.extend(_build_group_recs(sid))
+            visits = per_stop_visits.get(sid, [])
+            if not visits:
+                continue
+            code = (stop_meta.get(sid, {}) or {}).get("platform_code", "")
+            prefix = _platform_number(code)
+            is_rail = any(v["is_rail_like"] for v in visits)
+            if is_rail and prefix:
+                track_pool[("P:" + prefix,)].append(sid)
+            else:
+                track_pool[("S:" + sid,)].append(sid)
+        for key in sorted(track_pool):
+            recs.extend(_build_group_recs(track_pool[key]))
 
         # ── Same-curb resolution (non-rail) ──────────────────────────────
         # Same-direction groups of one station can sit on the same ground
@@ -4384,7 +4567,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                             for dst in c["destinations"]:
                                 if dst and dst not in tgt["destinations"]:
                                     tgt["destinations"].append(dst)
-                pooled.sort(key=lambda c: (-(c["speed_kmh"] or 0.0),
+                pooled.sort(key=lambda c: (-_variant_priority(c),
                                            c["osm_id"]))
                 path = _rightmost(pooled)
                 ext = _union_extents([r["ext"] for r in members],
@@ -4407,13 +4590,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         work = []
         for rec in recs:
             group, path, ext = rec["group"], rec["path"], rec["ext"]
-            # Queue course: the oriented stop position line extended dead
+            # Queue course: the stop position line (own point order — its
+            # front end is the stop end by construction) extended dead
             # straight far enough for the deepest band of this stack.
             # Anchors come from the stop position line ALONE (its forward
             # end for road-mode queues, its middle for rail stacks) — the
             # raw GTFS stop coordinate plays no part in placement.
             reach = (len(group) - 1) * max_step + max_L
-            built = _stop_course(ext, path["tangent"], path["cos_lat"],
+            built = _stop_course(ext, path["cos_lat"],
                                  back_m=reach + 2.0 * max_L,
                                  fwd_m=reach / 2.0 + 2.0 * max_L,
                                  chord_w=max_L)
@@ -4473,7 +4657,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # Full occupied length is exactly L: back cap (R) + body +
                 # chevron tip (R). The body is the frame range rear → neck.
                 body_len = L - 2.0 * R
-                stack_step = L + W * CLOSE_ZOOM_STACK_GAP_FRAC
+                stack_step = L + CLOSE_ZOOM_STACK_GAP_M
                 tipp = {"minzoom": bc["tipp_min"], "maxzoom": bc["tipp_max"]}
                 # Offset of the pill CENTER line from the path: consistent
                 # clear gap between the line and the pill's inner edge, on
@@ -4547,6 +4731,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     T = (dxm / norm, dym / norm)
                 else:
                     T = path["tangent"]
+                # Rail pool: reverse-direction pills flip T so their
+                # chevron tip points backward along the course (outward
+                # toward the negative-o end of the platform). The pill's
+                # map footprint is unchanged — the rectangle rotates 180°
+                # around origin — but the chevron and label direction flip
+                # to reflect the actual direction of travel.
+                if not c.get("dir_forward", True):
+                    T = (-T[0], -T[1])
                 N = (T[1], -T[0])  # right normal in direction of travel
                 origin = _point_at_extrap(tpts, tdists, o_center)
 
@@ -7200,7 +7392,9 @@ def compute_dwell_per_uic(stop_meta):
             arr = row.get("arrival_time", "")
             dep = row.get("departure_time", "")
             sid = row.get("stop_id", "")
-            if not sid:
+            if not sid or sid.startswith("WPT:"):
+                # Synthetic pfaedle waypoints (gtfs-trip-overrides) are not
+                # stops.
                 continue
             try:
                 a = _parse_time_secs(arr)

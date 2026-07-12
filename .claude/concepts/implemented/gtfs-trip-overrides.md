@@ -1,4 +1,10 @@
-# GTFS trip split at stop
+# GTFS trip overrides
+
+This document covers the `gtfs_trip_overrides` framework in `scripts/transit/config.yaml`: structural, config-driven rewrites of trips on named routes, applied during GTFS preprocessing before pfaedle. Two actions, both implemented: `split_at_stop` (the original subject of this document, formerly titled "GTFS trip split at stop") and `insert_waypoint`.
+
+---
+
+# Action: split_at_stop
 
 ## Problem
 
@@ -28,3 +34,32 @@ The canonical case is Niesenbahn (Mülenen — Schwandegg — Kulm), a two-cable
 - The original GTFS source files on disk are not modified. The split materialises in the same filtered-GTFS folder produced by the preprocessing step that the rest of the pipeline reads.
 - Stop coordinate overrides (`gtfs_stop_overrides`) and trip splits coexist on the same route if both are needed.
 - Trip-count diagnostics (e.g. `trip_groups.json` `trip_count`) reflect the post-split trips; the count is naturally higher than for an unsplit route. Frequency-related diagnostics (`f_weighted`, `freq_score`) are computed per segment from the post-split trips and are the correct per-segment values.
+
+---
+
+# Action: insert_waypoint
+
+## Problem
+
+Pfaedle sometimes routes a legally permitted but physically wrong path in the first metres of a trip, because the real-world constraint is not encoded anywhere it can see. Canonical case: Dornach Bahnhof, bus 56. The bus departs platform E, where a vehicle must stand facing north (doors toward the platform) and leave through the forecourt's northbound exit, turning around via Amthausstrasse to head south. The bay lane is correctly mapped as two-way in OSM (platform F uses it southbound), GTFS has no door-side concept, and pfaedle has no notion of "platform dictates standing direction" — so it legally exits south through the back of the bay. The wrong initial direction poisons everything downstream: direction classification at the platform, pill-arrow side and orientation, and the stop position line at close zoom.
+
+No automatic signal can fix this class of error; it needs a manual, per-case override — but a reusable one, not route-specific code.
+
+## Requirements
+
+- A second `gtfs_trip_overrides` action: `insert_waypoint`. Per entry the user supplies: `agency_id`, `route_short_name`, `action: insert_waypoint`, `after_stop_id`, `before_stop_id`, `waypoint` (lon, lat), and a free-text `reason`.
+- Applied during GTFS preprocessing, before pfaedle: on every trip of the matched route where `after_stop_id` is immediately followed by `before_stop_id`, a **synthetic stop** at the waypoint coordinate is inserted between the two, with times interpolated between its neighbours (non-decreasing; the existing arr/dep repair applies after insertion).
+- Pfaedle then has to route through the waypoint, which forces the shape onto the intended path (for Dornach 56: north out of the forecourt, turnaround, then south).
+- Synthetic stop ids carry a reserved marker prefix — `WPT:` — introduced by this action and used nowhere else.
+- **The waypoint exists only for pfaedle.** Every post-routing consumer of stop sequences drops `WPT:`-prefixed stops on load. No stop, dot, pill, pill-arrow, popup, destination, or diagnostic stop entry may ever show a waypoint; direction keys, merged stop sets, and frequency computations must be identical to a hypothetical run where pfaedle had produced the correct shape unaided.
+- Waypoint coordinate convention follows `gtfs_stop_overrides`: taken from the routable OSM way at the intended via position, so pfaedle snaps it reliably.
+- Direction scoping is inherent: matching is on the ordered consecutive stop pair, so the opposite direction (where the pair does not occur in that order) is untouched.
+- The trip-overrides audit output records each entry with the count of affected trips.
+
+## Constraints
+
+- Same identifier-robustness failure mode as `split_at_stop`: if the route is renumbered upstream, the override silently stops applying and the broken-shape baseline returns — visible on the map, fixable by updating the entry.
+- Trips on the matched route that do not contain the ordered pair consecutively (short workings, variants) are left untouched without per-trip warnings; the audit's matched/total counts are the visibility mechanism.
+- A `WPT:` id surviving into any rendered or diagnostic stop output is a bug, not a tuning issue.
+- One waypoint per entry. Multiple waypoints between different stop pairs are simply multiple entries; multiple waypoints between the same pair are deferred until a case appears.
+- `split_at_stop`, `insert_waypoint`, and `gtfs_stop_overrides` may coexist on the same route.
