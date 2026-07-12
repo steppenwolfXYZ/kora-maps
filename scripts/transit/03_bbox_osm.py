@@ -5,9 +5,9 @@ Step 03 — Cut OSM PBF to the Switzerland bbox + extract rail ways for pill wal
 Cuts each Geofabrik country PBF from step 02 to the bbox declared in
 scripts/transit/config.yaml, then merges the bbox-sized slices into a single
 file fed to pfaedle in step 05. After the merge, runs `osmium tags-filter`
-+ `osmium export` to produce a GeoJSON of rail ways used by step 07's
-terminal-pill OSM walk (see pill-rendering concept § "Missing-range fill
-(rail only)"). Step 07 consumes the GeoJSON only; it does not parse the PBF.
++ `osmium export` to produce GeoJSONs of rail, tram, and street ways used by
+step 07's stop-extent OSM walks (see stop-extent-osm-walk.md). Step 07
+consumes the GeoJSONs only; it does not parse the PBF.
 
 The bbox covers Switzerland + a 1–2 km margin past CH's outermost tips and
 intentionally captures a foreign sliver (Domodossola, Konstanz, Annemasse,
@@ -19,7 +19,16 @@ Docker. Outputs:
 
     data/osm/ch_pfaedle.osm.pbf
     data/osm/rail_ways.geojson
+    data/osm/tram_ways.geojson
+    data/osm/street_ways.geojson
     data/osm/buildings.geojson
+
+`tram_ways.geojson` and `street_ways.geojson` back the tram / bus stop-extent
+walk (stop-extent-osm-walk.md). Both are clipped to buffers of
+`streets_stop_buffer_m` (config.yaml) around all GTFS stop coordinates —
+only stop surroundings are ever walked, and unclipped street data would be
+orders of magnitude larger than the rail extract. Street ways keep their
+`highway` and `name` tags (they feed the walk's same-street rule).
 
 `buildings.geojson` carries only building centroids (Point features, no
 geometry beyond `[lon, lat]`). It feeds the urbanness bracket in step 07
@@ -30,9 +39,12 @@ village / rural bracket.
 Idempotent: skips if all outputs are newer than every input. Pass --force to rerun.
 """
 
+import csv
 import json
 import subprocess
 import sys
+from collections import defaultdict
+from math import cos, radians
 from pathlib import Path
 
 import yaml
@@ -51,11 +63,30 @@ COUNTRY_PBFS = [
 ]
 OUT_PBF = OSM_DIR / "ch_pfaedle.osm.pbf"
 OUT_RAIL_GEOJSON = OSM_DIR / "rail_ways.geojson"
+OUT_TRAM_GEOJSON = OSM_DIR / "tram_ways.geojson"
+OUT_STREET_GEOJSON = OSM_DIR / "street_ways.geojson"
 OUT_BUILDINGS_GEOJSON = OSM_DIR / "buildings.geojson"
+GTFS_STOPS = ROOT / "data" / "gtfs" / "stops.txt"
 # Railway tags whose ways step 07 walks at terminal train stops. Subway/tram/
 # funicular are excluded — they aren't used by train-bucket lines. See
-# pill-rendering concept § "Missing-range fill (rail only)".
+# stop-extent-osm-walk.md § "Rail walk".
 RAIL_TAG_FILTER = "w/railway=rail,light_rail,narrow_gauge"
+# Tram network for the tram stop-extent walk: railway=tram plus light_rail
+# (shared corridors; low relevance in Switzerland but harmless) plus
+# narrow_gauge — tram-classified lines can continue on their own
+# narrow-gauge railway beyond the city grid (Forchbahn), so their
+# terminals can sit on narrow-gauge track.
+TRAM_TAG_FILTER = "w/railway=tram,light_rail,narrow_gauge"
+# Street network for the bus stop-extent walk: highway classes a bus can
+# drive, plus the corresponding _link classes.
+STREET_HIGHWAY_CLASSES = [
+    "motorway", "trunk", "primary", "secondary", "tertiary",
+    "residential", "unclassified", "service", "living_street",
+    "bus_guideway",
+    "motorway_link", "trunk_link", "primary_link", "secondary_link",
+    "tertiary_link",
+]
+STREET_TAG_FILTER = "w/highway=" + ",".join(STREET_HIGHWAY_CLASSES)
 # Buildings: both closed-way buildings and building=* relations
 # (multipolygons covering stations, malls, etc.). osmium export's
 # add-centroid=force collapses them to a single representative Point each so
@@ -98,12 +129,14 @@ def newer_than(target: Path, sources: list) -> bool:
     return all(s.exists() and s.stat().st_mtime <= t for s in sources)
 
 
-def is_valid_geojson(path: Path) -> bool:
+def is_valid_geojson(path: Path, min_lines: int = 1000) -> bool:
     """True if path parses as a GeoJSON FeatureCollection with a plausible
-    number of rail LineStrings. Detects partial files left behind by a crashed
+    number of LineStrings. Detects partial files left behind by a crashed
     osmium-export run — osmium streams features incrementally and may write
     thousands of point features (level crossings etc.) before hitting the
-    duplicate-node error, so a structural type-check alone is fooled."""
+    duplicate-node error, so a structural type-check alone is fooled.
+    `min_lines` is per-artifact: well above any crashed-mid-write count but
+    below the artifact's real feature count."""
     if not path.exists():
         return False
     try:
@@ -115,13 +148,11 @@ def is_valid_geojson(path: Path) -> bool:
     features = data.get("features")
     if not isinstance(features, list):
         return False
-    # CH+neighbours within the bbox has tens of thousands of rail ways;
-    # require well above any crashed-mid-write count.
     n_lines = sum(
         1 for f in features
         if (f.get("geometry") or {}).get("type") == "LineString"
     )
-    return n_lines >= 1000
+    return n_lines >= min_lines
 
 
 def is_valid_buildings_geojson(path: Path) -> bool:
@@ -144,6 +175,169 @@ def is_valid_buildings_geojson(path: Path) -> bool:
         if (f.get("geometry") or {}).get("type") == "Point"
     )
     return n_pts >= 100_000
+
+
+def load_stop_grid(buffer_m: float):
+    """Spatial grid over all GTFS stop coordinates (data/gtfs/stops.txt) for
+    the buffer-clip test. Cell sizes are chosen so a 3×3 cell neighborhood
+    always covers `buffer_m` around a point. Returns (grid, cell_x, cell_y)
+    where grid maps (cx, cy) → [(lon, lat), ...]."""
+    if not GTFS_STOPS.exists():
+        sys.exit(f"missing {GTFS_STOPS} — run 01_download_gtfs.py first")
+    cell_y = buffer_m / 111320.0
+    # Lon cells sized for the bbox's highest latitude (cos 47.83° ≈ 0.67).
+    cell_x = buffer_m / (111320.0 * 0.62)
+    grid: dict = defaultdict(list)
+    n = 0
+    with open(GTFS_STOPS, encoding="utf-8-sig", newline="") as fp:
+        for row in csv.DictReader(fp):
+            try:
+                lon = float(row["stop_lon"])
+                lat = float(row["stop_lat"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            grid[(int(lon / cell_x), int(lat / cell_y))].append((lon, lat))
+            n += 1
+    print(f"  Stop buffer grid: {n:,} GTFS stop coords, "
+          f"{len(grid):,} cells, {buffer_m:g} m buffer")
+    return grid, cell_x, cell_y
+
+
+def _near_stop(lon, lat, grid, cell_x, cell_y, buffer_m) -> bool:
+    cx = int(lon / cell_x)
+    cy = int(lat / cell_y)
+    cos_lat = cos(radians(lat))
+    b_sq = buffer_m * buffer_m
+    for gx in (cx - 1, cx, cx + 1):
+        for gy in (cy - 1, cy, cy + 1):
+            for slon, slat in grid.get((gx, gy), ()):
+                dx = (lon - slon) * 111320.0 * cos_lat
+                dy = (lat - slat) * 111320.0
+                if dx * dx + dy * dy <= b_sq:
+                    return True
+    return False
+
+
+def _clip_to_buffers(coords, grid, cell_x, cell_y, buffer_m) -> list:
+    """Split a way's coordinate list into the runs of vertices that lie
+    within `buffer_m` of any GTFS stop, each run extended one vertex past
+    the buffer on both sides (so segments crossing the boundary survive)
+    and overlapping runs merged. Returns a list of coordinate runs (each
+    ≥ 2 vertices, z components stripped); empty when the way never comes
+    near a stop."""
+    flags = [_near_stop(c[0], c[1], grid, cell_x, cell_y, buffer_m)
+             for c in coords]
+    n = len(coords)
+    ranges: list = []
+    i = 0
+    while i < n:
+        if not flags[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and flags[j + 1]:
+            j += 1
+        a, b = max(0, i - 1), min(n - 1, j + 1)
+        if ranges and a <= ranges[-1][1] + 1:
+            ranges[-1][1] = b
+        else:
+            ranges.append([a, b])
+        i = j + 1
+    return [[[c[0], c[1]] for c in coords[a:b + 1]]
+            for a, b in ranges if b > a]
+
+
+def extract_clipped_ways(image: str, cuts: list, tag_filter: str,
+                         out_path: Path, label: str,
+                         grid, cell_x, cell_y, buffer_m: float,
+                         keep_props: tuple) -> None:
+    """tags-filter + export per country slice → stream-parse → clip each way
+    to the GTFS stop buffers → concat with way-id dedup → atomic write.
+
+    Same per-country pattern as the rail extraction (avoids `osmium merge`'s
+    incomplete cross-border dedup), but exports GeoJSONSeq and streams the
+    parse — the unclipped street network totals gigabytes across the slices,
+    far too big for a single json.loads. Only `keep_props` properties are
+    retained (they feed the walk's same-street rule in step 07)."""
+    way_pbfs: list = []
+    way_gjs: list = []
+    print(f"Extracting {label} ways per country slice → {out_path.name}")
+    for cut in cuts:
+        stem = cut.stem.replace(".osm", "")
+        w_pbf = OSM_DIR / f"{stem}.{label}.osm.pbf"
+        w_gj = OSM_DIR / f"{stem}.{label}.geojson"
+        docker_run(
+            image, "osmium", "tags-filter",
+            "--overwrite",
+            "-o", f"/work/{relpath(w_pbf)}",
+            f"/work/{relpath(cut)}",
+            tag_filter,
+        )
+        docker_run(
+            image, "osmium", "export",
+            "--overwrite",
+            "-f", "geojsonseq",
+            "-o", f"/work/{relpath(w_gj)}",
+            f"/work/{relpath(w_pbf)}",
+        )
+        way_pbfs.append(w_pbf)
+        way_gjs.append(w_gj)
+
+    seen_ids: set = set()
+    features: list = []
+    n_ways = n_kept = 0
+    for gj in way_gjs:
+        with open(gj, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("\x1e"):
+                    line = line[1:]
+                if not line:
+                    continue
+                try:
+                    feat = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                geom = feat.get("geometry") or {}
+                if geom.get("type") != "LineString":
+                    continue
+                fid = feat.get("id")
+                if fid is not None:
+                    if fid in seen_ids:
+                        continue
+                    seen_ids.add(fid)
+                coords = geom.get("coordinates") or []
+                if len(coords) < 2:
+                    continue
+                n_ways += 1
+                runs = _clip_to_buffers(coords, grid, cell_x, cell_y, buffer_m)
+                if not runs:
+                    continue
+                n_kept += 1
+                props_in = feat.get("properties") or {}
+                props = {k: props_in[k] for k in keep_props if props_in.get(k)}
+                for run in runs:
+                    features.append({
+                        "type": "Feature",
+                        "id": fid,
+                        "properties": props,
+                        "geometry": {"type": "LineString",
+                                     "coordinates": run},
+                    })
+
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": features,
+    }))
+    tmp_path.replace(out_path)
+
+    for p in way_pbfs + way_gjs:
+        p.unlink(missing_ok=True)
+
+    mb = out_path.stat().st_size / 1_000_000
+    print(f"Done. {label} GeoJSON: {n_kept:,} of {n_ways:,} ways near stops "
+          f"({len(features):,} clipped segments), {mb:.0f} MB → {out_path}")
 
 
 def cut_bbox(image: str, bbox_str: str, inputs: list) -> list:
@@ -177,19 +371,33 @@ def main() -> None:
         and newer_than(OUT_RAIL_GEOJSON, [OUT_PBF])
         and is_valid_geojson(OUT_RAIL_GEOJSON)
     )
+    # Tram / street extracts also depend on CFG_PATH (streets_stop_buffer_m).
+    # Validity floors: CH tram networks total a few thousand clipped ways;
+    # streets near stops run into the hundreds of thousands.
+    tram_fresh = (
+        (not force) and pbf_fresh
+        and newer_than(OUT_TRAM_GEOJSON, [OUT_PBF, CFG_PATH])
+        and is_valid_geojson(OUT_TRAM_GEOJSON, min_lines=200)
+    )
+    street_fresh = (
+        (not force) and pbf_fresh
+        and newer_than(OUT_STREET_GEOJSON, [OUT_PBF, CFG_PATH])
+        and is_valid_geojson(OUT_STREET_GEOJSON, min_lines=20_000)
+    )
     buildings_fresh = (
         (not force) and pbf_fresh
         and newer_than(OUT_BUILDINGS_GEOJSON, [OUT_PBF])
         and is_valid_buildings_geojson(OUT_BUILDINGS_GEOJSON)
     )
 
-    if pbf_fresh and rail_fresh and buildings_fresh:
+    if (pbf_fresh and rail_fresh and tram_fresh and street_fresh
+            and buildings_fresh):
         size_mb = OUT_PBF.stat().st_size / 1_000_000
-        rail_mb = OUT_RAIL_GEOJSON.stat().st_size / 1_000_000
-        bldg_mb = OUT_BUILDINGS_GEOJSON.stat().st_size / 1_000_000
-        print(f"Up-to-date: {OUT_PBF} ({size_mb:.0f} MB), "
-              f"{OUT_RAIL_GEOJSON.name} ({rail_mb:.0f} MB), "
-              f"{OUT_BUILDINGS_GEOJSON.name} ({bldg_mb:.0f} MB). "
+        gj_sizes = ", ".join(
+            f"{p.name} ({p.stat().st_size / 1_000_000:.0f} MB)"
+            for p in (OUT_RAIL_GEOJSON, OUT_TRAM_GEOJSON,
+                      OUT_STREET_GEOJSON, OUT_BUILDINGS_GEOJSON))
+        print(f"Up-to-date: {OUT_PBF} ({size_mb:.0f} MB), {gj_sizes}. "
               "Pass --force to rebuild.")
         return
 
@@ -198,10 +406,10 @@ def main() -> None:
     bbox_str = ",".join(f"{v:.4f}" for v in bbox)
 
     if pbf_fresh:
-        # Merged pfaedle PBF is fresh — only rail extraction needs to run.
+        # Merged pfaedle PBF is fresh — only stale extractions need to run.
         # Recreate the per-country bbox cuts since they're not kept on disk;
         # they're cheap relative to the merge.
-        print(f"Reusing existing {OUT_PBF.name}; recreating bbox cuts for rail extraction")
+        print(f"Reusing existing {OUT_PBF.name}; recreating bbox cuts for way extraction")
         cuts = cut_bbox(image, bbox_str, inputs)
     else:
         cuts = cut_bbox(image, bbox_str, inputs)
@@ -215,10 +423,39 @@ def main() -> None:
         size_mb = OUT_PBF.stat().st_size / 1_000_000
         print(f"Merged PBF: {size_mb:.0f} MB → {OUT_PBF}")
 
-    # Extract rail ways for step 07. Per-country slice → tags-filter →
-    # osmium export → JSON concat with way-id dedup. The per-country path
-    # avoids `osmium merge`'s incomplete dedup on cross-border duplicates,
-    # which `osmium export` rejects with "Node ID twice in input".
+    # Each extraction runs only when its own artifact is stale — a rerun
+    # for the new tram / street extracts must not redo the (expensive)
+    # buildings streaming pass. `cuts` stay on disk until the end of main().
+    if not rail_fresh:
+        extract_rail_ways(image, cuts)
+
+    if not tram_fresh or not street_fresh:
+        cfg = yaml.safe_load(CFG_PATH.read_text())
+        buffer_m = float(cfg.get("streets_stop_buffer_m", 150))
+        grid, cell_x, cell_y = load_stop_grid(buffer_m)
+        if not tram_fresh:
+            extract_clipped_ways(image, cuts, TRAM_TAG_FILTER,
+                                 OUT_TRAM_GEOJSON, "tram",
+                                 grid, cell_x, cell_y, buffer_m,
+                                 keep_props=("railway", "name"))
+        if not street_fresh:
+            extract_clipped_ways(image, cuts, STREET_TAG_FILTER,
+                                 OUT_STREET_GEOJSON, "street",
+                                 grid, cell_x, cell_y, buffer_m,
+                                 keep_props=("highway", "name"))
+
+    if not buildings_fresh:
+        extract_buildings(image, cuts)
+
+    for cut in cuts:
+        cut.unlink(missing_ok=True)
+
+
+def extract_rail_ways(image: str, cuts: list) -> None:
+    """Extract rail ways for step 07. Per-country slice → tags-filter →
+    osmium export → JSON concat with way-id dedup. The per-country path
+    avoids `osmium merge`'s incomplete dedup on cross-border duplicates,
+    which `osmium export` rejects with "Node ID twice in input"."""
     rail_geojsons: list = []
     rail_pbfs: list = []
     print(f"Extracting rail ways per country slice → {OUT_RAIL_GEOJSON.name}")
@@ -268,24 +505,21 @@ def main() -> None:
 
     for p in rail_pbfs + rail_geojsons:
         p.unlink(missing_ok=True)
-    # Keep `cuts` on disk — the building extraction below also needs them.
-    # They're removed at the end of main() once both extractions have run.
 
     rail_mb = OUT_RAIL_GEOJSON.stat().st_size / 1_000_000
     print(f"Done. Rail GeoJSON: {len(features):,} ways, "
           f"{rail_mb:.0f} MB → {OUT_RAIL_GEOJSON}")
 
-    # Extract building centroids for step 07's urbanness bracket. Same
-    # per-country-slice pattern as the rail extraction: tags-filter → export
-    # (with centroid-force) → Python dedup. Buildings cross borders far less
-    # than rail does, so dedup hits are rare, but the same key works.
+
+def extract_buildings(image: str, cuts: list) -> None:
+    """Extract building centroids for step 07's urbanness bracket. Same
+    per-country-slice pattern as the rail extraction: tags-filter → export
+    (with centroid-force) → Python dedup. Buildings cross borders far less
+    than rail does, so dedup hits are rare, but the same key works."""
     building_pbfs: list = []
     building_geojsons: list = []
     print(f"Extracting building centroids per country slice → "
           f"{OUT_BUILDINGS_GEOJSON.name}")
-    # The bbox cuts may already have been deleted above, so recreate them.
-    if not cuts or any(not c.exists() for c in cuts):
-        cuts = cut_bbox(image, bbox_str, inputs)
     for cut in cuts:
         stem = cut.stem.replace(".osm", "")
         bldg_pbf = OSM_DIR / f"{stem}.bldg.osm.pbf"
@@ -400,8 +634,6 @@ def main() -> None:
 
     for p in building_pbfs + building_geojsons:
         p.unlink(missing_ok=True)
-    for cut in cuts:
-        cut.unlink(missing_ok=True)
 
     bldg_mb = OUT_BUILDINGS_GEOJSON.stat().st_size / 1_000_000
     print(f"Done. Building centroids: {len(coords):,} buildings, "

@@ -22,6 +22,13 @@ osm_bbox:
   max_lon: 10.52
   max_lat: 47.83
 
+# Buffer radius around GTFS stop coordinates to which the street / tram way
+# extracts (step 03 → data/osm/street_ways.geojson, tram_ways.geojson) are
+# clipped. Only stop surroundings are ever walked by step 07's stop-extent
+# fill (see stop-extent-osm-walk.md); unclipped street data would be orders
+# of magnitude larger than the rail extract.
+streets_stop_buffer_m: 150
+
 # ── GTFS stop coordinate overrides ───────────────────────────────────────────
 # Hand-set coordinates for parent stops whose official GTFS coord sits too far
 # from the actual platform for pfaedle to route. The Eiger Express (route 2444)
@@ -150,6 +157,16 @@ pill_rendering:
   osm_match_radius_m: 5.0
   osm_match_max_tangent_diff_deg: 15.0
   osm_fallback_max_straight_m: 50.0
+  # ── Street / tram walk tier (tram / bus / regional_bus) ──────────────────
+  # See stop-extent-osm-walk.md. Final tier of the tram/bus missing-range
+  # fill after the sibling and non-sibling borrows: walk the OSM street
+  # (buses) / tram track (trams) backward from the extent's anchor. The
+  # tangent gate is deliberately wider than rail's 15° — road vehicles turn
+  # much tighter than trains and the anchor tangent can be skewed by an
+  # imminent turn. No straight fallback: when no way matches, nothing is
+  # appended (short-but-true beats long-but-wrong).
+  road_match_radius_m: 5.0
+  road_match_max_tangent_diff_deg: 45.0
 
 # ── Pill design bands ───────────────────────────────────────────────────────
 # Three baked variants of the pill / connector layout, one per zoom band.

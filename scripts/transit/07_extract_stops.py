@@ -48,6 +48,8 @@ LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 STOP_SCORES = ROOT / "data" / "transit" / "stop_size_scores.json"
 RAIL_WAYS_GEOJSON = ROOT / "data" / "osm" / "rail_ways.geojson"
+TRAM_WAYS_GEOJSON = ROOT / "data" / "osm" / "tram_ways.geojson"
+STREET_WAYS_GEOJSON = ROOT / "data" / "osm" / "street_ways.geojson"
 GTFS_STOPS   = ROOT / "data" / "gtfs_routed" / "stops.txt"
 # pfaedle rewrites stops.txt to a canonical schema and drops `original_stop_id`,
 # so the SLOID lookup reads from the pre-pfaedle filtered feed where the
@@ -57,6 +59,7 @@ ATLAS_CSV    = ROOT / "data" / "atlas" / "actual-date-world-traffic-point.csv"
 OUT_DOTS     = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS    = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_ATTRS_DIAG = ROOT / "data" / "transit" / "stop_attributes_sources.json"
+OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
 OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
 OUT_DEBUG_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
 OUT_DEBUG_BARS      = ROOT / "data" / "transit" / "transit_debug_bars.geojson"
@@ -301,6 +304,15 @@ OSM_FALLBACK_MAX_STRAIGHT_M    = float(PILL_CFG.get("osm_fallback_max_straight_m
 # terminal eligible for OSM-walk extension. pfaedle puts polyline endpoints
 # within ~metres of the snap; 20 m is comfortable headroom.
 TERMINAL_SNAP_TOLERANCE_M      = 20.0
+# Street / tram walk tier of the tram/bus missing-range fill (see
+# stop-extent-osm-walk.md): after both borrows fail, walk the OSM street
+# (buses) / tram track (trams) backward from the extent's anchor. The
+# tangent gate is deliberately wider than rail's 15° — road vehicles turn
+# much tighter than trains and the anchor tangent can be skewed by an
+# imminent turn. No straight fallback: when no way matches, nothing is
+# appended.
+ROAD_MATCH_RADIUS_M            = float(PILL_CFG.get("road_match_radius_m", 5.0))
+ROAD_MATCH_MAX_TANGENT_DIFF_DEG = float(PILL_CFG.get("road_match_max_tangent_diff_deg", 45.0))
 
 # Connector curving (see pill-rendering concept § Connector curving).
 # CURVE_PERP_PREF_RATIO: a perpendicular tangent at a pill tip replaces the
@@ -755,10 +767,10 @@ def _start_segment_tangent(polyline, dists, min_seg_m=1.0):
     pfaedle sub-metre stub at a line terminus would otherwise be used as the
     extension direction and point wildly wrong.
 
-    Used for straight-line backward extrapolation from the polyline start —
-    the extension follows the actual arrival angle at the polyline's starting
-    vertex, not a chord averaged over a window that may cross a curve at the
-    platform.
+    Used as the anchor direction of the tram/bus missing-range fill (borrow
+    tangent matching and OSM-walk way matching) — the fill follows the
+    actual arrival angle at the polyline's starting vertex, not a chord
+    averaged over a window that may cross a curve at the platform.
     """
     if len(polyline) < 2:
         return None
@@ -775,16 +787,28 @@ def _start_segment_tangent(polyline, dists, min_seg_m=1.0):
 # =============================================================================
 
 class _RailIndex:
-    """Spatial grid + endpoint adjacency over OSM rail-way LineStrings, loaded
-    once from data/osm/rail_ways.geojson. Used by `_osm_rail_walk` to extend
-    train-line polylines at terminal stops along the actual rail track.
+    """Spatial grid + adjacency over OSM way LineStrings (rail, tram, or
+    street networks from step 03). Used by `_osm_rail_walk` to extend
+    train-line polylines at terminal stops along the actual rail track, and
+    by `_osm_street_walk` for the tram/bus stop-extent fill.
+
+    `way_props` holds each way's retained tags (highway / railway / name —
+    they feed the street walk's same-street rule; empty for rail).
+    `endpoint_to_ways` is the endpoint-only adjacency the rail walk uses.
+    `node_to_ways` (populated when the loader is called with
+    `index_all_nodes=True`) additionally maps every vertex coordinate that
+    is some way's endpoint to all ways passing through it — the street
+    walk's junction continuation needs it because a street way frequently
+    T-s into the *middle* of the way it continues onto.
     """
 
     def __init__(self, cell_size_deg: float = 0.001):
         self.ways: list = []
         self.way_dists: list = []
+        self.way_props: list = []
         self.cells: dict = defaultdict(list)
         self.endpoint_to_ways: dict = defaultdict(list)
+        self.node_to_ways: dict = defaultdict(list)
         self.cell_size = cell_size_deg
 
     def query_radius(self, lon: float, lat: float, radius_m: float):
@@ -805,13 +829,13 @@ class _RailIndex:
         return seen
 
 
-def _load_rail_index(path):
-    """Load OSM rail ways from a FeatureCollection GeoJSON into a _RailIndex.
-    Returns None if the file is missing — terminal extension then falls back
-    to the capped-straight (Fallback A) path for every stop."""
+def _load_way_index(path, label, index_all_nodes=False):
+    """Load OSM ways from a FeatureCollection GeoJSON into a _RailIndex.
+    Returns None if the file is missing — the caller's walk tier is then
+    disabled (rail falls back to the capped-straight path; tram/bus append
+    nothing)."""
     if not path.exists():
-        print(f"  WARNING: {path.name} not found — rail walk disabled, "
-              f"terminal extensions fall back to capped-straight")
+        print(f"  WARNING: {path.name} not found — {label} walk disabled")
         return None
     data = json.loads(path.read_text())
     idx = _RailIndex()
@@ -838,6 +862,7 @@ def _load_rail_index(path):
         w_idx = len(idx.ways)
         idx.ways.append(coords)
         idx.way_dists.append(dists)
+        idx.way_props.append(feat.get("properties") or {})
         xs = [c[0] for c in coords]
         ys = [c[1] for c in coords]
         cs = idx.cell_size
@@ -850,7 +875,16 @@ def _load_rail_index(path):
                 idx.cells[(cx, cy)].append(w_idx)
         idx.endpoint_to_ways[coords[0]].append((w_idx, 0))
         idx.endpoint_to_ways[coords[-1]].append((w_idx, len(coords) - 1))
-    print(f"  Loaded {len(idx.ways):,} rail ways from {path.name} "
+    if index_all_nodes:
+        # Second pass: adjacency for every vertex that is some way's
+        # endpoint — junction continuation must find a crossing way even
+        # when the walked way ends mid-way of the continuation.
+        endpoints = set(idx.endpoint_to_ways.keys())
+        for w_idx, coords in enumerate(idx.ways):
+            for v_idx, c in enumerate(coords):
+                if c in endpoints:
+                    idx.node_to_ways[c].append((w_idx, v_idx))
+    print(f"  Loaded {len(idx.ways):,} {label} ways from {path.name} "
           f"({n_skip:,} skipped)")
     return idx
 
@@ -1084,6 +1118,181 @@ def _osm_rail_walk(rail_idx, p_lon, p_lat,
     return ("ran_out" if ran_out else "walk", translated)
 
 
+# =============================================================================
+# OSM street / tram walk (stop-extent-osm-walk.md § "Walk tier for tram /
+# bus / regional_bus")
+# =============================================================================
+
+# Road-class ranks for the same-street junction rule: the walk continues
+# onto a way only when its class is the same or adjacent in this ordering
+# ("similarly sized"), or when the way carries the same street name. Tram /
+# light_rail rank together — the tram network has no class hierarchy.
+_HIGHWAY_RANK = {
+    "motorway":      0,
+    "trunk":         1,
+    "primary":       2,
+    "secondary":     3,
+    "tertiary":      4,
+    "bus_guideway":  4,
+    "unclassified":  5,
+    "residential":   5,
+    "living_street": 6,
+    "service":       6,
+}
+
+
+def _way_rank(props):
+    """Road-class rank of a way, or None when the way carries no usable
+    class. `_link` variants rank as their base class."""
+    hw = (props or {}).get("highway") or ""
+    if hw.endswith("_link"):
+        hw = hw[:-5]
+    if hw in _HIGHWAY_RANK:
+        return _HIGHWAY_RANK[hw]
+    rw = (props or {}).get("railway") or ""
+    if rw in ("tram", "light_rail"):
+        return 0
+    return None
+
+
+def _same_street_ok(cur_props, cand_props):
+    """Same-street rule for the walk's junction continuation: same or
+    adjacent road-class rank ("similarly sized"), or same non-empty street
+    name (a class change under an unchanged name is still the same street).
+    A mere name change never breaks continuation on its own."""
+    name = (cur_props or {}).get("name") or ""
+    if name and name == ((cand_props or {}).get("name") or ""):
+        return True
+    ra = _way_rank(cur_props)
+    rb = _way_rank(cand_props)
+    if ra is None or rb is None:
+        return False
+    return abs(ra - rb) <= 1
+
+
+def _osm_street_find_continuation(way_index, exit_node, exit_dir,
+                                    excl_way_idx, cur_props):
+    """At the end of a walked street/tram way, pick the continuation among
+    all ways sharing the exit node (any-vertex adjacency — the walked way
+    may T into the middle of the continuation). Gates: same-street rule
+    against the walked way's props, and outgoing direction within
+    ROAD_MATCH_MAX_TANGENT_DIFF_DEG of the incoming direction (directional
+    — the walk never doubles back). Best direction match wins. Returns
+    (way_idx, start_t, forward) or None."""
+    candidates = way_index.node_to_ways.get(exit_node, ())
+    if not candidates:
+        return None
+
+    cos_lat = cos(radians(exit_node[1]))
+    ex = exit_dir[0] * cos_lat
+    ey = exit_dir[1]
+    e_mag = sqrt(ex * ex + ey * ey)
+    if e_mag <= 0:
+        return None
+    cos_tol = cos(radians(ROAD_MATCH_MAX_TANGENT_DIFF_DEG))
+
+    best = None  # (cos_a, way_idx, vert_idx, forward)
+    for w_idx, vert_idx in candidates:
+        if w_idx == excl_way_idx:
+            continue
+        if not _same_street_ok(cur_props, way_index.way_props[w_idx]):
+            continue
+        coords = way_index.ways[w_idx]
+        for nb, forward in ((vert_idx + 1, True), (vert_idx - 1, False)):
+            if nb < 0 or nb >= len(coords):
+                continue
+            other = coords[nb]
+            ox = (other[0] - exit_node[0]) * cos_lat
+            oy = other[1] - exit_node[1]
+            o_mag = sqrt(ox * ox + oy * oy)
+            if o_mag <= 0:
+                continue
+            cos_a = (ex * ox + ey * oy) / (e_mag * o_mag)
+            if cos_a < cos_tol:
+                continue
+            if best is None or cos_a > best[0]:
+                best = (cos_a, w_idx, vert_idx, forward)
+
+    if best is None:
+        return None
+    _, w_idx, vert_idx, forward = best
+    return (w_idx, way_index.way_dists[w_idx][vert_idx], forward)
+
+
+def _osm_street_walk(way_index, p_lon, p_lat,
+                      walk_dx_per_m, walk_dy_per_m, target_length_m):
+    """Walk an OSM street / tram way (with same-street junction
+    continuation) from a point P in the given walk direction for
+    `target_length_m` metres. Mirrors `_osm_rail_walk`; differs in the
+    gates (ROAD_MATCH_*), the junction rule (same-street via any-vertex
+    adjacency instead of best-tangent endpoint continuation), and the
+    caller's handling of the statuses (tram/bus keep a partial 'ran_out'
+    walk and never fall back to a straight line — see
+    stop-extent-osm-walk.md).
+
+    Returns (status, coords):
+      'walk'     — coords is the extension polyline starting at (p_lon,
+                   p_lat) (translated so the first vertex equals P exactly)
+                   reaching `target_length_m` of OSM geometry.
+      'ran_out'  — coords is the partial walk (network ended, or the
+                   same-street rule stopped the continuation).
+      'no_match' — coords is None; no way satisfied both gates at P.
+    """
+    if way_index is None:
+        return ("no_match", None)
+
+    start = _osm_rail_find_best_match(
+        way_index, p_lon, p_lat,
+        walk_dx_per_m, walk_dy_per_m,
+        ROAD_MATCH_RADIUS_M, ROAD_MATCH_MAX_TANGENT_DIFF_DEG)
+    if start is None:
+        return ("no_match", None)
+    way_idx, t_proj, walk_forward = start
+
+    out_coords: list = []
+    remaining = target_length_m
+    visited: set = set()
+    ran_out = False
+    while remaining > 1e-6:
+        if way_idx in visited:
+            ran_out = True
+            break
+        visited.add(way_idx)
+        coords = way_index.ways[way_idx]
+        dists = way_index.way_dists[way_idx]
+        seg, exit_pt, exit_dir, used, hit_end = _walk_along_way(
+            coords, dists, t_proj, walk_forward, remaining)
+        if not out_coords:
+            out_coords.extend(seg)
+        else:
+            out_coords.extend(seg[1:])
+        remaining -= used
+        if remaining <= 1e-6:
+            break
+        if not hit_end:
+            ran_out = True
+            break
+        cont = _osm_street_find_continuation(
+            way_index, exit_pt, exit_dir, way_idx,
+            way_index.way_props[way_idx])
+        if cont is None:
+            ran_out = True
+            break
+        way_idx, t_proj, walk_forward = cont
+
+    if len(out_coords) < 2:
+        return ("no_match", None)
+
+    # Translate so first vertex sits exactly at P (projection-distance
+    # shift, bounded by ROAD_MATCH_RADIUS_M) — the walked geometry also
+    # extends the rendered line polyline, which must join without a jog.
+    ox, oy = out_coords[0]
+    shift_x = p_lon - ox
+    shift_y = p_lat - oy
+    translated = [(x + shift_x, y + shift_y) for x, y in out_coords]
+    return ("ran_out" if ran_out else "walk", translated)
+
+
 def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
                                      pill_cfg, stop_attrs):
     """Extend train and mountain rail-like polylines at terminal stops via
@@ -1100,10 +1309,12 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
     `railway=funicular` (not in step 03's rail extraction), and aerial
     cable cars have no rail geometry at all.
 
-    Returns the set of (osm_id, stop_id) pairs that hit Fallback B — the OSM
-    walk matched a way but the way chain ran out before reaching L/2. These
-    stops use asymmetric anchoring in `_platform_extent` (polyline side
-    absorbs the full L; no polyline extension).
+    Returns the set of (osm_id, stop_id) pairs that hit case 2 — the OSM
+    walk matched a way but the track ran out before reaching L/2. The
+    walked partial IS prepended (the drawn line reaches OSM's true end,
+    nothing is fabricated past it) and these stops use asymmetric
+    anchoring in `_platform_extent`: the walked ground x outward plus
+    L − x inward from the snap, so the range still totals L.
     """
     end_of_platform_pairs: set = set()
     if not pill_cfg.get("default_length_m"):
@@ -1186,9 +1397,16 @@ def _extend_polylines_at_terminals(line_lookup, line_stops, rail_idx,
                 ext = walk_coords
                 n_walk += 1
             elif status == "ran_out":
+                # Case 2 (stop-extent-osm-walk.md § Rail walk): OSM ended
+                # before L/2. Prepend the walked partial — never fabricate
+                # geometry past OSM's true end — and flag the stop so
+                # _platform_extent splits the range asymmetrically (walked
+                # x outward + L − x inward from the snap).
                 end_of_platform_pairs.add((str(oid), sid))
                 n_eop += 1
-                continue
+                if walk_coords is None or len(walk_coords) < 2:
+                    continue
+                ext = walk_coords
             else:
                 # Fallback A: capped straight extension.
                 cap_m = min(target_m, OSM_FALLBACK_MAX_STRAIGHT_M)
@@ -1331,8 +1549,9 @@ def _borrow_backward_segment(anchor_lon, anchor_lat,
     Returns None if nothing qualifies.
 
     Gates (concept § Missing-range fill, step 1):
-      • ~2 m proximity between the anchor and the sibling's nearest-point
-        projection of the anchor (rejects parallel-street variants).
+      • SIBLING_PROXIMITY_M proximity between the anchor and the sibling's
+        nearest-point projection of the anchor (rejects parallel-street
+        variants).
       • Local turn at the sibling's nearest point ≤ SIBLING_MAX_TURN_DEG
         (rejects hairpins where the aligned/reversed sign of cos_ang is
         numerically unstable).
@@ -1440,9 +1659,9 @@ def _borrow_backward_segment(anchor_lon, anchor_lat,
 # -----------------------------------------------------------------------------
 # Non-sibling backward borrow (pill-rendering concept § Missing-range fill,
 # step 2). Widens the sibling-borrow candidate set from same-line variants to
-# any drawn line polyline within ~2 m of the snapped stop coord, kept honest
-# by the same ±15° tangent gate. Populated once by main() before pill / stop
-# extent building runs; None disables the tier.
+# any drawn line polyline within SIBLING_PROXIMITY_M of the anchor, kept
+# honest by the SIBLING_ANGLE_TOL_RAD tangent gate. Populated once by main()
+# before the upfront fill pass runs; None disables the tier.
 # -----------------------------------------------------------------------------
 
 _ALL_LINES_INDEX = None
@@ -1498,8 +1717,9 @@ def _borrow_backward_nonsibling(anchor_lon, anchor_lat,
                                  self_oid, self_sib_key):
     """Non-sibling backward borrow: widen the missing-range fill from
     same-(ref, agency_id, mode) variants to any drawn line polyline within
-    ~2 m of the anchor (the on-polyline extent's far end, `poly[0]`),
-    keeping the ±15° tangent gate. Multiple qualifying candidates are
+    SIBLING_PROXIMITY_M of the anchor (the on-polyline extent's far end,
+    `poly[0]`), keeping the SIBLING_ANGLE_TOL_RAD tangent gate. Multiple
+    qualifying candidates are
     ranked by tangent match to (anchor_dx, anchor_dy) — highest
     `|cos(angle)|` wins, with shorter proximity as tie-break. The picked
     line is walked from its projection of the anchor by the missing
@@ -1592,6 +1812,199 @@ def _borrow_backward_nonsibling(anchor_lon, anchor_lat,
     return None
 
 
+# =============================================================================
+# Upfront tram/bus missing-range fill (stop-extent-osm-walk.md § "Fill runs
+# once, upfront")
+# =============================================================================
+
+NONRAIL_FILL_MODES = ("tram", "bus", "regional_bus")
+
+
+def _extend_nonrail_polylines_at_terminals(line_lookup, line_stops,
+                                             tram_idx, street_idx,
+                                             pill_cfg, stop_attrs, stop_meta,
+                                             sibling_groups, oid_sibling_key,
+                                             stack_need):
+    """Run the whole tram/bus/regional_bus missing-range fill once per line,
+    before any extent consumer: sibling borrow → non-sibling borrow → OSM
+    street/tram walk (no straight fallback — when nothing matches, nothing
+    is appended; short-but-true beats long-but-wrong). Whatever geometry the
+    fill produces is PREPENDED to `line_lookup[oid]["coords"]` — the drawn
+    line must always reach the platform ground its extent covers, and
+    downstream platform extents become plain polyline slices with no fill
+    logic (same as rail).
+
+    Scope: every line whose backward-anchored extent [t−L, t] would run off
+    the polyline start for at least one of its stops (in practice the
+    departure terminal, where the polyline begins at the stop). The prepend
+    is sized to the largest deficit across the line's stops, so one fill
+    covers every stop and every extent consumer.
+
+    Returns (diag_records, filled_oids). diag_records carries one dict per
+    line that needed fill, with the fill source and any remaining deficit —
+    written to stop_extent_fill.json and read by the offender / shortened
+    diagnostics. filled_oids is the set of osm_ids whose coords changed
+    (main() syncs those back into transit_lines.geojson).
+    """
+    diag: list = []
+    filled_oids: set = set()
+    if not pill_cfg.get("default_length_m"):
+        return diag, filled_oids
+
+    counts: dict = defaultdict(int)
+
+    for oid, info in line_lookup.items():
+        mode = info.get("mode")
+        if mode not in NONRAIL_FILL_MODES:
+            continue
+        coords = info.get("coords")
+        if not coords:
+            continue
+        flat = flatten_coords(coords)
+        if len(flat) < 2:
+            continue
+        flat = [(c[0], c[1]) for c in flat]
+        dists = _cum_dist_m(flat)
+        if dists[-1] <= 0:
+            continue
+
+        ls_entry = line_stops.get(str(oid)) or line_stops.get(oid)
+        if not ls_entry:
+            continue
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+
+        # Largest backward deficit across the line's stops, measured
+        # against each stop's FILL TARGET (stop-extent-osm-walk.md § Fill
+        # target): trams keep the full fixed L; buses extend only as far
+        # as the stop's close-zoom pill-arrow stack actually needs, capped
+        # at L. Stops without a counted stack (no pill drawn there, e.g.
+        # layover bays) conservatively keep L. Only stops near the
+        # polyline start can need fill (t is arc-length from the start),
+        # so a cheap distance prefilter avoids the O(V) projection for
+        # the vast majority of stops.
+        start_lon, start_lat = flat[0]
+        need = 0.0
+        drive = None   # (trip, t, target) of the stop driving the deficit
+        for trip in triplets:
+            if len(trip) < 3:
+                continue
+            atlas_len = (stop_attrs.get(trip[2], {}) or {}).get("length")
+            L = _resolve_length(mode, atlas_len, pill_cfg)
+            if L is None or L <= 0:
+                continue
+            if mode == "tram":
+                target = L
+            else:
+                target = min(L, stack_need.get((str(oid), trip[2]), L))
+            if target <= 0:
+                continue
+            if haversine_km(trip[0], trip[1],
+                            start_lon, start_lat) * 1000.0 > target + 200.0:
+                continue
+            t = _project_meters(trip[0], trip[1], flat, dists)
+            if target - t > need:
+                need = target - t
+                drive = (trip, t, target)
+        if drive is None or need <= 0:
+            continue
+
+        trip, t_min, target = drive
+        sid = trip[2]
+        rec = {
+            "osm_id":    str(oid),
+            "ref":       info.get("ref", ""),
+            "agency_id": info.get("agency_id", ""),
+            "mode":      mode,
+            "stop_id":   sid,
+            "stop_name": (stop_meta.get(sid, {}) or {}).get("name", ""),
+            "lon":       trip[0],
+            "lat":       trip[1],
+            "needed_m":  round(need, 1),
+        }
+
+        # Anchor and direction exactly as the per-extent fill used them:
+        # the polyline start, with the first non-stub segment's tangent
+        # (±2 m averaged tangent at the stop's snap as fallback).
+        anchor = flat[0]
+        anchor_tan = (_start_segment_tangent(flat, dists)
+                      or _directional_tangent_at(flat, dists, t_min,
+                                                  window_m=2.0))
+        if anchor_tan is None:
+            rec["source"] = "none"
+            rec["filled_m"] = 0.0
+            rec["deficit_m"] = rec["needed_m"]
+            diag.append(rec)
+            counts["none"] += 1
+            continue
+        anchor_dx, anchor_dy = anchor_tan
+
+        fill = None       # backward→forward coords ending ~at flat[0]
+        source = None
+        filled_m = 0.0
+
+        sib_key = oid_sibling_key.get(str(oid))
+        siblings = sibling_groups.get(sib_key, []) if sib_key else []
+        if siblings:
+            seg = _borrow_backward_segment(
+                anchor[0], anchor[1], anchor_dx, anchor_dy,
+                t_min, target, siblings, str(oid))
+            if seg is not None and len(seg) >= 2:
+                fill = seg
+                source = "sibling_borrow"
+                filled_m = need
+
+        if fill is None and _ALL_LINES_INDEX is not None:
+            own_key = _ALL_LINES_INDEX.own_sib_key(str(oid))
+            seg = _borrow_backward_nonsibling(
+                anchor[0], anchor[1], anchor_dx, anchor_dy,
+                t_min, target, str(oid), own_key)
+            if seg is not None and len(seg) >= 2:
+                fill = seg
+                source = "nonsibling_borrow"
+                filled_m = need
+
+        if fill is None:
+            way_index = tram_idx if mode == "tram" else street_idx
+            status, walk_coords = _osm_street_walk(
+                way_index, anchor[0], anchor[1],
+                -anchor_dx, -anchor_dy, need)
+            if walk_coords is not None and len(walk_coords) >= 2:
+                # walk_coords run anchor → outward; the prepend needs
+                # backward → forward order ending at the anchor.
+                fill = list(reversed(walk_coords))
+                if status == "walk":
+                    source = "walk"
+                    filled_m = need
+                else:
+                    source = "partial_walk"
+                    filled_m = _cum_dist_m(walk_coords)[-1]
+            else:
+                source = "none"
+                filled_m = 0.0
+
+        rec["source"] = source
+        rec["filled_m"] = round(filled_m, 1)
+        rec["deficit_m"] = round(max(0.0, need - filled_m), 1)
+        diag.append(rec)
+        counts[source] += 1
+
+        if fill is not None:
+            # fill[-1] sits on the polyline start (walk: exactly; borrows:
+            # within the 1 m proximity gate) — drop it and join fill[-2] →
+            # flat[0] directly, matching the geometry the per-extent borrow
+            # used to produce.
+            info["coords"] = fill[:-1] + flat
+            filled_oids.add(str(oid))
+
+    summary = ", ".join(
+        f"{k}={counts[k]}"
+        for k in ("sibling_borrow", "nonsibling_borrow", "walk",
+                  "partial_walk", "none")
+        if counts.get(k)) or "nothing to fill"
+    print(f"  Tram/bus stop-extent fill: {summary}")
+    return diag, filled_oids
+
+
 def _length_key(mode: str, mountain_origin):
     """Map (mode, mountain_origin) to a config key under
     pill_rendering.{default,sanity_min,sanity_max}_length_m. Returns None
@@ -1624,8 +2037,7 @@ def _resolve_length(mode: str, atlas_length, cfg: dict, mountain_origin=None):
 
 
 def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
-                      osm_id=None, siblings=None, end_of_platform=False,
-                      mountain_origin=None):
+                      end_of_platform=False, mountain_origin=None):
     """Return the (lon, lat) sequence tracing the platform's allowed range
     along its polyline, or None for out-of-scope modes / degenerate geometry.
 
@@ -1640,19 +2052,21 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
       • tram, bus               — GTFS coord is FRONT of stop → range
                                   = [coord - L, coord].
 
-    Missing-range fill differs by mode:
-      • train: handled UPSTREAM by `_extend_polylines_at_terminals` — the
-        polyline is pre-extended at terminal stops along the OSM rail track
-        (Fallback A's capped straight when no way matches), so the
-        ±L/2 slice fits within the polyline. `end_of_platform=True` flips
-        the anchoring to asymmetric (Fallback B): the polyline side absorbs
-        the full L and no extrapolation is performed.
-      • metro, mountain rail-like / funicular: straight-line tangent-direction
-        extrapolation.
-      • tram / bus / regional_bus: sibling-borrow first (passes through
-        `siblings` as a list of (osm_id, polyline) tuples in the same
-        `(ref, agency_id, mode)` group), straight-line tangent extrapolation
-        as fallback.
+    Missing-range fill is handled UPSTREAM for both fill-bearing families
+    (see stop-extent-osm-walk.md § "Fill runs once, upfront"):
+      • train / mountain rail-like: `_extend_polylines_at_terminals`
+        pre-extends the polyline along the OSM rail track (capped straight
+        when no way matches), so the ±L/2 slice fits. `end_of_platform=True`
+        flips the anchoring to asymmetric (case 2, § Rail walk): the walked
+        partial was prepended, the outward side takes the walked ground x
+        and the inward side absorbs L − x — total range stays L.
+      • tram / bus / regional_bus: `_extend_nonrail_polylines_at_terminals`
+        pre-extends the polyline via sibling borrow → non-sibling borrow →
+        OSM street/tram walk. Here the extent is a plain [t−L, t] slice;
+        when the fill came up short the extent stays clipped —
+        short-but-true beats long-but-wrong.
+      • metro, mountain funicular: unchanged in-place behaviour (symmetric
+        straight-line extrapolation / clip-to-polyline respectively).
 
     Mountain aerial returns None — those stops are fixed-dot in the pill
     pipeline and have no extent.
@@ -1673,75 +2087,32 @@ def _platform_extent(stop_lon, stop_lat, polyline, mode, atlas_length, cfg,
         or (mode == "mountain" and mountain_origin in MOUNTAIN_EXTENT_ORIGINS)
     )
     if not is_centred_extent:
-        # Tram / bus / regional_bus: backward-anchored range [t-L, t].
-        if t >= L:
-            # Polyline supports the full backward range — slice and return.
-            return list(_slice_polyline(polyline, dists, t - L, t))
-
-        # On-polyline portion: polyline start to snapped point (length t).
-        on_slice = list(_slice_polyline(polyline, dists, 0.0, t))
-        if len(on_slice) >= 2 and on_slice[0] == on_slice[-1]:
-            on_slice = [on_slice[0]]
-
-        # Anchor for both the borrow search and the straight-line extension
-        # is the on-polyline extent's backward endpoint (poly[0]) — the point
-        # at which the extension actually needs to begin. Its direction is the
-        # first non-stub segment's tangent from poly[0], falling back to the
-        # ±2 m averaged tangent at t when the first segment is a sub-metre
-        # pfaedle stub.
-        p = _interp_at(polyline, dists, t)
-        target = on_slice[0] if on_slice else (polyline[0][0], polyline[0][1])
-        anchor_tan = (_start_segment_tangent(polyline, dists)
-                      or _directional_tangent_at(polyline, dists, t, window_m=2.0))
-        if anchor_tan is None:
-            return on_slice  # no usable tangent → can't fill
-        anchor_dx, anchor_dy = anchor_tan
-
-        if siblings:
-            borrowed = _borrow_backward_segment(
-                target[0], target[1],
-                anchor_dx, anchor_dy, t, L, siblings, osm_id)
-            if borrowed is not None:
-                if len(on_slice) <= 1:
-                    return borrowed
-                return borrowed[:-1] + on_slice
-
-        # Non-sibling borrow (step 2 in the concept's missing-range fill).
-        # Widens the candidate set to every drawn line polyline within 2 m
-        # of the anchor, excluding our own line and the same-(ref, agency_id,
-        # mode) siblings already tried above.
-        if _ALL_LINES_INDEX is not None and osm_id is not None:
-            own_key = _ALL_LINES_INDEX.own_sib_key(osm_id)
-            borrowed = _borrow_backward_nonsibling(
-                target[0], target[1],
-                anchor_dx, anchor_dy, t, L, osm_id, own_key)
-            if borrowed is not None:
-                if len(on_slice) <= 1:
-                    return borrowed
-                return borrowed[:-1] + on_slice
-
-        # Straight-line tangent extrapolation backward using the same anchor
-        # direction. The extension follows the actual arrival angle at the
-        # polyline's starting vertex, not a chord smoothed across a curve at
-        # the platform.
-        missing_m = L - t
-        extrap = (target[0] - anchor_dx * missing_m,
-                  target[1] - anchor_dy * missing_m)
-        if not on_slice:
-            return [extrap, (p[0], p[1])]
-        return [extrap] + on_slice
+        # Tram / bus / regional_bus: backward-anchored range [t-L, t],
+        # clipped to the (pre-extended) polyline. A sub-metre residual —
+        # the polyline starts at the stop and no fill was found — is no
+        # extent at all; returning a collapsed 2-point slice would feed
+        # zero-length geometry into pill construction downstream.
+        t_start = max(0.0, t - L)
+        if t - t_start < 0.5:
+            return None
+        return list(_slice_polyline(polyline, dists, t_start, t))
 
     if end_of_platform:
-        # Fallback B (train only): polyline side absorbs full L; snap sits
-        # at one end of the range. The polyline is NOT extended in this case,
-        # so the range slices whatever pfaedle geometry is available on the
-        # polyline side. Pick the side with more polyline as the anchor side.
+        # Case 2 (stop-extent-osm-walk.md § Rail walk): the OSM track ended
+        # before L/2 and the walked partial was prepended upstream, so the
+        # outward (short) side takes everything it has — x, the walked
+        # ground — and the inward side absorbs the remaining L − x. The
+        # range still totals L, just not centred on the snap.
         if poly_max - t >= t:
-            t_start_ideal = t
-            t_end_ideal = min(poly_max, t + L)
+            # Outward side is backward (start-side terminal).
+            x = min(t, L)
+            t_start_ideal = t - x
+            t_end_ideal = min(poly_max, t + (L - x))
         else:
-            t_start_ideal = max(0.0, t - L)
-            t_end_ideal = t
+            # Outward side is forward (end-side terminal).
+            x = min(poly_max - t, L)
+            t_start_ideal = max(0.0, t - (L - x))
+            t_end_ideal = t + x
         return list(_slice_polyline(polyline, dists, t_start_ideal, t_end_ideal))
 
     half_L = L / 2.0
@@ -3208,7 +3579,6 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
 def write_debug_platforms(line_stops: dict, line_lookup: dict,
                            stop_attrs: dict, skip_first_oids: set,
                            skip_last_oids: set,
-                           sibling_groups: dict, oid_sibling_key: dict,
                            end_of_platform_pairs: set | None = None) -> None:
     """Emit transit_debug_platforms.geojson — one LineString per stop tracing
     the platform's full allowed range along the line's polyline. Debug-only
@@ -3235,8 +3605,6 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
         skip_first_here = str(osm_id) in skip_first_oids
         skip_last_here = str(osm_id) in skip_last_oids
         last_idx = len(triplets) - 1
-        sib_key = oid_sibling_key.get(str(osm_id))
-        siblings = sibling_groups.get(sib_key, []) if sib_key else []
         for idx, trip in enumerate(triplets):
             if idx == 0 and skip_first_here:
                 continue
@@ -3249,7 +3617,6 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
             is_eop = (str(osm_id), stop_id) in eop
             extent = _platform_extent(stop_lon, stop_lat, polyline,
                                        mode, atlas_length, cfg,
-                                       osm_id=str(osm_id), siblings=siblings,
                                        end_of_platform=is_eop,
                                        mountain_origin=mo)
             if extent is None or len(extent) < 2:
@@ -3436,7 +3803,8 @@ CLOSE_ZOOM_STACK_GAP_M         = 0.8    # polygon-edge gap; 0.4 m outside-border
 CLOSE_ZOOM_LINE_GAP_M          = 2.0    # clear gap between line and pill inner edge
 CLOSE_ZOOM_DIR_CLUSTER_COS     = cos(radians(45.0))  # same-direction threshold
 CLOSE_ZOOM_BACKDROP_PAD_M      = 8.0    # outward padding of the station hull
-CLOSE_ZOOM_CURB_LATERAL_M      = 2.0    # same-curb: max lateral gap between stop position lines
+CLOSE_ZOOM_CURB_LATERAL_M      = 2.0    # same-curb: max lateral gap between stop position lines (tram/bus/regional_bus)
+CLOSE_ZOOM_CURB_LATERAL_RAIL_M = 1.0    # same-track: max lateral gap for rail (train + mountain rack rail)
 CLOSE_ZOOM_CURB_MERGE_FRAC     = 0.30   # same-curb: overlap share above which stops merge
 CLOSE_ZOOM_ARC_STEP_DEG        = 12.0   # hull corner rounding granularity
 # Label sizing (glyph height in metres; the style converts to px per zoom).
@@ -3526,6 +3894,31 @@ def _variant_priority(v):
     return v.get("speed_kmh") or 0.0
 
 
+def _rail_direction_order(clusters):
+    """Reorder a priority-sorted rail cluster list into the direction-outward
+    stack described in close-zoom-stop-design.md § Rail: fastest cluster's
+    tangent defines the "forward" direction, forward clusters queue
+    fastest→slowest from the forward end, reverse clusters queue slowest→
+    fastest from the backward end. Each cluster is stamped with
+    `dir_forward` for the pill build to flip T on reverse pills. Called
+    on both the sector-merge pool inside `_build_group_recs` and the
+    same-curb merge pool for rail records."""
+    if not clusters:
+        return clusters
+    fwd_ref = clusters[0]["tangent"]
+    forwards, reverses = [], []
+    for c in clusters:
+        dot = (fwd_ref[0] * c["tangent"][0]
+               + fwd_ref[1] * c["tangent"][1])
+        if dot >= 0.0:
+            c["dir_forward"] = True
+            forwards.append(c)
+        else:
+            c["dir_forward"] = False
+            reverses.append(c)
+    return forwards + list(reversed(reverses))
+
+
 def _local_offset_to_lonlat(cx, cy, dx_m, dy_m, cos_lat_cached=None):
     if cos_lat_cached is None:
         cos_lat_cached = cos(radians(cy))
@@ -3597,7 +3990,29 @@ def _unit_chord_metric(A, B, cos_lat):
     return (dxm / nrm, dym / nrm)
 
 
-def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0):
+def _orient_rail_extent(ext, target_T, cos_lat):
+    """Return `ext` with its point order aligned to `target_T` — the fastest
+    cluster's direction of travel — reversing when the extent's overall
+    chord opposes it. Rail-only: rail platforms are straight so a single-
+    point tangent at the stop is a stable reference, and each pill-arrow's
+    chevron end is picked (via the dir_forward flag downstream) relative
+    to the axis's point order. If the axis was built from a borrowed slice
+    running the other way — a terminal fallback from the arrival counter-
+    part (RBS Bern), or a same-curb union that took its base from an
+    opposite-running longer line (Bern SBB) — every chevron on the
+    platform would be mirrored without this normalisation."""
+    if len(ext) < 2:
+        return ext
+    ax = _unit_chord_metric(ext[0], ext[-1], cos_lat)
+    if ax is None:
+        return ext
+    if ax[0] * target_T[0] + ax[1] * target_T[1] < 0.0:
+        return list(reversed(ext))
+    return ext
+
+
+def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0,
+                 front_on_m=0.0):
     """Queue course for a pill-arrow stack: the stop position line `extent`
     extended DEAD STRAIGHT at both ends (rear by back_m, front by fwd_m
     metres) along the average direction (chord) of the extent's first /
@@ -3609,29 +4024,42 @@ def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0):
     NOTHING but the stop position line determines the placement — the raw
     GTFS stop coordinate is never consulted here.
 
-    Orientation: the extent's own point order, always. Every non-rail
+    Orientation: the extent's own point order, always. For non-rail the
     extent ends at the stop position by construction (backward-anchored
     [t-L, t] slices and borrowed fills alike), so the front end is the
-    stop end with no travel-direction guessing. A previous version
-    reversed the order when it opposed the group's ±20 m travel tangent;
-    that misfired at stops where the vehicle turns right after departing
-    (Herrliberg Bhf West — tangent skewed ~north by the turn, course
-    flipped, tip anchored at the wrong end) and never produced a better
-    outcome in the cases it was meant for.
+    stop end with no travel-direction guessing. For rail the caller has
+    normalised the extent to align with the fastest cluster's tangent
+    (see `_orient_rail_extent`), so the extent's forward end is the
+    fastest line's destination direction and the per-pill flip against
+    `dir_forward` picks the right chevron end. A previous version
+    reversed non-rail orders too against the group's ±20 m travel
+    tangent; that misfired at stops where the vehicle turns right after
+    departing (Herrliberg Bhf West — tangent skewed ~north by the turn,
+    course flipped, tip anchored at the wrong end).
 
-    Returns (course_pts, course_dists, t_front, t_mid) or None if
+    `front_on_m` marks how much of the extent's TAIL is forward-of-stop
+    line geometry appended for the terminal platform stretch
+    (close-zoom-stop-design.md § anchor): t_front then sits at the stop —
+    the boundary between the stop position line proper and the appended
+    forward geometry — instead of at the extent's last point, and the
+    queue anchor shift (done by the caller) moves the stack onto the real
+    forward geometry rather than onto a dead-straight rear extension.
+
+    Returns (course_pts, course_dists, t_front, t_mid, t_rear) or None if
     degenerate. t_front is the stop position line's forward end in course
     arc coordinates — where the lead pill's chevron tip anchors (the
     vehicle pulled fully forward); t_mid is the line's middle — the rail
-    stack center."""
+    stack center; t_rear is the extent's rear (buffer-side) end — the
+    end-of-platform rail anchor (close-zoom-stop-design.md § anchor)."""
     pts = [tuple(p) for p in extent]
     if len(pts) < 2:
         return None
     d = _cum_dist_m(pts)
     if d[-1] <= 0.0:
         return None
-    t_front = back_m + d[-1]
-    t_mid = back_m + d[-1] / 2.0
+    t_front = back_m + d[-1] - front_on_m
+    t_mid = back_m + (d[-1] - front_on_m) / 2.0
+    t_rear = back_m
     w = min(chord_w, d[-1])
     T0 = _unit_chord_metric(pts[0], _interp_at(pts, d, w), cos_lat)
     T1 = _unit_chord_metric(_interp_at(pts, d, d[-1] - w), pts[-1], cos_lat)
@@ -3642,7 +4070,7 @@ def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0):
     front = _local_offset_to_lonlat(pts[-1][0], pts[-1][1],
                                     fwd_m * T1[0], fwd_m * T1[1], cos_lat)
     course = [tuple(rear)] + pts + [tuple(front)]
-    return course, _cum_dist_m(course), t_front, t_mid
+    return course, _cum_dist_m(course), t_front, t_mid, t_rear
 
 
 def _slice_polyline(pts, dists, t0, t1):
@@ -4016,33 +4444,89 @@ def _blend_colors(hex_colors) -> str:
     return "#%02x%02x%02x" % (rs // n, gs // n, bs // n)
 
 
-def write_close_zoom_features(line_stops: dict, line_lookup: dict,
-                                stop_meta: dict, stop_attrs: dict,
-                                sibling_groups: dict, oid_sibling_key: dict,
-                                end_of_platform_pairs: set,
-                                skip_first_oids: set,
-                                skip_last_oids: set) -> None:
-    """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
-    line-segments that together produce the close-zoom (z17+) station
-    representation. See .claude/concepts/close-zoom-stop-design.md.
+def _collapse_direction_stacks(visits):
+    """Shared close-zoom stacking rules: collapse visits into one cluster
+    per (ref, agency, direction of travel) — same line number + agency
+    within the 45° tangent gate merge into one pill, destinations collected
+    across the merged variants, highest-priority variant first (frequency
+    for road modes, speed for rail — see _variant_priority) — then group
+    same-direction clusters into stacks. Rail pools form ONE stack in
+    _rail_direction_order's ordering; non-rail groups split per direction.
 
-    Pill-arrows are straight polygons queued along the stop's position line
-    (the same fitted-to-the-line extent the debug platform lines draw),
-    extended dead straight beyond its range. One pill-arrow per (stop, line
-    ref, agency, direction) — same-direction variants collapse into a
-    single pill listing every destination.
+    Returns (rail_pool, groups). Each cluster carries `member_oids` — every
+    osm_id collapsed into it, head (drawn) variant first.
 
-    The backdrop is one rounded convex-hull polygon per GTFS parent station,
-    covering every pill-arrow and the line sections next to them plus a
-    fixed outward padding — a single envelope shape with no overlaps and no
-    inward notches.
-
-    Every emitted feature carries `feature_type` ∈ {"pill_arrow",
-    "pill_disc", "pill_ref", "pill_dest", "backdrop"} to gate style layers.
-    Label features carry `font_m` (glyph height in metres, pre-shrunk so the
-    text fits its region) and `text_rot` (map-space rotation, flipped when it
-    would render upside-down).
+    Used by BOTH the pill-arrow construction (_build_group_recs) and the
+    pre-fill stack-need counter (_stack_need_by_stop) so the counted stack
+    sizes cannot drift from what is actually drawn — see
+    stop-extent-osm-walk.md § Fill target.
     """
+    visits = sorted(visits, key=lambda v: (-_variant_priority(v),
+                                           v["osm_id"]))
+    clusters = []
+    for v in visits:
+        merged = False
+        for c in clusters:
+            if c["ref"] != v["ref"] or c["agency_id"] != v["agency_id"]:
+                continue
+            dot = (c["tangent"][0] * v["tangent"][0]
+                   + c["tangent"][1] * v["tangent"][1])
+            if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                if v["destination"] and v["destination"] not in c["destinations"]:
+                    c["destinations"].append(v["destination"])
+                c["member_oids"].append(v["osm_id"])
+                merged = True
+                break
+        if not merged:
+            c = dict(v)
+            c["destinations"] = [v["destination"]] if v["destination"] else []
+            c["dir_forward"] = True
+            c["member_oids"] = [v["osm_id"]]
+            clusters.append(c)
+
+    rail_pool = bool(clusters) and clusters[0]["is_rail_like"]
+    if rail_pool:
+        groups = [_rail_direction_order(clusters)]
+    else:
+        groups = []
+        for c in clusters:
+            placed = False
+            for g in groups:
+                dot = (g[0]["tangent"][0] * c["tangent"][0]
+                       + g[0]["tangent"][1] * c["tangent"][1])
+                if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
+                    g.append(c)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([c])
+    return rail_pool, groups
+
+
+def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
+                                stop_attrs=None,
+                                end_of_platform_pairs=None,
+                                with_extents=False):
+    """Collect the close-zoom pill-arrow visits per stop_id — one entry per
+    (line, departure stop) under the close-zoom skip rules (departures
+    only, layover-departure dedup), carrying the tangent, priority and
+    destination data the stacking rules read.
+
+    Shared between write_close_zoom_features (rendering) and the pre-fill
+    stack-need counter (stop-extent-osm-walk.md § Fill target): both see
+    the same visits, so the counted stack sizes match what is drawn. The
+    counter runs BEFORE the tram/bus fill (the fill target depends on the
+    counts), rendering after — geometry-derived fields (t_stop, tangent)
+    therefore differ slightly between the two runs at filled terminals;
+    the grouping reads tangents only through the 45° direction gate, which
+    absorbs the fill's tangent-matched joins.
+
+    `with_extents` adds the rail platform extent per visit (needs
+    stop_attrs + end_of_platform_pairs) — rendering-only data the counter
+    skips.
+    """
+    eop = end_of_platform_pairs or set()
+
     # Per-line destination display names.
     line_dest = {}
     for oid, entry in line_stops.items():
@@ -4093,56 +4577,6 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         if apex_name:
             line_loop_apex[str(oid)] = (best[1], apex_name)
 
-    # ── Stop position lines ──────────────────────────────────────────────
-    # Re-used from the stop/dot placement: the same fitted-to-the-line
-    # extents the debug platform lines draw, under the same skip rules.
-    # The skips are what make this find the right line automatically — at
-    # a terminal the departure-side entry is skipped (skip_first) and the
-    # ARRIVAL line's extent survives; its geometry approaches along the
-    # street and ends at the stop, so the slice covers exactly the ground
-    # behind the stop where the departing queue stands. Never extrapolated.
-    stop_lines: dict = defaultdict(list)
-    for osm_id_raw, ls_entry in line_stops.items():
-        osm_id = str(osm_id_raw)
-        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
-        line = line_lookup.get(osm_id_raw) or line_lookup.get(osm_id)
-        if not line or not triplets:
-            continue
-        mode = line["mode"]
-        mo = line.get("mountain_origin")
-        if _length_key(mode, mo) not in PILL_CFG.get("default_length_m", {}):
-            continue
-        polyline = flatten_coords(line["coords"])
-        if len(polyline) < 2:
-            continue
-        skip_first_here = osm_id in skip_first_oids
-        skip_last_here = osm_id in skip_last_oids
-        sib_key = oid_sibling_key.get(osm_id)
-        siblings = sibling_groups.get(sib_key, []) if sib_key else []
-        last_idx = len(triplets) - 1
-        for idx, trip in enumerate(triplets):
-            if idx == 0 and skip_first_here:
-                continue
-            if idx == last_idx and skip_last_here:
-                continue
-            if len(trip) < 3 or not trip[2]:
-                continue
-            stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
-            atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
-            ext = _platform_extent(
-                stop_lon, stop_lat, polyline, mode, atlas_len, PILL_CFG,
-                osm_id=osm_id, siblings=siblings,
-                end_of_platform=(osm_id, sid) in end_of_platform_pairs,
-                mountain_origin=mo)
-            if ext is None or len(ext) < 2:
-                continue
-            stop_lines[sid].append(
-                {"osm_id": osm_id, "mode": mode,
-                 "ref": line.get("ref", ""),
-                 "agency_id": line.get("agency_id", ""),
-                 "extent": ext})
-
-    # ── Collect visits per stop_id ───────────────────────────────────────
     per_stop_visits: dict = defaultdict(list)
     for osm_id_raw, ls_entry in line_stops.items():
         osm_id = str(osm_id_raw)
@@ -4220,16 +4654,13 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # Full platform extent along the line (atlas length; same logic
             # as the debug platform overlay) — feeds the backdrop hull so
             # the yellow area covers the whole platform, not just the
-            # pill-arrow span.
+            # pill-arrow span. Rendering-only; skipped for the counter run.
             extent = None
-            if is_rail_like:
-                atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
-                sib_key = oid_sibling_key.get(osm_id)
-                siblings = sibling_groups.get(sib_key, []) if sib_key else []
+            if is_rail_like and with_extents:
+                atlas_len = ((stop_attrs or {}).get(sid, {}) or {}).get("length")
                 extent = _platform_extent(
                     stop_lon, stop_lat, polyline, mode, atlas_len, PILL_CFG,
-                    osm_id=osm_id, siblings=siblings,
-                    end_of_platform=(osm_id, sid) in end_of_platform_pairs,
+                    end_of_platform=(osm_id, sid) in eop,
                     mountain_origin=mo)
             per_stop_visits[sid].append({
                 "sid":             sid,
@@ -4258,6 +4689,110 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                      else line_dest.get(osm_id, "")),
                     stop_meta.get(sid, {}).get("name", "")),
             })
+    return per_stop_visits
+
+
+def _stack_need_by_stop(per_stop_visits):
+    """Per (osm_id, stop_id): the ground the stop's close-zoom pill-arrow
+    queue occupies at the largest band — (n − 1) · step + pill length for
+    the direction stack the line's pill belongs to (n = drawn pill-arrows
+    in that stack). Every osm_id collapsed into a stack maps to its
+    stack's reach, so lines whose variant merged into another pill still
+    get the right target. Rail pools are skipped — the tram/bus fill
+    target is the only reader (stop-extent-osm-walk.md § Fill target).
+    """
+    max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
+    max_step = max(bc["length_m"] + CLOSE_ZOOM_STACK_GAP_M
+                   for bc in CLOSE_ZOOM_BANDS.values())
+    need: dict = {}
+    for sid, visits in per_stop_visits.items():
+        rail_pool, groups = _collapse_direction_stacks(visits)
+        if rail_pool:
+            continue
+        for g in groups:
+            reach = (len(g) - 1) * max_step + max_L
+            for c in g:
+                for oid in c["member_oids"]:
+                    need[(str(oid), sid)] = reach
+    return need
+
+
+def write_close_zoom_features(line_stops: dict, line_lookup: dict,
+                                stop_meta: dict, stop_attrs: dict,
+                                end_of_platform_pairs: set,
+                                skip_first_oids: set,
+                                skip_last_oids: set) -> None:
+    """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
+    line-segments that together produce the close-zoom (z17+) station
+    representation. See .claude/concepts/close-zoom-stop-design.md.
+
+    Pill-arrows are straight polygons queued along the stop's position line
+    (the same fitted-to-the-line extent the debug platform lines draw),
+    extended dead straight beyond its range. One pill-arrow per (stop, line
+    ref, agency, direction) — same-direction variants collapse into a
+    single pill listing every destination.
+
+    The backdrop is one rounded convex-hull polygon per GTFS parent station,
+    covering every pill-arrow and the line sections next to them plus a
+    fixed outward padding — a single envelope shape with no overlaps and no
+    inward notches.
+
+    Every emitted feature carries `feature_type` ∈ {"pill_arrow",
+    "pill_disc", "pill_ref", "pill_dest", "backdrop"} to gate style layers.
+    Label features carry `font_m` (glyph height in metres, pre-shrunk so the
+    text fits its region) and `text_rot` (map-space rotation, flipped when it
+    would render upside-down).
+    """
+    # ── Stop position lines ──────────────────────────────────────────────
+    # Re-used from the stop/dot placement: the same fitted-to-the-line
+    # extents the debug platform lines draw, under the same skip rules.
+    # The skips are what make this find the right line automatically — at
+    # a terminal the departure-side entry is skipped (skip_first) and the
+    # ARRIVAL line's extent survives; its geometry approaches along the
+    # street and ends at the stop, so the slice covers exactly the ground
+    # behind the stop where the departing queue stands. Never extrapolated.
+    stop_lines: dict = defaultdict(list)
+    for osm_id_raw, ls_entry in line_stops.items():
+        osm_id = str(osm_id_raw)
+        triplets = ls_entry.get("stops", []) if isinstance(ls_entry, dict) else ls_entry
+        line = line_lookup.get(osm_id_raw) or line_lookup.get(osm_id)
+        if not line or not triplets:
+            continue
+        mode = line["mode"]
+        mo = line.get("mountain_origin")
+        if _length_key(mode, mo) not in PILL_CFG.get("default_length_m", {}):
+            continue
+        polyline = flatten_coords(line["coords"])
+        if len(polyline) < 2:
+            continue
+        skip_first_here = osm_id in skip_first_oids
+        skip_last_here = osm_id in skip_last_oids
+        last_idx = len(triplets) - 1
+        for idx, trip in enumerate(triplets):
+            if idx == 0 and skip_first_here:
+                continue
+            if idx == last_idx and skip_last_here:
+                continue
+            if len(trip) < 3 or not trip[2]:
+                continue
+            stop_lon, stop_lat, sid = trip[0], trip[1], trip[2]
+            atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
+            ext = _platform_extent(
+                stop_lon, stop_lat, polyline, mode, atlas_len, PILL_CFG,
+                end_of_platform=(osm_id, sid) in end_of_platform_pairs,
+                mountain_origin=mo)
+            if ext is None or len(ext) < 2:
+                continue
+            stop_lines[sid].append(
+                {"osm_id": osm_id, "mode": mode,
+                 "ref": line.get("ref", ""),
+                 "agency_id": line.get("agency_id", ""),
+                 "extent": ext})
+
+    # ── Collect visits per stop_id (shared with the pre-fill counter) ────
+    per_stop_visits = _collect_close_zoom_visits(
+        line_stops, line_lookup, stop_meta, stop_attrs,
+        end_of_platform_pairs, with_extents=True)
 
     features = []
     # Point cloud per parent station; hulled into the backdrop afterwards.
@@ -4329,81 +4864,17 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 key=lambda s: float(
                     (stop_attrs.get(s, {}) or {}).get("length") or 0.0))
 
-        # ── Collapse variants: one pill per (ref, agency, direction) ────
-        # Same line number + agency in the same direction of travel
-        # (tangent dot product within 45°) merges into one pill;
-        # destinations are collected across the merged variants, highest-
-        # priority variant first. Priority is frequency (f_weighted) for
-        # tram / bus / regional_bus — a rare short-turn variant terminating
-        # mid-route must not out-rank the through variants and hijack the
-        # pill's geometry (Sevgein) — and speed for rail-like modes.
-        visits.sort(key=lambda v: (-_variant_priority(v), v["osm_id"]))
-        clusters = []
-        for v in visits:
-            merged = False
-            for c in clusters:
-                if c["ref"] != v["ref"] or c["agency_id"] != v["agency_id"]:
-                    continue
-                dot = (c["tangent"][0] * v["tangent"][0]
-                       + c["tangent"][1] * v["tangent"][1])
-                if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
-                    if v["destination"] and v["destination"] not in c["destinations"]:
-                        c["destinations"].append(v["destination"])
-                    merged = True
-                    break
-            if not merged:
-                c = dict(v)
-                c["destinations"] = [v["destination"]] if v["destination"] else []
-                c["dir_forward"] = True
-                clusters.append(c)
-
-        # ── Direction groups ────────────────────────────────────────────
-        # Non-rail: clusters heading the same way (tangent dot within 45°)
-        # share a stack and, crucially, one path — when parallel lines
+        # ── Collapse variants + direction groups (shared stacking rules) ─
+        # One pill per (ref, agency, direction); same-direction clusters
+        # share a stack — and, for non-rail, one path: when parallel lines
         # (e.g. tram + bus on the same street) serve the same stop, every
         # pill-arrow in the group follows the RIGHTMOST line so they line
-        # up. Opposite directions form their own stack on the other side.
-        #
-        # Rail: ALL clusters at one track form ONE stack — opposite
-        # directions do not form a separate group. cluster[0] (fastest
-        # overall) defines the "forward" direction. Forward clusters
-        # queue fastest→slowest from the forward end; reverse clusters
-        # queue slowest→fastest from the same end, so at the boundary the
-        # two sub-groups meet round-cap-to-round-cap and each sub-group's
-        # fastest sits at the outward-most position with its chevron
-        # pointing out. The dir_forward flag is read later by the pill
-        # build loop, which flips T for reverse pills so their chevrons
-        # actually point backward.
-        rail_pool = clusters and clusters[0]["is_rail_like"]
-        if rail_pool:
-            fwd_ref = clusters[0]["tangent"]
-            forwards, reverses = [], []
-            for c in clusters:
-                dot = (fwd_ref[0] * c["tangent"][0]
-                       + fwd_ref[1] * c["tangent"][1])
-                if dot >= 0.0:
-                    c["dir_forward"] = True
-                    forwards.append(c)
-                else:
-                    c["dir_forward"] = False
-                    reverses.append(c)
-            # forwards already sorted highest-priority-first by the visits
-            # sort; reverses need lowest-first so their highest-priority
-            # pill lands at the outward (backward) end of the stack.
-            groups = [forwards + list(reversed(reverses))]
-        else:
-            groups = []
-            for c in clusters:
-                placed = False
-                for g in groups:
-                    dot = (g[0]["tangent"][0] * c["tangent"][0]
-                           + g[0]["tangent"][1] * c["tangent"][1])
-                    if dot >= CLOSE_ZOOM_DIR_CLUSTER_COS:
-                        g.append(c)
-                        placed = True
-                        break
-                if not placed:
-                    groups.append([c])
+        # up. Opposite directions form their own stack on the other side;
+        # rail pools form ONE stack in _rail_direction_order's ordering.
+        # The logic itself lives in _collapse_direction_stacks — shared
+        # with the pre-fill stack-need counter so counted stack sizes
+        # match what is drawn (stop-extent-osm-walk.md § Fill target).
+        rail_pool, groups = _collapse_direction_stacks(visits)
 
         recs = []
         for group in groups:
@@ -4434,7 +4905,12 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # (still fitted, never extrapolated). For a rail pool, the
             # search widens across every pooled sid's stop_lines and, at
             # equal key rank, prefers the LONGEST extent — the full
-            # platform beats any sector's sub-extent.
+            # platform beats any sector's sub-extent. Rail extents are
+            # then normalised to align with the fastest cluster's tangent
+            # (`_orient_rail_extent`) so a borrowed slice running the
+            # other way (arrival counterpart at a terminus, longer
+            # opposite-direction sibling in the pool) can't mirror every
+            # chevron on the platform.
             pool_lines = []
             for s in pool_sids:
                 pool_lines.extend(stop_lines.get(s, []))
@@ -4457,19 +4933,38 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     ext = cand["extent"]
             if ext is None:
                 atlas_len = (stop_attrs.get(rep_sid, {}) or {}).get("length")
-                sib_key = oid_sibling_key.get(path["osm_id"])
-                sibs = sibling_groups.get(sib_key, []) if sib_key else []
                 ext = _platform_extent(
                     path["stop_lon"], path["stop_lat"], path["polyline"],
                     path["mode"], atlas_len, PILL_CFG,
-                    osm_id=path["osm_id"], siblings=sibs,
                     end_of_platform=(path["osm_id"], rep_sid)
                                     in end_of_platform_pairs,
                     mountain_origin=path["mountain_origin"])
+            fwd_synth = False
+            if (ext is None or len(ext) < 2) and not rail_pool:
+                # Terminal platform stretch (close-zoom-stop-design.md
+                # § anchor): no rear ground exists at all — the extent
+                # collapsed because the road ends at the stop (Laufenburg
+                # (D) KiGa). Synthesize a short forward stub from the
+                # path's own polyline so the queue course exists at all;
+                # the stretch rule at course build then shifts the whole
+                # stack forward onto the real line geometry.
+                p_poly, p_dists = path["polyline"], path["dists"]
+                t0 = path["t_stop"]
+                t1 = min(p_dists[-1], t0 + 2.0)
+                if t1 - t0 >= 0.5:
+                    ext = _slice_polyline(p_poly, p_dists, t0, t1)
+                    fwd_synth = True
             if ext is None or len(ext) < 2:
                 continue
+            eop_rail = rail_pool and any(
+                (path["osm_id"], sid) in end_of_platform_pairs
+                for sid in pool_sids)
+            if rail_pool:
+                ext = _orient_rail_extent(ext, path["tangent"],
+                                          path["cos_lat"])
             recs.append({"sid": rep_sid, "group": group, "path": path,
-                         "ext": ext, "cut_pts": []})
+                         "ext": ext, "cut_pts": [], "fwd_synth": fwd_synth,
+                         "eop_rail": eop_rail})
         return recs
 
     per_parent_sids: dict = defaultdict(list)
@@ -4497,26 +4992,35 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         for key in sorted(track_pool):
             recs.extend(_build_group_recs(track_pool[key]))
 
-        # ── Same-curb resolution (non-rail) ──────────────────────────────
-        # Same-direction groups of one station can sit on the same ground
-        # under different GTFS platform ids (Bern, Schanzenstrasse:
-        # southbound city bus 20 at :10001, southbound regional 100/101 at
-        # :10000, one curb). Stop position lines laterally closer than
-        # CLOSE_ZOOM_CURB_LATERAL_M resolve by along-line overlap: above
-        # the merge fraction → one stop with the union platform line;
-        # anything less → both lines shortened to the overlap middle so
-        # they just touch (queues that no longer fit shift forward past
-        # the stop — see the cut_pts handling in the band loop). Rail is
-        # excluded for now — rail overlap needs its own treatment later.
+        # ── Same-curb / same-track resolution ────────────────────────────
+        # Non-rail canonical case is Bern, Schanzenstrasse: southbound
+        # city bus 20 at :10001 and southbound regional 100/101 at :10000,
+        # a few metres apart on one curb. Rail canonical case is Bern's
+        # mainline tracks, whose per-track queues (already pooled by the
+        # sector merge above) get drawn on top of each other when pfaedle
+        # routes different tracks onto essentially the same axis. Rail
+        # uses a tighter lateral tolerance (1 m vs 2 m non-rail) and the
+        # abs(dot) direction check — opposite-direction rail queues on
+        # the same track have antiparallel tangents but still count as
+        # "same axis". Rail-and-non-rail never merge (different physical
+        # infrastructure regardless of shape convergence).
         def _same_curb(a, b):
-            if a["path"]["is_rail_like"] or b["path"]["is_rail_like"]:
+            a_rail = a["path"]["is_rail_like"]
+            b_rail = b["path"]["is_rail_like"]
+            if a_rail != b_rail:
                 return None
             dot = (a["path"]["tangent"][0] * b["path"]["tangent"][0]
                    + a["path"]["tangent"][1] * b["path"]["tangent"][1])
-            if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
-                return None
+            if a_rail:
+                if abs(dot) < CLOSE_ZOOM_DIR_CLUSTER_COS:
+                    return None
+                lat_tol = CLOSE_ZOOM_CURB_LATERAL_RAIL_M
+            else:
+                if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
+                    return None
+                lat_tol = CLOSE_ZOOM_CURB_LATERAL_M
             m = _extent_overlap(a["ext"], b["ext"], a["path"]["cos_lat"])
-            if m is None or m[1] >= CLOSE_ZOOM_CURB_LATERAL_M:
+            if m is None or m[1] >= lat_tol:
                 return None
             return m
 
@@ -4546,8 +5050,12 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 members = [recs[i] for i in idxs]
                 # One stop: pool the clusters, re-collapse same
                 # (ref, agency, direction) across the platform ids,
-                # fastest first; rightmost path over the pooled set;
-                # union platform line.
+                # priority-first; rightmost path over the pooled set
+                # (non-rail) or fastest-forward (rail); union platform
+                # line. For rail, opposite-direction clusters are kept
+                # separate here and re-ordered via
+                # `_rail_direction_order` after the priority sort so the
+                # merged stack still follows the direction-outward rule.
                 pooled = []
                 for r in members:
                     for c in r["group"]:
@@ -4569,11 +5077,27 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                     tgt["destinations"].append(dst)
                 pooled.sort(key=lambda c: (-_variant_priority(c),
                                            c["osm_id"]))
-                path = _rightmost(pooled)
+                merged_rail = pooled and pooled[0]["is_rail_like"]
+                if merged_rail:
+                    pooled = _rail_direction_order(pooled)
+                    path = pooled[0]
+                else:
+                    path = _rightmost(pooled)
                 ext = _union_extents([r["ext"] for r in members],
                                      path["cos_lat"], chord_w=max_L)
+                if merged_rail:
+                    ext = _orient_rail_extent(ext, path["tangent"],
+                                              path["cos_lat"])
                 new_recs.append({"sid": path["sid"], "group": pooled,
-                                 "path": path, "ext": ext, "cut_pts": []})
+                                 "path": path, "ext": ext, "cut_pts": [],
+                                 # Union ground is only forward-synthetic
+                                 # when every member's was.
+                                 "fwd_synth": all(r.get("fwd_synth")
+                                                  for r in members),
+                                 # If any member track was end-of-platform,
+                                 # the merged track is too.
+                                 "eop_rail": merged_rail and any(
+                                     r.get("eop_rail") for r in members)})
             recs = new_recs
 
             # Shorten pass — pair by pair on the current (post-merge)
@@ -4597,22 +5121,65 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # end for road-mode queues, its middle for rail stacks) — the
             # raw GTFS stop coordinate plays no part in placement.
             reach = (len(group) - 1) * max_step + max_L
-            built = _stop_course(ext, path["cos_lat"],
+            # Terminal platform stretch (close-zoom-stop-design.md
+            # § anchor): at a terminal stop of tram/bus the extent ends
+            # where real geometry ends. When the stack needs more rear
+            # room than the stop position line offers, the course
+            # continues along the REAL forward line geometry (the path's
+            # own polyline past the stop) instead of dead straight, and
+            # the queue anchor shifts forward by the per-band shortfall —
+            # the stack is moved along the line in the direction where
+            # line geometry exists, never drawn into the void. Non-
+            # terminal stops (rear room on the line well beyond the
+            # extent) keep the dead-straight rule.
+            rear_ground = (0.0 if rec.get("fwd_synth")
+                           else _cum_dist_m([tuple(p) for p in ext])[-1])
+            stretch = False
+            front_on_m = 0.0
+            course_ext = ext
+            if (not path["is_rail_like"]
+                    and reach > rear_ground + 0.1
+                    and path["t_stop"] <= rear_ground + 10.0):
+                p_poly, p_dists = path["polyline"], path["dists"]
+                t0 = path["t_stop"]
+                t1 = min(p_dists[-1], t0 + (reach - rear_ground) + max_L)
+                if t1 - t0 >= 0.5:
+                    fslice = _slice_polyline(p_poly, p_dists, t0, t1)
+                    if rec.get("fwd_synth"):
+                        # The stub already IS forward geometry — replace
+                        # it with the full-length forward slice.
+                        course_ext = fslice
+                        front_on_m = _cum_dist_m(fslice)[-1]
+                    else:
+                        course_ext = [tuple(p) for p in ext] + fslice[1:]
+                        front_on_m = _cum_dist_m(fslice)[-1]
+                    stretch = True
+            # EOP rail queues forward from the buffer, so the course needs
+            # forward room to seat the whole stack (reach + a pill length
+            # of margin); the middle-anchored rail stack and the tip-at-
+            # front road queues keep the tighter default.
+            eop_rail = rec.get("eop_rail", False)
+            fwd_m = (reach + 2.0 * max_L if eop_rail
+                     else reach / 2.0 + 2.0 * max_L)
+            built = _stop_course(course_ext, path["cos_lat"],
                                  back_m=reach + 2.0 * max_L,
-                                 fwd_m=reach / 2.0 + 2.0 * max_L,
-                                 chord_w=max_L)
+                                 fwd_m=fwd_m,
+                                 chord_w=max_L,
+                                 front_on_m=front_on_m)
             if built is None:
                 continue
-            course, cdists, t_front, t_mid = built
+            course, cdists, t_front, t_mid, t_rear = built
             for k, c in enumerate(group):
-                work.append((c, path, course, cdists, t_front, t_mid,
-                             rec["cut_pts"], k, len(group)))
+                work.append((c, path, course, cdists, t_front, t_mid, t_rear,
+                             rec["cut_pts"], k, len(group),
+                             stretch, rear_ground, eop_rail))
 
         # Offset placement tracks, shared per (group course, band, side) —
         # valid within this station only (courses are per-group objects).
         track_cache: dict = {}
 
-        for c, path, course, cdists, t_front, t_mid, cut_pts, k, n in work:
+        for (c, path, course, cdists, t_front, t_mid, t_rear, cut_pts, k, n,
+             stretch, rear_ground, eop_rail) in work:
             # Everything is placed along the group's queue course (stop
             # position line + straight extensions), not the raw line.
             polyline, dists = course, cdists
@@ -4620,7 +5187,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # Queue anchor on the course: rail stacks center on the stop
             # position line's middle; road-mode queues put the lead tip at
             # its forward end (the vehicle pulled fully forward).
-            t_stop = t_mid if c["is_rail_like"] else t_front
+            # End-of-platform rail (stop-extent-osm-walk.md § Rail walk
+            # case 2) anchors at the extent's buffer end and queues inward
+            # — the fastest pill-arrow sits against the physical end of
+            # the tracks.
+            if c["is_rail_like"]:
+                t_stop = t_rear if eop_rail else t_mid
+            else:
+                t_stop = t_front
             # Merged same-curb groups pool pills from several platform
             # ids; each pill keeps its own.
             sid = c["sid"]
@@ -4674,9 +5248,16 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 track = track_cache.get(tkey)
                 if track is None:
                     reach = (n - 1) * stack_step + L
+                    # Terminal platform stretch shifts the queue up to
+                    # `reach` forward of the stop — the track must cover
+                    # that far ahead too. EOP rail queues forward from
+                    # t_rear, so it needs the same forward coverage.
+                    fwd_reach = (reach + L if stretch or eop_rail
+                                 else reach / 2.0 + L)
+                    back_reach = L if eop_rail else reach + L
                     track = _offset_track(polyline, dists,
-                                          t_stop - reach - L,
-                                          t_stop + reach / 2.0 + L,
+                                          t_stop - back_reach,
+                                          t_stop + fwd_reach,
                                           perp, cos_lat)
                     track_cache[tkey] = track if track else False
                 if not track:
@@ -4685,7 +5266,12 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 o_stop = _track_pos(t_stop, tcts, tdists)
 
                 # Track span this pill occupies.
-                if c["is_rail_like"]:
+                if c["is_rail_like"] and eop_rail:
+                    # End-of-platform: fastest (k=0) rear cap at the buffer
+                    # (o_stop), body/tip extending inward. Slower pills
+                    # queue further inward by one stack_step each.
+                    o_center = o_stop + k * stack_step + L / 2.0
+                elif c["is_rail_like"]:
                     # Stack centered on the platform middle along the track;
                     # fastest (k=0) sits furthest forward.
                     o_center = o_stop + (n - 1 - 2 * k) * (stack_step / 2.0)
@@ -4696,6 +5282,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     # stack shifts forward past the stop point — better in
                     # front than overlapping the neighbour.
                     o_shift = 0.0
+                    if stretch:
+                        # Terminal platform stretch: shift the stack
+                        # forward by this band's shortfall over the real
+                        # rear ground, so every pill sits on line geometry
+                        # that actually exists.
+                        reach_band = (n - 1) * stack_step + L
+                        if reach_band > rear_ground:
+                            o_shift = reach_band - rear_ground
                     if cut_pts:
                         rear_lim = None
                         for cp in cut_pts:
@@ -4708,7 +5302,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                         if rear_lim is not None:
                             rear_need = o_stop - ((n - 1) * stack_step + L)
                             if rear_need < rear_lim:
-                                o_shift = rear_lim - rear_need
+                                o_shift = max(o_shift, rear_lim - rear_need)
                     # Stack extends upstream from the stop point; the fastest
                     # pill's chevron tip lands exactly on the stop (unless
                     # shifted forward by the rule above).
@@ -8070,14 +8664,17 @@ def main():
     print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
 
     # Sibling index for the missing-range fill rule (tram/bus/regional_bus):
-    # {(ref, agency_id, mode) → [(osm_id, flat_polyline)]}. The two-metre
-    # proximity gate inside _borrow_backward_segment does the real filtering;
-    # this index just bounds the search to same-line variants.
+    # {(ref, agency_id, mode) → [(osm_id, flat_polyline)]}. The proximity
+    # gate inside _borrow_backward_segment does the real filtering; this
+    # index just bounds the search to same-line variants.
     #
     # The all-lines spatial index alongside is the non-sibling-borrow
-    # backing (concept step 2): same 2 m proximity + 15° tangent gates,
-    # widened to any drawn polyline. Built once, read by _platform_extent
-    # via the module-level `_ALL_LINES_INDEX`.
+    # backing, widened to any drawn polyline. Both are consumed only by the
+    # upfront fill pass (_extend_nonrail_polylines_at_terminals) — the
+    # borrowed geometry is prepended to the line polyline there, so
+    # _platform_extent itself carries no fill logic. Built from the
+    # pre-fill polylines, so donors are deterministic regardless of fill
+    # order.
     global _ALL_LINES_INDEX
     sibling_groups: dict = defaultdict(list)
     oid_sibling_key: dict = {}
@@ -8191,25 +8788,53 @@ def main():
     stop_attrs = write_stop_attributes_diag(line_stops)
 
     print("Loading OSM rail ways for terminal extension...")
-    rail_idx = _load_rail_index(RAIL_WAYS_GEOJSON)
+    rail_idx = _load_way_index(RAIL_WAYS_GEOJSON, "rail")
 
     print("Extending train and mountain rail-like polylines at terminal stops...")
     end_of_platform_pairs = _extend_polylines_at_terminals(
         line_lookup, line_stops, rail_idx, PILL_CFG, stop_attrs)
 
+    print("Loading OSM tram and street ways for the stop-extent fill...")
+    tram_idx = _load_way_index(TRAM_WAYS_GEOJSON, "tram",
+                               index_all_nodes=True)
+    street_idx = _load_way_index(STREET_WAYS_GEOJSON, "street",
+                                 index_all_nodes=True)
+
+    # Fill targets (stop-extent-osm-walk.md § Fill target): count the
+    # close-zoom pill-arrow stacks BEFORE the fill so bus/regional_bus
+    # extensions are exactly as long as the drawn queue needs (capped at
+    # L). Same visit collection + stacking rules the close-zoom rendering
+    # uses later (post-fill, with extents).
+    print("Counting close-zoom pill-arrow stacks for fill targets...")
+    pre_fill_visits = _collect_close_zoom_visits(
+        line_stops, line_lookup, stop_meta)
+    stack_need = _stack_need_by_stop(pre_fill_visits)
+    print(f"  {len(stack_need):,} (line, stop) fill targets from "
+          f"{len(pre_fill_visits):,} stops with pill-arrows")
+
+    print("Extending tram/bus polylines at terminal stops (stop-extent fill)...")
+    fill_diag, filled_oids = _extend_nonrail_polylines_at_terminals(
+        line_lookup, line_stops, tram_idx, street_idx,
+        PILL_CFG, stop_attrs, stop_meta, sibling_groups, oid_sibling_key,
+        stack_need)
+    OUT_STOP_EXTENT_FILL.write_text(json.dumps(fill_diag, ensure_ascii=False))
+    print(f"  {len(fill_diag):,} fill records → {OUT_STOP_EXTENT_FILL}")
+
     # Sync extended polylines back into lines_data so transit_lines.geojson
     # on disk reflects the new geometry — step 08's pmtile build reads the file,
-    # not the in-memory line_lookup. Same scope as _extend_polylines_at_terminals:
-    # train + mountain rail-like (rebucketed_rail / rack).
+    # not the in-memory line_lookup. Scope: train + mountain rail-like
+    # (rebucketed_rail / rack, as before) plus every tram/bus line the
+    # stop-extent fill actually prepended geometry to.
     n_synced = 0
     for feat in lines_data["features"]:
         props = feat.get("properties") or {}
         mode = props.get("mode")
         mo = props.get("mountain_origin")
-        if mode != "train" and not (
-                mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS):
-            continue
         oid = str(props.get("osm_id", ""))
+        is_rail_scope = mode == "train" or (
+            mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS)
+        if not is_rail_scope and oid not in filled_oids:
+            continue
         if not oid:
             continue
         info = line_lookup.get(oid)
@@ -8231,7 +8856,6 @@ def main():
     print("Emitting debug platform extents...")
     write_debug_platforms(line_stops, line_lookup, stop_attrs,
                           skip_first_oids, skip_last_oids,
-                          sibling_groups, oid_sibling_key,
                           end_of_platform_pairs)
 
     print("Building stop dots and pill candidates...")
@@ -8291,8 +8915,6 @@ def main():
         skip_first_here = str(osm_id) in skip_first_oids
         skip_last_here = str(osm_id) in skip_last_oids
         last_idx = len(stop_coords) - 1
-        sib_key = oid_sibling_key.get(str(osm_id))
-        siblings = sibling_groups.get(sib_key, []) if sib_key else []
 
         # Rail clustering pool (300 m radius): train, plus mountain origins
         # that share station-scale geometry with rail — rebucketed_rail / rack
@@ -8326,7 +8948,6 @@ def main():
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
                 is_eop = (str(osm_id), sid) in end_of_platform_pairs
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
-                                          osm_id=str(osm_id), siblings=siblings,
                                           end_of_platform=is_eop,
                                           mountain_origin=mo)
                 rail_pill_raw.append({
@@ -8390,7 +9011,6 @@ def main():
                 else:
                     cx, cy = snap_to_line(lon, lat, flat)
                 extent = _platform_extent(lon, lat, flat, mode, atlas_len, PILL_CFG,
-                                          osm_id=str(osm_id), siblings=siblings,
                                           mountain_origin=mo)
                 # Dots are generated post-cluster (like rail) to avoid duplicates at low zoom
                 all_nonrail_pills.append({
@@ -8974,7 +9594,6 @@ def main():
 
     print("Emitting close-zoom stop features...")
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
-                              sibling_groups, oid_sibling_key,
                               end_of_platform_pairs,
                               skip_first_oids, skip_last_oids)
 
