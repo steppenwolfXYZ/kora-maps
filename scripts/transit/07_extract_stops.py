@@ -3876,12 +3876,39 @@ CLOSE_ZOOM_BANDS = {
 # Band whose geometry feeds the backdrop hull (largest, so it covers all).
 CLOSE_ZOOM_HULL_BAND = "C"
 
-# Modes handled by the rail-style placement (centered on platform axis).
-CLOSE_ZOOM_RAIL_MODES = {"train"}
-CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS = {"rack", "rebucketed_rail"}
+# Rail-style modes: on-line placement (no sideways offset), no direction
+# split, one centered stack per stop. See close-zoom-stop-design.md
+# § "Side of the line" and § "Rail-style".
+CLOSE_ZOOM_RAIL_MODES = {"train", "ferry"}
+# All mountain sub-types join the rail-style group. Aerial and funicular
+# are extentless — see the emit loop for the endpoint-anchor terminal rule
+# and the aerial synthetic-slice fallback.
+CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS = {"rack", "rebucketed_rail",
+                                     "aerial", "funicular"}
 
 # Modes that get a close-zoom pill-arrow at all.
-CLOSE_ZOOM_PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus", "ferry"}
+CLOSE_ZOOM_PILL_MODES = {"train", "tram", "metro", "bus", "regional_bus",
+                          "ferry", "mountain"}
+
+# Extentless origins that need synthetic anchoring (no natural platform
+# extent from stop/dot placement). Funicular has an extent already; aerial
+# does not. Ferry uses its own +10 m pier-offset anchor.
+CLOSE_ZOOM_MOUNTAIN_EXTENTLESS = {"aerial"}
+
+# Hybrid tram detection tolerance (metres). A tram stop whose shaped
+# geometry lies within this distance of a narrow_gauge / light_rail OSM way
+# is treated as rail-style. See close-zoom-stop-design.md § "Hybrid tram
+# detection".
+CLOSE_ZOOM_HYBRID_TRAM_TOL_M = 2.0
+
+# Ferry pill-arrow offset from the pier's on-line position (metres,
+# in direction of travel). See close-zoom-stop-design.md § "Ferry".
+CLOSE_ZOOM_FERRY_OFFSET_M = 10.0
+
+# Terminal-snap tolerance for aerial / funicular: distance below which the
+# projected stop position is treated as sitting AT a polyline endpoint,
+# activating the endpoint-anchor rule.
+CLOSE_ZOOM_TERMINAL_SNAP_M = 3.0
 
 # Modes whose variant priority (representative pick + pill stacking order)
 # is frequency rather than speed. Frequency is the better proxy for "the
@@ -4455,6 +4482,72 @@ def _blend_colors(hex_colors) -> str:
     return "#%02x%02x%02x" % (rs // n, gs // n, bs // n)
 
 
+def _closest_way_distance_m(idx, lon, lat, tag_key, tag_values,
+                             search_radius_m):
+    """Nearest OSM way from `idx` whose properties[`tag_key`] is one of
+    `tag_values`, measured as projected-point distance in metres from
+    (lon, lat). Returns (min_distance_m, best_way_idx) or (None, None) if
+    no such way is inside `search_radius_m`. Used by the hybrid tram
+    detection to compare narrow_gauge/light_rail vs. tram proximity at a
+    stop's projected position on its shape."""
+    if idx is None:
+        return None, None
+    candidates = idx.query_radius(lon, lat, search_radius_m)
+    if not candidates:
+        return None, None
+    cos_lat_here = cos(radians(lat))
+    if cos_lat_here <= 0.0:
+        cos_lat_here = 1.0
+    values = set(tag_values)
+    best = None
+    for w_idx in candidates:
+        props = idx.way_props[w_idx]
+        if (props.get(tag_key) or "") not in values:
+            continue
+        coords = idx.ways[w_idx]
+        dists = idx.way_dists[w_idx]
+        t_proj = _project_meters(lon, lat, coords, dists)
+        px, py = _interp_at(coords, dists, t_proj)
+        dxm = (px - lon) * 111320.0 * cos_lat_here
+        dym = (py - lat) * 111320.0
+        d = sqrt(dxm * dxm + dym * dym)
+        if best is None or d < best[0]:
+            best = (d, w_idx)
+    if best is None:
+        return None, None
+    return best
+
+
+def _is_hybrid_tram_stop(shape_lon, shape_lat, rail_idx, tram_idx,
+                          tolerance_m=CLOSE_ZOOM_HYBRID_TRAM_TOL_M):
+    """Return True if the tram's shaped position (shape_lon, shape_lat) is
+    within `tolerance_m` of a `railway=narrow_gauge` / `railway=light_rail`
+    OSM way AND that way is closer than any `railway=tram` way at the same
+    point. See close-zoom-stop-design.md § "Hybrid tram detection".
+
+    The tram check is a tie-breaker for transitions where both tram track
+    and narrow_gauge / light_rail track are nearby (Forchbahn at the
+    Zürich inner-network / outer-alignment boundary): whichever way is
+    closer to the projected position wins.
+    """
+    if rail_idx is None:
+        return False
+    # Search a bit wider than the tolerance so the tram tie-breaker can
+    # still fire — a tram way at 3 m still beats a narrow_gauge way at
+    # 1.5 m even though only the latter is inside tolerance.
+    search_r = max(tolerance_m * 3.0, 5.0)
+    rail_d, _ = _closest_way_distance_m(
+        rail_idx, shape_lon, shape_lat, "railway",
+        {"narrow_gauge", "light_rail"}, search_r)
+    if rail_d is None or rail_d > tolerance_m:
+        return False
+    tram_d, _ = _closest_way_distance_m(
+        tram_idx, shape_lon, shape_lat, "railway", {"tram"}, search_r)
+    if tram_d is not None and tram_d < rail_d:
+        return False
+    return True
+
+
 def _collapse_direction_stacks(visits):
     """Shared close-zoom stacking rules: collapse visits into one cluster
     per (ref, agency, direction of travel) — same line number + agency
@@ -4517,7 +4610,9 @@ def _collapse_direction_stacks(visits):
 def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
                                 stop_attrs=None,
                                 end_of_platform_pairs=None,
-                                with_extents=False):
+                                with_extents=False,
+                                rail_idx=None,
+                                tram_idx=None):
     """Collect the close-zoom pill-arrow visits per stop_id — one entry per
     (line, departure stop) under the close-zoom skip rules (departures
     only, layover-departure dedup), carrying the tangent, priority and
@@ -4535,6 +4630,13 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
     `with_extents` adds the rail platform extent per visit (needs
     stop_attrs + end_of_platform_pairs) — rendering-only data the counter
     skips.
+
+    `rail_idx` / `tram_idx` (optional): when provided, tram stops whose
+    shaped position lies close to a `railway=narrow_gauge` / `light_rail`
+    OSM way (closer than any nearby `railway=tram` way) are flagged
+    `is_hybrid_rail_tram=True` and treated as rail-style. See
+    close-zoom-stop-design.md § "Hybrid tram detection". Missing indices
+    disable the check (all trams stay tram-style).
     """
     eop = end_of_platform_pairs or set()
 
@@ -4597,8 +4699,7 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
             continue
         mode = line["mode"]
         mo = line.get("mountain_origin")
-        if mode not in CLOSE_ZOOM_PILL_MODES and not (
-                mode == "mountain" and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS):
+        if mode not in CLOSE_ZOOM_PILL_MODES:
             continue
         polyline = flatten_coords(line["coords"])
         if len(polyline) < 2:
@@ -4658,10 +4759,32 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
             dxm = (stop_lon - sx) * 111320.0 * cos_lat
             dym = (stop_lat - sy) * 111320.0
             signed_d = dxm * N[0] + dym * N[1]
+            # Hybrid tram detection (close-zoom-stop-design.md § "Hybrid
+            # tram detection"): a tram stop sitting on narrow_gauge /
+            # light_rail infrastructure (Forchbahn outside Zürich's inner
+            # network) is treated as rail-style at exactly that stop. The
+            # check runs on the tram's projected position on its own shape.
+            is_hybrid_rail_tram = False
+            if mode == "tram" and rail_idx is not None:
+                is_hybrid_rail_tram = _is_hybrid_tram_stop(
+                    sx, sy, rail_idx, tram_idx)
             is_rail_like = (
                 mode in CLOSE_ZOOM_RAIL_MODES
-                or (mode == "mountain" and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS)
+                or (mode == "mountain"
+                    and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS)
+                or is_hybrid_rail_tram
             )
+            # Aerial/funicular terminal detection (close-zoom-stop-design.md
+            # § "Aerial + funicular terminals"): almost every cable car /
+            # funicular stop is one of the polyline's endpoints, and there
+            # the pill-arrow anchors AT the endpoint. Non-terminal stops
+            # (V-Bahn intermediate; funicular mid-stop) fall through to the
+            # normal centered rule.
+            is_extentless_terminal = False
+            if mode == "mountain" and mo in ("aerial", "funicular"):
+                if (t_stop <= CLOSE_ZOOM_TERMINAL_SNAP_M
+                        or dists[-1] - t_stop <= CLOSE_ZOOM_TERMINAL_SNAP_M):
+                    is_extentless_terminal = True
             # Full platform extent along the line (atlas length; same logic
             # as the debug platform overlay) — feeds the backdrop hull so
             # the yellow area covers the whole platform, not just the
@@ -4674,26 +4797,28 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
                     end_of_platform=(osm_id, sid) in eop,
                     mountain_origin=mo)
             per_stop_visits[sid].append({
-                "sid":             sid,
-                "osm_id":          osm_id,
-                "mode":            mode,
-                "mountain_origin": mo,
-                "color":           line["color"],
-                "ref":             line.get("ref", ""),
-                "agency_id":       line.get("agency_id", ""),
-                "speed_kmh":       line.get("speed_kmh") or 0.0,
-                "f_weighted":      line.get("f_weighted") or 0.0,
-                "polyline":        polyline,
-                "dists":           dists,
-                "t_stop":          t_stop,
-                "stop_lon":        stop_lon,
-                "stop_lat":        stop_lat,
-                "cos_lat":         cos_lat,
-                "tangent":         T,
-                "signed_d":        signed_d,
-                "is_rail_like":    is_rail_like,
-                "extent":          extent,
-                "destination":     _shorten_destination(
+                "sid":                    sid,
+                "osm_id":                 osm_id,
+                "mode":                   mode,
+                "mountain_origin":        mo,
+                "color":                  line["color"],
+                "ref":                    line.get("ref", ""),
+                "agency_id":              line.get("agency_id", ""),
+                "speed_kmh":              line.get("speed_kmh") or 0.0,
+                "f_weighted":             line.get("f_weighted") or 0.0,
+                "polyline":               polyline,
+                "dists":                  dists,
+                "t_stop":                 t_stop,
+                "stop_lon":               stop_lon,
+                "stop_lat":               stop_lat,
+                "cos_lat":                cos_lat,
+                "tangent":                T,
+                "signed_d":               signed_d,
+                "is_rail_like":           is_rail_like,
+                "is_hybrid_rail_tram":    is_hybrid_rail_tram,
+                "is_extentless_terminal": is_extentless_terminal,
+                "extent":                 extent,
+                "destination":            _shorten_destination(
                     (line_loop_apex[osm_id][1]
                      if osm_id in line_loop_apex
                      and idx < line_loop_apex[osm_id][0]
@@ -4732,7 +4857,9 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                 stop_meta: dict, stop_attrs: dict,
                                 end_of_platform_pairs: set,
                                 skip_first_oids: set,
-                                skip_last_oids: set) -> None:
+                                skip_last_oids: set,
+                                rail_idx=None,
+                                tram_idx=None) -> None:
     """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
     line-segments that together produce the close-zoom (z17+) station
     representation. See .claude/concepts/close-zoom-stop-design.md.
@@ -4803,7 +4930,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
     # ── Collect visits per stop_id (shared with the pre-fill counter) ────
     per_stop_visits = _collect_close_zoom_visits(
         line_stops, line_lookup, stop_meta, stop_attrs,
-        end_of_platform_pairs, with_extents=True)
+        end_of_platform_pairs, with_extents=True,
+        rail_idx=rail_idx, tram_idx=tram_idx)
 
     features = []
     # Point cloud per parent station; hulled into the backdrop afterwards.
@@ -4951,6 +5079,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                     in end_of_platform_pairs,
                     mountain_origin=path["mountain_origin"])
             fwd_synth = False
+            extentless_kind = None
             if (ext is None or len(ext) < 2) and not rail_pool:
                 # Terminal platform stretch (close-zoom-stop-design.md
                 # § anchor): no rear ground exists at all — the extent
@@ -4965,17 +5094,99 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 if t1 - t0 >= 0.5:
                     ext = _slice_polyline(p_poly, p_dists, t0, t1)
                     fwd_synth = True
+            if (ext is None or len(ext) < 2) and rail_pool:
+                # Extentless rail-style modes (close-zoom-stop-design.md
+                # § "Aerial + funicular terminals" and § "Ferry"): aerial
+                # cable-car stations and ferry piers have no natural
+                # platform extent. Synthesize a slice of the transit
+                # line at the stop so the queue course has an axis, and
+                # mark the record so the pill placement code uses the
+                # right anchor (endpoint for aerial/funicular terminals,
+                # +10 m offset from pier for ferry).
+                p_poly, p_dists = path["polyline"], path["dists"]
+                poly_max = p_dists[-1]
+                L_reach = max_L + max_step * max(len(group), 2)
+                if path["mode"] == "ferry":
+                    pier_t = _ferry_pier_t_on_line(
+                        path["stop_lon"], path["stop_lat"],
+                        p_poly, p_dists)
+                    t0 = pier_t
+                    t1 = min(poly_max, pier_t + L_reach
+                             + CLOSE_ZOOM_FERRY_OFFSET_M)
+                    if t1 - t0 >= 0.5:
+                        ext = _slice_polyline(p_poly, p_dists, t0, t1)
+                        extentless_kind = "ferry"
+                elif path.get("is_extentless_terminal"):
+                    # Aerial / funicular terminal: extent slice from the
+                    # polyline endpoint inward, oriented so the FIRST
+                    # point is the endpoint (so the eop_rail rule
+                    # anchors the fastest pill's back-cap there).
+                    if path["t_stop"] <= poly_max - path["t_stop"]:
+                        # Start-side terminal.
+                        t0 = 0.0
+                        t1 = min(poly_max, L_reach)
+                        if t1 - t0 >= 0.5:
+                            ext = _slice_polyline(p_poly, p_dists, t0, t1)
+                            extentless_kind = "endpoint"
+                    else:
+                        # End-side terminal — reverse so the polyline
+                        # endpoint sits at extent[0].
+                        t1 = poly_max
+                        t0 = max(0.0, poly_max - L_reach)
+                        if t1 - t0 >= 0.5:
+                            slice_pts = _slice_polyline(p_poly, p_dists,
+                                                        t0, t1)
+                            ext = list(reversed(slice_pts))
+                            extentless_kind = "endpoint"
+                else:
+                    # Aerial non-terminal (rare, e.g. V-Bahn intermediate):
+                    # centered slice around projected stop.
+                    t0 = max(0.0, path["t_stop"] - L_reach / 2.0)
+                    t1 = min(poly_max, path["t_stop"] + L_reach / 2.0)
+                    if t1 - t0 >= 0.5:
+                        ext = _slice_polyline(p_poly, p_dists, t0, t1)
+                        # No special anchor — standard rail centered.
             if ext is None or len(ext) < 2:
                 continue
+            # Hybrid tram: the tram default extent is backward-anchored
+            # ([t - L, t]) whereas rail-style stacks center on the extent
+            # middle. Recenter around the projected stop so the stack
+            # doesn't sit half a platform length behind the stop.
+            if (rail_pool and path.get("is_hybrid_rail_tram")
+                    and not extentless_kind):
+                p_poly, p_dists = path["polyline"], path["dists"]
+                ext_len = _cum_dist_m([tuple(p) for p in ext])[-1]
+                if ext_len > 0:
+                    t = path["t_stop"]
+                    t_start = max(0.0, t - ext_len / 2.0)
+                    t_end = min(p_dists[-1], t + ext_len / 2.0)
+                    if t_end - t_start >= 0.5:
+                        ext = _slice_polyline(p_poly, p_dists,
+                                              t_start, t_end)
             eop_rail = rail_pool and any(
                 (path["osm_id"], sid) in end_of_platform_pairs
                 for sid in pool_sids)
-            if rail_pool:
+            # Extentless terminal (aerial + funicular) + ferry all anchor
+            # the fastest pill's back-cap at the extent's first point,
+            # same rule as end-of-platform rail terminals. Funicular
+            # terminals have an existing extent from _platform_extent
+            # whose first point IS the polyline endpoint (start-terminal
+            # case), so no synthesis was needed — but the anchor rule
+            # still applies.
+            if (extentless_kind in ("endpoint", "ferry")
+                    or path.get("is_extentless_terminal")):
+                eop_rail = True
+            if rail_pool and extentless_kind not in ("endpoint", "ferry"):
+                # Skip rail orientation for extentless_kind == "endpoint"
+                # / "ferry" — the extent is already oriented deliberately
+                # (endpoint at [0], pier at [0]) and _orient_rail_extent
+                # could flip it against the direction of travel.
                 ext = _orient_rail_extent(ext, path["tangent"],
                                           path["cos_lat"])
             recs.append({"sid": rep_sid, "group": group, "path": path,
                          "ext": ext, "cut_pts": [], "fwd_synth": fwd_synth,
-                         "eop_rail": eop_rail})
+                         "eop_rail": eop_rail,
+                         "extentless_kind": extentless_kind})
         return recs
 
     per_parent_sids: dict = defaultdict(list)
@@ -5170,6 +5381,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # of margin); the middle-anchored rail stack and the tip-at-
             # front road queues keep the tighter default.
             eop_rail = rec.get("eop_rail", False)
+            extentless_kind = rec.get("extentless_kind")
             fwd_m = (reach + 2.0 * max_L if eop_rail
                      else reach / 2.0 + 2.0 * max_L)
             built = _stop_course(course_ext, path["cos_lat"],
@@ -5183,14 +5395,15 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             for k, c in enumerate(group):
                 work.append((c, path, course, cdists, t_front, t_mid, t_rear,
                              rec["cut_pts"], k, len(group),
-                             stretch, rear_ground, eop_rail))
+                             stretch, rear_ground, eop_rail,
+                             extentless_kind))
 
         # Offset placement tracks, shared per (group course, band, side) —
         # valid within this station only (courses are per-group objects).
         track_cache: dict = {}
 
         for (c, path, course, cdists, t_front, t_mid, t_rear, cut_pts, k, n,
-             stretch, rear_ground, eop_rail) in work:
+             stretch, rear_ground, eop_rail, extentless_kind) in work:
             # Everything is placed along the group's queue course (stop
             # position line + straight extensions), not the raw line.
             polyline, dists = course, cdists
@@ -5201,20 +5414,31 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # End-of-platform rail (stop-extent-osm-walk.md § Rail walk
             # case 2) anchors at the extent's buffer end and queues inward
             # — the fastest pill-arrow sits against the physical end of
-            # the tracks.
+            # the tracks. Ferry: same eop_rail rule, but shifted forward
+            # by CLOSE_ZOOM_FERRY_OFFSET_M — the extent starts at the
+            # pier's on-line position, and the pill-arrow sits 10 m past
+            # it in the direction of travel (close-zoom-stop-design.md
+            # § "Ferry").
             if c["is_rail_like"]:
                 t_stop = t_rear if eop_rail else t_mid
             else:
                 t_stop = t_front
+            if extentless_kind == "ferry":
+                t_stop = t_stop + CLOSE_ZOOM_FERRY_OFFSET_M
             # Merged same-curb groups pool pills from several platform
             # ids; each pill keeps its own.
             sid = c["sid"]
 
-            # Side of the line: bus/tram always to the right in direction of
-            # travel; rail on the side the GTFS stop position snapped from.
-            side = 1.0
-            if c["is_rail_like"] and path["signed_d"] < 0.0:
-                side = -1.0
+            # Side of the line (close-zoom-stop-design.md § "Side of the
+            # line"): bus and tram (non-hybrid) always to the right in
+            # direction of travel; rail-style (train + all mountain + ferry
+            # + hybrid tram) sits centered on the line itself with no
+            # sideways offset — there is no platform side. The GTFS-snap
+            # side (`signed_d`) is no longer consulted for placement.
+            if c["is_rail_like"]:
+                side = 0.0
+            else:
+                side = 1.0
 
             dest_full = " / ".join(c["destinations"])
             ref_text = c["ref"] or ""
@@ -5581,6 +5805,36 @@ def flatten_coords(coords):
     if coords and isinstance(coords[0][0], list):
         return [pt for seg in coords for pt in seg]
     return coords
+
+
+def _ferry_pier_t_on_line(stop_lon, stop_lat, polyline, dists):
+    """The pier's on-line arc position for a single ferry line: the
+    polyline VERTEX closest to the GTFS stop coord, with endpoint pull
+    (if the closer polyline endpoint is within FERRY_ENDPOINT_PULL_M of
+    that vertex, use the endpoint instead). Mirrors the per-line piece of
+    `_ferry_canonical_snap` — pill-rendering.md § "Ferry stops" defines
+    the same rule — reduced to the arc-position along one polyline that
+    the close-zoom pill-arrow needs as an anchor."""
+    if len(polyline) < 2 or dists[-1] <= 0:
+        return 0.0
+    # Closest-vertex index.
+    best_i = 0
+    best_d2 = float("inf")
+    for i, v in enumerate(polyline):
+        dx = v[0] - stop_lon
+        dy = v[1] - stop_lat
+        d2 = dx * dx + dy * dy
+        if d2 < best_d2:
+            best_d2 = d2
+            best_i = i
+    cv_lon, cv_lat = polyline[best_i]
+    # Endpoint pull.
+    for ep_i in (0, len(polyline) - 1):
+        ep_lon, ep_lat = polyline[ep_i]
+        d_m = haversine_km(cv_lon, cv_lat, ep_lon, ep_lat) * 1000.0
+        if d_m <= FERRY_ENDPOINT_PULL_M:
+            return dists[ep_i]
+    return dists[best_i]
 
 
 def _ferry_canonical_snap(polylines, gtfs):
@@ -8849,7 +9103,8 @@ def main():
     # uses later (post-fill, with extents).
     print("Counting close-zoom pill-arrow stacks for fill targets...")
     pre_fill_visits = _collect_close_zoom_visits(
-        line_stops, line_lookup, stop_meta)
+        line_stops, line_lookup, stop_meta,
+        rail_idx=rail_idx, tram_idx=tram_idx)
     stack_need = _stack_need_by_stop(pre_fill_visits)
     print(f"  {len(stack_need):,} (line, stop) fill targets from "
           f"{len(pre_fill_visits):,} stops with pill-arrows")
@@ -9639,7 +9894,8 @@ def main():
     print("Emitting close-zoom stop features...")
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
                               end_of_platform_pairs,
-                              skip_first_oids, skip_last_oids)
+                              skip_first_oids, skip_last_oids,
+                              rail_idx=rail_idx, tram_idx=tram_idx)
 
     # Summary
     mode_counts: dict = defaultdict(int)
