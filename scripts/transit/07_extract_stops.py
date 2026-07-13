@@ -45,6 +45,11 @@ ROOT       = Path(__file__).resolve().parents[2]
 _transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").read_text())
 
 LINES      = ROOT / "data" / "transit" / "transit_lines.geojson"
+# Terminal-extended copy of the step-06 lines, written by main() and consumed
+# by step 08's pmtile build. The step-06 file itself is never modified, so a
+# `--start 7` re-run always starts from pristine line geometry instead of
+# re-consuming (and retaining) a previous run's extensions.
+LINES_EXTENDED = ROOT / "data" / "transit" / "transit_lines_extended.geojson"
 LINE_STOPS = ROOT / "data" / "transit" / "line_stops.json"
 STOP_SCORES = ROOT / "data" / "transit" / "stop_size_scores.json"
 RAIL_WAYS_GEOJSON = ROOT / "data" / "osm" / "rail_ways.geojson"
@@ -1844,7 +1849,7 @@ def _extend_nonrail_polylines_at_terminals(line_lookup, line_stops,
     line that needed fill, with the fill source and any remaining deficit —
     written to stop_extent_fill.json and read by the offender / shortened
     diagnostics. filled_oids is the set of osm_ids whose coords changed
-    (main() syncs those back into transit_lines.geojson).
+    (main() writes those into transit_lines_extended.geojson).
     """
     diag: list = []
     filled_oids: set = set()
@@ -4388,10 +4393,13 @@ def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
     dot (no hyphen splitting — without linguistic hyphenation the break
     positions would be nonsense).
 
-    The line breaks are computed FIRST; only then, if lines remain beyond
-    the budget, the last kept line is trimmed until it fits with a trailing
-    ellipsis — so the ellipsis lands at the true end of the last line, not
-    at a character count guessed without knowing the break position."""
+    The line breaks are computed FIRST. If the text needs more than
+    max_lines, the last kept line is rejoined with the dropped lines and
+    letter-filled to the line width before the trailing ellipsis lands, so
+    the ellipsis sits where the characters actually run out — not at the
+    word boundary that bumped the next word to a discarded line. On a
+    one-line band the latter would strand the ellipsis right after the
+    first word ("La Roche FR" → "La…" instead of "La Roch…")."""
     words = text.split()
     lines = []
     cur = ""
@@ -4416,7 +4424,10 @@ def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
     if len(lines) <= max_lines:
         return "\n".join(lines)
     kept = lines[:max_lines]
-    last = kept[-1]
+    # Rejoin the last kept line with every dropped line and letter-fill the
+    # combined string, so the ellipsis uses the full line width instead of
+    # stranding right after the word boundary that bumped the next word.
+    last = " ".join(lines[max_lines - 1:])
     while last and _text_width_em(last + "…") > max_w_em:
         last = last[:-1].rstrip()
     last = last.rstrip(" .")
@@ -5325,16 +5336,47 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     T = (dxm / norm, dym / norm)
                 else:
                     T = path["tangent"]
+                origin = _point_at_extrap(tpts, tdists, o_center)
+                # Zero-extent queue orientation (close-zoom-stop-design.md):
+                # when this pill's own line has no ground behind the stop
+                # (its own debug line collapsed to nothing), the queue sits
+                # on borrowed ground — typically the arrival counterpart's
+                # extent — whose point order may oppose the departure.
+                # Check the EXACT segment the pill runs along: project the
+                # pill's midpoint onto its own departing polyline; when the
+                # line runs along that segment (within the lateral offset
+                # plus a small slack) and its direction of travel there
+                # clearly opposes the pill axis, flip in place. No tangent
+                # at the stop is involved, so turnaround-skewed departure
+                # tangents cannot misfire. Canonical case: Les Crosets,
+                # télésièges (dead-end road at the chairlift).
+                zero_ext_flip = False
+                if not c["is_rail_like"] and c["t_stop"] < 0.5:
+                    q_t = _project_meters(origin[0], origin[1],
+                                          c["polyline"], c["dists"])
+                    q_pt = _interp_at(c["polyline"], c["dists"], q_t)
+                    q_dist = haversine_km(origin[0], origin[1],
+                                          q_pt[0], q_pt[1]) * 1000.0
+                    if q_dist <= abs(perp) + 3.0:
+                        own_tan = _directional_tangent_at(
+                            c["polyline"], c["dists"], q_t, window_m=2.0)
+                        if own_tan is not None:
+                            oxm = own_tan[0] * cos_lat
+                            oym = own_tan[1]
+                            omag = sqrt(oxm * oxm + oym * oym)
+                            if omag > 0 and (T[0] * oxm + T[1] * oym) / omag \
+                                    < -CLOSE_ZOOM_DIR_CLUSTER_COS:
+                                zero_ext_flip = True
                 # Rail pool: reverse-direction pills flip T so their
                 # chevron tip points backward along the course (outward
                 # toward the negative-o end of the platform). The pill's
                 # map footprint is unchanged — the rectangle rotates 180°
                 # around origin — but the chevron and label direction flip
-                # to reflect the actual direction of travel.
-                if not c.get("dir_forward", True):
+                # to reflect the actual direction of travel. The zero-
+                # extent flip above reuses the same mechanism.
+                if not c.get("dir_forward", True) or zero_ext_flip:
                     T = (-T[0], -T[1])
                 N = (T[1], -T[0])  # right normal in direction of travel
-                origin = _point_at_extrap(tpts, tdists, o_center)
 
                 heading_deg_map = (90.0 - degrees(atan2(T[1], T[0]))) % 360.0
                 # Label rotation: along the pill axis, flipped upside-down.
@@ -8820,10 +8862,11 @@ def main():
     OUT_STOP_EXTENT_FILL.write_text(json.dumps(fill_diag, ensure_ascii=False))
     print(f"  {len(fill_diag):,} fill records → {OUT_STOP_EXTENT_FILL}")
 
-    # Sync extended polylines back into lines_data so transit_lines.geojson
-    # on disk reflects the new geometry — step 08's pmtile build reads the file,
-    # not the in-memory line_lookup. Scope: train + mountain rail-like
-    # (rebucketed_rail / rack, as before) plus every tram/bus line the
+    # Sync extended polylines into lines_data and write the FULL feature set
+    # (extended and untouched lines alike) to transit_lines_extended.geojson —
+    # step 08's pmtile build reads that file. The step-06 transit_lines.geojson
+    # input is never modified. Scope of the geometry patch: train + mountain
+    # rail-like (rebucketed_rail / rack) plus every tram/bus line the
     # stop-extent fill actually prepended geometry to.
     n_synced = 0
     for feat in lines_data["features"]:
@@ -8843,8 +8886,9 @@ def main():
         feat["geometry"]["type"] = "LineString"
         feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]
         n_synced += 1
-    LINES.write_text(json.dumps(lines_data, ensure_ascii=False))
-    print(f"  Wrote {n_synced:,} extended polylines back to {LINES.name}")
+    LINES_EXTENDED.write_text(json.dumps(lines_data, ensure_ascii=False))
+    print(f"  Wrote {n_synced:,} extended polylines → {LINES_EXTENDED.name} "
+          f"({LINES.name} left pristine)")
 
     skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
         line_stops, line_lookup, stop_meta)

@@ -17,9 +17,10 @@ echo "=== Building transit_lines → tl_lines.pmtiles ==="
 # z18 tiles eliminate the drift at z18 and reduce it at higher zooms.
 tippecanoe -o "$STATIC/tl_lines.pmtiles" --force \
   -z18 -Z4 -d18 \
+  --layer transit_lines \
   --drop-densest-as-needed \
   --extend-zooms-if-still-dropping \
-  "$DATA/transit_lines.geojson"
+  "$DATA/transit_lines_extended.geojson"
 
 echo ""
 echo "=== Splitting stops by mode group ==="
