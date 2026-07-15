@@ -3848,7 +3848,7 @@ except (FileNotFoundError, ValueError):
 # container the number must sit inside.
 CLOSE_ZOOM_BORDER_M = 0.4
 
-# Zoom bands: each pill is emitted once per band with band-specific sizing;
+# Zoom bands: each pill-arrow is emitted once per band with band-specific sizing;
 # the style gates them by display zoom (A: z17, B: z18, C: z19+). Bands B
 # and C both live in the z18 tiles (z19+ overzooms them), band A in the
 # z15–17 tiles.
@@ -3856,9 +3856,9 @@ CLOSE_ZOOM_BORDER_M = 0.4
 # The arrow does NOT grow across bands (all 10 m long): zooming in itself
 # provides the extra pixels, which the higher bands spend on destination
 # text (B: one line, C: two lines) while the glyph height in metres shrinks.
-# Band A has no destination (font_dest_m None) — it renders as a solid pill
+# Band A has no destination (font_dest_m None) — it renders as a solid pill-arrow
 # in the line color with just the centered line number, no disc.
-#   length_m / width_m — pill geometry
+#   length_m / width_m — pill-arrow geometry
 #   font_ref_m         — line-number glyph height
 #   font_dest_m        — destination glyph height (None = number-only band)
 #   max_lines          — destination wrap limit before the ellipsis
@@ -3965,7 +3965,7 @@ CLOSE_ZOOM_LINE_END_OVERHANG_M = float(
 # primary check is the trip's first-stop index (idx == 0).
 CLOSE_ZOOM_TERMINAL_SNAP_M = 100.0
 
-# Modes whose variant priority (representative pick + pill stacking order)
+# Modes whose variant priority (representative pick + pill-arrow stacking order)
 # is frequency rather than speed. Frequency is the better proxy for "the
 # canonical variant" on road modes: a rare short-turn variant terminating
 # mid-route must not out-rank the through variants.
@@ -3987,7 +3987,7 @@ def _rail_direction_order(clusters):
     tangent defines the "forward" direction, forward clusters queue
     fastest→slowest from the forward end, reverse clusters queue slowest→
     fastest from the backward end. Each cluster is stamped with
-    `dir_forward` for the pill build to flip T on reverse pills. Called
+    `dir_forward` for the pill-arrow build to flip T on reverse pill-arrows. Called
     on both the sector-merge pool inside `_build_group_recs` and the
     same-curb merge pool for rail records."""
     if not clusters:
@@ -4103,9 +4103,9 @@ def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0,
     """Queue course for a pill-arrow stack: the stop position line `extent`
     extended DEAD STRAIGHT at both ends (rear by back_m, front by fwd_m
     metres) along the average direction (chord) of the extent's first /
-    last chord_w metres. Pills whose span lies inside the extent thus
+    last chord_w metres. Pill-arrows whose span lies inside the extent thus
     derive their angle from the stop position line at their own segment;
-    pills beyond it continue straight in the direction of the last pills
+    pill-arrows beyond it continue straight in the direction of the last pill-arrows
     that fit.
 
     NOTHING but the stop position line determines the placement — the raw
@@ -4117,7 +4117,7 @@ def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0,
     stop end with no travel-direction guessing. For rail the caller has
     normalised the extent to align with the fastest cluster's tangent
     (see `_orient_rail_extent`), so the extent's forward end is the
-    fastest line's destination direction and the per-pill flip against
+    fastest line's destination direction and the per-pill-arrow flip against
     `dir_forward` picks the right chevron end. A previous version
     reversed non-rail orders too against the group's ±20 m travel
     tangent; that misfired at stops where the vehicle turns right after
@@ -4134,7 +4134,7 @@ def _stop_course(extent, cos_lat, back_m, fwd_m, chord_w=10.0,
 
     Returns (course_pts, course_dists, t_front, t_mid, t_rear) or None if
     degenerate. t_front is the stop position line's forward end in course
-    arc coordinates — where the lead pill's chevron tip anchors (the
+    arc coordinates — where the lead pill-arrow's chevron tip anchors (the
     vehicle pulled fully forward); t_mid is the line's middle — the rail
     stack center; t_rear is the extent's rear (buffer-side) end — the
     end-of-platform rail anchor (close-zoom-stop-design.md § anchor)."""
@@ -4503,7 +4503,7 @@ def _shorten_destination(dest: str, current_stop_name: str) -> str:
     """Destination shortening for pill-arrow labels.
 
     1. If the destination begins with the current stop's city — comma- or
-       space-separated ("Bern, …" or "Bern …" on a pill in Bern) — strip the
+       space-separated ("Bern, …" or "Bern …" on a pill-arrow in Bern) — strip the
        city prefix. The city is the part of the current stop's name before
        its first comma. The separator requirement keeps "Berneck" intact.
     2. If (afterwards) a comma remains, keep only the part before it
@@ -4539,7 +4539,7 @@ def _shrink_ref_font_m(ref_text: str, nominal_font_m: float,
                        band_config: dict) -> float:
     """Return the pill-arrow line-number glyph height in metres, shrunk
     from `nominal_font_m` only as far as needed so the ref text fits its
-    container: the disc for duo-tone bands (B–E), the whole pill for the
+    container: the disc for duo-tone bands (B–E), the whole pill-arrow for the
     solid band A. Short numbers keep the nominal size."""
     if not ref_text or nominal_font_m <= 0:
         return nominal_font_m
@@ -4549,7 +4549,7 @@ def _shrink_ref_font_m(ref_text: str, nominal_font_m: float,
     border_half = CLOSE_ZOOM_BORDER_M / 2.0
     solid = band_config["font_dest_m"] is None
     if solid:
-        # Solid pill (band A): text sits horizontally along the pill's
+        # Solid pill-arrow (band A): text sits horizontally along the pill-arrow's
         # long axis inside an inner rectangle body_len × W (minus border on
         # each side). Width-bound by the length axis, height-bound by the
         # transverse axis. Slightly conservative vs the true stadium shape
@@ -4705,7 +4705,7 @@ def _is_hybrid_tram_stop(shape_lon, shape_lat, rail_idx, tram_idx,
 def _collapse_direction_stacks(visits):
     """Shared close-zoom stacking rules: collapse visits into one cluster
     per (ref, agency, direction of travel) — same line number + agency
-    within the 45° tangent gate merge into one pill, destinations collected
+    within the 45° tangent gate merge into one pill-arrow, destinations collected
     across the merged variants, highest-priority variant first (frequency
     for road modes, speed for rail — see _variant_priority) — then group
     same-direction clusters into stacks. Rail pools form ONE stack in
@@ -4866,13 +4866,13 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
         # the feature's FIRST stop is skipped when it has no platform_code
         # and the same feature calls again at the same UIC at a
         # platform-coded stop later (non-final, so the revisit itself gets
-        # the pill). Canonical case: Bern bus 30 departs the bare :10001
+        # the pill-arrow). Canonical case: Bern bus 30 departs the bare :10001
         # layover, then serves platform :A of the same station — without
         # the skip the line shows twice at the station. NOT copied from
         # the dot side: skip_first_oids, which drops the departure whenever
         # any sibling ARRIVES at the same stop_id — fine for dots (the
-        # arrival dot survives) but fatal here, where arrivals get no pill
-        # and the departure pill is the line's only presence at a terminus.
+        # arrival dot survives) but fatal here, where arrivals get no pill-arrow
+        # and the departure pill-arrow is the line's only presence at a terminus.
         skip_first_layover = False
         first_sid = triplets[0][2] if len(triplets[0]) >= 3 else ""
         if first_sid and not (stop_meta.get(first_sid, {})
@@ -4890,7 +4890,7 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
         for idx, trip in enumerate(triplets):
             if len(trip) < 3:
                 continue
-            # Departures only: the line's last stop is an arrival — no pill
+            # Departures only: the line's last stop is an arrival — no pill-arrow
             # there ("17 to Bern, Bahnhof" at Bern, Bahnhof makes no sense).
             if idx == last_idx:
                 continue
@@ -4991,10 +4991,10 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
 
 def _stack_need_by_stop(per_stop_visits):
     """Per (osm_id, stop_id): the ground the stop's close-zoom pill-arrow
-    queue occupies at the largest band — (n − 1) · step + pill length for
-    the direction stack the line's pill belongs to (n = drawn pill-arrows
+    queue occupies at the largest band — (n − 1) · step + pill-arrow length for
+    the direction stack the line's pill-arrow belongs to (n = drawn pill-arrows
     in that stack). Every osm_id collapsed into a stack maps to its
-    stack's reach, so lines whose variant merged into another pill still
+    stack's reach, so lines whose variant merged into another pill-arrow still
     get the right target. Rail pools are skipped — the tram/bus fill
     target is the only reader (stop-extent-osm-walk.md § Fill target).
     """
@@ -5029,7 +5029,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
     (the same fitted-to-the-line extent the debug platform lines draw),
     extended dead straight beyond its range. One pill-arrow per (stop, line
     ref, agency, direction) — same-direction variants collapse into a
-    single pill listing every destination.
+    single pill-arrow listing every destination.
 
     The backdrop is one rounded convex-hull polygon per GTFS parent station,
     covering every pill-arrow and the line sections next to them plus a
@@ -5145,10 +5145,10 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         lookups — is the pooled sid with the longest atlas length.
 
         Rail direction ordering (close-zoom-stop-design.md § Rail): all
-        rail clusters at one track form ONE stack. Same-direction pills
+        rail clusters at one track form ONE stack. Same-direction pill-arrows
         stay contiguous, and opposite-direction sub-groups sit at
         opposite ends of the stack with their fastest line at the
-        outward-most position, so no two adjacent pills point at each
+        outward-most position, so no two adjacent pill-arrows point at each
         other and each sub-group's chevrons point outward from the
         platform middle."""
         if visits_override is not None:
@@ -5178,7 +5178,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     (stop_attrs.get(s, {}) or {}).get("length") or 0.0))
 
         # ── Collapse variants + direction groups (shared stacking rules) ─
-        # One pill per (ref, agency, direction); same-direction clusters
+        # One pill-arrow per (ref, agency, direction); same-direction clusters
         # share a stack — and, for non-rail, one path: when parallel lines
         # (e.g. tram + bus on the same street) serve the same stop, every
         # pill-arrow in the group follows the RIGHTMOST line so they line
@@ -5213,7 +5213,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # is only the fallback when the departure has none — a
             # borrowed course carries the donor's orientation (Bern
             # Weissenbühl: the same-sid arrival extent pointed the 28's
-            # pill into the terminus even though the departure had its
+            # pill-arrow into the terminus even though the departure had its
             # own filled ground). No direction gate on the fallback: at
             # corner terminals the arrival approaches on a different
             # street, near-perpendicular, and that is precisely the
@@ -5269,7 +5269,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # concept doc requires the pill-arrow at the polyline endpoint,
             # not at the middle of a platform-length slice. _platform_extent
             # returns an end-side slice whose extent[0] sits L metres
-            # inward, so eop_rail anchors the pill inside the polyline
+            # inward, so eop_rail anchors the pill-arrow inside the polyline
             # rather than at its end. Discard here so the extentless-
             # terminal synthesis branch below re-slices from the endpoint
             # inward with the correct extent[0] = endpoint orientation.
@@ -5282,7 +5282,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             extentless_kind = None
             if not rail_pool and ext is not None and len(ext) >= 2:
                 # Dead-end terminus course (close-zoom-stop-design.md):
-                # every pill in the queue has zero rear ground on its own
+                # every pill-arrow in the queue has zero rear ground on its own
                 # line and the borrowed stop position line points against
                 # the departures (near-180° — an arrival doubling back at
                 # a dead-end road). Using it as the course would fold the
@@ -5318,7 +5318,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # cable-car stations and ferry piers have no natural
                 # platform extent. Synthesize a slice of the transit
                 # line at the stop so the queue course has an axis, and
-                # mark the record so the pill placement code uses the
+                # mark the record so the pill-arrow placement code uses the
                 # right anchor (endpoint for aerial/funicular terminals,
                 # +10 m offset from pier for ferry).
                 p_poly, p_dists = path["polyline"], path["dists"]
@@ -5330,8 +5330,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                         p_poly, p_dists)
                     # Solo-ferry de-overlap stagger (see the ferry pier
                     # clustering pass): shifts the whole extent forward
-                    # along this ferry's own polyline so the pill lands
-                    # past any earlier-placed solo ferry pill.
+                    # along this ferry's own polyline so the pill-arrow lands
+                    # past any earlier-placed solo ferry pill-arrow.
                     stagger = float(path.get("ferry_extra_m", 0.0))
                     t0 = pier_t
                     t1 = min(poly_max, pier_t + L_reach
@@ -5343,7 +5343,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     # Aerial / funicular terminal: extent slice from the
                     # polyline endpoint inward, oriented so the FIRST
                     # point is the endpoint (so the eop_rail rule
-                    # anchors the fastest pill's back-cap there).
+                    # anchors the fastest pill-arrow's back-cap there).
                     if path["t_stop"] <= poly_max - path["t_stop"]:
                         # Start-side terminal.
                         t0 = 0.0
@@ -5390,7 +5390,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 (path["osm_id"], sid) in end_of_platform_pairs
                 for sid in pool_sids)
             # Extentless terminal (aerial + funicular) + ferry all anchor
-            # the fastest pill's back-cap at the extent's first point,
+            # the fastest pill-arrow's back-cap at the extent's first point,
             # same rule as end-of-platform rail terminals. Funicular
             # terminals have an existing extent from _platform_extent
             # whose first point IS the polyline endpoint (start-terminal
@@ -5483,7 +5483,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         #      same OSM ferry way.
         #   2. Solo de-overlap: solo ferries (each on their own polyline)
         #      whose pill-arrows would land world-close to another solo
-        #      ferry's — the lines diverge but the pills at
+        #      ferry's — the lines diverge but the pill-arrows at
         #      pier + CLOSE_ZOOM_FERRY_OFFSET_M still collide — are shifted
         #      further along their own polyline by (max_L +
         #      CLOSE_ZOOM_STACK_GAP_M) increments until they clear.
@@ -5543,45 +5543,176 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     solo_ferries.append(members[0])
                     pools[("F:" + str(members[0]["osm_id"])
                            + ":" + members[0]["sid"],)].append(members[0])
-            # Solo de-overlap: place fastest first at pier + FERRY_OFFSET,
-            # then each subsequent solo ferry gets an extra `k * step`
-            # forward along its OWN polyline where k is the smallest
-            # non-negative integer that separates its pill-center from
-            # every already-placed pill by at least `step`. `step` is one
-            # pill length (widest band) plus the pill gap, giving the
-            # same visual spacing a same-line stack would use.
-            if len(solo_ferries) >= 2:
-                max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
-                step = max_L + CLOSE_ZOOM_STACK_GAP_M
-                # Fastest first (matches _variant_priority for rail-style
-                # modes — speed_kmh).
-                solo_ferries.sort(
-                    key=lambda v: -(v.get("speed_kmh") or 0.0))
-                placed = []  # list of (lon, lat, cos_lat)
-                for v in solo_ferries:
-                    poly, dists = v["polyline"], v["dists"]
-                    # Natural pill-center on this ferry's own polyline:
-                    # pier + FERRY_OFFSET + max_L/2. Extra staggering
-                    # shifts by k*step further along the polyline.
-                    base = v["_pier_t"] + CLOSE_ZOOM_FERRY_OFFSET_M + max_L / 2.0
-                    k = 0
-                    while True:
-                        t = min(dists[-1], base + k * step)
-                        p = _interp_at(poly, dists, t)
-                        clear = True
-                        for (px, py, cl) in placed:
-                            dxm = (p[0] - px) * 111320.0 * cl
-                            dym = (p[1] - py) * 111320.0
-                            if sqrt(dxm * dxm + dym * dym) < step:
-                                clear = False
-                                break
-                        # Stop when clear, or when further stepping is
-                        # capped by the polyline end (no room to shift).
-                        if clear or t >= dists[-1]:
-                            v["ferry_extra_m"] = k * step
-                            placed.append((p[0], p[1], v["cos_lat"]))
-                            break
-                        k += 1
+            # Ring-alternating pill-arrow layout
+            # (close-zoom-stop-design.md § "Ring-alternating pill-arrow
+            # layout"): each petal is a merged pool (fastest ferry's
+            # polyline as axis) or a solo (its own polyline as axis),
+            # carrying a queue of drawn pill-arrows. Each pill-arrow has
+            # its OWN ring assignment; ring r's world position on a
+            # petal is arc distance pier_t + FERRY_OFFSET + max_L/2 +
+            # r*step on the petal's axis, tangent sampled from the
+            # polyline at that arc distance — no straight-line-from-pier
+            # assumption. Iterate rings from the pier outward, OBB-
+            # checking every pair of pill-arrows sharing a ring. On
+            # conflict, exactly ONE pill-arrow moves one ring outward
+            # (its queue-mates behind it cascade to keep their order;
+            # the ones before it STAY — the queue develops gaps and the
+            # two lines zipper into each other's gaps). First conflict
+            # of a pair: the petal with fewer pill-arrows yields.
+            # Repeat conflict of the same pair at a later ring:
+            # ALTERNATE — whichever petal moved last stays, the other
+            # moves. Per-pair tracking keeps independent lines
+            # untouched and handles 3-way overlaps pair-by-pair.
+            max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
+            step = max_L + CLOSE_ZOOM_STACK_GAP_M
+            # z18 is the reference zoom for the visual overlap check —
+            # z17 slight overlap is fine, z18 is where the pill-arrows
+            # must read as separate. Band B is the z18 design.
+            pill_W = float(CLOSE_ZOOM_BANDS["B"]["width_m"])
+            # 0.5 m padding on each OBB half-dimension so near-touches
+            # count too — the pill-arrow border and the transit line
+            # drawn through the queue eat into the space between bare
+            # rectangles that are close-but-not-overlapping.
+            _obb_pad_m = 0.5
+            pill_center_off = max_L / 2.0
+            pill_L_half = max_L / 2.0 + _obb_pad_m
+            pill_W_half = pill_W / 2.0 + _obb_pad_m
+            # Build petals. The queue entries are the DRAWN pill-arrows,
+            # not the raw visits: downstream, _collapse_direction_stacks
+            # merges same-(ref, agency) variants into one pill-arrow, so
+            # the queue groups member visits by (ref, agency) and orders
+            # the groups by speed descending — the same priority order
+            # the drawn stack uses (ferry priority is speed_kmh).
+            petals = []
+            for root, members in clusters_by_root.items():
+                subgroups: dict = {}
+                for v in members:
+                    subgroups.setdefault(
+                        (v["ref"], v["agency_id"]), []).append(v)
+                pills = sorted(
+                    subgroups.values(),
+                    key=lambda g: -max((v.get("speed_kmh") or 0.0)
+                                       for v in g))
+                axis = max(members,
+                           key=lambda v: v.get("speed_kmh") or 0.0)
+                petals.append({
+                    "poly": axis["polyline"],
+                    "dists": axis["dists"],
+                    "pier_t": axis["_pier_t"],
+                    "cos_lat": axis["cos_lat"],
+                    "pills": pills,
+                    "rings": list(range(len(pills))),
+                })
+            if len(petals) >= 2:
+                # Local metric frame anchored on the first petal's pier
+                # position — cos_lat is essentially identical across
+                # petals at one parent station, so a shared frame is fine.
+                ref_lon, ref_lat = petals[0]["poly"][0][0], petals[0]["poly"][0][1]
+                mx_per_deg = 111320.0 * cos(radians(ref_lat))
+                my_per_deg = 111320.0
+
+                def _pill_pos_tangent(p, ring):
+                    arc_t = (p["pier_t"] + CLOSE_ZOOM_FERRY_OFFSET_M
+                             + pill_center_off + ring * step)
+                    dists = p["dists"]
+                    arc_t = min(dists[-1], arc_t)
+                    lon, lat = _interp_at(p["poly"], dists, arc_t)
+                    T = _unit_tangent_metric(
+                        p["poly"], dists, arc_t, p["cos_lat"])
+                    if T is None:
+                        T = (1.0, 0.0)
+                    cx = (lon - ref_lon) * mx_per_deg
+                    cy = (lat - ref_lat) * my_per_deg
+                    return cx, cy, T[0], T[1]
+
+                # Iteration cap: a pathological non-diverging pair
+                # (which should have merged upstream anyway) cannot
+                # loop forever.
+                pair_last_mover: dict = {}
+                max_iter = 200
+                for _ in range(max_iter):
+                    moved_this_pass = False
+                    max_ring = max(max(p["rings"]) for p in petals)
+                    for r in range(max_ring + 1):
+                        at_ring = []
+                        for pet_i, p in enumerate(petals):
+                            for q_i, ring in enumerate(p["rings"]):
+                                if ring == r:
+                                    cx, cy, tx, ty = _pill_pos_tangent(p, r)
+                                    at_ring.append(
+                                        (pet_i, q_i, cx, cy, tx, ty,
+                                         len(p["pills"])))
+                        # pet_i → queue index of its conflicting
+                        # pill-arrow at this ring.
+                        movers: dict = {}
+                        for i in range(len(at_ring)):
+                            (pet_a, q_a, cxa, cya, txa, tya,
+                             na) = at_ring[i]
+                            for j in range(i + 1, len(at_ring)):
+                                (pet_b, q_b, cxb, cyb, txb, tyb,
+                                 nb) = at_ring[j]
+                                if pet_a == pet_b:
+                                    continue
+                                if _obb_overlap(cxa, cya, txa, tya,
+                                                pill_L_half, pill_W_half,
+                                                cxb, cyb, txb, tyb,
+                                                pill_L_half, pill_W_half):
+                                    key = (min(pet_a, pet_b),
+                                           max(pet_a, pet_b))
+                                    prev = pair_last_mover.get(key)
+                                    if prev is None:
+                                        # First conflict for this pair —
+                                        # fewest pill-arrows yields; ties
+                                        # break by higher index (stable
+                                        # deterministic choice).
+                                        if na < nb:
+                                            mover, m_q = pet_a, q_a
+                                        elif nb < na:
+                                            mover, m_q = pet_b, q_b
+                                        elif pet_a > pet_b:
+                                            mover, m_q = pet_a, q_a
+                                        else:
+                                            mover, m_q = pet_b, q_b
+                                    else:
+                                        # Repeat conflict — alternate:
+                                        # whoever moved last stays, the
+                                        # OTHER moves.
+                                        if prev == pet_a:
+                                            mover, m_q = pet_b, q_b
+                                        else:
+                                            mover, m_q = pet_a, q_a
+                                    pair_last_mover[key] = mover
+                                    if (mover not in movers
+                                            or m_q < movers[mover]):
+                                        movers[mover] = m_q
+                        if movers:
+                            for pet_i, q_i in movers.items():
+                                p = petals[pet_i]
+                                # Only the conflicting pill-arrow moves;
+                                # queue-mates behind it cascade to keep
+                                # their order, the ones before it stay.
+                                p["rings"][q_i] += 1
+                                for q2 in range(q_i + 1, len(p["rings"])):
+                                    if p["rings"][q2] <= p["rings"][q2 - 1]:
+                                        p["rings"][q2] = p["rings"][q2 - 1] + 1
+                            moved_this_pass = True
+                            break  # rescan from ring 0
+                    if not moved_this_pass:
+                        break
+
+            # Apply the resolved rings to visits: each drawn pill-arrow's
+            # extra is (assigned ring − natural queue position) · step,
+            # stamped on every member visit of its (ref, agency)
+            # subgroup so the collapsed cluster head carries it. The
+            # extent-synth branch and the pill-arrow placement both read
+            # ferry_extra_m per pill-arrow, on top of the queue-index
+            # step the drawn stack already applies.
+            for petal in petals:
+                for q_i, pill_group in enumerate(petal["pills"]):
+                    extra = (petal["rings"][q_i] - q_i) * step
+                    if extra > 0:
+                        for v in pill_group:
+                            v["ferry_extra_m"] = extra
         if cluster_candidates:
             n = len(cluster_candidates)
             cl_uf = list(range(n))
@@ -5725,7 +5856,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     _shorten_curb(recs[i], m[2])
                     _shorten_curb(recs[j], m[3])
 
-        # ── Queue course + per-pill work items ───────────────────────────
+        # ── Queue course + per-pill-arrow work items ───────────────────────────
         work = []
         for rec in recs:
             group, path, ext = rec["group"], rec["path"], rec["ext"]
@@ -5770,7 +5901,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                         front_on_m = _cum_dist_m(fslice)[-1]
                     stretch = True
             # EOP rail queues forward from the buffer, so the course needs
-            # forward room to seat the whole stack (reach + a pill length
+            # forward room to seat the whole stack (reach + a pill-arrow length
             # of margin); the middle-anchored rail stack and the tip-at-
             # front road queues keep the tighter default.
             eop_rail = rec.get("eop_rail", False)
@@ -5825,13 +5956,13 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             if extentless_kind == "ferry":
                 # Base pier offset + optional solo-ferry stagger (set by
                 # the ferry pier clustering + de-overlap pass) so a solo
-                # ferry whose pill would otherwise land on top of another
+                # ferry whose pill-arrow would otherwise land on top of another
                 # sits further along its own polyline. Merged ferry pool
                 # members carry no `ferry_extra_m`, so stagger is 0.
                 t_stop = (t_stop + CLOSE_ZOOM_FERRY_OFFSET_M
                           + float(c.get("ferry_extra_m", 0.0)))
-            # Merged same-curb groups pool pills from several platform
-            # ids; each pill keeps its own.
+            # Merged same-curb groups pool pill-arrows from several platform
+            # ids; each pill-arrow keeps its own.
             sid = c["sid"]
 
             # Side of the line (close-zoom-stop-design.md § "Side of the
@@ -5873,8 +6004,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 body_len = L - 2.0 * R
                 stack_step = L + CLOSE_ZOOM_STACK_GAP_M
                 tipp = {"minzoom": bc["tipp_min"], "maxzoom": bc["tipp_max"]}
-                # Offset of the pill CENTER line from the path: consistent
-                # clear gap between the line and the pill's inner edge, on
+                # Offset of the pill-arrow CENTER line from the path: consistent
+                # clear gap between the line and the pill-arrow's inner edge, on
                 # the side chosen above.
                 # Bands B–E widen the offset by half the widest transit
                 # line in the stack (evaluated at z19, the anchor zoom)
@@ -5889,10 +6020,10 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 perp = side * (bc["line_gap_m"] + line_half_m + W / 2.0)
 
                 # Placement track: the path shifted sideways by perp — the
-                # curve the pill centers actually sit on. Stepping, spans
+                # curve the pill-arrow centers actually sit on. Stepping, spans
                 # and axes are all measured along THIS track, not the
                 # centerline: measured on the centerline, every degree of
-                # bend stretches the gaps between pills on the outside of
+                # bend stretches the gaps between pill-arrows on the outside of
                 # the curve and squeezes them on the inside.
                 tkey = (id(course), band_id, side)
                 track = track_cache.get(tkey)
@@ -5915,15 +6046,15 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 tpts, tdists, tcts = track
                 o_stop = _track_pos(t_stop, tcts, tdists)
 
-                # Track span this pill occupies.
+                # Track span this pill-arrow occupies.
                 if c["is_rail_like"] and eop_rail:
                     # End-of-platform: fastest (k=0) rear cap sits at the
                     # buffer (o_stop), shifted backward past the polyline
                     # endpoint by CLOSE_ZOOM_LINE_END_OVERHANG_M so the
-                    # pill covers MapLibre's zoom-scaled round line-cap
+                    # pill-arrow covers MapLibre's zoom-scaled round line-cap
                     # (see close-zoom-stop-design.md § "End-of-platform
                     # line-end overhang"). Body/tip extend inward. Slower
-                    # pills queue further inward by one stack_step each.
+                    # pill-arrows queue further inward by one stack_step each.
                     o_center = (o_stop + k * stack_step + L / 2.0
                                 - CLOSE_ZOOM_LINE_END_OVERHANG_M)
                 elif c["is_rail_like"]:
@@ -5940,7 +6071,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     if stretch:
                         # Terminal platform stretch: shift the stack
                         # forward by this band's shortfall over the real
-                        # rear ground, so every pill sits on line geometry
+                        # rear ground, so every pill-arrow sits on line geometry
                         # that actually exists.
                         reach_band = (n - 1) * stack_step + L
                         if reach_band > rear_ground:
@@ -5959,14 +6090,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                             if rear_need < rear_lim:
                                 o_shift = max(o_shift, rear_lim - rear_need)
                     # Stack extends upstream from the stop point; the fastest
-                    # pill's chevron tip lands exactly on the stop (unless
+                    # pill-arrow's chevron tip lands exactly on the stop (unless
                     # shifted forward by the rule above).
                     o_center = o_stop + o_shift - k * stack_step - L / 2.0
                 o0 = o_center - L / 2.0
                 o1 = o_center + L / 2.0
 
-                # Per-pill straight frame: the axis is the AVERAGE direction
-                # of the track part the pill occupies (the chord over its
+                # Per-pill-arrow straight frame: the axis is the AVERAGE direction
+                # of the track part the pill-arrow occupies (the chord over its
                 # own span), anchored at that part's midpoint. A
                 # single-point tangent at the stop tilts the whole stack
                 # against the line near bends, and deep stack positions can
@@ -5982,15 +6113,15 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     T = path["tangent"]
                 origin = _point_at_extrap(tpts, tdists, o_center)
                 # Zero-extent queue orientation (close-zoom-stop-design.md):
-                # when this pill's own line has no ground behind the stop
+                # when this pill-arrow's own line has no ground behind the stop
                 # (its own debug line collapsed to nothing), the queue sits
                 # on borrowed ground — typically the arrival counterpart's
                 # extent — whose point order may oppose the departure.
-                # Check the EXACT segment the pill runs along: project the
-                # pill's midpoint onto its own departing polyline; when the
+                # Check the EXACT segment the pill-arrow runs along: project the
+                # pill-arrow's midpoint onto its own departing polyline; when the
                 # line runs along that segment (within the lateral offset
                 # plus a small slack) and its direction of travel there
-                # clearly opposes the pill axis, flip in place. No tangent
+                # clearly opposes the pill-arrow axis, flip in place. No tangent
                 # at the stop is involved, so turnaround-skewed departure
                 # tangents cannot misfire. Canonical case: Les Crosets,
                 # télésièges (dead-end road at the chairlift).
@@ -6011,9 +6142,9 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                             if omag > 0 and (T[0] * oxm + T[1] * oym) / omag \
                                     < -CLOSE_ZOOM_DIR_CLUSTER_COS:
                                 zero_ext_flip = True
-                # Rail pool: reverse-direction pills flip T so their
+                # Rail pool: reverse-direction pill-arrows flip T so their
                 # chevron tip points backward along the course (outward
-                # toward the negative-o end of the platform). The pill's
+                # toward the negative-o end of the platform). The pill-arrow's
                 # map footprint is unchanged — the rectangle rotates 180°
                 # around origin — but the chevron and label direction flip
                 # to reflect the actual direction of travel. The zero-
@@ -6023,7 +6154,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 N = (T[1], -T[0])  # right normal in direction of travel
 
                 heading_deg_map = (90.0 - degrees(atan2(T[1], T[0]))) % 360.0
-                # Label rotation: along the pill axis, flipped upside-down.
+                # Label rotation: along the pill-arrow axis, flipped upside-down.
                 text_rot = (heading_deg_map - 90.0) % 360.0
                 flipped = 90.0 < text_rot < 270.0
                 if flipped:
@@ -6034,9 +6165,9 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                         origin[0], origin[1],
                         dx * T[0] + dy * N[0], dx * T[1] + dy * N[1], cos_lat)
 
-                # Body range in the pill's own frame (origin = span middle;
+                # Body range in the pill-arrow's own frame (origin = span middle;
                 # the lateral offset is already baked into the track, so the
-                # pill sits ON its frame axis at zero perpendicular offset).
+                # pill-arrow sits ON its frame axis at zero perpendicular offset).
                 x_neck = body_len / 2.0
                 x_rear = -body_len / 2.0
 
@@ -6077,7 +6208,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     },
                 })
 
-                # Solid band (no destination): the whole pill renders in the
+                # Solid band (no destination): the whole pill-arrow renders in the
                 # line color with just the centered number — no disc.
                 solid = bc["font_dest_m"] is None
 
@@ -6099,7 +6230,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                        "band":         band_id},
                     })
 
-                # Line number: centered in the disc, or in the whole pill
+                # Line number: centered in the disc, or in the whole pill-arrow
                 # for solid bands. Wide refs (e.g. "IR15") shrink per feature
                 # just enough to fit their container; short refs keep the
                 # band's nominal size.
@@ -6127,8 +6258,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # Destination text: anchor placed at the text's reader-left
                 # edge in both flip states so multi-line text visually
                 # left-aligns for the reader in both orientations. That end
-                # is the pill's disc side for non-flipped labels (text
-                # reads toward the tip) and the pill's tip side for
+                # is the pill-arrow's disc side for non-flipped labels (text
+                # reads toward the tip) and the pill-arrow's tip side for
                 # flipped labels (text reads toward the disc, after the
                 # +180° flip). margin_disc_m controls the padding between
                 # disc and non-flipped text start; margin_tip_m sets the
@@ -6160,13 +6291,13 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                         },
                     })
 
-                # Hull cloud: pill outline plus the adjacent line section
+                # Hull cloud: pill-arrow outline plus the adjacent line section
                 # (largest band only — it covers the smaller ones; the line
                 # section stays arc-based since the LINE itself may curve).
                 if band_id == CLOSE_ZOOM_HULL_BAND:
                     cloud = parent_cloud[parent]
                     cloud.extend((p[0], p[1]) for p in ring)
-                    # Map the pill's track span back to centerline arc
+                    # Map the pill-arrow's track span back to centerline arc
                     # positions before sampling the line itself.
                     ct0 = _track_pos(o0, tdists, tcts)
                     ct1 = _track_pos(o1, tdists, tcts)
@@ -6273,6 +6404,29 @@ def _ferry_pier_t_on_line(stop_lon, stop_lat, polyline, dists):
         if d_m <= FERRY_ENDPOINT_PULL_M:
             return dists[ep_i]
     return dists[best_i]
+
+
+def _obb_overlap(cx1, cy1, tx1, ty1, l1_half, w1_half,
+                  cx2, cy2, tx2, ty2, l2_half, w2_half):
+    """SAT overlap test for two oriented rectangles in a shared metric
+    frame. tangent (tx, ty) is a unit vector along the rect's long axis;
+    l_half is the half-length along the tangent, w_half the half-width
+    perpendicular to it. Returns True when the rectangles overlap; False
+    when a separating axis is found. Used by the ferry ring-alternating
+    layout to detect visual pill-arrow collisions at z18."""
+    px1, py1 = -ty1, tx1
+    px2, py2 = -ty2, tx2
+    dx = cx2 - cx1
+    dy = cy2 - cy1
+    for ax, ay in ((tx1, ty1), (px1, py1), (tx2, ty2), (px2, py2)):
+        r1 = (abs(l1_half * (tx1 * ax + ty1 * ay))
+              + abs(w1_half * (px1 * ax + py1 * ay)))
+        r2 = (abs(l2_half * (tx2 * ax + ty2 * ay))
+              + abs(w2_half * (px2 * ax + py2 * ay)))
+        d_proj = abs(dx * ax + dy * ay)
+        if d_proj > r1 + r2 + 1e-6:
+            return False
+    return True
 
 
 def _ferry_canonical_snap(polylines, gtfs):
@@ -9870,10 +10024,17 @@ def main():
         pier_key = cand["parent_station"] or cand["stop_id"]
         ferry_by_pier.setdefault(pier_key, []).append(cand)
 
+    # Non-ferry drawn stop positions used by the GTFS-coord suppression
+    # check in the "Convergent + split" branch below. See pill-rendering.md
+    # § "Ferry stops" — GTFS-side suppression.
+    non_ferry_stop_coords = [(p["lon"], p["lat"]) for p in rail_pill_raw] + \
+                            [(p["lon"], p["lat"]) for p in all_nonrail_pills]
+
     ferry_pill_features = []
     n_ferry_collapsed = 0
     n_ferry_split = 0
     n_ferry_diverged = 0
+    n_ferry_gtfs_suppressed = 0
     # Pill (medium-zoom) and pair (split detail) both appear from z14 — the
     # same zoom every other mode starts at (see pill-rendering.md § "Dot-to-
     # pill zoom switch"). The z9–z13 far-zoom marker for ferry is a low-zoom
@@ -10003,6 +10164,21 @@ def main():
             n_ferry_collapsed += 1
             continue
 
+        # GTFS-side suppression: if the canonical pier is closer to a drawn
+        # non-ferry transit stop than the GTFS coord is, the GTFS coord
+        # points away from the interchange rather than toward it — drawing
+        # a second dot + connector there adds no orientation value. Suppress
+        # them and emit only the canonical dot. See pill-rendering.md § "Ferry
+        # stops" — GTFS-side suppression.
+        if non_ferry_stop_coords:
+            d_c = min(haversine_km(canon[0], canon[1], lon, lat)
+                      for lon, lat in non_ferry_stop_coords)
+            d_g = min(haversine_km(gtfs_repr[0], gtfs_repr[1], lon, lat)
+                      for lon, lat in non_ferry_stop_coords)
+            if d_c < d_g:
+                n_ferry_gtfs_suppressed += 1
+                continue
+
         # Convergent + split: add GTFS-side endpoint + connector at the pill
         # detail threshold. The canonical-vertex endpoint (emitted above)
         # plus this GTFS endpoint give the connector a disc at each end; the
@@ -10030,7 +10206,8 @@ def main():
         })
     print(f"  Ferry stops: {len(ferry_by_pier):,} piers "
           f"({n_ferry_split:,} split, {n_ferry_collapsed:,} collapsed, "
-          f"{n_ferry_diverged:,} per-line fallback)")
+          f"{n_ferry_diverged:,} per-line fallback, "
+          f"{n_ferry_gtfs_suppressed:,} GTFS-side suppressed)")
 
     # Per-stop-id set of lines (osm_ids), used by cluster_stops_for_pills to
     # block merging of two stops served by the same drawn line. See

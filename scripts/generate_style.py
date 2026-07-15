@@ -1439,7 +1439,7 @@ def build_station_layers(cfg) -> list:
     # The yellow station backdrop is NOT here — it renders below the transit
     # lines via build_close_zoom_backdrop_layers().
 
-    # Geometry-locked sizing: pill geometry is metres, so borders and labels
+    # Geometry-locked sizing: pill-arrow geometry is metres, so borders and labels
     # convert their metre dimensions to px on the map's own exponential
     # scale. 1 m = 2.455 px at z17 (lat 47°, 512px tiles), doubling per zoom.
     PX_PER_M_Z17 = 2.455
@@ -1456,10 +1456,10 @@ def build_station_layers(cfg) -> list:
     ]
 
     # Zoom bands (must mirror CLOSE_ZOOM_BANDS in 07_extract_stops.py):
-    # each pill exists once per band in the tiles; the style shows exactly
+    # each pill-arrow exists once per band in the tiles; the style shows exactly
     # one band per display-zoom range. Bands B and C share the z18 tiles
     # (z19+ overzooms them), so the zoom gates + band filter do the switch.
-    # Band A is the solid variant: whole pill in the line color with a white
+    # Band A is the solid variant: whole pill-arrow in the line color with a white
     # border, number only, no disc (step 07 emits none for it).
     #   (band, display minzoom, display maxzoom, dest text-max-width in em,
     #    body fill color, border color)
@@ -1486,7 +1486,7 @@ def build_station_layers(cfg) -> list:
 
         # 1 & 2. Pill-arrow body fill (line color for the solid band A,
         # white for the duo-tone bands) and border (~0.4 m, scales with
-        # the pill geometry): white on band A, line color on duo-tone.
+        # the pill-arrow geometry): white on band A, line color on duo-tone.
         # Band A paints border BELOW fill so that overlapping pill-arrows
         # at the same stop have their intruding borders occluded by the
         # neighbour's fill — clean unified silhouette instead of two
@@ -1584,8 +1584,8 @@ def build_station_layers(cfg) -> list:
                     # Left-aligned: step 07 places the anchor at the text's
                     # visual-left (reader-left) end of the text region.
                     # For non-flipped labels that's the disc side of the
-                    # pill; for flipped labels the +180° text-rotate makes
-                    # the reader-left end the pill's tip side.
+                    # pill-arrow; for flipped labels the +180° text-rotate makes
+                    # the reader-left end the pill-arrow's tip side.
                     "text-anchor": "left",
                     "text-justify": "left",
                 },
