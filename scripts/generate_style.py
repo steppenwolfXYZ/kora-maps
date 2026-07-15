@@ -1484,9 +1484,16 @@ def build_station_layers(cfg) -> list:
                 layer["maxzoom"] = band_max
             layers.append(layer)
 
-        # 1. Pill-arrow body fill (line color for the solid band A, white
-        # for the duo-tone bands).
-        _band_layer({
+        # 1 & 2. Pill-arrow body fill (line color for the solid band A,
+        # white for the duo-tone bands) and border (~0.4 m, scales with
+        # the pill geometry): white on band A, line color on duo-tone.
+        # Band A paints border BELOW fill so that overlapping pill-arrows
+        # at the same stop have their intruding borders occluded by the
+        # neighbour's fill — clean unified silhouette instead of two
+        # visible borders crossing each other. Bands B–E keep fill below
+        # border because their border IS the line color and needs to sit
+        # on top of the white body.
+        fill_layer = {
             "id": f"close-zoom-pill-arrow-fill-{band}",
             "type": "fill",
             "filter": ["all",
@@ -1496,11 +1503,8 @@ def build_station_layers(cfg) -> list:
                 "fill-color": body_fill,
                 "fill-antialias": True,
             }
-        })
-
-        # 2. Pill-arrow border (~0.4 m, scales with the pill geometry):
-        # white on the solid band A, line color on the duo-tone bands.
-        _band_layer({
+        }
+        border_layer = {
             "id": f"close-zoom-pill-arrow-border-{band}",
             "type": "line",
             "filter": ["all",
@@ -1511,7 +1515,13 @@ def build_station_layers(cfg) -> list:
                 "line-color": border_color,
                 "line-width": _metric_px(0.4),
             }
-        })
+        }
+        if band == "A":
+            _band_layer(border_layer)
+            _band_layer(fill_layer)
+        else:
+            _band_layer(fill_layer)
+            _band_layer(border_layer)
 
         # 3. Disc at the round end, filled with the line color (duo-tone
         # bands only; band A emits no disc features).
@@ -1572,7 +1582,10 @@ def build_station_layers(cfg) -> list:
                     "text-padding": 0,
                     "text-max-width": dest_max_width,
                     # Left-aligned: step 07 places the anchor at the text's
-                    # visual-left end of the text region (flip-aware).
+                    # visual-left (reader-left) end of the text region.
+                    # For non-flipped labels that's the disc side of the
+                    # pill; for flipped labels the +180° text-rotate makes
+                    # the reader-left end the pill's tip side.
                     "text-anchor": "left",
                     "text-justify": "left",
                 },

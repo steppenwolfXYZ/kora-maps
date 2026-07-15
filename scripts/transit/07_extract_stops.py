@@ -3805,12 +3805,19 @@ def write_debug_bars() -> None:
 
 # First-draft seed values. Refine after visual review.
 CLOSE_ZOOM_STACK_GAP_M         = 0.8    # polygon-edge gap; 0.4 m outside-border visible after the 0.4 m centered border
-CLOSE_ZOOM_LINE_GAP_M          = 2.0    # clear gap between line and pill inner edge
 CLOSE_ZOOM_DIR_CLUSTER_COS     = cos(radians(45.0))  # same-direction threshold
+# Transit-line casing formula from generate_style.py (z18+ endpoint,
+# clamped past z18): line-width in pixels = width_base * 4 + 2.
+# Bands B–E widen the side-anchored perp offset by half this width in
+# metres, evaluated at z19 (the anchor zoom), using the widest
+# width_base among the pill-arrows in the stack. 1 m = 2.455 * 4 px
+# at z19 (matches PX_PER_M_Z17 * 4 in generate_style.py).
+CLOSE_ZOOM_PX_PER_M_Z19        = 2.455 * 4.0
 CLOSE_ZOOM_BACKDROP_PAD_M      = 8.0    # outward padding of the station hull
 CLOSE_ZOOM_CURB_LATERAL_M      = 2.0    # same-curb: max lateral gap between stop position lines (tram/bus/regional_bus)
 CLOSE_ZOOM_CURB_LATERAL_RAIL_M = 1.0    # same-track: max lateral gap for rail (train + mountain rack rail)
 CLOSE_ZOOM_CURB_MERGE_FRAC     = 0.30   # same-curb: overlap share above which stops merge
+CLOSE_ZOOM_RAIL_CLUSTER_MIN_FRAC = 0.30 # rail per-track clustering: min overlap share (of the shorter extent) required alongside the 1 m lateral test — a shared switch node briefly touching two extents doesn't fuse whole platforms
 CLOSE_ZOOM_ARC_STEP_DEG        = 12.0   # hull corner rounding granularity
 # Label sizing (glyph height in metres; the style converts to px per zoom).
 # Uniform within a band — destinations are pre-wrapped at build time and get
@@ -3825,10 +3832,21 @@ try:
     GLYPH_WIDTHS = _gw_raw.get("regular") or {}
     GLYPH_WIDTH_DEFAULT = float(_gw_raw.get("default_regular",
                                             CLOSE_ZOOM_CHAR_W_EM))
+    GLYPH_WIDTHS_BOLD = _gw_raw.get("bold") or {}
+    GLYPH_WIDTH_DEFAULT_BOLD = float(_gw_raw.get("default_bold",
+                                                 CLOSE_ZOOM_CHAR_W_EM))
     del _gw_raw
 except (FileNotFoundError, ValueError):
     GLYPH_WIDTHS = {}
     GLYPH_WIDTH_DEFAULT = CLOSE_ZOOM_CHAR_W_EM
+    GLYPH_WIDTHS_BOLD = {}
+    GLYPH_WIDTH_DEFAULT_BOLD = CLOSE_ZOOM_CHAR_W_EM
+
+# Border width of the pill-arrow outline, in metres. Kept in sync with
+# generate_style.py's _metric_px(0.4) on the close-zoom-pill-arrow-border
+# layers. The shrink-to-fit ref logic uses this to compute the inner
+# container the number must sit inside.
+CLOSE_ZOOM_BORDER_M = 0.4
 
 # Zoom bands: each pill is emitted once per band with band-specific sizing;
 # the style gates them by display zoom (A: z17, B: z18, C: z19+). Bands B
@@ -3852,25 +3870,34 @@ except (FileNotFoundError, ValueError):
 # each band's native zoom (z18: 1 px ≈ 0.20 m, z19: 1 px ≈ 0.10 m) on top
 # of the previous ~0.2 m base inset.
 CLOSE_ZOOM_BANDS = {
-    "A": {"length_m": 10.0, "width_m": 5.0, "font_ref_m": 2.5,
+    "A": {"length_m": 10.0, "width_m": 5.6, "font_ref_m": 2.5,
           "font_dest_m": None, "max_lines": 0,
           "margin_disc_m": 0.0, "margin_tip_m": 0.0,
+          "line_gap_m": -0.5,
           "tipp_min": 15, "tipp_max": 17},
-    "B": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.8,
+    "B": {"length_m": 10.0, "width_m": 2.8, "font_ref_m": 1.8,
           "font_dest_m": 1.12, "max_lines": 1,
-          "margin_disc_m": 0.4, "margin_tip_m": -0.5,
+          "margin_disc_m": 0.2, "margin_tip_m": -0.5,
+          "flipped_shift_m": 0.3,
+          "line_gap_m": 0.5,
           "tipp_min": 18, "tipp_max": 18},
-    "C": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+    "C": {"length_m": 10.0, "width_m": 2.8, "font_ref_m": 1.6,
           "font_dest_m": 0.84, "max_lines": 2,
-          "margin_disc_m": 0.3, "margin_tip_m": -0.15,
+          "margin_disc_m": 0.15, "margin_tip_m": -0.15,
+          "flipped_shift_m": 0.3,
+          "line_gap_m": 0.5,
           "tipp_min": 18, "tipp_max": 18},
-    "D": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+    "D": {"length_m": 10.0, "width_m": 2.8, "font_ref_m": 1.6,
           "font_dest_m": 0.63, "max_lines": 3,
           "margin_disc_m": 0.15, "margin_tip_m": -0.08,
+          "flipped_shift_m": 0.2,
+          "line_gap_m": 0.5,
           "tipp_min": 18, "tipp_max": 18},
-    "E": {"length_m": 10.0, "width_m": 3.6, "font_ref_m": 1.6,
+    "E": {"length_m": 10.0, "width_m": 2.8, "font_ref_m": 1.6,
           "font_dest_m": 0.47, "max_lines": 4,
-          "margin_disc_m": 0.08, "margin_tip_m": -0.04,
+          "margin_disc_m": 0.15, "margin_tip_m": -0.04,
+          "flipped_shift_m": 0.15,
+          "line_gap_m": 0.5,
           "tipp_min": 18, "tipp_max": 18},
 }
 # Band whose geometry feeds the backdrop hull (largest, so it covers all).
@@ -3905,10 +3932,38 @@ CLOSE_ZOOM_HYBRID_TRAM_TOL_M = 2.0
 # in direction of travel). See close-zoom-stop-design.md § "Ferry".
 CLOSE_ZOOM_FERRY_OFFSET_M = 10.0
 
-# Terminal-snap tolerance for aerial / funicular: distance below which the
-# projected stop position is treated as sitting AT a polyline endpoint,
-# activating the endpoint-anchor rule.
-CLOSE_ZOOM_TERMINAL_SNAP_M = 3.0
+# Ferry pier clustering (close-zoom-stop-design.md § "Ferry pier
+# clustering"): two ferry lines at one pier merge into ONE rail-style
+# stack when their polylines run laterally within
+# CLOSE_ZOOM_FERRY_CLUSTER_LATERAL_M of each other for at least
+# CLOSE_ZOOM_FERRY_CLUSTER_MIN_FRAC of the shorter slice's length,
+# measured over the first CLOSE_ZOOM_FERRY_CLUSTER_WINDOW_M metres out
+# of the pier — same physical departure line, different GTFS routes.
+# Direction gate (same-side of 45°) still applies via
+# CLOSE_ZOOM_DIR_CLUSTER_COS below.
+CLOSE_ZOOM_FERRY_CLUSTER_WINDOW_M = float(
+    PILL_CFG.get("close_zoom_ferry_cluster_window_m", 50.0))
+CLOSE_ZOOM_FERRY_CLUSTER_LATERAL_M = float(
+    PILL_CFG.get("close_zoom_ferry_cluster_lateral_m", 1.0))
+CLOSE_ZOOM_FERRY_CLUSTER_MIN_FRAC = float(
+    PILL_CFG.get("close_zoom_ferry_cluster_min_frac", 0.5))
+
+# End-of-platform rail: shift the whole stack backward past the polyline
+# endpoint by this many metres so the fastest pill-arrow's rear cap covers
+# the transit line's rounded end-cap. The line-cap radius is line-width/2
+# in PIXELS, which converts to a metres-scale radius that grows as you zoom
+# out — invisible at z22, a visible stub at z17–z19. Fixed 4 m covers the
+# widest transit line (train) at the lowest close-zoom band.
+# See close-zoom-stop-design.md § "End-of-platform line-end overhang".
+CLOSE_ZOOM_LINE_END_OVERHANG_M = float(
+    PILL_CFG.get("close_zoom_line_end_overhang_m", 4.0))
+
+# Terminal-snap tolerance for mountain rail-style modes: distance from a
+# polyline endpoint below which the projected stop position is treated as
+# a terminal, activating the endpoint-anchor rule. Safety net for the
+# rare case where pfaedle's shape overshoots the terminal stop; the
+# primary check is the trip's first-stop index (idx == 0).
+CLOSE_ZOOM_TERMINAL_SNAP_M = 100.0
 
 # Modes whose variant priority (representative pick + pill stacking order)
 # is frequency rather than speed. Frequency is the better proxy for "the
@@ -4116,32 +4171,93 @@ def _slice_polyline(pts, dists, t0, t1):
     return out
 
 
-def _extent_overlap(extA, extB, cos_lat):
-    """Overlap metrics between two stop position lines. Returns
-    (fraction, lateral_m, ivA, ivB) — the shared length as a fraction of
-    the SHORTER line, the perpendicular separation sampled at the overlap
-    middle, and the overlap interval on each line's own arc — or None when
-    the lines don't overlap along their course."""
+def _extent_overlap(extA, extB, cos_lat, lateral_threshold_m=1.0,
+                     sample_step_m=2.0):
+    """How much of A and B actually run close (perpendicular distance below
+    lateral_threshold_m), not how far their projected footprints span.
+
+    The earlier projection-based metric — the range on A's arc between the
+    two projected positions of B's endpoints — mistook a single-point
+    X-crossing for large overlap: when two extents cross at one point (a
+    station-throat switch), B's endpoints project onto A on opposite sides
+    of the crossing, so the arc range spans across the crossing even
+    though the two never actually run together. Canonical failure: RE5 at
+    Bern platform 21 fusing with SBB platform 12A-C, meeting only at a
+    switch. The projection returned 50 % overlap with lateral 0.88 m at
+    the crossing; both gates passed and the whole rail cluster collapsed.
+
+    New metric: sample the SHORTER extent every sample_step_m along its
+    arc; for each sample compute the perpendicular distance to the LONGER
+    extent (nearest-point projection). Returns
+        (close_frac, mean_lateral, ivA, ivB)
+    - close_frac: fraction of shorter-extent samples whose distance is
+      below lateral_threshold_m. 0 for an X-crossing; 1 for two extents
+      truly running together over the shorter's whole length.
+    - mean_lateral: mean perpendicular distance across close samples, or
+      None if none.
+    - ivA, ivB: arc-length intervals on A and B covering the LONGEST
+      contiguous close range; (None, None) if no sample is close.
+    Returns None only when either extent has zero length."""
     dA = _cum_dist_m(extA)
     dB = _cum_dist_m(extB)
     if dA[-1] <= 0.0 or dB[-1] <= 0.0:
         return None
-    tb = [_project_meters(p[0], p[1], extA, dA) for p in (extB[0], extB[-1])]
-    lo_A, hi_A = max(0.0, min(tb)), min(dA[-1], max(tb))
-    if hi_A <= lo_A:
-        return None
-    ta = [_project_meters(p[0], p[1], extB, dB) for p in (extA[0], extA[-1])]
-    lo_B, hi_B = max(0.0, min(ta)), min(dB[-1], max(ta))
-    if hi_B <= lo_B:
-        return None
-    overlap = max(hi_A - lo_A, hi_B - lo_B)
-    frac = overlap / min(dA[-1], dB[-1])
-    Pm = _interp_at(extA, dA, (lo_A + hi_A) / 2.0)
-    Q = _interp_at(extB, dB, _project_meters(Pm[0], Pm[1], extB, dB))
-    dxm = (Q[0] - Pm[0]) * 111320.0 * cos_lat
-    dym = (Q[1] - Pm[1]) * 111320.0
-    lateral = sqrt(dxm * dxm + dym * dym)
-    return frac, lateral, (lo_A, hi_A), (lo_B, hi_B)
+    if dA[-1] <= dB[-1]:
+        e_s, d_s, e_l, d_l, short_is_A = extA, dA, extB, dB, True
+    else:
+        e_s, d_s, e_l, d_l, short_is_A = extB, dB, extA, dA, False
+    len_s = d_s[-1]
+    n_samples = max(20, min(200, int(len_s / sample_step_m) + 1))
+    step = len_s / (n_samples - 1)
+    samples = []
+    for k in range(n_samples):
+        t_short = k * step
+        p_s = _interp_at(e_s, d_s, t_short)
+        t_long = _project_meters(p_s[0], p_s[1], e_l, d_l)
+        p_l = _interp_at(e_l, d_l, t_long)
+        dxm = (p_l[0] - p_s[0]) * 111320.0 * cos_lat
+        dym = (p_l[1] - p_s[1]) * 111320.0
+        samples.append((t_short, t_long, sqrt(dxm * dxm + dym * dym)))
+    n_close = sum(1 for (_, _, lat) in samples if lat < lateral_threshold_m)
+    close_frac = n_close / n_samples if n_samples else 0.0
+    close_lats = [lat for (_, _, lat) in samples if lat < lateral_threshold_m]
+    mean_lateral = (sum(close_lats) / len(close_lats)) if close_lats else None
+    # Longest contiguous close run — arc intervals on shorter and longer.
+    best_lo_s = best_hi_s = None
+    best_lo_l = best_hi_l = None
+    best_len = 0.0
+    lo_s = lo_l = hi_l = None
+    for (t_s, t_l, lat) in samples:
+        if lat < lateral_threshold_m:
+            if lo_s is None:
+                lo_s = t_s
+                lo_l = hi_l = t_l
+            else:
+                lo_l = min(lo_l, t_l)
+                hi_l = max(hi_l, t_l)
+            hi_s = t_s
+        elif lo_s is not None:
+            run_len = hi_s - lo_s
+            if run_len > best_len:
+                best_lo_s, best_hi_s = lo_s, hi_s
+                best_lo_l, best_hi_l = lo_l, hi_l
+                best_len = run_len
+            lo_s = None
+    if lo_s is not None:
+        run_len = hi_s - lo_s
+        if run_len > best_len:
+            best_lo_s, best_hi_s = lo_s, hi_s
+            best_lo_l, best_hi_l = lo_l, hi_l
+    if best_lo_s is None:
+        iv_short = iv_long = None
+    else:
+        iv_short = (best_lo_s, best_hi_s)
+        iv_long = (best_lo_l, best_hi_l)
+    if short_is_A:
+        iv_A, iv_B = iv_short, iv_long
+    else:
+        iv_A, iv_B = iv_long, iv_short
+    return close_frac, mean_lateral, iv_A, iv_B
 
 
 def _union_extents(exts, cos_lat, chord_w=10.0):
@@ -4411,6 +4527,44 @@ def _text_width_em(s: str) -> float:
     (kerning ignored). Falls back to a flat average per character when
     glyph_widths.json is absent."""
     return sum(GLYPH_WIDTHS.get(ch, GLYPH_WIDTH_DEFAULT) for ch in s)
+
+
+def _text_width_em_bold(s: str) -> float:
+    """Bold-weight counterpart of `_text_width_em` — used to size the
+    close-zoom pill-arrow line number, which renders in Noto Sans Bold."""
+    return sum(GLYPH_WIDTHS_BOLD.get(ch, GLYPH_WIDTH_DEFAULT_BOLD) for ch in s)
+
+
+def _shrink_ref_font_m(ref_text: str, nominal_font_m: float,
+                       band_config: dict) -> float:
+    """Return the pill-arrow line-number glyph height in metres, shrunk
+    from `nominal_font_m` only as far as needed so the ref text fits its
+    container: the disc for duo-tone bands (B–E), the whole pill for the
+    solid band A. Short numbers keep the nominal size."""
+    if not ref_text or nominal_font_m <= 0:
+        return nominal_font_m
+    w_em = _text_width_em_bold(ref_text)
+    if w_em <= 0:
+        return nominal_font_m
+    border_half = CLOSE_ZOOM_BORDER_M / 2.0
+    solid = band_config["font_dest_m"] is None
+    if solid:
+        # Solid pill (band A): text sits horizontally along the pill's
+        # long axis inside an inner rectangle body_len × W (minus border on
+        # each side). Width-bound by the length axis, height-bound by the
+        # transverse axis. Slightly conservative vs the true stadium shape
+        # (the caps give a hair of extra room past the body length) but
+        # dead simple.
+        inner_len = band_config["length_m"] - 2.0 * border_half
+        inner_wid = band_config["width_m"] - 2.0 * border_half
+        return min(nominal_font_m, inner_len / w_em, inner_wid)
+    # Duo-tone bands (B–E): the ref sits inside the disc. Its bounding box
+    # of size (w_em * h) × h must inscribe in a circle of inner radius
+    # R_inner = R - border_half. Corners on the circle give
+    # (w_em·h)² + h² = (2·R_inner)² → h = 2·R_inner / sqrt(w_em² + 1).
+    R_inner = band_config["width_m"] / 2.0 - border_half
+    max_font = 2.0 * R_inner / sqrt(w_em * w_em + 1.0)
+    return min(nominal_font_m, max_font)
 
 
 def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
@@ -4774,15 +4928,21 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
                     and mo in CLOSE_ZOOM_RAIL_MOUNTAIN_ORIGINS)
                 or is_hybrid_rail_tram
             )
-            # Aerial/funicular terminal detection (close-zoom-stop-design.md
-            # § "Aerial + funicular terminals"): almost every cable car /
-            # funicular stop is one of the polyline's endpoints, and there
-            # the pill-arrow anchors AT the endpoint. Non-terminal stops
-            # (V-Bahn intermediate; funicular mid-stop) fall through to the
-            # normal centered rule.
+            # Mountain terminal detection (close-zoom-stop-design.md
+            # § "Aerial + funicular terminals"): at a terminal stop the
+            # pill-arrow anchors AT the polyline endpoint. Primary check
+            # is the trip's first-stop index — departures-only above
+            # skips idx == last_idx, so idx == 0 is the only terminal
+            # position that reaches here. The metric fallback handles
+            # rare pfaedle shapes that overshoot the terminal stop.
+            # Applies to aerial, funicular, and rack / rebucketed_rail
+            # cog railways; non-terminal mid-stops (V-Bahn intermediate,
+            # funicular mid-stops) fall through to the centered rule.
             is_extentless_terminal = False
-            if mode == "mountain" and mo in ("aerial", "funicular"):
-                if (t_stop <= CLOSE_ZOOM_TERMINAL_SNAP_M
+            if mode == "mountain" and mo in ("aerial", "funicular", "rack",
+                                              "rebucketed_rail"):
+                if (idx == 0
+                        or t_stop <= CLOSE_ZOOM_TERMINAL_SNAP_M
                         or dists[-1] - t_stop <= CLOSE_ZOOM_TERMINAL_SNAP_M):
                     is_extentless_terminal = True
             # Full platform extent along the line (atlas length; same logic
@@ -4806,6 +4966,7 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
                 "agency_id":              line.get("agency_id", ""),
                 "speed_kmh":              line.get("speed_kmh") or 0.0,
                 "f_weighted":             line.get("f_weighted") or 0.0,
+                "width_base":             float(line.get("width_base") or 0.0),
                 "polyline":               polyline,
                 "dists":                  dists,
                 "t_stop":                 t_stop,
@@ -4966,19 +5127,22 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 path = c
         return path
 
-    def _build_group_recs(pool_sids):
+    def _build_group_recs(pool_sids, visits_override=None):
         """Per track (list of stop_ids pooled into one queue for rail
-        platform-sector merge; a one-item list for every other case):
+        per-track clustering; a one-item list for every other case):
         variant collapse → direction groups → recs carrying the group's
         chosen path and its stop position line.
 
-        Rail platform-sector merge (close-zoom-stop-design.md § Rail
-        platform-sector merge): stop_ids at one parent whose platform_code
-        shares the same numeric leading-digit run refer to one physical
-        track; their visits pool into one queue on the full platform
-        extent. The rep sid — used for atlas length / extent lookups — is
-        the pooled sid with the longest atlas length, so the queue rides
-        the full platform, not a sector's sub-extent.
+        Rail per-track clustering (close-zoom-stop-design.md § Rail
+        per-track clustering): rail visits at one parent are clustered by
+        extent shape before entering here. When called from that path,
+        `visits_override` carries the cluster's visits explicitly and
+        `pool_sids` is the set of distinct sids they occupy — a cluster
+        may span multiple GTFS platform_codes (pfaedle collapsed both
+        directions onto one shape) or the same platform_code may split
+        across two clusters (pfaedle drew the two directions on distinct
+        physical tracks). The rep sid — used for atlas length / extent
+        lookups — is the pooled sid with the longest atlas length.
 
         Rail direction ordering (close-zoom-stop-design.md § Rail): all
         rail clusters at one track form ONE stack. Same-direction pills
@@ -4987,11 +5151,21 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
         outward-most position, so no two adjacent pills point at each
         other and each sub-group's chevrons point outward from the
         platform middle."""
-        visits = []
-        for s in pool_sids:
-            visits.extend(per_stop_visits.get(s, []))
+        if visits_override is not None:
+            visits = list(visits_override)
+        else:
+            visits = []
+            for s in pool_sids:
+                visits.extend(per_stop_visits.get(s, []))
         if not visits:
             return []
+        # When a cluster is given, keep only the stop_lines entries for
+        # (osm_id, sid) pairs the cluster actually contains — otherwise the
+        # backbone preference cascade would draw candidates from features
+        # in a neighbouring cluster.
+        line_filter = None
+        if visits_override is not None:
+            line_filter = {(v["osm_id"], v["sid"]) for v in visits}
         # Rep sid for extent / atlas-length lookups. For a rail pool, the
         # longest atlas length is the full-platform stop_id (a "7" sid
         # over a "7A-C" sid); solo sids pick themselves.
@@ -5030,20 +5204,22 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             else:
                 path = _rightmost(group)
 
-            # Backbone: the group's stop position line. Prefer the extent
-            # the stop/dot placement computed for the path line itself; a
-            # terminal departure has none (its entry is skip_first-skipped),
-            # so fall back to another extent at this stop — best is the
-            # same line's ARRIVAL counterpart (same ref + agency), whose
-            # geometry ends at the stop and covers exactly the ground
-            # behind it where the queue stands. No direction gate: at
+            # Backbone: the group's stop position line. Non-rail: the
+            # path's OWN extent comes first — since the stop-extent fill
+            # gives terminal departures real, correctly-oriented rear
+            # ground, a departure with ground is its own best course. The
+            # pool (best: the same line's ARRIVAL counterpart, whose
+            # geometry ends at the stop and covers the ground behind it)
+            # is only the fallback when the departure has none — a
+            # borrowed course carries the donor's orientation (Bern
+            # Weissenbühl: the same-sid arrival extent pointed the 28's
+            # pill into the terminus even though the departure had its
+            # own filled ground). No direction gate on the fallback: at
             # corner terminals the arrival approaches on a different
-            # street, near-perpendicular to the departure tangent, and
-            # that is precisely the ground the queue belongs on. Last
-            # resort: compute the extent from the path's own geometry
-            # (still fitted, never extrapolated). For a rail pool, the
-            # search widens across every pooled sid's stop_lines and, at
-            # equal key rank, prefers the LONGEST extent — the full
+            # street, near-perpendicular, and that is precisely the
+            # ground the queue belongs on. For a rail pool, the search
+            # stays pool-first across every pooled sid's stop_lines and,
+            # at equal key rank, prefers the LONGEST extent — the full
             # platform beats any sector's sub-extent. Rail extents are
             # then normalised to align with the fastest cluster's tangent
             # (`_orient_rail_extent`) so a borrowed slice running the
@@ -5052,24 +5228,35 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             # chevron on the platform.
             pool_lines = []
             for s in pool_sids:
-                pool_lines.extend(stop_lines.get(s, []))
+                for ln in stop_lines.get(s, []):
+                    if line_filter is None or (ln["osm_id"], s) in line_filter:
+                        pool_lines.append(ln)
             ext = None
+            if not rail_pool:
+                atlas_len = (stop_attrs.get(rep_sid, {}) or {}).get("length")
+                own = _platform_extent(
+                    path["stop_lon"], path["stop_lat"], path["polyline"],
+                    path["mode"], atlas_len, PILL_CFG,
+                    mountain_origin=path["mountain_origin"])
+                if own is not None and len(own) >= 2:
+                    ext = own
             best_key = None
             best_len = -1.0
-            for cand in pool_lines:
-                if cand["osm_id"] == path["osm_id"] and not rail_pool:
-                    ext = cand["extent"]
-                    break
-                key = ((cand["ref"], cand["agency_id"])
-                       == (path["ref"], path["agency_id"]),
-                       cand["mode"] == path["mode"],
-                       cand["osm_id"] == path["osm_id"])
-                cand_len = _cum_dist_m(cand["extent"])[-1] if cand["extent"] and len(cand["extent"]) >= 2 else 0.0
-                if (best_key is None or key > best_key
-                        or (key == best_key and cand_len > best_len)):
-                    best_key = key
-                    best_len = cand_len
-                    ext = cand["extent"]
+            if ext is None:
+                for cand in pool_lines:
+                    if cand["osm_id"] == path["osm_id"] and not rail_pool:
+                        ext = cand["extent"]
+                        break
+                    key = ((cand["ref"], cand["agency_id"])
+                           == (path["ref"], path["agency_id"]),
+                           cand["mode"] == path["mode"],
+                           cand["osm_id"] == path["osm_id"])
+                    cand_len = _cum_dist_m(cand["extent"])[-1] if cand["extent"] and len(cand["extent"]) >= 2 else 0.0
+                    if (best_key is None or key > best_key
+                            or (key == best_key and cand_len > best_len)):
+                        best_key = key
+                        best_len = cand_len
+                        ext = cand["extent"]
             if ext is None:
                 atlas_len = (stop_attrs.get(rep_sid, {}) or {}).get("length")
                 ext = _platform_extent(
@@ -5078,8 +5265,39 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     end_of_platform=(path["osm_id"], rep_sid)
                                     in end_of_platform_pairs,
                     mountain_origin=path["mountain_origin"])
+            # Mountain terminal (funicular / rack / rebucketed_rail): the
+            # concept doc requires the pill-arrow at the polyline endpoint,
+            # not at the middle of a platform-length slice. _platform_extent
+            # returns an end-side slice whose extent[0] sits L metres
+            # inward, so eop_rail anchors the pill inside the polyline
+            # rather than at its end. Discard here so the extentless-
+            # terminal synthesis branch below re-slices from the endpoint
+            # inward with the correct extent[0] = endpoint orientation.
+            # See close-zoom-stop-design.md § "Aerial + funicular terminals".
+            if (rail_pool and path.get("is_extentless_terminal")
+                    and path["mountain_origin"] in
+                    ("funicular", "rack", "rebucketed_rail")):
+                ext = None
             fwd_synth = False
             extentless_kind = None
+            if not rail_pool and ext is not None and len(ext) >= 2:
+                # Dead-end terminus course (close-zoom-stop-design.md):
+                # every pill in the queue has zero rear ground on its own
+                # line and the borrowed stop position line points against
+                # the departures (near-180° — an arrival doubling back at
+                # a dead-end road). Using it as the course would fold the
+                # queue around the road end (Egg (Vorarlberg) Zentrum), so
+                # it is discarded — the synth path below builds the course
+                # from the departure's own forward geometry instead, same
+                # as when no extent exists at all. Corner terminals (~90°)
+                # fail the opposition test; loop termini have self-borrowed
+                # rear ground and fail the zero-ground test.
+                if all(v["t_stop"] < 0.5 for v in group):
+                    ax = _unit_chord_metric(ext[0], ext[-1], path["cos_lat"])
+                    if ax is not None and all(
+                            (ax[0] * v["tangent"][0] + ax[1] * v["tangent"][1])
+                            < -CLOSE_ZOOM_DIR_CLUSTER_COS for v in group):
+                        ext = None
             if (ext is None or len(ext) < 2) and not rail_pool:
                 # Terminal platform stretch (close-zoom-stop-design.md
                 # § anchor): no rear ground exists at all — the extent
@@ -5110,9 +5328,14 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     pier_t = _ferry_pier_t_on_line(
                         path["stop_lon"], path["stop_lat"],
                         p_poly, p_dists)
+                    # Solo-ferry de-overlap stagger (see the ferry pier
+                    # clustering pass): shifts the whole extent forward
+                    # along this ferry's own polyline so the pill lands
+                    # past any earlier-placed solo ferry pill.
+                    stagger = float(path.get("ferry_extra_m", 0.0))
                     t0 = pier_t
                     t1 = min(poly_max, pier_t + L_reach
-                             + CLOSE_ZOOM_FERRY_OFFSET_M)
+                             + CLOSE_ZOOM_FERRY_OFFSET_M + stagger)
                     if t1 - t0 >= 0.5:
                         ext = _slice_polyline(p_poly, p_dists, t0, t1)
                         extentless_kind = "ferry"
@@ -5195,54 +5418,224 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
 
     for parent, parent_sids in per_parent_sids.items():
         recs = []
-        # Rail platform-sector merge: rail sids at this parent whose
-        # platform_code shares a numeric leading-digit run pool into one
-        # track queue; non-rail sids and rail sids without a numeric
-        # prefix stay solo.
-        track_pool: dict = defaultdict(list)
+        # Rail per-track clustering (close-zoom-stop-design.md § Rail
+        # per-track clustering): rail visits with extents cluster by
+        # lateral proximity — the extents must run within 1 m of each
+        # other over at least CLOSE_ZOOM_RAIL_CLUSTER_MIN_FRAC of the
+        # shorter extent's length — transitive via union-find, and each
+        # cluster becomes one queue on one physical track. The fraction
+        # gate is what prevents a brief crossing at a station-throat
+        # switch node (lateral ≈ 0 at the shared point but overlap is
+        # only a few metres) from fusing whole platforms — Bern's SBB
+        # tracks and the RBS underground tracks cross overhead but their
+        # extents run parallel for only a tiny stretch. GTFS
+        # platform_code is not consulted for grouping. All other visits
+        # — non-rail, or aerial mountain without a fitted extent — stay
+        # sid-solo and go through the non-rail same-curb resolution below
+        # where applicable. Ferries and aerials are keyed per-line rather
+        # than per-sid (see the elif branches), so multiple lines at the
+        # same pier / boarding station never share a stack.
+        pools: dict = defaultdict(list)
+        cluster_candidates = []
+        ferry_visits = []
         for sid in sorted(parent_sids):
             visits = per_stop_visits.get(sid, [])
             if not visits:
                 continue
-            code = (stop_meta.get(sid, {}) or {}).get("platform_code", "")
-            prefix = _platform_number(code)
             is_rail = any(v["is_rail_like"] for v in visits)
-            if is_rail and prefix:
-                track_pool[("P:" + prefix,)].append(sid)
-            else:
-                track_pool[("S:" + sid,)].append(sid)
-        for key in sorted(track_pool):
-            recs.extend(_build_group_recs(track_pool[key]))
+            for v in visits:
+                if (is_rail
+                        and v.get("extent")
+                        and len(v["extent"]) >= 2
+                        and v["is_rail_like"]):
+                    cluster_candidates.append(v)
+                elif (v["mode"] == "mountain"
+                      and v.get("mountain_origin") == "aerial"):
+                    # Aerials never pool (close-zoom-stop-design.md
+                    # § "Aerials never pool"). Sibling aerials commonly
+                    # list the same GTFS parent stop_id (Grindelwald
+                    # Terminal: GGM + Eiger Express both use sid
+                    # 8505226); pooling by sid would drag the slower
+                    # aerial onto the fastest's polyline. Key by
+                    # (osm_id, sid) so each aerial line gets its own
+                    # solo stack anchored on its own polyline endpoint.
+                    pools[("A:" + str(v["osm_id"]) + ":" + sid,)].append(v)
+                elif v["mode"] == "ferry":
+                    # Deferred to the ferry pier clustering pass below —
+                    # ferries at a parent need to be considered together
+                    # (both for merge and for solo de-overlap staggering).
+                    ferry_visits.append(v)
+                else:
+                    pools[("S:" + sid,)].append(v)
+        # ── Ferry pier clustering + solo de-overlap ────────────────────────
+        # close-zoom-stop-design.md § "Ferries never pool" and § "Ferry
+        # pier clustering". Two rules act on the ferry visits at this
+        # parent, in order:
+        #   1. Merge: ferries whose polylines run laterally within
+        #      CLOSE_ZOOM_FERRY_CLUSTER_LATERAL_M for at least
+        #      CLOSE_ZOOM_FERRY_CLUSTER_MIN_FRAC of the shorter slice
+        #      (measured over the first CLOSE_ZOOM_FERRY_CLUSTER_WINDOW_M
+        #      m out of the pier, and pointing the same way within
+        #      CLOSE_ZOOM_DIR_CLUSTER_COS) share ONE rail-style pool on
+        #      the fastest ferry's polyline — pill-arrows queue behind
+        #      each other on the shared line. Canonical case: two ferry
+        #      routes leaving Spiez Schiffstation both toward Thun on the
+        #      same OSM ferry way.
+        #   2. Solo de-overlap: solo ferries (each on their own polyline)
+        #      whose pill-arrows would land world-close to another solo
+        #      ferry's — the lines diverge but the pills at
+        #      pier + CLOSE_ZOOM_FERRY_OFFSET_M still collide — are shifted
+        #      further along their own polyline by (max_L +
+        #      CLOSE_ZOOM_STACK_GAP_M) increments until they clear.
+        #      Fastest ferry stays at pier + FERRY_OFFSET; slower ones
+        #      take turns further out.
+        if ferry_visits:
+            nf = len(ferry_visits)
+            uf = list(range(nf))
 
-        # ── Same-curb / same-track resolution ────────────────────────────
-        # Non-rail canonical case is Bern, Schanzenstrasse: southbound
-        # city bus 20 at :10001 and southbound regional 100/101 at :10000,
-        # a few metres apart on one curb. Rail canonical case is Bern's
-        # mainline tracks, whose per-track queues (already pooled by the
-        # sector merge above) get drawn on top of each other when pfaedle
-        # routes different tracks onto essentially the same axis. Rail
-        # uses a tighter lateral tolerance (1 m vs 2 m non-rail) and the
-        # abs(dot) direction check — opposite-direction rail queues on
-        # the same track have antiparallel tangents but still count as
-        # "same axis". Rail-and-non-rail never merge (different physical
-        # infrastructure regardless of shape convergence).
+            def _fc_find(i):
+                while uf[i] != i:
+                    uf[i] = uf[uf[i]]
+                    i = uf[i]
+                return i
+
+            # Per-ferry pier position and forward slice used for clustering.
+            for v in ferry_visits:
+                poly, dists = v["polyline"], v["dists"]
+                v["_pier_t"] = _ferry_pier_t_on_line(
+                    v["stop_lon"], v["stop_lat"], poly, dists)
+                t_end = min(dists[-1],
+                            v["_pier_t"] + CLOSE_ZOOM_FERRY_CLUSTER_WINDOW_M)
+                if t_end - v["_pier_t"] >= 0.5:
+                    v["_pier_slice"] = _slice_polyline(
+                        poly, dists, v["_pier_t"], t_end)
+                else:
+                    v["_pier_slice"] = None
+            for i in range(nf):
+                sA = ferry_visits[i].get("_pier_slice")
+                if sA is None or len(sA) < 2:
+                    continue
+                for j in range(i + 1, nf):
+                    sB = ferry_visits[j].get("_pier_slice")
+                    if sB is None or len(sB) < 2:
+                        continue
+                    dot = (ferry_visits[i]["tangent"][0]
+                            * ferry_visits[j]["tangent"][0]
+                           + ferry_visits[i]["tangent"][1]
+                            * ferry_visits[j]["tangent"][1])
+                    if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
+                        continue
+                    m = _extent_overlap(
+                        sA, sB, ferry_visits[i]["cos_lat"],
+                        lateral_threshold_m=CLOSE_ZOOM_FERRY_CLUSTER_LATERAL_M)
+                    if m is None:
+                        continue
+                    if m[0] >= CLOSE_ZOOM_FERRY_CLUSTER_MIN_FRAC:
+                        uf[_fc_find(i)] = _fc_find(j)
+            clusters_by_root: dict = defaultdict(list)
+            for i, v in enumerate(ferry_visits):
+                clusters_by_root[_fc_find(i)].append(v)
+            solo_ferries = []
+            for root, members in clusters_by_root.items():
+                if len(members) >= 2:
+                    pools[("FM:" + str(root),)].extend(members)
+                else:
+                    solo_ferries.append(members[0])
+                    pools[("F:" + str(members[0]["osm_id"])
+                           + ":" + members[0]["sid"],)].append(members[0])
+            # Solo de-overlap: place fastest first at pier + FERRY_OFFSET,
+            # then each subsequent solo ferry gets an extra `k * step`
+            # forward along its OWN polyline where k is the smallest
+            # non-negative integer that separates its pill-center from
+            # every already-placed pill by at least `step`. `step` is one
+            # pill length (widest band) plus the pill gap, giving the
+            # same visual spacing a same-line stack would use.
+            if len(solo_ferries) >= 2:
+                max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
+                step = max_L + CLOSE_ZOOM_STACK_GAP_M
+                # Fastest first (matches _variant_priority for rail-style
+                # modes — speed_kmh).
+                solo_ferries.sort(
+                    key=lambda v: -(v.get("speed_kmh") or 0.0))
+                placed = []  # list of (lon, lat, cos_lat)
+                for v in solo_ferries:
+                    poly, dists = v["polyline"], v["dists"]
+                    # Natural pill-center on this ferry's own polyline:
+                    # pier + FERRY_OFFSET + max_L/2. Extra staggering
+                    # shifts by k*step further along the polyline.
+                    base = v["_pier_t"] + CLOSE_ZOOM_FERRY_OFFSET_M + max_L / 2.0
+                    k = 0
+                    while True:
+                        t = min(dists[-1], base + k * step)
+                        p = _interp_at(poly, dists, t)
+                        clear = True
+                        for (px, py, cl) in placed:
+                            dxm = (p[0] - px) * 111320.0 * cl
+                            dym = (p[1] - py) * 111320.0
+                            if sqrt(dxm * dxm + dym * dym) < step:
+                                clear = False
+                                break
+                        # Stop when clear, or when further stepping is
+                        # capped by the polyline end (no room to shift).
+                        if clear or t >= dists[-1]:
+                            v["ferry_extra_m"] = k * step
+                            placed.append((p[0], p[1], v["cos_lat"]))
+                            break
+                        k += 1
+        if cluster_candidates:
+            n = len(cluster_candidates)
+            cl_uf = list(range(n))
+
+            def _cl_find(i):
+                while cl_uf[i] != i:
+                    cl_uf[i] = cl_uf[cl_uf[i]]
+                    i = cl_uf[i]
+                return i
+
+            for i in range(n):
+                extA = cluster_candidates[i]["extent"]
+                for j in range(i + 1, n):
+                    extB = cluster_candidates[j]["extent"]
+                    m = _extent_overlap(
+                        extA, extB, cluster_candidates[i]["cos_lat"],
+                        lateral_threshold_m=CLOSE_ZOOM_CURB_LATERAL_RAIL_M)
+                    if m is None:
+                        continue
+                    if m[0] >= CLOSE_ZOOM_RAIL_CLUSTER_MIN_FRAC:
+                        cl_uf[_cl_find(i)] = _cl_find(j)
+            for i in range(n):
+                pools[("T:" + str(_cl_find(i)),)].append(
+                    cluster_candidates[i])
+        for key in sorted(pools):
+            pool_visits = pools[key]
+            pool_sids = sorted({v["sid"] for v in pool_visits})
+            recs.extend(_build_group_recs(pool_sids,
+                                          visits_override=pool_visits))
+
+        # ── Same-curb resolution (non-rail only) ─────────────────────────
+        # Canonical case: Bern, Schanzenstrasse — southbound city bus 20
+        # at :10001 and southbound regional 100/101 at :10000, a few
+        # metres apart on one curb. Rail is handled entirely by the
+        # per-track clustering pass above and returns None here.
         def _same_curb(a, b):
             a_rail = a["path"]["is_rail_like"]
             b_rail = b["path"]["is_rail_like"]
             if a_rail != b_rail:
                 return None
+            if a_rail:
+                # Rail is handled upstream by per-track clustering, which
+                # already used the 1 m gate on the per-visit extents.
+                return None
             dot = (a["path"]["tangent"][0] * b["path"]["tangent"][0]
                    + a["path"]["tangent"][1] * b["path"]["tangent"][1])
-            if a_rail:
-                if abs(dot) < CLOSE_ZOOM_DIR_CLUSTER_COS:
-                    return None
-                lat_tol = CLOSE_ZOOM_CURB_LATERAL_RAIL_M
-            else:
-                if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
-                    return None
-                lat_tol = CLOSE_ZOOM_CURB_LATERAL_M
-            m = _extent_overlap(a["ext"], b["ext"], a["path"]["cos_lat"])
-            if m is None or m[1] >= lat_tol:
+            if dot < CLOSE_ZOOM_DIR_CLUSTER_COS:
+                return None
+            lat_tol = CLOSE_ZOOM_CURB_LATERAL_M
+            m = _extent_overlap(a["ext"], b["ext"], a["path"]["cos_lat"],
+                                lateral_threshold_m=lat_tol)
+            # No close samples ⇒ no shared curb (avoids feeding None
+            # intervals into _shorten_curb downstream).
+            if m is None or m[0] <= 0.0 or m[2] is None:
                 return None
             return m
 
@@ -5392,18 +5785,24 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             if built is None:
                 continue
             course, cdists, t_front, t_mid, t_rear = built
+            # Widest transit-line width_base among variants in this stack.
+            # Used by side-anchored bands to widen the perp offset by half
+            # the visible line width so the pill-arrow's inner edge sits
+            # just past the line's edge instead of eating into it.
+            group_max_wb = max((v.get("width_base") or 0.0) for v in group)
             for k, c in enumerate(group):
                 work.append((c, path, course, cdists, t_front, t_mid, t_rear,
                              rec["cut_pts"], k, len(group),
                              stretch, rear_ground, eop_rail,
-                             extentless_kind))
+                             extentless_kind, group_max_wb))
 
         # Offset placement tracks, shared per (group course, band, side) —
         # valid within this station only (courses are per-group objects).
         track_cache: dict = {}
 
         for (c, path, course, cdists, t_front, t_mid, t_rear, cut_pts, k, n,
-             stretch, rear_ground, eop_rail, extentless_kind) in work:
+             stretch, rear_ground, eop_rail, extentless_kind,
+             group_max_wb) in work:
             # Everything is placed along the group's queue course (stop
             # position line + straight extensions), not the raw line.
             polyline, dists = course, cdists
@@ -5424,7 +5823,13 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
             else:
                 t_stop = t_front
             if extentless_kind == "ferry":
-                t_stop = t_stop + CLOSE_ZOOM_FERRY_OFFSET_M
+                # Base pier offset + optional solo-ferry stagger (set by
+                # the ferry pier clustering + de-overlap pass) so a solo
+                # ferry whose pill would otherwise land on top of another
+                # sits further along its own polyline. Merged ferry pool
+                # members carry no `ferry_extra_m`, so stagger is 0.
+                t_stop = (t_stop + CLOSE_ZOOM_FERRY_OFFSET_M
+                          + float(c.get("ferry_extra_m", 0.0)))
             # Merged same-curb groups pool pills from several platform
             # ids; each pill keeps its own.
             sid = c["sid"]
@@ -5471,7 +5876,17 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                 # Offset of the pill CENTER line from the path: consistent
                 # clear gap between the line and the pill's inner edge, on
                 # the side chosen above.
-                perp = side * (CLOSE_ZOOM_LINE_GAP_M + W / 2.0)
+                # Bands B–E widen the offset by half the widest transit
+                # line in the stack (evaluated at z19, the anchor zoom)
+                # so the pill-arrow's inner edge sits past the visible
+                # line edge instead of eating into it. Band A is exempt
+                # — it's designed to sit on / over the line.
+                if band_id == "A":
+                    line_half_m = 0.0
+                else:
+                    line_px_z19 = group_max_wb * 4.0 + 2.0
+                    line_half_m = (line_px_z19 / 2.0) / CLOSE_ZOOM_PX_PER_M_Z19
+                perp = side * (bc["line_gap_m"] + line_half_m + W / 2.0)
 
                 # Placement track: the path shifted sideways by perp — the
                 # curve the pill centers actually sit on. Stepping, spans
@@ -5502,10 +5917,15 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
 
                 # Track span this pill occupies.
                 if c["is_rail_like"] and eop_rail:
-                    # End-of-platform: fastest (k=0) rear cap at the buffer
-                    # (o_stop), body/tip extending inward. Slower pills
-                    # queue further inward by one stack_step each.
-                    o_center = o_stop + k * stack_step + L / 2.0
+                    # End-of-platform: fastest (k=0) rear cap sits at the
+                    # buffer (o_stop), shifted backward past the polyline
+                    # endpoint by CLOSE_ZOOM_LINE_END_OVERHANG_M so the
+                    # pill covers MapLibre's zoom-scaled round line-cap
+                    # (see close-zoom-stop-design.md § "End-of-platform
+                    # line-end overhang"). Body/tip extend inward. Slower
+                    # pills queue further inward by one stack_step each.
+                    o_center = (o_stop + k * stack_step + L / 2.0
+                                - CLOSE_ZOOM_LINE_END_OVERHANG_M)
                 elif c["is_rail_like"]:
                     # Stack centered on the platform middle along the track;
                     # fastest (k=0) sits furthest forward.
@@ -5680,12 +6100,16 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                     })
 
                 # Line number: centered in the disc, or in the whole pill
-                # for solid bands.
+                # for solid bands. Wide refs (e.g. "IR15") shrink per feature
+                # just enough to fit their container; short refs keep the
+                # band's nominal size.
                 if ref_text and bc["font_ref_m"]:
                     if solid:
                         ref_x, ref_y = _frame_pt(0.0, 0.0)
                     else:
                         ref_x, ref_y = rear_cx, rear_cy
+                    ref_font_m = _shrink_ref_font_m(
+                        ref_text, bc["font_ref_m"], bc)
                     features.append({
                         "type": "Feature",
                         "tippecanoe": dict(tipp),
@@ -5695,17 +6119,31 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                             **common,
                             "feature_type": "pill_ref",
                             "band":         band_id,
-                            "font_m":       round(bc["font_ref_m"], 3),
+                            "font_m":       round(ref_font_m, 3),
                             "text_rot":     round(text_rot, 2),
                         },
                     })
 
-                # Destination, left-aligned in the text region: the anchor
-                # sits at the region end that is the text's visual left —
-                # the disc side normally, the neck side when the label is
-                # flipped (the style anchors the text's left edge here).
+                # Destination text: anchor placed at the text's reader-left
+                # edge in both flip states so multi-line text visually
+                # left-aligns for the reader in both orientations. That end
+                # is the pill's disc side for non-flipped labels (text
+                # reads toward the tip) and the pill's tip side for
+                # flipped labels (text reads toward the disc, after the
+                # +180° flip). margin_disc_m controls the padding between
+                # disc and non-flipped text start; margin_tip_m sets the
+                # wrap-budget end (region_end) for both flip states and
+                # the flipped anchor's base position at the neck. Short
+                # flipped labels would then sit at the tip and leave a
+                # visible gap between text end and disc; flipped_shift_m
+                # shifts the flipped anchor toward the disc by that many
+                # metres to close the gap. Non-flipped anchor and the
+                # shared wrap budget are unaffected.
                 if dest_text:
-                    x_text = region_end if flipped else region_start
+                    if flipped:
+                        x_text = region_end - bc["flipped_shift_m"]
+                    else:
+                        x_text = region_start
                     tx, ty = _frame_pt(x_text, 0.0)
                     features.append({
                         "type": "Feature",
@@ -8670,20 +9108,63 @@ def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
 
 def merge_clusters_by_parent_station(clusters):
     """
-    Merge spatially separate clusters that share the same parent_station into
-    one super-cluster so make_pill_features can connect them with pills and connectors.
-    Clusters with no parent_station are left as-is.
+    Merge spatially separate clusters into one super-cluster whenever they
+    share any GTFS parent_station. Enforces the same-parent invariant from
+    `pill-rendering.md` § "Pill grouping": every stop_id under one parent
+    UIC lands in a single pill cluster, regardless of what foreign parents
+    happen to sit in the same spatial cluster.
+
+    Union-find over cluster indices: two clusters are unified iff they
+    share at least one parent_station. Foreign-parent stops carried into a
+    spatial cluster (e.g. an aerial dot pulled into a rail cluster because
+    same-line guard couldn't reject it) propagate the merge to every other
+    cluster containing that foreign parent, which is intended — otherwise
+    that parent's stops would be split. Clusters with no parent_station on
+    any member are left as-is.
+
+    Deterministic: cluster iteration follows the input order and per-cluster
+    parents are visited in sorted order, so the output is independent of
+    Python's per-process set iteration order (which depends on
+    PYTHONHASHSEED and is randomised by default).
     """
-    by_parent = defaultdict(list)
-    no_parent = []
+    with_parents: list[tuple[list, list[str]]] = []
+    no_parent: list[list] = []
     for cluster in clusters:
-        parents = [s.get("parent_station", "") for s in cluster if s.get("parent_station", "")]
+        parents = sorted({s.get("parent_station", "") for s in cluster
+                          if s.get("parent_station", "")})
         if parents:
-            dominant = max(set(parents), key=parents.count)
-            by_parent[dominant].extend(cluster)
+            with_parents.append((cluster, parents))
         else:
             no_parent.append(cluster)
-    return list(by_parent.values()) + no_parent
+
+    n = len(with_parents)
+    uf = list(range(n))
+
+    def find(x: int) -> int:
+        while uf[x] != x:
+            uf[x] = uf[uf[x]]
+            x = uf[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            uf[ra] = rb
+
+    seen_parent: dict[str, int] = {}
+    for i, (_, parents) in enumerate(with_parents):
+        for p in parents:
+            j = seen_parent.get(p)
+            if j is None:
+                seen_parent[p] = i
+            else:
+                union(i, j)
+
+    groups: dict[int, list] = defaultdict(list)
+    for i, (cluster, _) in enumerate(with_parents):
+        groups[find(i)].extend(cluster)
+
+    return list(groups.values()) + no_parent
 
 
 # =============================================================================

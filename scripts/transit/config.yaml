@@ -8,7 +8,7 @@ debug:
   # clickable GTFS-coord dots, and thick white max-stab bars. Development-time
   # visual aids — flip to false for production-style rendering. Read by
   # scripts/generate_style.py.
-  debug_overlay: true
+  debug_overlay: false
 
 # ── OSM bbox extract for pfaedle ─────────────────────────────────────────────
 # Switzerland bounding box with a small buffer. Pfaedle never routes outside
@@ -167,6 +167,33 @@ pill_rendering:
   # appended (short-but-true beats long-but-wrong).
   road_match_radius_m: 5.0
   road_match_max_tangent_diff_deg: 45.0
+  # ── Close-zoom line-end overhang ─────────────────────────────────────────
+  # At end-of-platform rail terminals the fastest pill-arrow's rear cap sits
+  # exactly on the polyline endpoint (extent[0] = polyline[0]). MapLibre draws
+  # the transit line with a round line-cap of radius line-width/2 in PIXELS,
+  # so the line's cap overhangs the polyline endpoint by a zoom-dependent
+  # number of metres — invisible at z22 (thin line vs. large pill), a visible
+  # stub at z17–z19 where the metres-per-pixel ratio makes the cap comparable
+  # to the pill's own rear-cap radius. Shifting the whole eop_rail stack
+  # backward by this many metres puts the pill's rear cap past the polyline
+  # endpoint by more than the worst-case line-cap radius, hiding the stub at
+  # every close-zoom band. Sized to cover train (widest transit line) at z17.
+  close_zoom_line_end_overhang_m: 4.0
+  # ── Ferry pier clustering + de-overlap (close-zoom) ─────────────────────
+  # See close-zoom-stop-design.md § "Ferries never pool" and § "Ferry pier
+  # clustering". Two ferry lines at one pier whose polylines run laterally
+  # within `cluster_lateral_m` for at least `cluster_min_frac` of the shorter
+  # slice's length — measured over the first `cluster_window_m` metres out
+  # of the pier — are physically the same departure and merge into ONE
+  # rail-style stack on the fastest ferry's polyline (pill-arrows queued
+  # behind each other). Solo ferries that would otherwise draw
+  # world-overlapping pill-arrows at pier + CLOSE_ZOOM_FERRY_OFFSET_M — the
+  # lines diverge but the pills at that anchor still collide — are shifted
+  # further along their own polyline by one pill-length + gap increments
+  # until they clear, fastest ferry closest to the pier.
+  close_zoom_ferry_cluster_window_m: 50.0
+  close_zoom_ferry_cluster_lateral_m: 1.0
+  close_zoom_ferry_cluster_min_frac: 0.5
 
 # ── Pill design bands ───────────────────────────────────────────────────────
 # Three baked variants of the pill / connector layout, one per zoom band.

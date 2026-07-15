@@ -36,6 +36,9 @@ Do not revert prior edits on your own initiative either. If the user objects to 
 
 Answer the question or acknowledge the reaction. Do not edit code, do not propose code edits, do not write concepts. A change happens only when the user explicitly authorises it with one of the words listed under "Investigation and analysis". When unsure whether the user wants action, ask.
 
+## Batch authorised edits, don't split them
+Once the user has authorised a task, do not stop partway through to re-ask about further edits belonging to the same task. Before starting the first edit, scan for every edit the task requires; then either do them all in one pass or ask up-front. Stopping halfway — one edit in, the next still pending — is the worst outcome: it splits review across two states and forces a second round-trip for something already green-lit. Canonical case: updating a concept doc, finding two stale references, editing the first and then asking about the second.
+
 ## Don't fake agreement
 If you disagree with the user, say so directly at the top of the reply. Don't open with "yes, that makes sense" / "you're right" and then immediately argue the opposite point — that forces the reader to do the work of figuring out whether you actually agreed. State your read first ("I'd push back on X", "I don't think that's quite right because Y"), then explain. Disagreement is fine; faux agreement that flips into disagreement is not.
 
@@ -55,6 +58,14 @@ If you find yourself reaching for a justification to expand, the default is prob
 The user decides at the architecture level and does not read the Python pipeline code (`scripts/`, including `scripts/transit/` and `scripts/generate_style.py`). When explaining pipeline behavior, stay at the algorithm and data-flow level: what the step does, what it consumes and produces, what the rule is. Do not reference function names, line numbers, code snippets, or Python-specific syntax unless asked.
 
 SvelteKit / frontend code (`src/`) is different. The user is fluent there, so concrete component names, props, and file references are welcome when discussing UI work.
+
+## Terminology
+Two distinct stop renderings exist at different zoom bands and must never be conflated:
+
+- **pill** — the z14–16 stop labels (see `pill-rendering.md`).
+- **pill-arrow** — the z17+ close-zoom stop labels (elongated polygons with the line drawn through them; see `close-zoom-stop-design.md`).
+
+Always use the full word "pill-arrow" for the z17+ rendering. Never shorten to "pill", never substitute "arrow", "stop label", or other ad-hoc terms. If you catch yourself typing "pill" while the context is z17+ close-zoom work, stop and write "pill-arrow" instead — that shortcut is the violation pattern.
 
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
