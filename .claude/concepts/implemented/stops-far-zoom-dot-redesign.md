@@ -77,7 +77,7 @@ Example outcomes: 2 terminating mountain lines → 1.8 → **Mountain**. 3 termi
 
 ### Size per tier
 
-Each tier has a fixed diameter (in CSS px) at z7 and z13; linear-in-zoom interpolation between them, and linear extrapolation past z13 through z13.99 (the pill takes over at z14 — see `pill-rendering.md` § "Visual style", where `max_d(z14)` is matched to the largest tier's z13.99 extrapolated diameter for a seamless handoff). Only the lower edge z7 is clamped. Within a tier there is **no per-stop size variation** — the continuous score decides which tier a stop lands in; once the tier is fixed the size follows the tier table.
+Each tier has a fixed diameter (in CSS px) at z7 and z13; linear-in-zoom interpolation between them, and linear extrapolation past z13 through z13.99 (the pill takes over at z14 — see `stops-pill-zoom.md` § "Visual style", where `max_d(z14)` is matched to the largest tier's z13.99 extrapolated diameter for a seamless handoff). Only the lower edge z7 is clamped. Within a tier there is **no per-stop size variation** — the continuous score decides which tier a stop lands in; once the tier is fixed the size follows the tier table.
 
 | Tier | z7 diameter | z13 diameter |
 |---|---|---|

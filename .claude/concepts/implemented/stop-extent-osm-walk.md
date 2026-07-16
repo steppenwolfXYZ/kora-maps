@@ -2,7 +2,7 @@
 
 ## Problem
 
-When a stop's platform extent needs more range than the trip polyline provides, the pipeline must obtain the missing geometry from somewhere. Rail already solves this well: it walks the OSM rail way under the stop and extends both the extent and the drawn line along the real track. Buses and trams have no equivalent — after the borrow tiers fail they extrapolate dead straight, cutting across buildings wherever the street curves (canonical case: Feldis/Veulden, Dorfplatz). This concept holds the OSM-walk mechanism for all ground modes: the implemented rail walk (moved here from `pill-rendering.md`) and its generalization to streets and tram tracks.
+When a stop's platform extent needs more range than the trip polyline provides, the pipeline must obtain the missing geometry from somewhere. Rail already solves this well: it walks the OSM rail way under the stop and extends both the extent and the drawn line along the real track. Buses and trams have no equivalent — after the borrow tiers fail they extrapolate dead straight, cutting across buildings wherever the street curves (canonical case: Feldis/Veulden, Dorfplatz). This concept holds the OSM-walk mechanism for all ground modes: the implemented rail walk (moved here from `stops-pill-zoom.md`) and its generalization to streets and tram tracks.
 
 ## Requirements
 
@@ -18,12 +18,12 @@ The rail extract exists; the two new artifacts follow the same processing patter
 
 The two new artifacts are additionally clipped at extraction time to buffers of `streets_stop_buffer_m` (default 150 m) around all GTFS stop coordinates — only stop surroundings are ever walked, and unclipped street data would be orders of magnitude larger than the rail extract.
 
-### Rail walk (implemented; moved from `pill-rendering.md`)
+### Rail walk (implemented; moved from `stops-pill-zoom.md`)
 
-Applies to train and mountain `rebucketed_rail` / `rack`. When the polyline does not extend ±L/2 around the snapped coord `p`, the clipped side's missing arc-length is filled by the first of the following that succeeds. The rule is separate from the tram / bus borrow tiers (documented in `pill-rendering.md` § missing-range fill) because these modes typically sit on a single track with no good borrow candidate, but do have unambiguous OSM rail geometry under `p` to walk along.
+Applies to train and mountain `rebucketed_rail` / `rack`. When the polyline does not extend ±L/2 around the snapped coord `p`, the clipped side's missing arc-length is filled by the first of the following that succeeds. The rule is separate from the tram / bus borrow tiers (documented in `stops-pill-zoom.md` § missing-range fill) because these modes typically sit on a single track with no good borrow candidate, but do have unambiguous OSM rail geometry under `p` to walk along.
 
 1. **OSM rail walk.** At `p` with tangent `T` (the polyline's last-segment tangent at `p`), identify the OSM rail way under the polyline by combining proximity (within `osm_match_radius_m` of `p`) and tangent alignment (within `osm_match_max_tangent_diff_deg` of `T`, mod π). When a way matches, walk it in the clipped direction (away from where the polyline is) for the missing arc-length and use that segment as the fill. At interior nodes and junctions, the walk continues along the outgoing edge whose tangent best matches the incoming direction.
-2. **OSM way runs out.** When step 1 matches a way but the way reaches its end before the missing arc-length is fulfilled, treat the walked partial as the actual end of the platform. Prepend the walked portion to the polyline — do not fabricate any extension past OSM's true end. The extent then covers the full L, split as `x` metres outward (whatever was walked) plus `L − x` metres inward from the snap. Train polylines are always longer than the platform, so no truncation fallback is needed. `p` is then no longer at the centre of the range — an explicit exception to the centred-anchor rule. Close-zoom pill-arrow placement further exploits this case (see `close-zoom-stop-design.md`): the rail stack anchors the fastest pill-arrow at the extent's buffer end instead of centring on its middle.
+2. **OSM way runs out.** When step 1 matches a way but the way reaches its end before the missing arc-length is fulfilled, treat the walked partial as the actual end of the platform. Prepend the walked portion to the polyline — do not fabricate any extension past OSM's true end. The extent then covers the full L, split as `x` metres outward (whatever was walked) plus `L − x` metres inward from the snap. Train polylines are always longer than the platform, so no truncation fallback is needed. `p` is then no longer at the centre of the range — an explicit exception to the centred-anchor rule. Close-zoom pill-arrow placement further exploits this case (see `stops-close-zoom.md`): the rail stack anchors the fastest pill-arrow at the extent's buffer end instead of centring on its middle.
 3. **No matching OSM way.** When step 1 finds no way satisfying both gates, fall back to a straight-line extrapolation in the polyline's tangent direction at `p`, with the fill length capped at `osm_fallback_max_straight_m` (`50 m`). The polyline side is **not** extended to compensate, so the total range length can be less than L in this case.
 4. **No fill.** If the polyline is too short to compute a usable tangent, the range is left as whatever on-polyline geometry exists (possibly collapsed).
 
@@ -49,7 +49,7 @@ How much backward range the fill must produce. On-polyline rear ground counts to
 - **Tram**: the full platform length L (default 35 m), fixed. A fixed-length track extension reads fine at tram terminals without turnaround loops (Geneva's stub terminals), and a need-based target would buy nothing visually.
 - **Bus / regional_bus**: `min(stack need, L)` — extending a street by the full 30 m when a single pill-arrow needs half of that looks overdone on the map, so the extension is exactly as long as the close-zoom display requires, capped at L. The **stack need** is the ground the stop's pill-arrow queue actually occupies at the largest close-zoom band: `n × pill length + (n − 1) × gap`, where `n` is the exact number of pill-arrows drawn at the stop. `n` must be produced by the same grouping rules the close-zoom construction applies (departures only, layover skip, direction grouping, same-line-same-direction collapse) — shared logic, so the count cannot drift from what is actually drawn.
 - **Debug extent = extension.** The debug platform extent is whatever ground exists after the fill — no separate full-L geometry is kept, so the debug line and the drawn line always end together.
-- What the target deliberately does not cover — queues later pooled longer by same-curb merging (which runs on finished geometry), or a stack need above L — is handled by the terminal platform stretch (`close-zoom-stop-design.md`), which shifts the queue forward onto existing line geometry.
+- What the target deliberately does not cover — queues later pooled longer by same-curb merging (which runs on finished geometry), or a stack need above L — is handled by the terminal platform stretch (`stops-close-zoom.md`), which shifts the queue forward onto existing line geometry.
 - Rail and metro are unaffected.
 
 ### Line-shape extension
@@ -66,9 +66,9 @@ The offender diagnostic script gains a second output: a link list of stops whose
 
 ## Constraints
 
-- The rail walk's behavior is not modified by this concept — only its documentation home moved here; `pill-rendering.md` points here instead of duplicating it.
+- The rail walk's behavior is not modified by this concept — only its documentation home moved here; `stops-pill-zoom.md` points here instead of duplicating it.
 - Metro's symmetric extrapolation is unchanged. Ferry and aerial are unaffected.
-- Borrow tiers keep priority for tram/bus/regional_bus: sibling borrow → non-sibling borrow → OSM walk. The walk only runs where both borrows fail. The borrow tiers themselves remain documented in `pill-rendering.md`.
+- Borrow tiers keep priority for tram/bus/regional_bus: sibling borrow → non-sibling borrow → OSM walk. The walk only runs where both borrows fail. The borrow tiers themselves remain documented in `stops-pill-zoom.md`.
 - The ~25 manually verified offenders (unmarked entries in the first 50 of the annotated offender list) all have a street or tram track under the former straight extension — the walk must succeed at these; an extent coming up short there is a bug, not an acceptable outcome.
 - Performance must stay negligible: extraction is cached with step 03's idempotency, and the step-07 walk runs only for the few hundred stops where borrows fail.
-- The close-zoom pill-arrow consequence of shorter extents (terminal stacks longer than the platform line) is covered in `close-zoom-stop-design.md`, not here.
+- The close-zoom pill-arrow consequence of shorter extents (terminal stacks longer than the platform line) is covered in `stops-close-zoom.md`, not here.

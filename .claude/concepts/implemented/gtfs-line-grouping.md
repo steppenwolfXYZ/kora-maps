@@ -62,5 +62,4 @@ No proportional rule or anchor-stop filter is needed.
 - This concept does not address corridor-level frequency aggregation (the "peak reinforcement" case where IC + RE + S1 should accumulate). That is the domain of the pair-centric transit model concept. Concept 1 alone fixes disambiguation and short-turn merging; it does not change the line-as-primary-entity rendering contract.
 - This concept does not address express-on-local visualization. Same reason — that is a property of the pair model.
 - The `gtfs_unmatched.json` accounting becomes per-trip-group rather than per-`line_key`. Unmatched groups are surfaced individually.
-- The diagnose script (`diagnose_transit_line.py`) reads `_line_canonical_export` and unpacks `CanonEntry` directly. It must be updated alongside this change so the new `trip_group_id` field does not break it.
 - EV (Ersatzverkehr / rail replacement) exclusion is out of scope here. It is tracked separately.

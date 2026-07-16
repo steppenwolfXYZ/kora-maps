@@ -62,8 +62,8 @@ SvelteKit / frontend code (`src/`) is different. The user is fluent there, so co
 ## Terminology
 Two distinct stop renderings exist at different zoom bands and must never be conflated:
 
-- **pill** — the z14–16 stop labels (see `pill-rendering.md`).
-- **pill-arrow** — the z17+ close-zoom stop labels (elongated polygons with the line drawn through them; see `close-zoom-stop-design.md`).
+- **pill** — the z14–16 stop labels (see `stops-pill-zoom.md`).
+- **pill-arrow** — the z17+ close-zoom stop labels (elongated polygons with the line drawn through them; see `stops-close-zoom.md`).
 
 Always use the full word "pill-arrow" for the z17+ rendering. Never shorten to "pill", never substitute "arrow", "stop label", or other ad-hoc terms. If you catch yourself typing "pill" while the context is z17+ close-zoom work, stop and write "pill-arrow" instead — that shortcut is the violation pattern.
 

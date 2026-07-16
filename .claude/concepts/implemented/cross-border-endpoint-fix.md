@@ -52,7 +52,7 @@ The Swiss GTFS assigns prefix `85` to stations physically in Italy that SBB or j
 - Pougny-Chancy (Geneva area, French prefix): 8774538
 - Delle (Jura border, French prefix): 8718444
 
-**Apply the filter in four places in `05_score_and_match.py`:**
+**Apply the filter in four places in `06_score_and_match.py`:**
 1. `_lookup_canonical_stops` — when building `ccoords` from each GTFS candidate
 2. `_lookup_canonical_stops` Trigger 1 — when building `_cand_coords` for density (name-fallback sanity check)
 3. Geo fallback — when building `ccoords` from each GTFS candidate

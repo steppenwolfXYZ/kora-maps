@@ -1,16 +1,16 @@
 # MultiLineString Segment Ordering and Noise Reduction
 
-**Status:** Implemented
+**Status:** Superseded by the pfaedle-based pipeline. Line geometry is now shaped from GTFS + OSM ways by pfaedle in step 05; OSM route relations are no longer extracted directly, so the segment-ordering problem described below cannot arise. Retained for historical context.
 
 ## Problem
 
-OSM route relations are assembled from member ways that form the track geometry. When exported to GeoJSON as a MultiLineString, the segments are stored in member-list order, which is not necessarily geographic traversal order. For routes with multiple segments (e.g. RhB RE4: 6 segments), consecutive segments in the array may be geographically distant — the segment covering Scuol is followed by a Landquart depot siding, then a Vereinatunnel siding, etc. When `05_score_and_match.py` flattens the MultiLineString into a single point list, these out-of-order segments introduce large teleportation jumps between them (up to 57 km for RE4), inflating the computed route length from the actual 75 km to 205 km. This inflated length makes the density gate in the geo sanity check (Check 2) reject all candidates, preventing correct stop assignment.
+OSM route relations are assembled from member ways that form the track geometry. When exported to GeoJSON as a MultiLineString, the segments are stored in member-list order, which is not necessarily geographic traversal order. For routes with multiple segments (e.g. RhB RE4: 6 segments), consecutive segments in the array may be geographically distant — the segment covering Scuol is followed by a Landquart depot siding, then a Vereinatunnel siding, etc. When `06_score_and_match.py` flattens the MultiLineString into a single point list, these out-of-order segments introduce large teleportation jumps between them (up to 57 km for RE4), inflating the computed route length from the actual 75 km to 205 km. This inflated length makes the density gate in the geo sanity check (Check 2) reject all candidates, preventing correct stop assignment.
 
 Additionally, OSM relations include non-mainline segments: depot sidings, passing loops, tunnel bypass tracks. These add noise to sub-bbox computation and endpoint detection.
 
 ## Current workaround
 
-None. The segments are used as-is. `raw_length_km` in the GeoJSON properties is computed correctly (sum of per-segment lengths, no inter-segment jumps), but `05_score_and_match.py` ignores it and recomputes length from the flattened geometry, inheriting the inflation.
+None. The segments are used as-is. `raw_length_km` in the GeoJSON properties is computed correctly (sum of per-segment lengths, no inter-segment jumps), but `06_score_and_match.py` ignores it and recomputes length from the flattened geometry, inheriting the inflation.
 
 ## Requirements
 
@@ -43,7 +43,7 @@ Drop if all of the following hold:
 **Step 3 — Write output:**
 Write the remaining chains and surviving disconnected segments as a MultiLineString. Each entry is a single merged polyline. Recompute `raw_length_km` as the sum of kept segment lengths.
 
-### Endpoint coverage in `05_score_and_match.py`
+### Endpoint coverage in `06_score_and_match.py`
 
 Replace the two fixed comparison points (`osm_pts[0]` and `osm_pts[-1]`) with the set of all segment endpoints from the MultiLineString: the start and end point of every segment. A GTFS terminal is considered covered if it is within the threshold distance of any segment endpoint.
 
@@ -59,4 +59,4 @@ This works correctly because after merging: each MultiLineString entry is either
 - **`raw_length_km` integrity:** After noise reduction, `raw_length_km` must be recomputed as the sum of remaining segment lengths only.
 - **Y-shapes:** At a fork, the primary chain consumes one branch; the other branch forms a separate chain. Both are kept. Neither is eligible for noise reduction (they are connected at the fork point).
 - **Routes with few stops:** Rule 2 is gated on the relation having ≥ 3 OSM stop nodes total, preventing over-filtering on routes where stop membership is sparse.
-- **`osm_line_km` in `05_score_and_match.py`:** After this change, `osm_line_km` should be read from the `raw_length_km` GeoJSON property rather than recomputed from the flattened geometry. The property is already correct and avoids any residual inflation from surviving disconnected segments.
+- **`osm_line_km` in `06_score_and_match.py`:** After this change, `osm_line_km` should be read from the `raw_length_km` GeoJSON property rather than recomputed from the flattened geometry. The property is already correct and avoids any residual inflation from surviving disconnected segments.

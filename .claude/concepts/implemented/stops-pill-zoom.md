@@ -10,9 +10,9 @@ The `prm-platform-positions` concept provides per-platform attributes: `length` 
 
 The eventual map will use three distinct stop-style systems, chosen by zoom range:
 
-- **Far zoom** (through z13.99) — a single circle per station. Conveys presence and mode, not platform geometry. See `far-zoom-stop-dot-redesign.md`.
+- **Far zoom** (through z13.99) — a single circle per station. Conveys presence and mode, not platform geometry. See `stops-far-zoom-dot-redesign.md`.
 - **Medium zoom** (z14–16.99) — a precise dot-and-pill per platform, faithful to platform extent and clustered cleanly across multi-line stations.
-- **Close zoom** (z17+) — platform-level pill-arrows with line number, direction, and destination. See `close-zoom-stop-design.md`.
+- **Close zoom** (z17+) — platform-level pill-arrows with line number, direction, and destination. See `stops-close-zoom.md`.
 
 This concept covers only the **medium-zoom** layer (z14–16.99). The platform-extent machinery defined below is shared infrastructure: close zoom re-uses the stop position lines computed here.
 
@@ -174,7 +174,7 @@ Equivalent form used in the paint expressions:
 | z16 | 8 | 30 | 4.4 |
 | z17+ | 14 | 36 | 4.4 |
 
-The z17 anchors are the top interpolation endpoint of the size curve — every pill-family paint layer is capped at `maxzoom: 17`, where the close-zoom design (`close-zoom-stop-design.md`) takes over with a hard cut, so the z17 values are only ever approached, never rendered at or past z17. The design bands A / B / C (see § Pills and connectors and § Connector curving) tag pipeline-baked features by zoom; the paint curve is one continuous expression across the pill range, so the tag doesn't gate the paint sizing — only which pill / connector geometry is present in the tile at each zoom.
+The z17 anchors are the top interpolation endpoint of the size curve — every pill-family paint layer is capped at `maxzoom: 17`, where the close-zoom design (`stops-close-zoom.md`) takes over with a hard cut, so the z17 values are only ever approached, never rendered at or past z17. The design bands A / B / C (see § Pills and connectors and § Connector curving) tag pipeline-baked features by zoom; the paint curve is one continuous expression across the pill range, so the tag doesn't gate the paint sizing — only which pill / connector geometry is present in the tile at each zoom.
 
 **Casing** (black rim under fill): `casing_width(z, wb) = d(z, wb) + 2 px`. Constant 2 px rim (1 px per side) at every zoom.
 
@@ -186,7 +186,7 @@ The z17 anchors are the top interpolation endpoint of the size curve — every p
 
 **Line width stays raw.** Only the stop family reads from the range-mapped curve; the transit line itself keeps its `width_base` unchanged. The stop range being decoupled from the line's zoom curve prevents runaway growth on the fattest lines (the pain point the old `m × line_curve × wb` formulation produced at z14) while keeping line width the primary input into stop size (via the `slope × wb` term).
 
-**Scope.** The per-mode hard clamp described in `pill-zoom-stop-tweaks.md` § "Width-base floor for stop sizing" (`stop_width_base_floor` in `scripts/transit/config.yaml`, `_clamp_stop_wb` in step 07) is removed. `min_d(z)` in the paint expression is the sole minimum-visibility mechanism now. The far-zoom dot layer is unaffected: it uses tier-based diameters (`far-zoom-stop-dot-redesign.md`), not `width_base`.
+**Scope.** The per-mode hard clamp described in `stops-pill-zoom-tweaks.md` § "Width-base floor for stop sizing" (`stop_width_base_floor` in `scripts/transit/config.yaml`, `_clamp_stop_wb` in step 07) is removed. `min_d(z)` in the paint expression is the sole minimum-visibility mechanism now. The far-zoom dot layer is unaffected: it uses tier-based diameters (`stops-far-zoom-dot-redesign.md`), not `width_base`.
 
 **Painter order.** Casing layers for dots, pills, and connectors render first, forming one unified black outer rim wherever the stop construct overlaps itself; the white fill layers render on top. The mechanism — wider casing beneath narrower fill, with all casings drawn before any fill — is unchanged from the prior white-on-coloured scheme; only the constants invert.
 
@@ -290,7 +290,7 @@ This length-only criterion supersedes an earlier angle-based version. The failur
 
 ### Dot-to-pill zoom switch
 
-The handoff from a station's low-zoom dot to its multi-line pill / connector construct happens at a **hard cut at z14, uniform across every mode** (train, tram, metro, bus, regional_bus, ferry, mountain rail-like). Far-zoom dots (`far-zoom-stop-dot-redesign.md`) render through z13.99; the pill family (this doc) takes over at z14.
+The handoff from a station's low-zoom dot to its multi-line pill / connector construct happens at a **hard cut at z14, uniform across every mode** (train, tram, metro, bus, regional_bus, ferry, mountain rail-like). Far-zoom dots (`stops-far-zoom-dot-redesign.md`) render through z13.99; the pill family (this doc) takes over at z14.
 
 Single-line stops never get a pill — they keep their dot at every zoom regardless of mode.
 

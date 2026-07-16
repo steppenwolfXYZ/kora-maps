@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-off generator for scripts/transit/glyph_widths.json.
+"""One-off generator for scripts/transit/tools/glyph_widths.json.
 
 Downloads the Noto Sans Regular and Bold TTFs (the same typeface the
 OpenFreeMap glyph server serves) and extracts per-character advance widths
@@ -12,7 +12,7 @@ names (quotes, dashes, ellipsis).
 
 Usage:
     python3 -m pip install --user --break-system-packages fonttools
-    python3 scripts/transit/gen_glyph_widths.py
+    python3 scripts/transit/tools/gen_glyph_widths.py
 
 Re-run only if the map's font stack changes.
 """

@@ -1,5 +1,7 @@
 # Transit Preprocessing
 
+**Status:** Superseded by the pfaedle-based pipeline. The "main loop" / "4-loop" OSM→GTFS matching architecture described below no longer exists; pfaedle shapes GTFS trip geometry from OSM ways directly. `_line_canonical_export`, `find_best_gtfs_candidate`, and `diagnose_transit_line.py` all belong to that pre-pfaedle system and have been removed. Retained for historical context.
+
 ## Problem
 
 The current "main loop" performs OSM→GTFS matching for every OSM route to obtain freq/speed data, and drops routes whose match is below `MIN_FREQ_SCORE` or finds no match at all. Because this matching is inferior to the 4-loop architecture, it prematurely drops routes the 4-loop would have correctly matched.

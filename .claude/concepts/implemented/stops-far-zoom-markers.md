@@ -103,7 +103,7 @@ New `far_zoom_marker` block in the transit config:
 - This concept changes **far-zoom** (below each mode's `mz`) dot placement only. Medium-zoom pill, disc, and connector rendering are unchanged.
 - The no-jump invariant binds the design: any future tweak to the position rule must preserve visual continuity at the `mz` boundary, with the explicit exception that the intersection-search case may differ from the medium-zoom geometry.
 - Train and mountain rail-like modes skip the intersection search by design — train tracks rarely cross at stations, and where they do (throat junctions) the crossing sits far from the platforms.
-- Intersection scoring is line-polyline-based, not platform-extent-based. Platform-extent geometry from `pill-rendering.md` is not consulted.
+- Intersection scoring is line-polyline-based, not platform-extent-based. Platform-extent geometry from `stops-pill-zoom.md` is not consulted.
 - The intersection search includes lines of every mode in the cluster, not just the dominant mode's lines. Mixed-mode clusters (tram + bus interchanges, train + tram interchanges) score every in-scope line equally.
 - Single-line clusters cannot produce a qualifying intersection. The fall-through chain handles them without special-casing.
 - The rule must be deterministic; identical inputs produce identical positions.
