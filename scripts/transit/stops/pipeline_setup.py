@@ -45,9 +45,6 @@ from stops.far_zoom import far_zoom_dot_position
 from stops.ferry_snap import (
     _ferry_canonical_snap, _ferry_pier_t_on_line, _obb_overlap,
 )
-from stops.pill_zoom.debug import (
-    write_debug_bars, write_debug_platforms, write_debug_stops,
-)
 from stops.pill_zoom.lines import (
     build_indicator_features, cluster_lines, color_luminance,
     count_unique_lines, dominant_line, pill_minzoom,
@@ -276,11 +273,6 @@ def run():
           f"will be omitted from rendering (popup retains both directions)")
     print(f"  Arrival drop (tram/bus/regional_bus): {len(skip_last_oids):,} "
           f"unpaired or layover-shadowed arrival entries omitted from pill construction")
-
-    print("Emitting debug platform extents...")
-    write_debug_platforms(line_stops, line_lookup, stop_attrs,
-                          skip_first_oids, skip_last_oids,
-                          end_of_platform_pairs)
 
     from stops.pipeline_render import run_pills
     run_pills(

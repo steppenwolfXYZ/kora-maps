@@ -5,7 +5,10 @@ from itertools import permutations
 from math import atan2, cos, degrees, pi, radians, sin, sqrt
 
 from _state import *  # noqa: F401,F403
-from _state import _DIAG_BARS, _M_PER_DEG, _STABBED_PAIRS  # underscore names skipped by *
+from _state import _M_PER_DEG  # underscore names skipped by *
+from stops.debug_overlay import (
+    diag_bars_len, record_diag_bar, rescale_diag_bars_from,
+)
 from stops.extent import _funicular_snap_override, _length_key, _platform_extent, _resolve_length
 from geometry import _cum_dist_m, _directional_tangent_at, _interp_at, _meters_per_deg, _project_meters, haversine_km, snap_to_line
 from stops.pill_zoom.geom import (
@@ -20,7 +23,7 @@ from stops.pill_zoom.nn_path import _dedup_stop_positions, _pos_to_platforms
 from stops.pill_zoom.options import (
     ON_PLATFORM_PENALTY, ON_PLATFORM_TOL_M,
     _apply_option, _pick_option_single_group, _pick_options_multi_group,
-    _record_diag_bar, _should_split_at_gap,
+    _should_split_at_gap,
 )
 
 
@@ -408,7 +411,7 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
         if ext:
             s["extent"] = [(x * cos_lat, y) for x, y in ext]
 
-    diag_bars_start = len(_DIAG_BARS)
+    diag_bars_start = diag_bars_len()
 
     try:
         # Snapshot raw (scaled) positions so the leftover fill can reset
@@ -469,11 +472,13 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
             else:
                 chosen = [options[0]]
 
-        # Apply chosen options (record _STABBED_PAIRS + diag bar geometry).
+        # Apply chosen options (record stabbed pairs + diag bar geometry
+        # into stops.debug_overlay's in-memory state — always populated;
+        # only the file writes are gated by DEBUG_ENABLED).
         placed_ids = set()
         for (group, _, _), option in zip(per_group_options, chosen):
             _apply_option(group, option, placed_ids, record_stabbed=True)
-            _record_diag_bar(group, option)
+            record_diag_bar(group, option)
 
         # Leftovers: every platform NOT placed on a bar. For rail (train)
         # clusters, repeatedly run leftover-fill and check each placed
@@ -507,11 +512,6 @@ def coordinate_dots_global_stab(cluster: list, protection_m: float,
             ext = s.get("extent")
             if ext:
                 s["extent"] = [(x / cos_lat, y) for x, y in ext]
-        for i in range(diag_bars_start, len(_DIAG_BARS)):
-            ep1, ep2 = _DIAG_BARS[i]
-            _DIAG_BARS[i] = (
-                (ep1[0] / cos_lat, ep1[1]),
-                (ep2[0] / cos_lat, ep2[1]),
-            )
+        rescale_diag_bars_from(diag_bars_start, cos_lat)
 
 

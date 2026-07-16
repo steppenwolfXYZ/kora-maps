@@ -18,13 +18,6 @@ import yaml
 from common import PROJECT_ROOT as ROOT
 from geometry import _M_PER_DEG  # noqa: F401 — re-exported for stops modules
 
-# Diagnostic state populated by coordinate_dots_global_stab:
-# - _DIAG_BARS: list of (endpoint1, endpoint2) tuples for each max-stab bar.
-# - _STABBED_PAIRS: set of (osm_id, stop_id) for (line, stop) records placed
-#   on a bar. Read by write_debug_stops to mark stabbed dots as filled.
-_DIAG_BARS: list = []
-_STABBED_PAIRS: set = set()
-
 _transit_cfg = yaml.safe_load((ROOT / "scripts" / "transit" / "config.yaml").read_text())
 
 LINES               = ROOT / "data" / "transit" / "transit_lines.geojson"
@@ -36,9 +29,6 @@ STREET_WAYS_GEOJSON = ROOT / "data" / "osm" / "street_ways.geojson"
 OUT_DOTS            = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS           = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
-OUT_DEBUG_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
-OUT_DEBUG_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
-OUT_DEBUG_BARS      = ROOT / "data" / "transit" / "transit_debug_bars.geojson"
 OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 
 # Per-mode platform-length defaults and sanity ranges from config.
@@ -169,7 +159,6 @@ PILL_BAND_TARGET_MODULES = (
     "stops.pill_zoom.geom",
     "stops.pill_zoom.options",
     "stops.pill_zoom.place",
-    "stops.pill_zoom.debug",
     "stops.pill_zoom.nn_path",
     "stops.pill_zoom.lines",
     "stops.pill_zoom.polyline",

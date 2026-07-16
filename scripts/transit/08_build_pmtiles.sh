@@ -103,26 +103,36 @@ tippecanoe -o "$STATIC/tl_close_zoom.pmtiles" --force \
   --drop-densest-as-needed \
   "$DATA/transit_close_zoom.geojson"
 
-echo ""
-echo "=== Building tl_debug_platforms.pmtiles ==="
-tippecanoe -o "$STATIC/tl_debug_platforms.pmtiles" --force \
-  -z14 -Z5 -d18 --layer transit_debug_platforms \
-  --drop-densest-as-needed \
-  "$DATA/transit_debug_platforms.geojson"
+# Debug overlay pmtiles: gated on presence of the source geojson. Step 07's
+# stops/debug_overlay.py either emits these files (when debug.debug_overlay
+# is true) or unlinks any stale copies. See stops/debug_overlay.py for the
+# full delete-checklist.
+if [ -f "$DATA/transit_debug_platforms.geojson" ]; then
+  echo ""
+  echo "=== Building tl_debug_platforms.pmtiles ==="
+  tippecanoe -o "$STATIC/tl_debug_platforms.pmtiles" --force \
+    -z14 -Z5 -d18 --layer transit_debug_platforms \
+    --drop-densest-as-needed \
+    "$DATA/transit_debug_platforms.geojson"
+fi
 
-echo ""
-echo "=== Building tl_debug_stops.pmtiles ==="
-tippecanoe -o "$STATIC/tl_debug_stops.pmtiles" --force \
-  -z14 -Z5 -d18 --layer transit_debug_stops \
-  --drop-densest-as-needed \
-  "$DATA/transit_debug_stops.geojson"
+if [ -f "$DATA/transit_debug_stops.geojson" ]; then
+  echo ""
+  echo "=== Building tl_debug_stops.pmtiles ==="
+  tippecanoe -o "$STATIC/tl_debug_stops.pmtiles" --force \
+    -z14 -Z5 -d18 --layer transit_debug_stops \
+    --drop-densest-as-needed \
+    "$DATA/transit_debug_stops.geojson"
+fi
 
-echo ""
-echo "=== Building tl_debug_bars.pmtiles ==="
-tippecanoe -o "$STATIC/tl_debug_bars.pmtiles" --force \
-  -z14 -Z5 -d18 --layer transit_debug_bars \
-  --drop-densest-as-needed \
-  "$DATA/transit_debug_bars.geojson"
+if [ -f "$DATA/transit_debug_bars.geojson" ]; then
+  echo ""
+  echo "=== Building tl_debug_bars.pmtiles ==="
+  tippecanoe -o "$STATIC/tl_debug_bars.pmtiles" --force \
+    -z14 -Z5 -d18 --layer transit_debug_bars \
+    --drop-densest-as-needed \
+    "$DATA/transit_debug_bars.geojson"
+fi
 
 echo ""
 echo "=== Done! ==="

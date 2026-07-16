@@ -1,22 +1,116 @@
-"""Debug overlay writers for the pill-rendering pipeline."""
+"""Debug overlay: pill-rendering diagnostics.
+
+Emits three GeoJSON files consumed by the debug layers in
+`scripts/style/transit_stations.py`:
+
+  * transit_debug_platforms.geojson — one LineString per (line, stop) tracing
+    the platform's full allowed range along the line's polyline.
+  * transit_debug_stops.geojson — one Point per (line, stop) at the GTFS
+    coordinate snapped onto that line's polyline. Carries the atlas platform
+    length and the list of lines visiting that stop (with origin /
+    destination) for click-popups. Stabbed dots (placed onto a max-stab bar
+    by the pill-placement algorithm) render solid; non-stabbed dots are
+    hollow.
+  * transit_debug_bars.geojson — one LineString per max-stab bar found
+    during cluster processing.
+
+This file is the ONLY place that touches the debug overlay outputs. Toggle
+via `debug.debug_overlay` in scripts/transit/config.yaml — when disabled
+`emit_all` skips the writes and unlinks stale outputs so step 8 doesn't
+build pmtiles from yesterday's data.
+
+Delete-checklist (when the overlay is no longer needed at all):
+  1. Delete this file.
+  2. Remove the `emit_all` call at the tail of step 7 (stops/pipeline_render.py).
+  3. Remove the `record_stabbed_pair` / `record_diag_bar` /
+     `diag_bars_len` / `rescale_diag_bars_from` helper calls in
+     stops/pill_zoom/options.py and stops/pill_zoom/place.py.
+  4. Remove the debug source/layer blocks in scripts/generate_style.py
+     and scripts/style/transit_stations.py.
+  5. Remove the three `tl_debug_*.pmtiles` blocks in
+     scripts/transit/08_build_pmtiles.sh.
+  6. Remove the `debug` block from scripts/transit/config.yaml.
+"""
 import json
-from collections import defaultdict
-from math import cos, radians
 
-from _state import *  # noqa: F401,F403
-from _state import _DIAG_BARS, _STABBED_PAIRS  # underscore names skipped by *
-from stops.extent import _funicular_snap_override, _length_key, _platform_extent, _resolve_length
-from geometry import _cum_dist_m, _interp_at, _project_meters, flatten_coords, haversine_km, snap_to_line
+from _state import MODE_MINZOOM, PILL_CFG, ROOT
+from common import load_transit_cfg
+from geometry import flatten_coords, snap_to_line
+from stops.extent import _length_key, _platform_extent
 
 
-def write_debug_platforms(line_stops: dict, line_lookup: dict,
-                           stop_attrs: dict, skip_first_oids: set,
-                           skip_last_oids: set,
-                           end_of_platform_pairs: set | None = None) -> None:
-    """Emit transit_debug_platforms.geojson — one LineString per stop tracing
-    the platform's full allowed range along the line's polyline. Debug-only
-    overlay; replaces the previous black-dot debug feature.
+# ── Config ──────────────────────────────────────────────────────────────────
+DEBUG_ENABLED = bool(
+    (load_transit_cfg().get("debug") or {}).get("debug_overlay", False))
+
+# ── Output paths ────────────────────────────────────────────────────────────
+_OUT_PLATFORMS = ROOT / "data" / "transit" / "transit_debug_platforms.geojson"
+_OUT_STOPS     = ROOT / "data" / "transit" / "transit_debug_stops.geojson"
+_OUT_BARS      = ROOT / "data" / "transit" / "transit_debug_bars.geojson"
+
+# ── In-memory tracking populated during pill placement ─────────────────────
+# Populated unconditionally: the add-to-set / append-to-list operations are
+# effectively free, so keeping the tracking always-on lets the placement
+# algorithm stay branch-free. Only the file writes are gated by
+# DEBUG_ENABLED.
+#
+# _STABBED_PAIRS: (osm_id, stop_id) tuples for (line, stop) records placed
+#   on a max-stab bar. Read by _write_debug_stops to mark stabbed dots.
+# _DIAG_BARS: (endpoint1, endpoint2) tuples for each max-stab bar's
+#   perpendicular geometry, written by _write_debug_bars.
+_STABBED_PAIRS: set = set()
+_DIAG_BARS: list = []
+
+
+# ── Recorder helpers (called from pill_zoom hot paths) ─────────────────────
+
+def record_stabbed_pair(osm_id, stop_id) -> None:
+    """Note a (line, stop) placement onto a max-stab bar."""
+    _STABBED_PAIRS.add((str(osm_id), str(stop_id)))
+
+
+def record_diag_bar(group, option) -> None:
+    """Append `option`'s perpendicular bar geometry.
+
+    Called from within the scaled-lon coordinate frame in
+    coordinate_dots_global_stab; that driver's finally-block calls
+    `rescale_diag_bars_from` to unscale after the cluster is done.
     """
+    tx, ty, sigma = option["tx"], option["ty"], option["sigma"]
+    nx, ny = -ty, tx
+    n_values = [group[k]["lon"] * nx + group[k]["lat"] * ny
+                for k in option["scoring"]]
+    if len(n_values) < 2:
+        return
+    n_min, n_max = min(n_values), max(n_values)
+    margin = (n_max - n_min) * 0.05 + 1e-6
+    n_min -= margin
+    n_max += margin
+    ep1 = (sigma * tx + n_min * nx, sigma * ty + n_min * ny)
+    ep2 = (sigma * tx + n_max * nx, sigma * ty + n_max * ny)
+    _DIAG_BARS.append((ep1, ep2))
+
+
+def diag_bars_len() -> int:
+    return len(_DIAG_BARS)
+
+
+def rescale_diag_bars_from(start_idx: int, cos_lat: float) -> None:
+    """Undo the scaled-lon transform on bars appended since `start_idx`."""
+    for i in range(start_idx, len(_DIAG_BARS)):
+        ep1, ep2 = _DIAG_BARS[i]
+        _DIAG_BARS[i] = (
+            (ep1[0] / cos_lat, ep1[1]),
+            (ep2[0] / cos_lat, ep2[1]),
+        )
+
+
+# ── Writers ────────────────────────────────────────────────────────────────
+
+def _write_debug_platforms(line_stops: dict, line_lookup: dict,
+                            stop_attrs: dict, skip_first_oids: set,
+                            skip_last_oids: set,
+                            end_of_platform_pairs: set | None = None) -> None:
     cfg = PILL_CFG
     if not cfg.get("default_length_m"):
         print("  No pill_rendering config — debug platforms skipped.")
@@ -61,21 +155,20 @@ def write_debug_platforms(line_stops: dict, line_lookup: dict,
                              "coordinates": [list(p) for p in extent]},
                 "properties": {"mode": mode, "stop_id": stop_id},
             })
-    OUT_DEBUG_PLATFORMS.write_text(json.dumps({
+    _OUT_PLATFORMS.write_text(json.dumps({
         "type": "FeatureCollection",
         "features": feats,
     }, ensure_ascii=False))
-    print(f"  Debug platforms: {len(feats):,} features → {OUT_DEBUG_PLATFORMS}")
+    print(f"  Debug platforms: {len(feats):,} features → {_OUT_PLATFORMS}")
 
 
-def write_debug_stops(line_stops: dict, line_lookup: dict,
-                       stop_attrs: dict, stop_meta: dict,
-                       skip_first_oids: set, skip_last_oids: set) -> None:
-    """Emit transit_debug_stops.geojson — one Point per (line, stop) pair,
-    1:1 with the debug platform lines. The point sits at the GTFS coord
-    snapped onto that line's polyline (the same snap-to-line used by the
-    pipeline's dot placement), so every debug line has a matching dot and
-    every dot has a matching line.
+def _write_debug_stops(line_stops: dict, line_lookup: dict,
+                        stop_attrs: dict, stop_meta: dict,
+                        skip_first_oids: set, skip_last_oids: set) -> None:
+    """One Point per (line, stop) pair, 1:1 with the debug platform lines.
+    The point sits at the GTFS coord snapped onto that line's polyline (the
+    same snap-to-line used by the pipeline's dot placement), so every debug
+    line has a matching dot and every dot has a matching line.
 
     The popup data is keyed on stop_id and lists every line visiting that
     stop (with origin / destination), regardless of which line's snap this
@@ -195,21 +288,16 @@ def write_debug_stops(line_stops: dict, line_lookup: dict,
                     "current_osm_id":   str(osm_id),
                 },
             })
-    OUT_DEBUG_STOPS.write_text(json.dumps({
+    _OUT_STOPS.write_text(json.dumps({
         "type": "FeatureCollection",
         "features": feats,
     }, ensure_ascii=False))
     stabbed_count = sum(1 for f in feats if f["properties"]["stabbed"])
     print(f"  Debug stops: {len(feats):,} features ({stabbed_count:,} stabbed) "
-          f"→ {OUT_DEBUG_STOPS}")
+          f"→ {_OUT_STOPS}")
 
 
-def write_debug_bars() -> None:
-    """Emit transit_debug_bars.geojson — one LineString per max-stab bar
-    found during cluster processing. Each line spans the perpendicular
-    extent of its stabbed dots (plus a small visual margin), so on the map
-    the line draws exactly where the bar "is" in 2D.
-    """
+def _write_debug_bars() -> None:
     feats = []
     for ep1, ep2 in _DIAG_BARS:
         feats.append({
@@ -219,19 +307,34 @@ def write_debug_bars() -> None:
                          "coordinates": [list(ep1), list(ep2)]},
             "properties": {},
         })
-    OUT_DEBUG_BARS.write_text(json.dumps({
+    _OUT_BARS.write_text(json.dumps({
         "type": "FeatureCollection",
         "features": feats,
     }, ensure_ascii=False))
-    print(f"  Debug bars: {len(feats):,} features → {OUT_DEBUG_BARS}")
+    print(f"  Debug bars: {len(feats):,} features → {_OUT_BARS}")
 
 
-# =============================================================================
+# ── Public entry point ─────────────────────────────────────────────────────
 
-
-
-
-# =============================================================================
-# Pill geometry — nearest-neighbor path through dot positions
-# =============================================================================
-
+def emit_all(*, line_stops, line_lookup, stop_attrs, stop_meta,
+             skip_first_oids, skip_last_oids,
+             end_of_platform_pairs) -> None:
+    """Single entry point invoked once at the tail of step 7. No-ops (and
+    unlinks stale outputs so step 8 doesn't rebuild yesterday's pmtiles)
+    when DEBUG_ENABLED is false."""
+    if not DEBUG_ENABLED:
+        for p in (_OUT_PLATFORMS, _OUT_STOPS, _OUT_BARS):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+        return
+    print("Emitting debug platform extents...")
+    _write_debug_platforms(line_stops, line_lookup, stop_attrs,
+                           skip_first_oids, skip_last_oids,
+                           end_of_platform_pairs)
+    print("Emitting debug stop dots...")
+    _write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta,
+                       skip_first_oids, skip_last_oids)
+    print("Emitting debug max-stab bars...")
+    _write_debug_bars()

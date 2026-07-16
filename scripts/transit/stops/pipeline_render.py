@@ -9,8 +9,8 @@ from math import atan2, cos, degrees, floor, log, pi, radians, sin, sqrt
 
 from _state import *  # noqa: F401,F403
 from _state import _stop_wb, _tag_band_features  # underscore names skipped by *
-from _state import _DIAG_BARS, _STABBED_PAIRS  # underscore names skipped by *
 from _state import _set_pill_design_band
+from stops.debug_overlay import emit_all as _emit_debug_overlays
 from stops.cluster import (
     cluster_rail_stops, cluster_stops_for_pills,
     merge_clusters_by_parent_station,
@@ -32,7 +32,6 @@ from stops.far_zoom import far_zoom_dot_position
 from stops.ferry_snap import (
     _ferry_canonical_snap, _ferry_pier_t_on_line, _obb_overlap,
 )
-from stops.pill_zoom.debug import write_debug_bars, write_debug_stops
 from stops.pill_zoom.geom import (
     PROTECTION_RADIUS_NONRAIL_M, PROTECTION_RADIUS_RAIL_M,
 )
@@ -607,13 +606,19 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                                     lone_outlier_m)
     print("  → non-rail dot placement done")
 
-    # Emit debug overlays now that all clusters have been processed and
-    # _STABBED_PAIRS / _DIAG_BARS are populated.
-    print("Emitting debug stop dots...")
-    write_debug_stops(line_stops, line_lookup, stop_attrs, stop_meta,
-                       skip_first_oids, skip_last_oids)
-    print("Emitting debug max-stab bars...")
-    write_debug_bars()
+    # Emit debug overlays now that all clusters have been processed and the
+    # stops.debug_overlay in-memory state (stabbed pairs + diag bars) is
+    # populated. No-ops when `debug.debug_overlay` is false; see
+    # stops/debug_overlay.py for the delete-checklist.
+    _emit_debug_overlays(
+        line_stops=line_stops,
+        line_lookup=line_lookup,
+        stop_attrs=stop_attrs,
+        stop_meta=stop_meta,
+        skip_first_oids=skip_first_oids,
+        skip_last_oids=skip_last_oids,
+        end_of_platform_pairs=end_of_platform_pairs,
+    )
 
     nonrail_pill_count = 0
     nonrail_dot_features = []

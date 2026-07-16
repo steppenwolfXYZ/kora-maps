@@ -3,7 +3,7 @@ each cluster settles on and where a stack should split into pill+connector."""
 from math import atan2, cos, degrees, pi, radians, sin, sqrt
 
 from _state import *  # noqa: F401,F403
-from _state import _DIAG_BARS, _STABBED_PAIRS  # underscore names skipped by *
+from stops.debug_overlay import record_diag_bar, record_stabbed_pair
 from stops.extent import _funicular_snap_override, _length_key, _resolve_length
 from geometry import _cum_dist_m, _directional_tangent_at, _interp_at, haversine_km
 from stops.pill_zoom.geom import (
@@ -17,8 +17,9 @@ from stops.pill_zoom.geom import (
 def _apply_option(group, option, placed_ids, record_stabbed=True):
     """Place this option's scoring + covered dots on their extents. When
     `record_stabbed` is False (e.g. trial placements during single-group
-    measurement), the (osm_id, stop_id) pairs are NOT pushed to
-    _STABBED_PAIRS — that's reserved for the chosen option's final pass.
+    measurement), the (osm_id, stop_id) pairs are NOT reported to
+    stops.debug_overlay — that's reserved for the chosen option's final
+    pass.
 
     The multi-group tie-break guarantees no member is in two chosen bars,
     so apply doesn't need its own anti-overlap guard — every member it
@@ -31,8 +32,7 @@ def _apply_option(group, option, placed_ids, record_stabbed=True):
         p["lon"], p["lat"] = pt
         placed_ids.add(id(p))
         if record_stabbed:
-            _STABBED_PAIRS.add((str(p.get("osm_id", "")),
-                                str(p.get("stop_id", ""))))
+            record_stabbed_pair(p.get("osm_id", ""), p.get("stop_id", ""))
     for k in option["covered"]:
         p = group[k]
         pt = _extent_intersect_axis(p["extent"], tx, ty, sigma)
@@ -41,25 +41,7 @@ def _apply_option(group, option, placed_ids, record_stabbed=True):
         p["lon"], p["lat"] = pt
         placed_ids.add(id(p))
         if record_stabbed:
-            _STABBED_PAIRS.add((str(p.get("osm_id", "")),
-                                str(p.get("stop_id", ""))))
-
-
-def _record_diag_bar(group, option):
-    """Append this option's perpendicular debug-bar geometry to _DIAG_BARS."""
-    tx, ty, sigma = option["tx"], option["ty"], option["sigma"]
-    nx, ny = -ty, tx
-    n_values = [group[k]["lon"] * nx + group[k]["lat"] * ny
-                for k in option["scoring"]]
-    if len(n_values) < 2:
-        return
-    n_min, n_max = min(n_values), max(n_values)
-    margin = (n_max - n_min) * 0.05 + 1e-6
-    n_min -= margin
-    n_max += margin
-    ep1 = (sigma * tx + n_min * nx, sigma * ty + n_min * ny)
-    ep2 = (sigma * tx + n_max * nx, sigma * ty + n_max * ny)
-    _DIAG_BARS.append((ep1, ep2))
+            record_stabbed_pair(p.get("osm_id", ""), p.get("stop_id", ""))
 
 
 def _pick_options_multi_group(per_group_options, protection_m):
