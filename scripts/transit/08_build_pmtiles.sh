@@ -10,13 +10,13 @@ STATIC="$ROOT/static/map-assets"
 mkdir -p "$STATIC"
 
 echo "=== Building transit_lines → tl_lines.pmtiles ==="
-# maxzoom z18: same rationale as tl_stop_pills below. Upscaling z14 tiles
-# 16× at z18+ triggers MapLibre's line-tessellation artifact — the line
-# visibly drifts from its true geographic position and no longer aligns
-# with the stop dots (which use a different rasterization path). Native
-# z18 tiles eliminate the drift at z18 and reduce it at higher zooms.
+# maxzoom z16: line/stop-dot alignment only matters up to z16.99 because
+# the close-zoom pill-arrow design (z17+) no longer overlays dots on lines.
+# So the tile-tessellation drift that motivated native z18 tiles is only a
+# problem below z17, and z16 native tiles are enough. Cuts the file from
+# ~500 MB to ~130 MB.
 tippecanoe -o "$STATIC/tl_lines.pmtiles" --force \
-  -z18 -Z4 -d18 \
+  -z16 -Z4 -d18 \
   --layer transit_lines \
   --drop-densest-as-needed \
   --extend-zooms-if-still-dropping \
