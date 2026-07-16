@@ -6,10 +6,15 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 
 **Key files:**
 - `scripts/config.yaml` — all design tokens (colors, opacities, zoom levels, widths). Edit here, rerun generator, reload browser.
-- `scripts/generate_style.py` — generates MapLibre style JSON from config. All layer logic lives here.
+- `scripts/generate_style.py` — generates MapLibre style JSON from config. Thin driver; the layer-building code lives in the `scripts/style/` package.
 - `static/map-assets/style.json` — generated output, gitignored, served at `/map-assets/style.json`. Alongside it live the `tl_*.pmtiles` tile bundles, referenced from the style as `pmtiles:///map-assets/tl_*.pmtiles`.
 
 **Tile source:** OpenMapTiles schema (`openmaptiles` source, OpenFreeMap tiles).
+
+**Basemap design language:**
+- Color philosophy: green = nature (background, default), warm yellow/brown = urban human spaces, gray = dead/uninteresting (industry, motorways).
+- Road hierarchy: motorway/trunk are "dead space" (gray, dashed when zoomed out, real-width fill when close); primary/secondary gray solid, not inviting; walkable streets carry the walkability color gradient (gray→yellow→orange); paths/cycleways are separate thin brown-orange lines from z14. Real-width streets from z15+ via meter-to-pixel conversion.
+- Rendering constraints: `sprite: ""` (no sprite source — never use `icon-image`); fonts are Noto Sans Regular/Bold/Italic from the OpenFreeMap glyph server.
 
 ---
 
