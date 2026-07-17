@@ -11,6 +11,8 @@ module its own binding, so the setter must mirror updates into each one).
 Everything else is a real constant and safe to share.
 """
 import json
+import time
+from contextlib import contextmanager
 from math import sqrt
 
 import yaml
@@ -191,6 +193,16 @@ def _set_pill_design_band(band_cfg):
         if mod is not None:
             for k, v in updates.items():
                 setattr(mod, k, v)
+
+
+@contextmanager
+def _timed(label: str):
+    """Print `  [   X.Xs] <label>` after the wrapped block completes.
+    Used by step 07's pipeline to surface per-section wall-clock times."""
+    t0 = time.perf_counter()
+    yield
+    dt = time.perf_counter() - t0
+    print(f"  [{dt:6.1f}s] {label}")
 
 
 def _stop_wb(wb: float, mode: str) -> float:

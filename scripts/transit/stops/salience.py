@@ -1,7 +1,6 @@
 """Per-stop salience: urbanness / dwell scoring, stop importance, tier
 resolution and min_zoom assignment. See zoom-level-rules.md and the
 salience-ranking concept."""
-import csv
 import json
 import sys
 from collections import defaultdict
@@ -11,7 +10,7 @@ from _state import *  # noqa: F401,F403 — shared constants (ROOT, MODE_*, ...)
 from _state import _M_PER_DEG, _transit_cfg  # underscore names skipped by *
 from geometry import (
     _cum_dist_m, _interp_at, _meters_per_deg, _project_meters,
-    flatten_coords, haversine_km, parse_time,
+    flatten_coords, haversine_km,
 )
 from gtfs.loaders import load_stop_meta
 from stop_attributes import GTFS_STOPS
@@ -52,6 +51,7 @@ def _resolve_stop_tier(modes_present: set) -> str:
 
 BUILDINGS_GEOJSON = ROOT / "data" / "osm" / "buildings.geojson"
 GTFS_STOP_TIMES   = ROOT / "data" / "gtfs_routed" / "stop_times.txt"
+DWELL_BY_UIC      = ROOT / "data" / "transit" / "dwell_by_uic.json"
 OUT_URBANNESS     = ROOT / "data" / "transit" / "urbanness.json"
 
 
@@ -146,38 +146,18 @@ def compute_urbanness(building_counts, urb_cfg):
 
 
 def compute_dwell_per_uic(stop_meta):
-    """{uic: avg_dwell_seconds} streamed from data/gtfs_routed/stop_times.txt.
-    avg (dep − arr) across every trip-stop row. Rows with arr == dep or
-    missing fields are folded in as 0 — they count toward the average but
-    pull it down, matching the concept's "average departure − arrival
-    across trips visiting the stop".
+    """{uic: avg_dwell_seconds} — read from data/transit/dwell_by_uic.json,
+    which step 06 populates as a side-effect of its stop_times.txt stream
+    (see gtfs.identity._dwell_export). Streaming the 1.7 GB routed
+    stop_times.txt a second time here was ~60 s of pure-Python CSV
+    parsing; piggybacking on step 06 makes step 07 skip it entirely.
     """
-    if not GTFS_STOP_TIMES.exists():
-        print(f"  WARNING: {GTFS_STOP_TIMES} missing — dwell points default "
-              "to 0.")
+    if not DWELL_BY_UIC.exists():
+        print(f"  WARNING: {DWELL_BY_UIC} missing — dwell points default "
+              "to 0. Re-run step 06 to populate.")
         return {}
-    sum_secs: dict = defaultdict(float)
-    cnt: dict = defaultdict(int)
-    with open(GTFS_STOP_TIMES, encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            arr = row.get("arrival_time", "")
-            dep = row.get("departure_time", "")
-            sid = row.get("stop_id", "")
-            if not sid or sid.startswith("WPT:"):
-                # Synthetic pfaedle waypoints (gtfs-trip-overrides) are not
-                # stops.
-                continue
-            try:
-                a = parse_time(arr)
-                d = parse_time(dep)
-            except (ValueError, IndexError):
-                continue
-            uic = _uic_of(sid, stop_meta)
-            if not uic:
-                continue
-            sum_secs[uic] += max(0, d - a)
-            cnt[uic] += 1
-    return {uic: sum_secs[uic] / cnt[uic] for uic in sum_secs if cnt[uic] > 0}
+    raw = json.loads(DWELL_BY_UIC.read_text())
+    return {uic: float(v) for uic, v in raw.items()}
 
 
 def compute_stop_importance(uic_serving, coords_by_uic,

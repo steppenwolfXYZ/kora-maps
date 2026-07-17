@@ -7,6 +7,7 @@ keep every file under the 1000-line cap the body is split across two
 sibling files that are exec'd in one shared namespace.
 """
 import pathlib
+import time
 
 from _state import *  # noqa: F401,F403
 from stops.extent import _length_key, _platform_extent
@@ -60,5 +61,7 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
     scope.setdefault("defaultdict", _dd)
     for phase in ("_writer_visits.py", "_writer_render.py"):
         path = _HERE / phase
+        _t0 = time.perf_counter()
         with open(path) as f:
             exec(compile(f.read(), str(path), "exec"), scope)
+        print(f"    [{time.perf_counter() - _t0:6.1f}s] close_zoom/{phase}")

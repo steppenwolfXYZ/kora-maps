@@ -323,6 +323,14 @@ print(f"  Trip groups:   {len(trip_groups_diag)} groups → {OUT_TRIP_GROUPS}")
 OUT_PFAEDLE_UNROUTED.write_text(json.dumps(pfaedle_unrouted, ensure_ascii=False))
 print(f"  Pfaedle unrouted: {len(pfaedle_unrouted)} trips → {OUT_PFAEDLE_UNROUTED}")
 
+# Per-merged-UIC dwell — written here so step 07 doesn't have to walk the
+# 1.7 GB stop_times.txt a second time. `_dwell_export` is populated as a
+# side effect of stream_stop_times.
+from gtfs.identity import _dwell_export
+OUT_DWELL_BY_UIC = ROOT / "data" / "transit" / "dwell_by_uic.json"
+OUT_DWELL_BY_UIC.write_text(json.dumps(_dwell_export, ensure_ascii=False))
+print(f"  Dwell by UIC: {len(_dwell_export)} UICs → {OUT_DWELL_BY_UIC}")
+
 # ── Comprehensive grouping diagnostic ──────────────────────────────────
 # One entry per (line_key, agency_id, trip_group_id) including groups that
 # never reached emission (low_frequency). One sub-entry per merged-stop

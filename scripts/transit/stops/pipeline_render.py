@@ -3,13 +3,16 @@
 Pill construction (rail + non-rail), dedup, close-zoom emission, output
 writes. Called from `stops.pipeline_setup.run()` after the setup phase."""
 import json
+import multiprocessing
+import os
+import time
 from collections import defaultdict
 from itertools import permutations
 from math import atan2, cos, degrees, floor, log, pi, radians, sin, sqrt
 
 from _state import *  # noqa: F401,F403
 from _state import _stop_wb, _tag_band_features  # underscore names skipped by *
-from _state import _set_pill_design_band
+from _state import _set_pill_design_band, _timed
 from stops.debug_overlay import emit_all as _emit_debug_overlays
 from stops.cluster import (
     cluster_rail_stops, cluster_stops_for_pills,
@@ -44,12 +47,107 @@ from stops.pill_zoom.nn_path import nearest_neighbor_path
 from stops.pill_zoom.place import coordinate_dots_global_stab
 
 
+# ── Non-rail pill bake worker ────────────────────────────────────────────────
+# The non-rail 3-band bake is the single biggest chunk of step 07 wall-clock
+# (~240 s over 26k clusters). Each cluster's bake is independent (all shared
+# state — line_lookup, PILL_DESIGN_BANDS — is read-only inside make_pill_features
+# and far_zoom_dot_position), so we fan out to a process pool. The pre-bake
+# `coordinate_dots_global_stab` pass — which is what populates the debug
+# overlay's in-memory state — runs in the PARENT before the pool is spawned,
+# so workers never touch stops.debug_overlay.
+
+_WORKER_LINE_LOOKUP = None
+_WORKER_PILL_DESIGN_BANDS = None
+
+
+def _nonrail_worker_init(line_lookup, pill_design_bands):
+    """Called once per worker; stashes shared read-only state in worker
+    globals so tasks don't have to re-pickle line_lookup for every cluster.
+    Under fork this is essentially a no-op (COW gives workers the parent's
+    memory for free); under spawn the initargs are pickled once per worker."""
+    global _WORKER_LINE_LOOKUP, _WORKER_PILL_DESIGN_BANDS
+    _WORKER_LINE_LOOKUP = line_lookup
+    _WORKER_PILL_DESIGN_BANDS = pill_design_bands
+
+
+def _bake_nonrail_cluster(payload):
+    """One cluster → (dot_feat, band_feats_or_None, indicator_feats).
+    Mirrors the sequential loop body in run_pills verbatim; only difference
+    is that `line_lookup` and `PILL_DESIGN_BANDS` come from worker globals
+    populated by `_nonrail_worker_init`."""
+    (cluster, mz, cluster_rail_like, mode_minzoom,
+     centroid_lon, centroid_lat, centroid_props,
+     lines_json_str) = payload
+    line_lookup = _WORKER_LINE_LOOKUP
+    bands = _WORKER_PILL_DESIGN_BANDS
+
+    if mz is None:
+        dot_feat = {
+            "type": "Feature",
+            "tippecanoe": {"minzoom": mode_minzoom},
+            "geometry": {"type": "Point",
+                         "coordinates": [centroid_lon, centroid_lat]},
+            "properties": centroid_props,
+        }
+        ind = list(build_indicator_features(
+            cluster, centroid_lon, centroid_lat, line_lookup))
+        return (dot_feat, None, ind)
+
+    _set_pill_design_band(bands["C"])
+    c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+    if not c_feats:
+        # Pill collapsed — fall through to centroid dot + indicators.
+        dot_feat = {
+            "type": "Feature",
+            "tippecanoe": {"minzoom": mode_minzoom},
+            "geometry": {"type": "Point",
+                         "coordinates": [centroid_lon, centroid_lat]},
+            "properties": centroid_props,
+        }
+        ind = list(build_indicator_features(
+            cluster, centroid_lon, centroid_lat, line_lookup))
+        return (dot_feat, None, ind)
+
+    _tag_band_features(c_feats, "C", bands["C"])
+    all_band_feats = list(c_feats)
+    for band_id in ("A", "B"):
+        _set_pill_design_band(bands[band_id])
+        bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+        _tag_band_features(bfeats, band_id, bands[band_id])
+        all_band_feats.extend(bfeats)
+    dot_lon, dot_lat = far_zoom_dot_position(
+        cluster, c_feats, line_lookup,
+        (centroid_lon, centroid_lat),
+        rail_like=cluster_rail_like)
+    dot_feat = {
+        "type": "Feature",
+        "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
+        "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
+        "properties": centroid_props,
+    }
+    return (dot_feat, all_band_feats, [])
+
+
+def _get_nonrail_pool_context():
+    """Pick a multiprocessing start method. `fork` is dramatically cheaper
+    (COW inheritance of line_lookup + all the pill_zoom modules) and is
+    safe for this pure-Python pipeline on both macOS and Linux — the
+    codebase touches no threads or GUI runtime before the pool is spawned.
+    Fallback to `spawn` if fork is unavailable (some hardened environments
+    disable it)."""
+    try:
+        return multiprocessing.get_context("fork")
+    except (ValueError, OSError):
+        return multiprocessing.get_context("spawn")
+
+
 def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
               stop_attrs, end_of_platform_pairs, fill_diag, filled_oids,
               skip_first_oids, skip_last_oids, rail_idx, tram_idx,
               coords_by_uic, uic_serving, gtfs_stop_features,
               stop_salience):
 
+    _t_phase = time.perf_counter()
     print("Building stop dots and pill candidates...")
 
     rail_pill_raw     = []   # dicts for rail pill clustering (also used for dots)
@@ -248,6 +346,9 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                     slon, slat, line_lookup,
                     parent_width_base=_stop_wb(width_base, mode),
                     parent_mode=mode))
+
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] build stop dots + per-line pill candidates")
+    _t_phase = time.perf_counter()
 
     # --- Ferry stop aggregation (parent_station → one disc) ---------------
     # Group ferry candidates by parent_station (or stop_id when no parent),
@@ -466,6 +567,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
           f"({n_ferry_split:,} split, {n_ferry_collapsed:,} collapsed, "
           f"{n_ferry_diverged:,} per-line fallback, "
           f"{n_ferry_gtfs_suppressed:,} GTFS-side suppressed)")
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] ferry stop aggregation")
+    _t_phase = time.perf_counter()
 
     # Per-stop-id set of lines (osm_ids), used by cluster_stops_for_pills to
     # block merging of two stops served by the same drawn line. See
@@ -577,6 +680,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
           f"from {len(rail_pill_clusters):,} clusters")
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] rail cluster + pill bake (3 bands)")
+    _t_phase = time.perf_counter()
 
     # ==========================================================================
     # Pill generation (non-rail)
@@ -622,6 +727,13 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
 
     nonrail_pill_count = 0
     nonrail_dot_features = []
+    # Prep per-cluster payloads once, then bake either in parallel (default)
+    # or sequentially (when the debug overlay is on — the debug overlay
+    # accumulates in-module state in stops.debug_overlay that doesn't cross
+    # process boundaries; the pre-bake `coordinate_dots_global_stab` already
+    # ran in the parent so the debug OVERLAY output is safe, but keeping
+    # things sequential when the debug is on avoids any surprises).
+    payloads = []
     for cluster in nonrail_clusters:
         stop_count  = count_unique_lines(cluster)
         color, dom_mode, max_wb, dom_stop = dominant_line(cluster)
@@ -649,61 +761,42 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
         }
+        payloads.append((cluster, mz, cluster_rail_like, mode_minzoom,
+                         centroid_lon, centroid_lat, centroid_props,
+                         lines_json_str))
 
-        if mz is None:
-            # Single-line stop: one cluster dot at all zooms. Rule chain
-            # falls through to centroid (intersection needs ≥2 lines).
-            nonrail_dot_features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": mode_minzoom},
-                "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
-                "properties": centroid_props,
-            })
-            indicator_features.extend(build_indicator_features(
-                cluster, centroid_lon, centroid_lat, line_lookup))
-        else:
-            # Bake band C first (its features drive the far-zoom-dot and
-            # collapse decision); then bake A and B on top with per-band
-            # thresholds. See rail block above for rationale.
-            _set_pill_design_band(PILL_DESIGN_BANDS["C"])
-            c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
-            if c_feats:
-                _tag_band_features(c_feats, "C", PILL_DESIGN_BANDS["C"])
-                all_band_feats = list(c_feats)
-                for _band_id in ("A", "B"):
-                    _set_pill_design_band(PILL_DESIGN_BANDS[_band_id])
-                    _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
-                    _tag_band_features(_bfeats, _band_id, PILL_DESIGN_BANDS[_band_id])
-                    all_band_feats.extend(_bfeats)
-                # Non-rail family runs the intersection search first — at
-                # a crossroads the dot sits at the junction, not at the
-                # platform centroid.
-                dot_lon, dot_lat = far_zoom_dot_position(
-                    cluster, c_feats, line_lookup,
-                    (centroid_lon, centroid_lat),
-                    rail_like=cluster_rail_like)
-                nonrail_dot_features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": mode_minzoom, "maxzoom": mz - 1},
-                    "geometry": {"type": "Point", "coordinates": [dot_lon, dot_lat]},
-                    "properties": centroid_props,
-                })
-                pill_features.extend(all_band_feats)
-                nonrail_pill_count += len(all_band_feats)
-            else:
-                # Pill collapsed — cluster dot stays at all zooms at the
-                # centroid (no pill, no disc, fall-through case).
-                nonrail_dot_features.append({
-                    "type": "Feature",
-                    "tippecanoe": {"minzoom": mode_minzoom},
-                    "geometry": {"type": "Point", "coordinates": [centroid_lon, centroid_lat]},
-                    "properties": centroid_props,
-                })
-                indicator_features.extend(build_indicator_features(
-                    cluster, centroid_lon, centroid_lat, line_lookup))
+    from stops.debug_overlay import DEBUG_ENABLED as _NONRAIL_DEBUG_ON
+    n_workers = min(8, max(1, (os.cpu_count() or 2) - 1))
+    use_parallel = (not _NONRAIL_DEBUG_ON) and n_workers > 1 and len(payloads) >= 200
+    if use_parallel:
+        ctx = _get_nonrail_pool_context()
+        # Chunksize: aim for ~16 chunks per worker so late-arriving heavy
+        # clusters don't leave workers idle at the tail.
+        chunksize = max(1, len(payloads) // (n_workers * 16))
+        print(f"  Parallel non-rail bake: {n_workers} workers, "
+              f"chunksize={chunksize}, start_method={ctx.get_start_method()}")
+        with ctx.Pool(
+                n_workers,
+                initializer=_nonrail_worker_init,
+                initargs=(line_lookup, PILL_DESIGN_BANDS)) as pool:
+            results = pool.map(_bake_nonrail_cluster, payloads, chunksize)
+    else:
+        # Sequential fallback — mirrors worker semantics.
+        _nonrail_worker_init(line_lookup, PILL_DESIGN_BANDS)
+        results = [_bake_nonrail_cluster(p) for p in payloads]
+
+    for dot_feat, band_feats, ind_feats in results:
+        nonrail_dot_features.append(dot_feat)
+        if band_feats:
+            pill_features.extend(band_feats)
+            nonrail_pill_count += len(band_feats)
+        if ind_feats:
+            indicator_features.extend(ind_feats)
 
     print(f"  → {nonrail_pill_count} non-rail pill/connector features "
           f"from {len(nonrail_clusters):,} clusters")
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] non-rail cluster + pill bake (3 bands) + debug overlays")
+    _t_phase = time.perf_counter()
 
     # ==========================================================================
     # Apply per-UIC min_zoom to stop dots
@@ -773,8 +866,13 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # ==========================================================================
     # Far-zoom dot dedup
     # ==========================================================================
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] attach stop_score / stop_tier / min_zoom to dots")
+    _t_phase = time.perf_counter()
+
     print("Applying far-zoom dot dedup...")
     apply_stop_dedup(dot_features)
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] apply_stop_dedup (far-zoom)")
+    _t_phase = time.perf_counter()
 
     # ==========================================================================
     # Salience diagnostic (per-line salience + per-stop rule placement)
@@ -812,12 +910,15 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     pill_features.extend(ferry_pill_features)
     pill_features.extend(indicator_features)
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] salience diag + write dot/pill GeoJSON")
+    _t_phase = time.perf_counter()
 
     print("Emitting close-zoom stop features...")
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
                               end_of_platform_pairs,
                               skip_first_oids, skip_last_oids,
                               rail_idx=rail_idx, tram_idx=tram_idx)
+    print(f"  [{time.perf_counter() - _t_phase:6.1f}s] write_close_zoom_features (visits + polygon bake + write)")
 
     # Summary
     mode_counts: dict = defaultdict(int)

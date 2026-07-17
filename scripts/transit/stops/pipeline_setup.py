@@ -5,12 +5,13 @@ file.
 All shared constants (paths, MODE_*, PILL_CFG, ...) come in via
 `from _state import *`; every helper it needs is imported explicitly."""
 import json
+import time
 from collections import defaultdict
 from itertools import permutations
 from math import atan2, cos, degrees, floor, log, pi, radians, sin, sqrt
 
 from _state import *  # noqa: F401,F403
-from _state import _set_pill_design_band
+from _state import _set_pill_design_band, _timed
 from stops.cluster import (
     cluster_rail_stops, cluster_stops_for_pills,
     merge_clusters_by_parent_station,
@@ -55,32 +56,34 @@ from stops.pill_zoom.place import coordinate_dots_global_stab
 
 
 def run():
+    _t_total = time.perf_counter()
     print("Loading lines...")
-    lines_data = json.loads(LINES.read_text())
-    line_lookup = {}
-    gtfs_stop_features = []
-    for feat in lines_data["features"]:
-        p   = feat["properties"]
-        oid = str(p.get("osm_id", ""))
-        if oid:
-            line_lookup[oid] = {
-                "color":           p["color"],
-                "mode":            p["mode"],
-                "mountain_origin": p.get("mountain_origin"),
-                "width_base":      p.get("width_base", 3.0),
-                "freq_score":      p.get("freq_score", 0.0),
-                "f_weighted":      p.get("f_weighted", 0.0),
-                "speed_kmh":       p.get("speed_kmh"),
-                "salience":        p.get("salience"),
-                "min_zoom":        p.get("min_zoom"),
-                "coords":          feat["geometry"]["coordinates"],
-                "ref":             p.get("ref", ""),
-                "name":            p.get("name", ""),
-                "agency_id":       p.get("agency_id", ""),
-            }
-        if p.get("gtfs_stops"):
-            gtfs_stop_features.append(feat)
-    print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
+    with _timed("load lines + build line_lookup"):
+        lines_data = json.loads(LINES.read_text())
+        line_lookup = {}
+        gtfs_stop_features = []
+        for feat in lines_data["features"]:
+            p   = feat["properties"]
+            oid = str(p.get("osm_id", ""))
+            if oid:
+                line_lookup[oid] = {
+                    "color":           p["color"],
+                    "mode":            p["mode"],
+                    "mountain_origin": p.get("mountain_origin"),
+                    "width_base":      p.get("width_base", 3.0),
+                    "freq_score":      p.get("freq_score", 0.0),
+                    "f_weighted":      p.get("f_weighted", 0.0),
+                    "speed_kmh":       p.get("speed_kmh"),
+                    "salience":        p.get("salience"),
+                    "min_zoom":        p.get("min_zoom"),
+                    "coords":          feat["geometry"]["coordinates"],
+                    "ref":             p.get("ref", ""),
+                    "name":            p.get("name", ""),
+                    "agency_id":       p.get("agency_id", ""),
+                }
+            if p.get("gtfs_stops"):
+                gtfs_stop_features.append(feat)
+        print(f"  {len(line_lookup):,} lines, {len(gtfs_stop_features):,} with embedded gtfs_stops")
 
     # Sibling index for the missing-range fill rule (tram/bus/regional_bus):
     # {(ref, agency_id, mode) → [(osm_id, flat_polyline)]}. The proximity
@@ -94,42 +97,47 @@ def run():
     # _platform_extent itself carries no fill logic. Built from the
     # pre-fill polylines, so donors are deterministic regardless of fill
     # order.
-    sibling_groups: dict = defaultdict(list)
-    oid_sibling_key: dict = {}
-    all_lines_index = _AllLinesIndex()
-    for oid_s, info in line_lookup.items():
-        key = (info.get("ref", ""), info.get("agency_id", ""), info.get("mode", ""))
-        flat_poly = flatten_coords(info["coords"])
-        if len(flat_poly) >= 2:
-            sibling_groups[key].append((oid_s, flat_poly))
-            oid_sibling_key[oid_s] = key
-            all_lines_index.add(oid_s, key, flat_poly, _cum_dist_m(flat_poly))
+    with _timed("build sibling + all-lines spatial index"):
+        sibling_groups: dict = defaultdict(list)
+        oid_sibling_key: dict = {}
+        all_lines_index = _AllLinesIndex()
+        for oid_s, info in line_lookup.items():
+            key = (info.get("ref", ""), info.get("agency_id", ""), info.get("mode", ""))
+            flat_poly = flatten_coords(info["coords"])
+            if len(flat_poly) >= 2:
+                sibling_groups[key].append((oid_s, flat_poly))
+                oid_sibling_key[oid_s] = key
+                all_lines_index.add(oid_s, key, flat_poly, _cum_dist_m(flat_poly))
 
     print("Loading stop coordinates and metadata...")
-    line_stops = json.loads(LINE_STOPS.read_text())
-    stop_meta  = load_stop_meta()
-    print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
+    with _timed("load line_stops + stop_meta"):
+        line_stops = json.loads(LINE_STOPS.read_text())
+        stop_meta  = load_stop_meta()
+        print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
 
     # ── Zoom-level rules: per-mode stop min_zoom ─────────────────────────────
     # See .claude/concepts/zoom-level-rules.md.
     print("Building per-UIC line index...")
-    uic_serving, coords_by_uic = _build_uic_serving(
-        line_lookup, line_stops, stop_meta)
-    print(f"  {len(uic_serving):,} canonical UICs across "
-          f"{sum(len(v) for v in uic_serving.values()):,} (line, stop) pairs")
+    with _timed("_build_uic_serving"):
+        uic_serving, coords_by_uic = _build_uic_serving(
+            line_lookup, line_stops, stop_meta)
+        print(f"  {len(uic_serving):,} canonical UICs across "
+              f"{sum(len(v) for v in uic_serving.values()):,} (line, stop) pairs")
 
     zr_cfg = _zoom_rules_cfg()
 
     # Urbanness — building counts at two radii per UIC.
     print("Loading OSM building centroids...")
-    buildings = load_buildings()
-    print(f"  {len(buildings):,} building centroids")
+    with _timed("load_buildings (254 MB JSON parse)"):
+        buildings = load_buildings()
+        print(f"  {len(buildings):,} building centroids")
     urb_cfg = zr_cfg.get("urbanness") or {}
     r_in = float(urb_cfg.get("radius_inner_m", 200))
     r_out = float(urb_cfg.get("radius_outer_m", 500))
     print(f"  Counting buildings within {r_in:g}m / {r_out:g}m per UIC...")
-    building_counts = count_buildings_in_radii(coords_by_uic, buildings,
-                                               r_in, r_out)
+    with _timed("count_buildings_in_radii"):
+        building_counts = count_buildings_in_radii(coords_by_uic, buildings,
+                                                   r_in, r_out)
     urbanness = compute_urbanness(building_counts, urb_cfg)
     OUT_URBANNESS.write_text(json.dumps(urbanness, ensure_ascii=False))
     bracket_counts = defaultdict(int)
@@ -139,20 +147,23 @@ def run():
           ", ".join(f"{k}={v}" for k, v in sorted(bracket_counts.items())) +
           f" → {OUT_URBANNESS}")
 
-    # Dwell per UIC (avg dep − arr across all trip-stop rows).
-    print("Computing per-UIC dwell from stop_times.txt...")
-    dwell_by_uic = compute_dwell_per_uic(stop_meta)
-    if dwell_by_uic:
-        avgs = list(dwell_by_uic.values())
-        print(f"  {len(dwell_by_uic):,} UICs with dwell data; "
-              f"mean {sum(avgs)/len(avgs):.1f}s, "
-              f"max {max(avgs):.0f}s")
+    # Dwell per UIC — read from data/transit/dwell_by_uic.json which step 06
+    # populates as a side-effect of its stop_times.txt stream.
+    print("Loading per-UIC dwell (from step 06 output)...")
+    with _timed("compute_dwell_per_uic (reads dwell_by_uic.json)"):
+        dwell_by_uic = compute_dwell_per_uic(stop_meta)
+        if dwell_by_uic:
+            avgs = list(dwell_by_uic.values())
+            print(f"  {len(dwell_by_uic):,} UICs with dwell data; "
+                  f"mean {sum(avgs)/len(avgs):.1f}s, "
+                  f"max {max(avgs):.0f}s")
 
     # Stop importance score (4 categories, sum).
     si_cfg = zr_cfg.get("stop_importance") or {}
     nt_radius = float(si_cfg.get("nearby_transit_radius_m", 1000))
-    importance_by_uic = compute_stop_importance(
-        uic_serving, coords_by_uic, urbanness, dwell_by_uic, nt_radius)
+    with _timed("compute_stop_importance"):
+        importance_by_uic = compute_stop_importance(
+            uic_serving, coords_by_uic, urbanness, dwell_by_uic, nt_radius)
     imp_counts = defaultdict(int)
     for s in importance_by_uic.values():
         imp_counts[s] += 1
@@ -172,11 +183,12 @@ def run():
             intercity_oids.add(str(oid))
 
     print("Applying per-mode stop rules...")
-    stop_min_zoom = compute_stop_min_zoom(
-        line_lookup, line_stops, stop_meta,
-        importance_by_uic, intercity_oids,
-        uic_serving, coords_by_uic,
-    )
+    with _timed("compute_stop_min_zoom"):
+        stop_min_zoom = compute_stop_min_zoom(
+            line_lookup, line_stops, stop_meta,
+            importance_by_uic, intercity_oids,
+            uic_serving, coords_by_uic,
+        )
     if stop_min_zoom:
         mzs = [v["min_zoom"] for v in stop_min_zoom.values()]
         mz_counts = defaultdict(int)
@@ -203,20 +215,25 @@ def run():
         }
 
     print("Loading atlas platform attributes...")
-    stop_attrs = write_stop_attributes_diag(line_stops)
+    with _timed("write_stop_attributes_diag (atlas + diag)"):
+        stop_attrs = write_stop_attributes_diag(line_stops)
 
     print("Loading OSM rail ways for terminal extension...")
-    rail_idx = _load_way_index(RAIL_WAYS_GEOJSON, "rail")
+    with _timed("_load_way_index(rail, 34 MB)"):
+        rail_idx = _load_way_index(RAIL_WAYS_GEOJSON, "rail")
 
     print("Extending train and mountain rail-like polylines at terminal stops...")
-    end_of_platform_pairs = _extend_polylines_at_terminals(
-        line_lookup, line_stops, rail_idx, PILL_CFG, stop_attrs)
+    with _timed("_extend_polylines_at_terminals (rail)"):
+        end_of_platform_pairs = _extend_polylines_at_terminals(
+            line_lookup, line_stops, rail_idx, PILL_CFG, stop_attrs)
 
     print("Loading OSM tram and street ways for the stop-extent fill...")
-    tram_idx = _load_way_index(TRAM_WAYS_GEOJSON, "tram",
-                               index_all_nodes=True)
-    street_idx = _load_way_index(STREET_WAYS_GEOJSON, "street",
-                                 index_all_nodes=True)
+    with _timed("_load_way_index(tram, 3.6 MB, all_nodes)"):
+        tram_idx = _load_way_index(TRAM_WAYS_GEOJSON, "tram",
+                                   index_all_nodes=True)
+    with _timed("_load_way_index(street, 149 MB, all_nodes)"):
+        street_idx = _load_way_index(STREET_WAYS_GEOJSON, "street",
+                                     index_all_nodes=True)
 
     # Fill targets (stop-extent-osm-walk.md § Fill target): count the
     # close-zoom pill-arrow stacks BEFORE the fill so bus/regional_bus
@@ -224,18 +241,21 @@ def run():
     # L). Same visit collection + stacking rules the close-zoom rendering
     # uses later (post-fill, with extents).
     print("Counting close-zoom pill-arrow stacks for fill targets...")
-    pre_fill_visits = _collect_close_zoom_visits(
-        line_stops, line_lookup, stop_meta,
-        rail_idx=rail_idx, tram_idx=tram_idx)
-    stack_need = _stack_need_by_stop(pre_fill_visits)
+    with _timed("_collect_close_zoom_visits (pre-fill counter, first of two runs)"):
+        pre_fill_visits = _collect_close_zoom_visits(
+            line_stops, line_lookup, stop_meta,
+            rail_idx=rail_idx, tram_idx=tram_idx)
+    with _timed("_stack_need_by_stop"):
+        stack_need = _stack_need_by_stop(pre_fill_visits)
     print(f"  {len(stack_need):,} (line, stop) fill targets from "
           f"{len(pre_fill_visits):,} stops with pill-arrows")
 
     print("Extending tram/bus polylines at terminal stops (stop-extent fill)...")
-    fill_diag, filled_oids = _extend_nonrail_polylines_at_terminals(
-        line_lookup, line_stops, tram_idx, street_idx,
-        PILL_CFG, stop_attrs, stop_meta, sibling_groups, oid_sibling_key,
-        stack_need, all_lines_index)
+    with _timed("_extend_nonrail_polylines_at_terminals"):
+        fill_diag, filled_oids = _extend_nonrail_polylines_at_terminals(
+            line_lookup, line_stops, tram_idx, street_idx,
+            PILL_CFG, stop_attrs, stop_meta, sibling_groups, oid_sibling_key,
+            stack_need, all_lines_index)
     OUT_STOP_EXTENT_FILL.write_text(json.dumps(fill_diag, ensure_ascii=False))
     print(f"  {len(fill_diag):,} fill records → {OUT_STOP_EXTENT_FILL}")
 
@@ -245,34 +265,36 @@ def run():
     # input is never modified. Scope of the geometry patch: train + mountain
     # rail-like (rebucketed_rail / rack) plus every tram/bus line the
     # stop-extent fill actually prepended geometry to.
-    n_synced = 0
-    for feat in lines_data["features"]:
-        props = feat.get("properties") or {}
-        mode = props.get("mode")
-        mo = props.get("mountain_origin")
-        oid = str(props.get("osm_id", ""))
-        is_rail_scope = mode == "train" or (
-            mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS)
-        if not is_rail_scope and oid not in filled_oids:
-            continue
-        if not oid:
-            continue
-        info = line_lookup.get(oid)
-        if not info or "coords" not in info:
-            continue
-        feat["geometry"]["type"] = "LineString"
-        feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]
-        n_synced += 1
-    LINES_EXTENDED.write_text(json.dumps(lines_data, ensure_ascii=False))
-    print(f"  Wrote {n_synced:,} extended polylines → {LINES_EXTENDED.name} "
-          f"({LINES.name} left pristine)")
+    with _timed("sync extended polylines + write LINES_EXTENDED"):
+        n_synced = 0
+        for feat in lines_data["features"]:
+            props = feat.get("properties") or {}
+            mode = props.get("mode")
+            mo = props.get("mountain_origin")
+            oid = str(props.get("osm_id", ""))
+            is_rail_scope = mode == "train" or (
+                mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS)
+            if not is_rail_scope and oid not in filled_oids:
+                continue
+            if not oid:
+                continue
+            info = line_lookup.get(oid)
+            if not info or "coords" not in info:
+                continue
+            feat["geometry"]["type"] = "LineString"
+            feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]
+            n_synced += 1
+        LINES_EXTENDED.write_text(json.dumps(lines_data, ensure_ascii=False))
+        print(f"  Wrote {n_synced:,} extended polylines → {LINES_EXTENDED.name} "
+              f"({LINES.name} left pristine)")
 
-    skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
-        line_stops, line_lookup, stop_meta)
-    print(f"  Terminus dedup: {len(skip_first_oids):,} departure-side entries "
-          f"will be omitted from rendering (popup retains both directions)")
-    print(f"  Arrival drop (tram/bus/regional_bus): {len(skip_last_oids):,} "
-          f"unpaired or layover-shadowed arrival entries omitted from pill construction")
+    with _timed("compute_terminus_skip_oids"):
+        skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
+            line_stops, line_lookup, stop_meta)
+        print(f"  Terminus dedup: {len(skip_first_oids):,} departure-side entries "
+              f"will be omitted from rendering (popup retains both directions)")
+        print(f"  Arrival drop (tram/bus/regional_bus): {len(skip_last_oids):,} "
+              f"unpaired or layover-shadowed arrival entries omitted from pill construction")
 
     from stops.pipeline_render import run_pills
     run_pills(
@@ -293,3 +315,7 @@ def run():
         gtfs_stop_features=gtfs_stop_features,
         stop_salience=stop_salience,
     )
+    _dt_total = time.perf_counter() - _t_total
+    print(f"\n  ═══════════════════════════════════════════════════════")
+    print(f"  Step 07 total wall-clock: {_dt_total:.1f}s ({_dt_total/60:.1f} min)")
+    print(f"  ═══════════════════════════════════════════════════════")

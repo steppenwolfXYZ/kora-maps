@@ -34,6 +34,9 @@ _trip_merged_export: dict = {}       # trip_id → frozenset(merged_stop_id)  (v
 _trip_weight_export: dict = {}       # trip_id → int (≈ trip-runs across calendar)
 _trip_weight_seasonal_export: dict = {}  # trip_id → {"annual": n, "winter": n, "summer": n}
 _trip_direction_export: dict = {}    # trip_id → (first_merged_uic, last_merged_uic)
+_dwell_export: dict = {}             # merged_uic → avg dwell (seconds) — piggybacks
+                                     # on this streaming pass so step 07 doesn't have
+                                     # to walk the 1.7 GB stop_times.txt a second time.
 
 
 def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta):
@@ -42,12 +45,18 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     `_trip_stops_export`, `_trip_merged_export`, `_trip_weight_export`,
     and `_trip_direction_export`.
     """
-    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export
+    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export, _dwell_export
 
     stop_merge: dict = {}
     for sid, meta in stop_meta.items():
         parent = meta["parent"]
         stop_merge[sid] = parent if parent else sid.split(":")[0]
+
+    # Per-merged-UIC dwell accumulator (see _dwell_export docstring above).
+    # avg dep − arr across every trip-stop row; rows with dep == arr are
+    # folded in as 0 so the mean matches step 07's original definition.
+    dwell_sum: dict = defaultdict(float)
+    dwell_cnt: dict = defaultdict(int)
 
     wd_set, we_set, n_wd_samples, n_we_samples = _sample_dates()
     season_dates = _sample_dates_seasonal()
@@ -149,6 +158,10 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
             # routing.
             if stop_id.startswith("WPT:"):
                 continue
+            uic_for_dwell = stop_merge.get(stop_id) or stop_id.split(":")[0]
+            if uic_for_dwell:
+                dwell_sum[uic_for_dwell] += max(0, dep - arr)
+                dwell_cnt[uic_for_dwell] += 1
             seq = int(row["stop_sequence"])
 
             if tid != current_trip_id:
@@ -163,6 +176,12 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
 
         process_trip(current_trip_id, current_stops)
     print(f"  Done. {row_count:,} rows processed, {len(trip_buf):,} trips buffered.")
+
+    _dwell_export = {
+        u: dwell_sum[u] / dwell_cnt[u]
+        for u in dwell_sum if dwell_cnt[u] > 0
+    }
+    print(f"  Dwell aggregated for {len(_dwell_export):,} merged UICs.")
 
     # ── Trip-group partitioning ──────────────────────────────────────────────
     print("  Partitioning trips and computing trip-groups...")

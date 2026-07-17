@@ -9,7 +9,7 @@
 #   4  Preprocess GTFS (excluded agencies, foreign-terminus)  (~2 min)
 #   5  Run pfaedle (Docker)                               (~5–15 min)
 #   6  Emit transit_lines.geojson from pfaedle shapes     (~3 min)
-#   7  Build stop dots & pills + regenerate style.json    (~10 sec)
+#   7  Build stop dots & pills + regenerate style.json    (~15-20 min; per-section timings printed)
 #   8  Build all tl_*.pmtiles                             (~1 min)
 #
 # Use --start N to start from step N (default 3). Steps before N are skipped
