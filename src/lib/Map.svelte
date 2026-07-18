@@ -29,6 +29,20 @@
 		'transit-stop-fill-transit_stops_bus-far'
 	];
 
+	const TRANSIT_STOP_LABEL_LAYERS = [
+		'transit-stop-label-transit_stops_rail-far-normal',
+		'transit-stop-label-transit_stops_rail-far-other',
+		'transit-stop-label-transit_stops_tram-far-normal',
+		'transit-stop-label-transit_stops_tram-far-other',
+		'transit-stop-label-transit_stops_regional-far-normal',
+		'transit-stop-label-transit_stops_regional-far-other',
+		'transit-stop-label-transit_stops_bus-far-normal',
+		'transit-stop-label-transit_stops_bus-far-other',
+		'transit-stop-label-pill-normal',
+		'transit-stop-label-pill-other',
+		'transit-stop-label-leader'
+	];
+
 	const TRANSIT_STOP_PILL_LAYERS = [
 		'transit-stop-pill-fill',
 		'transit-stop-pill-casing',
@@ -42,6 +56,7 @@
 	const STOP_SYMBOLOGY_LAYERS = [
 		...TRANSIT_STOP_DOT_LAYERS,
 		...TRANSIT_STOP_PILL_LAYERS,
+		...TRANSIT_STOP_LABEL_LAYERS,
 		'transit-stop-indicator',
 		'close-zoom-station-backdrop',
 		'close-zoom-pill-arrow-casing',

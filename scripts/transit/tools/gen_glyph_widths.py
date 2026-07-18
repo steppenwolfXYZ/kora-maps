@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """One-off generator for scripts/transit/tools/glyph_widths.json.
 
-Downloads the Noto Sans Regular and Bold TTFs (the same typeface the
-OpenFreeMap glyph server serves) and extracts per-character advance widths
-as em fractions. Step 07's close-zoom label wrapping measures text with
-these widths instead of assuming a flat average character width.
+Downloads Saira as a variable font from Google Fonts and instantiates
+Regular (wght=400) and ExtraBold (wght=800) — the two weights the close-zoom
+pill-arrows actually render (destination text / line number). Per-character
+advance widths are extracted as em fractions. Step 07's close-zoom label
+wrapping measures text with these widths instead of assuming a flat average
+character width.
+
+Note: the JSON keys `regular` / `bold` / `default_regular` / `default_bold`
+are kept for backward compatibility with `close_zoom/constants.py`; `bold`
+here refers to Saira ExtraBold (the pill-arrow ref weight).
 
 Kerning is deliberately ignored (~1% error). Coverage: Basic Latin,
 Latin-1 Supplement, Latin Extended-A, plus common punctuation used in stop
@@ -24,16 +30,20 @@ import urllib.request
 from pathlib import Path
 
 from fontTools.ttLib import TTFont
+from fontTools.varLib.instancer import instantiateVariableFont
 
 OUT = Path(__file__).resolve().parent / "glyph_widths.json"
 
-URLS = {
-    "regular": ("https://raw.githubusercontent.com/notofonts/"
-                "notofonts.github.io/main/fonts/NotoSans/hinted/ttf/"
-                "NotoSans-Regular.ttf"),
-    "bold":    ("https://raw.githubusercontent.com/notofonts/"
-                "notofonts.github.io/main/fonts/NotoSans/hinted/ttf/"
-                "NotoSans-Bold.ttf"),
+# Saira ships as a variable font (wght + wdth axes) on Google Fonts. Same
+# source we instance for the map's runtime glyph PBFs, so measurements
+# match what MapLibre actually renders.
+SAIRA_VF_URL = ("https://github.com/google/fonts/raw/main/ofl/saira/"
+                "Saira%5Bwdth%2Cwght%5D.ttf")
+
+# JSON keys ↔ weight axis value picked out of the variable font.
+INSTANCES = {
+    "regular": {"wght": 400, "wdth": 87.5},  # Saira Semi Condensed — destinations
+    "bold":    {"wght": 800, "wdth": 100},   # Saira ExtraBold — pill-arrow ref
 }
 
 # Basic Latin + Latin-1 Supplement + Latin Extended-A, plus punctuation
@@ -45,11 +55,7 @@ CODEPOINTS = (list(range(0x20, 0x7F))
                  0x2026])                          # ellipsis
 
 
-def extract(url: str) -> tuple[dict, float]:
-    print(f"Fetching {url} ...")
-    with urllib.request.urlopen(url) as resp:
-        data = resp.read()
-    font = TTFont(io.BytesIO(data))
+def _widths_from_ttf(font: TTFont) -> tuple[dict, float]:
     cmap = font.getBestCmap()
     hmtx = font["hmtx"]
     upm = font["head"].unitsPerEm
@@ -65,12 +71,22 @@ def extract(url: str) -> tuple[dict, float]:
 
 
 def main() -> None:
-    out = {"source": URLS}
-    for style, url in URLS.items():
-        widths, default = extract(url)
+    print(f"Fetching {SAIRA_VF_URL} ...")
+    with urllib.request.urlopen(SAIRA_VF_URL) as resp:
+        vf_bytes = resp.read()
+
+    out = {"source": {"variable_font": SAIRA_VF_URL,
+                      "instances": INSTANCES}}
+    for style, axes in INSTANCES.items():
+        # Instance a fresh TTFont per style — instantiateVariableFont mutates
+        # its input, so a shared TTFont across weights would double-instance.
+        vf = TTFont(io.BytesIO(vf_bytes))
+        static = instantiateVariableFont(vf, axes)
+        widths, default = _widths_from_ttf(static)
         out[style] = widths
         out[f"default_{style}"] = default
-        print(f"  {style}: {len(widths)} glyphs, default {default} em")
+        print(f"  {style} (wght={axes['wght']}): {len(widths)} glyphs, "
+              f"default {default} em")
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1))
     print(f"Wrote {OUT}")
 

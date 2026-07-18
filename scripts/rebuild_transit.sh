@@ -3,6 +3,7 @@
 # Run from the project root: ./scripts/rebuild_transit.sh
 #
 # Steps:
+#   0  Build glyph PBFs & glyph_widths.json               (~1 min; skipped if --start passed)
 #   1  Download GTFS                                      (~30 sec)
 #   2  Download OSM (CH + LI + DE + FR + IT + AT)         (~12 GB; one-off)
 #   3  Cut bbox slice from country PBFs                   (~2 min)
@@ -14,7 +15,9 @@
 #
 # Use --start N to start from step N (default 3). Steps before N are skipped
 # and their existing outputs reused. Steps cannot be skipped individually —
-# each step's output is the next step's input.
+# each step's output is the next step's input. Step 0 (glyph build) runs only
+# when NO --start is passed — it's a fresh-clone bootstrap, not something you
+# want to redo mid-iteration.
 #
 # Download steps (1 and 2) skip when the target file is already present. Use
 # one of the force flags below to re-download:
@@ -35,13 +38,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 START=3
+START_EXPLICIT=0
 FORCE_GTFS=0
 FORCE_ATLAS=0
 FORCE_OSM=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --start)        shift; START="$1" ;;
-    --start=*)      START="${1#--start=}" ;;
+    --start)        shift; START="$1"; START_EXPLICIT=1 ;;
+    --start=*)      START="${1#--start=}"; START_EXPLICIT=1 ;;
     --force)        FORCE_GTFS=1; FORCE_ATLAS=1; FORCE_OSM=1 ;;
     --force-gtfs)   FORCE_GTFS=1 ;;
     --force-atlas)  FORCE_ATLAS=1 ;;
@@ -71,6 +75,12 @@ echo "════════════════════════�
 echo "  Transit Rebuild Pipeline (pfaedle)"
 echo "  Starting at step $START"
 echo "══════════════════════════════════════════"
+
+if [[ $START_EXPLICIT -eq 0 ]]; then
+  echo ""
+  echo "▶ Step 0 — Build glyph PBFs & regenerate glyph_widths.json"
+  time python3 scripts/build_glyphs.py
+fi
 
 if [[ $START -le 1 ]]; then
   echo ""

@@ -287,12 +287,26 @@ def _build_uic_serving(line_lookup, line_stops, stop_meta):
 
 def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
                            importance_by_uic, intercity_oids,
-                           uic_serving, coords_by_uic):
+                           uic_serving, coords_by_uic,
+                           stop_tier_by_uic=None):
     """Apply per-mode stop rules → candidate min_zoom per UIC, then
     raise to the smallest min_zoom of any line serving the UIC
     (stops-follow-lines). Returns {uic: {min_zoom, rule_label,
     is_intersection, is_terminus, tier}}.
+
+    `stop_tier_by_uic` maps UIC → `stop_tier` string (from step 06's
+    stop_size_scores.json). Used by the train z7/z8 tier gates.
     """
+    if stop_tier_by_uic is None:
+        stop_tier_by_uic = {}
+    # Train tier ranks — lower is more prominent.
+    TRAIN_TIER_RANK = {
+        "major_train": 0,
+        "main_train": 1,
+        "important_train": 2,
+        "train_station": 3,
+        "small_train": 4,
+    }
     # Per-line cumulative km along the polyline at each stop index.
     cum_km_by_oid: dict = {}
     for oid, entry in line_stops.items():
@@ -363,7 +377,9 @@ def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
     # secondary stop on top of the hub.
     INTERSECTION_MAX_SHARED_STOPS = 2
 
-    def _apply_intersection_or_terminus(mode: str, level: int):
+    def _apply_intersection_or_terminus(mode: str, level: int,
+                                        intersection_ok=None,
+                                        terminus_ok=None):
         vis = _visible_oids_in_mode(mode, level)
         if not vis:
             return
@@ -395,12 +411,18 @@ def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
                         break
                 if intersection:
                     break
-            if mode_entries and (intersection or terminus):
+            if not mode_entries:
+                continue
+            if intersection:
+                is_intersection_flag[uic] = True
+            if terminus:
+                is_terminus_flag[uic] = True
+            gated_intersection = intersection and (
+                intersection_ok is None or intersection_ok(uic))
+            gated_terminus = terminus and (
+                terminus_ok is None or terminus_ok(uic))
+            if gated_intersection or gated_terminus:
                 _maybe_set(uic, level, f"{mode}: intersection_or_terminus")
-                if intersection:
-                    is_intersection_flag[uic] = True
-                if terminus:
-                    is_terminus_flag[uic] = True
 
     def _apply_intercity_train_stops(level: int):
         # Every stop on a visible intercity train line.
@@ -484,8 +506,21 @@ def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
 
     # ── Apply the per-mode tables ───────────────────────────────────────────
     # Train
-    _apply_intersection_or_terminus("train", 7)
+    def _train_tier_rank(uic: str) -> int:
+        tier = stop_tier_by_uic.get(uic, "")
+        return TRAIN_TIER_RANK.get(tier, 99)
+    _apply_intersection_or_terminus(
+        "train", 7,
+        intersection_ok=lambda uic: _train_tier_rank(uic) <= TRAIN_TIER_RANK["main_train"],
+        terminus_ok=lambda uic: _train_tier_rank(uic) <= TRAIN_TIER_RANK["train_station"],
+    )
     _apply_intercity_train_stops(8)
+    _apply_intersection_or_terminus(
+        "train", 8,
+        intersection_ok=lambda uic: _train_tier_rank(uic) <= TRAIN_TIER_RANK["important_train"],
+        terminus_ok=lambda uic: False,
+    )
+    _apply_intersection_or_terminus("train", 9)
     _apply_importance_greedy("train", 9, 5.0)
     _apply_importance_greedy("train", 10, 3.0)
     _apply_all_remaining("train", 11)

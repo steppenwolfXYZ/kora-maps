@@ -47,11 +47,13 @@ Lines
 
 Stops
 
+Tier gates below use `stop_tier` from the far-zoom dot redesign (train tiers ordered: `major_train` > `main_train` > `important_train` > `train_station` > `small_train`).
+
 | Level | Rule |
 |---|---|
-| 7 | is_intersection OR is_terminus |
-| 8 | served by an intercity line |
-| 9 | importance-greedy ≤ 1 / 5 km |
+| 7 | (is_intersection AND stop_tier ≥ main_train) OR (is_terminus AND stop_tier ≥ train_station) |
+| 8 | served by an intercity line OR (is_intersection AND stop_tier ≥ important_train) |
+| 9 | is_intersection OR is_terminus OR importance-greedy ≤ 1 / 5 km |
 | 10 | importance-greedy ≤ 1 / 3 km |
 | 11 | all remaining |
 

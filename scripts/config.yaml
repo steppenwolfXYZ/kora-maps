@@ -19,7 +19,7 @@ global:
   max_zoom: 20
   tile_source: "https://tiles.openfreemap.org/planet"
   tile_source_type: "tilejson"
-  glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf"
+  glyphs: "/map-assets/fonts/{fontstack}/{range}.pbf"
   sprite: ""
 
 # ── Palette ──────────────────────────────────────────────────────────────────
@@ -169,9 +169,9 @@ water:
 
 # ── Labels ───────────────────────────────────────────────────────────────────
 labels:
-  font: "Noto Sans Regular"
-  font_bold: "Noto Sans Bold"
-  font_italic: "Noto Sans Italic"
+  font: "Saira Regular"
+  font_bold: "Saira Bold"
+  font_italic: "Saira Italic"
   size_scale: 1.0
   halo_width: 1.5
   country_min_zoom: 2

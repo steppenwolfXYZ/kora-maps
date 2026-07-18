@@ -835,6 +835,7 @@ for parent, parent_sids in per_parent_sids.items():
                         "band":         band_id,
                         "font_m":       round(ref_font_m, 3),
                         "text_rot":     round(text_rot, 2),
+                        "flipped":      flipped,
                     },
                 })
 

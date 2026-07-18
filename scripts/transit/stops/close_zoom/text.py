@@ -1,6 +1,27 @@
 """Pill-arrow label text: width measuring from baked glyph advances,
 destination shortening, ref-font shrinking, and label wrapping."""
+import re
+
 from stops.close_zoom.constants import *  # noqa: F401,F403
+
+
+# Break characters where a line wrap may fall AFTER the character (so a
+# dashed compound like "Zug-Bahnhof" can split as "Zug-" / "Bahnhof").
+# Covers ASCII hyphen-minus, en dash, em dash.
+_DASH_RE = re.compile(r"(?<=[-–—])")
+
+def strip_city_prefix(name: str, city: str) -> str:
+    """If `name` starts with `city` followed by ',' or ' ', strip the
+    prefix and the separator. Case-insensitive. The separator requirement
+    keeps "Berneck" intact when city is "Bern"."""
+    if not name or not city:
+        return name
+    n = name.strip()
+    low_n, low_c = n.lower(), city.lower()
+    if low_n.startswith(low_c + ",") or low_n.startswith(low_c + " "):
+        return n[len(city) + 1:].strip()
+    return n
+
 
 def _shorten_destination(dest: str, current_stop_name: str) -> str:
     """Destination shortening for pill-arrow labels.
@@ -15,11 +36,7 @@ def _shorten_destination(dest: str, current_stop_name: str) -> str:
     if not dest:
         return dest
     city = (current_stop_name or "").split(",")[0].strip()
-    d = dest.strip()
-    if city:
-        low_d, low_c = d.lower(), city.lower()
-        if low_d.startswith(low_c + ",") or low_d.startswith(low_c + " "):
-            d = d[len(city) + 1:].strip()
+    d = strip_city_prefix(dest, city)
     if "," in d:
         d = d.split(",")[0].strip()
     return d or dest
@@ -73,9 +90,11 @@ def _shrink_ref_font_m(ref_text: str, nominal_font_m: float,
 def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
     """Greedy-wrap `text` into at most `max_lines` lines of at most
     `max_w_em` measured ems, with baked "\\n" breaks (MapLibre honours
-    them). Words wider than a line are shortened with a single abbreviation
-    dot (no hyphen splitting — without linguistic hyphenation the break
-    positions would be nonsense).
+    them). Break points are whitespace AND dashes (`-` / `–` / `—`) — the
+    dash stays on the preceding piece so a broken "Zug-Bahnhof" reads
+    "Zug-" / "Bahnhof". Words still wider than a line are shortened with a
+    single abbreviation dot (no hyphen splitting mid-word — without
+    linguistic hyphenation the break positions would be nonsense).
 
     The line breaks are computed FIRST. If the text needs more than
     max_lines, the last kept line is rejoined with the dropped lines and
@@ -84,25 +103,33 @@ def _wrap_label(text: str, max_w_em: float, max_lines: int) -> str:
     word boundary that bumped the next word to a discarded line. On a
     one-line band the latter would strand the ellipsis right after the
     first word ("La Roche FR" → "La…" instead of "La Roch…")."""
-    words = text.split()
+    # Tokenise into (piece, join_sep) where join_sep is the separator
+    # inserted BEFORE this piece when adjacent tokens land on the same line.
+    # Whitespace boundary → " "; dash boundary → "" (dash stays on prev).
+    tokens: list[tuple[str, str]] = []
+    for w in text.split():
+        for i, part in enumerate(p for p in _DASH_RE.split(w) if p):
+            sep = "" if (i > 0 or not tokens) else " "
+            tokens.append((part, sep))
+
     lines = []
     cur = ""
-    for w in words:
-        cand = (cur + " " + w) if cur else w
+    for piece, sep in tokens:
+        cand = (cur + sep + piece) if cur else piece
         if _text_width_em(cand) <= max_w_em:
             cur = cand
             continue
         if cur:
             lines.append(cur)
             cur = ""
-        if _text_width_em(w) <= max_w_em:
-            cur = w
+        if _text_width_em(piece) <= max_w_em:
+            cur = piece
         else:
-            # Single word wider than a line → abbreviate with a dot.
-            cut = len(w)
-            while cut > 1 and _text_width_em(w[:cut] + ".") > max_w_em:
+            # Single token wider than a line → abbreviate with a dot.
+            cut = len(piece)
+            while cut > 1 and _text_width_em(piece[:cut] + ".") > max_w_em:
                 cut -= 1
-            lines.append(w[:cut] + ".")
+            lines.append(piece[:cut] + ".")
     if cur:
         lines.append(cur)
     if len(lines) <= max_lines:

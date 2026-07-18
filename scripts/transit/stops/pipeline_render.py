@@ -816,6 +816,25 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # are per parent UIC; for each dot we resolve the UIC from
     # `parent_station` (falling back to the platform-stripped `stop_id`).
     # Dots without a resolvable UIC fall back to `small_bus`.
+    # `label_priority` (see `stop-labels.md`) is derived from tier + score
+    # here so the far-zoom label layer can use it as its symbol-sort-key.
+    LABEL_TIER_RANK = {
+        "major_train":     0,
+        "main_train":      1,
+        "important_train": 2,
+        "train_station":   3,
+        "small_train":     4,
+        "major_mountain":  5,
+        "ferry_stop":      6,
+        "mountain_stop":   7,
+        "major_hub":       8,
+        "big_station":     9,
+        "normal_stop":    10,
+        "small_bus":      11,
+    }
+    def _label_priority(tier, score):
+        return LABEL_TIER_RANK.get(tier, 11) * 1000 - float(score or 0.0)
+
     stop_scores_lookup = load_stop_scores()
     if stop_scores_lookup:
         n_scored = 0
@@ -832,14 +851,78 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             else:
                 p["stop_score"] = 0.0
                 p["stop_tier"] = "small_bus"
+            p["label_priority"] = round(
+                _label_priority(p["stop_tier"], p["stop_score"]), 4)
         print(f"  stop_score/stop_tier attached to {len(dot_features):,} "
               f"dot features ({n_scored:,} with non-zero score)")
     else:
         print(f"  WARNING: {STOP_SCORES.name} not found — every dot will "
               "render at the smallest tier")
         for feat in dot_features:
-            feat["properties"]["stop_score"] = 0.0
-            feat["properties"]["stop_tier"] = "small_bus"
+            p = feat["properties"]
+            p["stop_score"] = 0.0
+            p["stop_tier"] = "small_bus"
+            p["label_priority"] = round(_label_priority("small_bus", 0.0), 4)
+
+    # ==========================================================================
+    # Attach display_name (stop-labels.md § City-prefix stripping)
+    # ==========================================================================
+    # Bus / tram stops in Swiss GTFS use "City, Streetname" — the city prefix
+    # is redundant on the map when a nearby train station labels the city
+    # already. Rule: if the stop's `stop_name.split(",")[0]` matches a train
+    # station's city key (its full first-comma-segment OR its space-split
+    # first word — catches both "Bern" and "Zürich HB" style) within
+    # DISPLAY_NAME_RADIUS_KM, drop the prefix. Rural villages without a
+    # train station keep their name.
+    from stops.close_zoom.text import strip_city_prefix
+    DISPLAY_NAME_RADIUS_KM = 25.0
+
+    def _train_station_city_keys(name):
+        if not name:
+            return set()
+        keys = set()
+        first_segment = name.split(",")[0].strip()
+        if first_segment:
+            keys.add(first_segment.lower())
+            parts = first_segment.split()
+            if parts:
+                keys.add(parts[0].lower())
+        return keys
+
+    train_city_lookup = defaultdict(list)
+    for feat in dot_features:
+        if feat["properties"].get("mode") != "train":
+            continue
+        name = feat["properties"].get("stop_name") or ""
+        coord = feat["geometry"]["coordinates"]
+        for key in _train_station_city_keys(name):
+            train_city_lookup[key].append(coord)
+
+    n_stripped = 0
+    for feat in dot_features:
+        p = feat["properties"]
+        name = p.get("stop_name") or ""
+        p["display_name"] = name
+        if "," not in name:
+            continue
+        prefix = name.split(",")[0].strip()
+        if not prefix:
+            continue
+        candidates = train_city_lookup.get(prefix.lower())
+        if not candidates:
+            continue
+        stop_lon, stop_lat = feat["geometry"]["coordinates"]
+        for city_lon, city_lat in candidates:
+            if haversine_km(stop_lon, stop_lat, city_lon, city_lat) \
+                    <= DISPLAY_NAME_RADIUS_KM:
+                stripped = strip_city_prefix(name, prefix)
+                if stripped and stripped != name:
+                    p["display_name"] = stripped
+                    n_stripped += 1
+                break
+    print(f"  display_name: {n_stripped:,} stops had their city prefix "
+          f"stripped (within {DISPLAY_NAME_RADIUS_KM:.0f} km of a matching "
+          f"train station)")
 
     if stop_salience:
         n_applied = 0
@@ -909,6 +992,172 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
     pill_features.extend(ferry_pill_features)
     pill_features.extend(indicator_features)
+
+    # ==========================================================================
+    # Emit stop_label_anchor + stop_label_leader features (stop-labels.md § Pill-zoom)
+    # ==========================================================================
+    # Two cases:
+    #   Simple  — station has only a dot / endpoint or a single straight pill
+    #             (no connector, no bent pill). Label sits 3 m east of the
+    #             feature's easternmost point, same as the far-zoom rule. No
+    #             leader emitted.
+    #   Complex — has a connector, a bent pill, or multiple pills. Pick the
+    #             "main pill" (longest by segment sum — proxy for f_weighted-
+    #             ranked; refine later if the proxy fails). Place the label
+    #             8 m east + 5 m north of the main pill's easternmost point,
+    #             and emit a thin leader LineString from that pill point to
+    #             the label anchor.
+    # Anchor computation uses band C features only (widest zoom range) so the
+    # world-coord position is stable across zoom bands.
+    SIMPLE_PADDING_X_M = 3.0
+    COMPLEX_PADDING_X_M = 8.0
+    COMPLEX_PADDING_Y_M = 5.0
+    RELEVANT_PILL_TYPES = {"pill", "connector", "endpoint"}
+
+    def _bucket_key(props):
+        return props.get("parent_station") or (props.get("stop_id") or "").split(":")[0]
+
+    def _is_band_c(f):
+        band = (f.get("properties") or {}).get("design_band")
+        # design_band is only stamped on rail features (via _tag_band_features);
+        # nonrail features don't carry a band tag but each cluster emits only
+        # once, so treat missing band as band C-equivalent.
+        return band is None or band == "C"
+
+    station_pill_features_by_key = defaultdict(list)
+    for f in pill_features:
+        p = f.get("properties", {})
+        if p.get("feature_type") not in RELEVANT_PILL_TYPES:
+            continue
+        if not _is_band_c(f):
+            continue
+        key = _bucket_key(p)
+        if not key:
+            continue
+        station_pill_features_by_key[key].append(f)
+
+    # Best (lowest label_priority) dot per parent_station carries the label
+    # metadata — a Bern train + tram + bus combined station labels once, at the
+    # train tier's font weight and size.
+    best_dot_by_key = {}
+    for f in dot_features:
+        p = f.get("properties", {})
+        key = _bucket_key(p)
+        if not key or not p.get("stop_name"):
+            continue
+        prio = p.get("label_priority", 11000.0)
+        if key not in best_dot_by_key or prio < best_dot_by_key[key][1]:
+            best_dot_by_key[key] = (f, prio)
+
+    def _segment_length_m(coords):
+        if len(coords) < 2:
+            return 0.0
+        return sum(
+            haversine_km(coords[i][0], coords[i][1],
+                         coords[i + 1][0], coords[i + 1][1]) * 1000.0
+            for i in range(len(coords) - 1))
+
+    def _easternmost_of(coords_list):
+        best = None
+        for pt in coords_list:
+            if best is None or pt[0] > best[0]:
+                best = pt
+        return best
+
+    def _all_coords(feats):
+        pts = []
+        for f in feats:
+            geom = f.get("geometry") or {}
+            gtype = geom.get("type")
+            c = geom.get("coordinates") or []
+            if gtype == "Point" and len(c) >= 2:
+                pts.append(c)
+            elif gtype == "LineString":
+                pts.extend(c)
+        return pts
+
+    def _lon_offset(lat, meters):
+        c = cos(radians(lat))
+        return meters / (111320.0 * c) if abs(c) > 1e-9 else 0.0
+
+    def _lat_offset(meters):
+        return meters / 111320.0
+
+    def _pillzoom_label_geometry(feats, dot_feat):
+        """Return (anchor_lonlat, leader_start_lonlat_or_None). Feats are
+        band-C pill/connector/endpoint features for one station; dot_feat is
+        included as a fallback for single-line stations with no pills."""
+        pills = [f for f in feats
+                 if (f.get("properties") or {}).get("feature_type") == "pill"]
+        connectors = [f for f in feats
+                      if (f.get("properties") or {}).get("feature_type") == "connector"]
+        has_bent_pill = any(
+            len((p.get("geometry") or {}).get("coordinates") or []) > 2
+            for p in pills)
+        is_complex = bool(connectors) or has_bent_pill or len(pills) > 1
+
+        if is_complex and pills:
+            main = max(pills, key=lambda p: _segment_length_m(
+                (p.get("geometry") or {}).get("coordinates") or []))
+            east_pt = _easternmost_of(main["geometry"]["coordinates"])
+            if east_pt is None:
+                return None, None
+            anchor = (east_pt[0] + _lon_offset(east_pt[1], COMPLEX_PADDING_X_M),
+                      east_pt[1] + _lat_offset(COMPLEX_PADDING_Y_M))
+            return anchor, tuple(east_pt)
+
+        pts = _all_coords(feats + [dot_feat])
+        east_pt = _easternmost_of(pts)
+        if east_pt is None:
+            return None, None
+        anchor = (east_pt[0] + _lon_offset(east_pt[1], SIMPLE_PADDING_X_M),
+                  east_pt[1])
+        return anchor, None
+
+    n_anchors = 0
+    n_leaders = 0
+    n_missing = 0
+    for key, (dot_feat, _) in best_dot_by_key.items():
+        feats = station_pill_features_by_key.get(key, [])
+        anchor, leader_start = _pillzoom_label_geometry(feats, dot_feat)
+        if anchor is None:
+            n_missing += 1
+            continue
+        p = dot_feat["properties"]
+        label_props = {
+            "feature_type":   "stop_label_anchor",
+            "stop_name":      p.get("stop_name", ""),
+            "display_name":   p.get("display_name") or p.get("stop_name", ""),
+            "stop_tier":      p.get("stop_tier", "small_bus"),
+            "stop_score":     p.get("stop_score", 0.0),
+            "label_priority": p.get("label_priority", 11000.0),
+            "parent_station": key,
+            "mode":           p.get("mode", ""),
+        }
+        pill_features.append({
+            "type": "Feature",
+            "tippecanoe": {"minzoom": 14, "maxzoom": 17},
+            "geometry": {"type": "Point", "coordinates": [anchor[0], anchor[1]]},
+            "properties": label_props,
+        })
+        n_anchors += 1
+        if leader_start is not None:
+            pill_features.append({
+                "type": "Feature",
+                "tippecanoe": {"minzoom": 14, "maxzoom": 17},
+                "geometry": {"type": "LineString",
+                             "coordinates": [[leader_start[0], leader_start[1]],
+                                             [anchor[0], anchor[1]]]},
+                "properties": {
+                    "feature_type":   "stop_label_leader",
+                    "parent_station": key,
+                    "label_priority": p.get("label_priority", 11000.0),
+                },
+            })
+            n_leaders += 1
+    print(f"  stop_label_anchor: emitted {n_anchors:,} anchors "
+          f"({n_leaders:,} with leader; {n_missing:,} skipped)")
+
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
     print(f"  [{time.perf_counter() - _t_phase:6.1f}s] salience diag + write dot/pill GeoJSON")
     _t_phase = time.perf_counter()

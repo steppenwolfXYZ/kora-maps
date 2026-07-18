@@ -14,7 +14,7 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 **Basemap design language:**
 - Color philosophy: green = nature (background, default), warm yellow/brown = urban human spaces, gray = dead/uninteresting (industry, motorways).
 - Road hierarchy: motorway/trunk are "dead space" (gray, dashed when zoomed out, real-width fill when close); primary/secondary gray solid, not inviting; walkable streets carry the walkability color gradient (gray→yellow→orange); paths/cycleways are separate thin brown-orange lines from z14. Real-width streets from z15+ via meter-to-pixel conversion.
-- Rendering constraints: `sprite: ""` (no sprite source — never use `icon-image`); fonts are Noto Sans Regular/Bold/Italic from the OpenFreeMap glyph server.
+- Rendering constraints: `sprite: ""` (no sprite source — never use `icon-image`); fonts are Saira Regular/Bold/Italic/SemiBold/ExtraBold (DIN-inspired grotesque by Omnibus-Type, instantiated from the Google Fonts variable font), self-hosted as pre-built glyph PBFs under `static/map-assets/fonts/`. The color-dot indicator layer is the sole exception — it renders `●` (U+25CF) via `Noto Sans Regular`, which Saira lacks; that folder holds OpenFreeMap's pre-composited "Noto Sans Regular" PBFs (23-font composite that provides the black-circle glyph). Glyphs URL in `config.yaml` points at the local path, not an external server.
 
 ---
 

@@ -182,12 +182,20 @@ def run():
         if any(r.startswith(p) for p in intercity_prefixes):
             intercity_oids.add(str(oid))
 
+    # Stop tier lookup (per parent UIC) from step 06's stop_size_scores.json —
+    # used by train z7/z8 tier gates. Empty dict if step 06 hasn't emitted it
+    # (in which case tier-gated rules effectively reject every train stop and
+    # the z9 catch-all takes over).
+    stop_scores_lookup = load_stop_scores()
+    stop_tier_by_uic = {uic: v["tier"] for uic, v in stop_scores_lookup.items()}
+
     print("Applying per-mode stop rules...")
     with _timed("compute_stop_min_zoom"):
         stop_min_zoom = compute_stop_min_zoom(
             line_lookup, line_stops, stop_meta,
             importance_by_uic, intercity_oids,
             uic_serving, coords_by_uic,
+            stop_tier_by_uic=stop_tier_by_uic,
         )
     if stop_min_zoom:
         mzs = [v["min_zoom"] for v in stop_min_zoom.values()]

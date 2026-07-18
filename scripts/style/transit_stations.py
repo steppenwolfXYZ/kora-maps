@@ -95,6 +95,81 @@ def build_station_layers(cfg) -> list:
         ("transit_stops_bus",      11),
     ]
 
+    # Far-zoom stop labels — see .claude/concepts/stop-labels.md § Far-zoom.
+    # Per-tier size curve; MapLibre collision (`text-allow-overlap: false` +
+    # `symbol-sort-key: label_priority`) does the density control. Tiers not
+    # yet participating at a given zoom anchor get text-size 0 → not drawn.
+    LABEL_ALL_TIERS = [
+        "major_train", "main_train", "important_train",
+        "train_station", "small_train",
+        "major_mountain", "mountain_stop", "ferry_stop",
+        "major_hub", "big_station", "normal_stop", "small_bus",
+    ]
+    LABEL_SIZE_Z7 = {
+        "major_train": 11, "main_train": 10, "important_train": 9,
+        "major_mountain": 9, "ferry_stop": 9,
+    }
+    LABEL_SIZE_Z10 = {
+        "major_train": 16, "main_train": 14, "important_train": 12,
+        "train_station": 11, "small_train": 11,
+        "major_mountain": 11, "ferry_stop": 11,
+    }
+    LABEL_SIZE_Z12 = {
+        "major_train": 20, "main_train": 16, "important_train": 14,
+        "train_station": 12, "small_train": 12,
+        "major_mountain": 12, "mountain_stop": 10, "ferry_stop": 12,
+        "major_hub": 11, "big_station": 10, "normal_stop": 10,
+    }
+    LABEL_SIZE_Z13 = {
+        "major_train": 22, "main_train": 18, "important_train": 15,
+        "train_station": 13, "small_train": 13,
+        "major_mountain": 13, "mountain_stop": 11, "ferry_stop": 13,
+        "major_hub": 13, "big_station": 11,
+        "normal_stop": 11,
+        # small_bus: never labelled at far-zoom.
+    }
+
+    def _label_size_match(sizes):
+        cases = []
+        for tier in LABEL_ALL_TIERS:
+            cases.extend([tier, sizes.get(tier, 0)])
+        return ["match", ["get", "stop_tier"], *cases, 0]
+
+    def far_zoom_label_text_size():
+        return ["interpolate", ["linear"], ["zoom"],
+                7,  _label_size_match(LABEL_SIZE_Z7),
+                10, _label_size_match(LABEL_SIZE_Z10),
+                12, _label_size_match(LABEL_SIZE_Z12),
+                13, _label_size_match(LABEL_SIZE_Z13)]
+
+    # Bold set grows with zoom so the ratio of bold-to-regular labels stays
+    # in the ~1/3 range at every zoom band. See `stop-labels.md` § Font size.
+    # `big_station`, `mountain_stop`, `ferry_stop` always render SemiBold
+    # (independent of the bold set) — a middle weight between the bold
+    # train / hub / major_mountain tiers and the regular rest.
+    LABEL_SEMIBOLD_TIERS = ("big_station", "mountain_stop", "ferry_stop")
+    LABEL_BOLD_Z7 = {"major_train", "main_train"}
+    LABEL_BOLD_Z9 = LABEL_BOLD_Z7 | {"important_train"}
+    LABEL_BOLD_Z10 = LABEL_BOLD_Z9 | {"train_station"}
+    LABEL_BOLD_Z11 = LABEL_BOLD_Z10 | {"major_hub", "major_mountain"}
+
+    def _label_font_match(bold_tiers):
+        # SemiBold overrides come FIRST so they win the match even at
+        # zoom bands where the tier might otherwise sit in bold_tiers.
+        cases = []
+        for tier in LABEL_SEMIBOLD_TIERS:
+            cases.extend([tier, ["literal", ["Saira SemiBold"]]])
+        for tier in bold_tiers:
+            cases.extend([tier, ["literal", ["Saira Bold"]]])
+        return ["match", ["get", "stop_tier"], *cases,
+                ["literal", ["Saira Regular"]]]
+
+    far_zoom_label_text_font = ["step", ["zoom"],
+        _label_font_match(LABEL_BOLD_Z7),
+        9,  _label_font_match(LABEL_BOLD_Z9),
+        10, _label_font_match(LABEL_BOLD_Z10),
+        11, _label_font_match(LABEL_BOLD_Z11)]
+
     for source, source_minzoom in stop_groups:
         # Far-zoom: score-driven layer, z(source_minzoom)–z13.99.
         layers.append({
@@ -127,6 +202,131 @@ def build_station_layers(cfg) -> list:
                 "circle-stroke-width": 1.0,
             },
         })
+
+    # Far-zoom stop labels, emitted in REVERSE mode-priority order so rail
+    # sits last in the layer array. MapLibre's PauseablePlacement iterates
+    # symbol layers from last to first, so the last-declared layer places
+    # first and every earlier layer yields to it — rail must be last to win
+    # cross-layer collisions against tram / regional / bus. `symbol-sort-key:
+    # label_priority` handles ordering WITHIN each mode's layer.
+    # `text-padding` accepts zoom expressions only — not data-driven — so
+    # per-tier padding must go through a filter split. Two sublayers per
+    # source: one for normal_stop tier (padding 20) so rural stops of that
+    # tier space out from each other, and one for every other tier (padding
+    # 4) so majors collide only when they actually touch. Within a source,
+    # the "other" sublayer is declared LAST so MapLibre's reverse-order
+    # placement places its (higher-priority) tiers first; the "normal"
+    # sublayer yields to it.
+    def _label_layer(source, source_minzoom, layer_suffix, filter_expr, padding):
+        return {
+            "id": f"transit-stop-label-{source}-far-{layer_suffix}",
+            "type": "symbol",
+            "source": source,
+            "source-layer": "transit_stops",
+            "minzoom": source_minzoom,
+            "maxzoom": 14,
+            "filter": filter_expr,
+            "layout": {
+                # display_name = stop_name with city prefix stripped in
+                # cities that already carry a train-station label; falls
+                # back to stop_name in rural areas or on features emitted
+                # before the display_name pass existed. See
+                # `.claude/concepts/stop-labels.md` § City-prefix stripping.
+                "text-field": ["coalesce",
+                    ["get", "display_name"],
+                    ["get", "stop_name"]],
+                "text-font": far_zoom_label_text_font,
+                "text-size": far_zoom_label_text_size(),
+                "text-anchor": "left",
+                # y = -0.11 em: Saira's line-height metrics push cap-height
+                # below MapLibre's line centre — same correction as pill-arrow
+                # text (see the close-zoom layers below).
+                "text-offset": [0.55, -0.11],
+                "text-justify": "left",
+                "text-max-width": 8,
+                "text-padding": padding,
+                "text-allow-overlap": False,
+                "text-ignore-placement": False,
+                "symbol-sort-key": ["get", "label_priority"],
+            },
+            "paint": {
+                "text-color": "#1a1a1a",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5,
+                "text-halo-blur": 0.5,
+            },
+        }
+
+    for source, source_minzoom in reversed(stop_groups):
+        layers.append(_label_layer(
+            source, source_minzoom, "normal",
+            ["==", ["get", "stop_tier"], "normal_stop"], 20))
+        layers.append(_label_layer(
+            source, source_minzoom, "other",
+            ["!=", ["get", "stop_tier"], "normal_stop"], 4))
+
+    # Pill-zoom stop labels (z14–z16.99) — see stop-labels.md § Pill-zoom.
+    # Reads `stop_label_anchor` Point features (baked by step 07) from the
+    # shared transit_stop_pills source. Anchor sits ~3 m east of the pill
+    # construct at its centre-y, so text-anchor "left" with no extra offset
+    # is enough — the padding is in world coords. Same normal_stop /
+    # everything-else padding split as far-zoom.
+    def _pill_label_layer(layer_suffix, extra_filter, padding):
+        return {
+            "id": f"transit-stop-label-pill-{layer_suffix}",
+            "type": "symbol",
+            "source": "transit_stop_pills",
+            "source-layer": "transit_stop_pills",
+            "minzoom": 14,
+            "maxzoom": 17,
+            "filter": ["all",
+                       ["==", ["get", "feature_type"], "stop_label_anchor"],
+                       extra_filter],
+            "layout": {
+                "text-field": ["coalesce",
+                    ["get", "display_name"],
+                    ["get", "stop_name"]],
+                "text-font": far_zoom_label_text_font,
+                "text-size": far_zoom_label_text_size(),
+                "text-anchor": "left",
+                "text-max-width": 8,
+                "text-padding": padding,
+                "text-allow-overlap": False,
+                "text-ignore-placement": False,
+                "symbol-sort-key": ["get", "label_priority"],
+            },
+            "paint": {
+                "text-color": "#1a1a1a",
+                "text-halo-color": "#ffffff",
+                "text-halo-width": 1.5,
+                "text-halo-blur": 0.5,
+            },
+        }
+
+    # Leader line — thin hairline from the main pill to the label anchor.
+    # Rendered BELOW the label symbol layers so the text halo covers where
+    # the leader meets the anchor.
+    layers.append({
+        "id": "transit-stop-label-leader",
+        "type": "line",
+        "source": "transit_stop_pills",
+        "source-layer": "transit_stop_pills",
+        "minzoom": 14,
+        "maxzoom": 17,
+        "filter": ["==", ["get", "feature_type"], "stop_label_leader"],
+        "paint": {
+            "line-color": "#1a1a1a",
+            "line-width": 0.8,
+            "line-opacity": 0.85,
+        },
+    })
+
+    # normal_stop declared FIRST so it yields to "other" (last-declared →
+    # placed first in MapLibre's reverse-order collision pass).
+    layers.append(_pill_label_layer(
+        "normal", ["==", ["get", "stop_tier"], "normal_stop"], 20))
+    layers.append(_pill_label_layer(
+        "other", ["!=", ["get", "stop_tier"], "normal_stop"], 4))
 
     # Ferry stops follow the same two-tier pattern as every other mode:
     # a low-zoom dot at z9–z13 (rendered through the regional source above)
@@ -382,10 +582,16 @@ def build_station_layers(cfg) -> list:
                 17, m * PX_PER_M_Z17,
                 22, m * PX_PER_M_Z22]
 
-    font_px_expr = ["interpolate", ["exponential", 2], ["zoom"],
-        17, ["*", ["get", "font_m"], PX_PER_M_Z17],
-        22, ["*", ["get", "font_m"], PX_PER_M_Z22],
-    ]
+    def _font_px_expr(scale=1.0):
+        # MapLibre requires ["zoom"] at the top level of interpolate, so a
+        # per-band scale factor cannot wrap the whole expression — it multiplies
+        # each anchor's per-metre conversion instead.
+        return ["interpolate", ["exponential", 2], ["zoom"],
+            17, ["*", ["get", "font_m"], scale * PX_PER_M_Z17],
+            22, ["*", ["get", "font_m"], scale * PX_PER_M_Z22],
+        ]
+
+    font_px_expr = _font_px_expr()
 
     # Zoom bands (must mirror CLOSE_ZOOM_BANDS in
     # scripts/transit/stops/close_zoom/constants.py):
@@ -480,14 +686,31 @@ def build_station_layers(cfg) -> list:
                        ["==", ["get", "band"], band]],
             "layout": {
                 "text-field": ["get", "ref"],
-                "text-font": ["Noto Sans Bold"],
-                "text-size": font_px_expr,
+                "text-font": ["Saira ExtraBold"],
+                # Band A holds the number in the whole pill-arrow silhouette
+                # (no disc), so it can use a larger font than the disc-bound
+                # bands B–E which share step 07's conservative `font_m`.
+                "text-size": (_font_px_expr(1.30)
+                              if band == "A" else font_px_expr),
                 "text-rotate": ["get", "text_rot"],
                 "text-rotation-alignment": "map",
                 "text-pitch-alignment": "map",
                 "text-allow-overlap": True,
                 "text-ignore-placement": True,
                 "text-padding": 0,
+                # Saira's line-height metrics (hhea.descent=-439) push its
+                # cap-height below MapLibre's line centre; nudge up ~8% em to
+                # restore visual centring within the disc / pill silhouette.
+                # Band A additionally shifts along the tangent toward the
+                # round end of the pill-arrow. The sign of x flips with the
+                # feature's `flipped` bool (baked by step 07) because MapLibre
+                # applies text-offset in the text's reader frame, which reverses
+                # relative to map coords when the label is flipped 180°.
+                "text-offset": (
+                    ["case", ["get", "flipped"],
+                     ["literal", [0.15, -0.11]],
+                     ["literal", [-0.15, -0.11]]]
+                    if band == "A" else [0, -0.11]),
             },
             "paint": {
                 "text-color": "#ffffff",
@@ -505,7 +728,12 @@ def build_station_layers(cfg) -> list:
                            ["==", ["get", "band"], band]],
                 "layout": {
                     "text-field": ["get", "destination"],
-                    "text-font": ["Noto Sans Regular"],
+                    # Semi Condensed (wdth=87.5) fits more characters in the
+                    # available body width. The ~10% size bump compensating
+                    # for the narrower letterforms is baked into `font_dest_m`
+                    # in close_zoom/constants.py so the wrap budget stays
+                    # coherent with the rendered size.
+                    "text-font": ["Saira SemiCondensed"],
                     "text-size": font_px_expr,
                     "text-rotate": ["get", "text_rot"],
                     "text-rotation-alignment": "map",
@@ -514,6 +742,9 @@ def build_station_layers(cfg) -> list:
                     "text-ignore-placement": True,
                     "text-padding": 0,
                     "text-max-width": dest_max_width,
+                    # Same vertical nudge as pill-ref — Saira's line-height
+                    # centring sits low relative to cap-height (see ref layer).
+                    "text-offset": [0, -0.11],
                     # Left-aligned: step 07 places the anchor at the text's
                     # visual-left (reader-left) end of the text region.
                     # For non-flipped labels that's the disc side of the
