@@ -58,27 +58,53 @@
 	const DIST_DECAY_KM = 30;
 	const EARTH_KM = 6371;
 
-	// Match tier scores (100 = tier 1 … 10 = tier 5, 0 = no match).
-	const MATCH_TIER_NAME_EXACT      = 100;
-	const MATCH_TIER_NAME_PREFIX     = 70;
-	const MATCH_TIER_WORD_FULL       = 40;
-	const MATCH_TIER_WORD_PREFIX     = 20;
-	const MATCH_TIER_SUBSTRING       = 10;
-
-	function matchTierScore(name: string, words: string[], q: string): number {
-		if (!q) return 0;
-		if (name === q) return MATCH_TIER_NAME_EXACT;
-		if (name.startsWith(q)) return MATCH_TIER_NAME_PREFIX;
-		let hasWordFull = false;
-		let hasWordPrefix = false;
-		for (const w of words) {
-			if (w === q) { hasWordFull = true; break; }
-			if (!hasWordPrefix && w.startsWith(q)) hasWordPrefix = true;
+	// Match tiers (stop-search.md § Ranking): 8-tier cascade, evaluated
+	// top-down, first condition that holds wins. Multi-word queries are
+	// token-based and order-insensitive; every token must match at least
+	// as substring for the stop to be a hit at all.
+	function matchTierScore(name: string, words: string[], tokens: string[]): number {
+		// Per-token match strength: 3 = full word, 2 = word prefix,
+		// 1 = substring, 0 = no match (kills the whole hit).
+		let allFull = true;
+		let anyFull = false;
+		let allPrefix = true;
+		let anyPrefix = false;
+		const fullMatched = new Set<number>();
+		for (const t of tokens) {
+			let strength = 0;
+			for (let wi = 0; wi < words.length; wi++) {
+				const w = words[wi];
+				if (w === t) {
+					strength = 3;
+					fullMatched.add(wi);
+					break;
+				}
+				if (strength < 2 && w.startsWith(t)) strength = 2;
+			}
+			if (strength < 2 && name.includes(t)) strength = 1;
+			if (strength === 0) return 0;
+			if (strength === 3) anyFull = true; else allFull = false;
+			if (strength >= 2) anyPrefix = true; else allPrefix = false;
 		}
-		if (hasWordFull) return MATCH_TIER_WORD_FULL;
-		if (hasWordPrefix) return MATCH_TIER_WORD_PREFIX;
-		if (name.includes(q)) return MATCH_TIER_SUBSTRING;
-		return 0;
+
+		// 1. Exact: all tokens full words AND every name word matched.
+		if (allFull && fullMatched.size === words.length) return 100;
+		// 2. Name-prefix start: all tokens word-prefixes AND the name's
+		//    first word fully matched by some token.
+		if (allPrefix && fullMatched.has(0)) return 80;
+		// 3. Contains name prefix: some token is a prefix of the name's
+		//    first word (rest already known ≥ substring).
+		if (words.length > 0 && tokens.some(t => words[0].startsWith(t))) return 70;
+		// 4. All words full match.
+		if (allFull) return 50;
+		// 5. Some words full match.
+		if (anyFull) return 40;
+		// 6. All word-prefix.
+		if (allPrefix) return 30;
+		// 7. Some word-prefix.
+		if (anyPrefix) return 20;
+		// 8. Substring only.
+		return 10;
 	}
 
 	function modeScore(mode: string | undefined): number {
@@ -123,7 +149,9 @@
 				if (cancelled) return;
 				index = data.map(e => {
 					const f = fold(e.n);
-					return { ...e, fold: f, words: f.split(/[\s,]+/).filter(Boolean) };
+					// Words split on any non-alphanumeric run: commas, parens,
+					// slashes, dots, hyphens are separators, not word content.
+					return { ...e, fold: f, words: f.split(/[^\p{L}\p{N}]+/u).filter(Boolean) };
 				});
 			})
 			.catch(err => {
@@ -136,13 +164,15 @@
 	const results = $derived.by<Indexed[]>(() => {
 		const q = fold(query.trim());
 		if (!q) return [];
+		const tokens = q.split(/\s+/).filter(Boolean);
+		if (!tokens.length) return [];
 		const c = map?.getCenter();
 		const cLon = c?.lng ?? 0;
 		const cLat = c?.lat ?? 0;
 		const cosLat = c ? Math.cos((cLat * Math.PI) / 180) : 1;
 		const scored: { e: Indexed; score: number }[] = [];
 		for (const e of index) {
-			const match = matchTierScore(e.fold, e.words, q);
+			const match = matchTierScore(e.fold, e.words, tokens);
 			if (match === 0) continue;
 			const mode = modeScore(e.m);
 			const tier = tierScore(e.t);

@@ -10,10 +10,11 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
   },
   "devDependencies": {
-    "@mapbox/glyph-pbf-composite": "^0.2.0",
+    "@mapbox/glyph-pbf-composite": "^0.0.3",
     "@sveltejs/adapter-auto": "^3.0.0",
     "@sveltejs/kit": "^2.57.1",
     "@sveltejs/vite-plugin-svelte": "^4.0.4",
+    "@types/node": "^26.1.1",
     "fontnik": "^0.7.0",
     "svelte": "^5.55.3",
     "svelte-check": "^4.4.6",
@@ -21,6 +22,7 @@
     "vite": "^5.0.3"
   },
   "dependencies": {
+    "maplibre-contour": "^0.1.0",
     "maplibre-gl": "^5.24.0",
     "pmtiles": "^4.4.1"
   },

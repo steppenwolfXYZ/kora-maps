@@ -1386,7 +1386,9 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         key: {"stop_name": f["properties"].get("stop_name", ""),
               "display_name": (f["properties"].get("display_name")
                                or f["properties"].get("stop_name", "")),
-              "stop_tier": f["properties"].get("stop_tier", "small_bus")}
+              "stop_tier": f["properties"].get("stop_tier", "small_bus"),
+              "lines_json": f["properties"].get("lines_json", ""),
+              "dep_hr":     f["properties"].get("dep_hr", 0.0)}
         for key, (f, _) in best_dot_by_key.items()
     }
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,

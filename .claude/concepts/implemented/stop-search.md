@@ -21,9 +21,10 @@ There is no way to jump to a specific transit stop by name. Finding a known stop
 - Where a name does not include a city prefix, no synthesised disambiguation is added — the distance ranking handles same-named stops.
 
 ### Match behavior
-- Case-insensitive substring match against the display name.
+- Case-insensitive matching against the display name.
 - Diacritic-insensitive: query `zurich` matches `Zürich`, `geneve` matches `Genève`. The fold applies to the query and to the comparison key; the displayed name keeps its diacritics.
-- No fuzzy matching in this iteration — substring only.
+- **Multi-word queries**: the query is split on whitespace into tokens. Every token must match somewhere in the name (word, word-prefix, or substring) for the stop to be a hit — order-insensitive, so `eigerplatz bern` finds `Bern, Eigerplatz`. Name words are split on whitespace and punctuation (commas etc. are separators, not word content).
+- No typo-tolerant fuzzy matching in this iteration. It is an anticipated future requirement; when it comes, the plan is to swap the match-quality signal for a fuzzy-match score (e.g. a fuzzysort/uFuzzy-style library) rather than extending the tier cascade.
 
 ### Result list (preview)
 - As the user types, a dropdown appears below the input showing up to N matching stops (cap in the ~10 range; exact number a design choice, not a requirement).
@@ -36,12 +37,17 @@ Results are sorted by a weighted score. All signals are normalised to 0–100, t
 
 **Signals and their 0–100 normalisation:**
 
-- **Match quality** — one of 5 discrete tiers scoring the query against the stop name (folded case + diacritics):
-  1. Exact match — query equals the full name. Score `100`.
-  2. Prefix of stop name — query starts the name. Score `70`.
-  3. Full-word match anywhere — query equals a whole word inside the name (bounded by start, space, comma, or end). Score `40`.
-  4. Word-prefix match anywhere — query starts some word in the name (but not the first). Score `20`.
-  5. Substring match — appears mid-word. Score `10`.
+- **Match quality** — one of 8 discrete tiers scoring the query tokens against the stop name's words (folded case + diacritics). Evaluated top-down; the first tier whose condition holds wins. "Prefix of a word" includes the full word itself (every word is its own prefix), so lower tiers' "at least substring" covers full and prefix matches too.
+  1. **Exact** (`100`) — every query token full-word matches and every word of the name is matched. Order and punctuation don't matter: `eigerplatz bern` = `Bern, Eigerplatz`.
+  2. **Name-prefix start** (`80`) — every token is a prefix of some name word, and the name's **first word** is fully matched by some token. `bern eigerpl` → `Bern, Eigerplatz`.
+  3. **Contains name prefix** (`70`) — some token is a prefix of the name's first word, all other tokens match at least as substring. `ber eigerplatz` → `Bern, Eigerplatz`.
+  4. **All words full match** (`50`) — every token full-word matches (somewhere in the name).
+  5. **Some words full match** (`40`) — at least one token full-word matches, the rest match at least as substring.
+  6. **All word-prefix** (`30`) — every token is a prefix of some name word.
+  7. **Some word-prefix** (`20`) — at least one token is a prefix of some name word, the rest match at least as substring.
+  8. **Substring only** (`10`) — every token appears somewhere, none at a word boundary.
+
+  Deliberate consequence: tier 3 outranks tier 4 — matching the start of the name (city prefix) with the rest as loose substrings beats full-word matches scattered elsewhere in the name.
 - **Mode** — pipeline `MODE_RANK` (train = 0, metro = 1, tram = 2, bus = 3, mountain = 4, ferry = 5, regional_bus = 6). Normalised: `(6 − rank) / 6 × 100`.
 - **Stop tier** — pipeline `stop_tier` string (`major_train` … `small_bus`, 12 buckets). Normalised inversely to the tier rank (0 = highest → `100`; 11 = lowest → `0`).
 - **Distance to map view center** — exponential decay, `100 × exp(−distance_km / 30)`. Bounded [0, 100]; ~37 at 30 km, ~14 at 60 km, ~1 at 150 km.
@@ -55,7 +61,7 @@ Results are sorted by a weighted score. All signals are normalised to 0–100, t
 | Stop tier | 1 |
 | Distance | 1 |
 
-**Design intent:** the 5× weight on match quality makes tier 1 (exact match) uncatchable by any lower tier; tier 2 (name prefix) can be caught by a much-better-signal tier 3 in edge cases (a very close major-station word-prefix outranks a distant unimportant name-prefix). Weights are deliberately not "hard" tiers — the point is to let strong secondary signals promote well-placed lower-tier matches, without ever letting a random substring in `Alchenflüh, Bernstrasse` outrank the actual `Bern` train station. Values are starting points; adjust after observing behaviour.
+**Design intent:** with the 5× weight, one match-quality tier step of 10 points equals 50 weighted points, while the other three signals together contribute at most 300 — so adjacent tiers can be overtaken by strong secondary signals, but a gap of two or more large tier steps (e.g. exact vs. full-word, 100 vs. 50) is effectively uncatchable. Weights are deliberately not "hard" tiers — the point is to let strong secondary signals promote well-placed lower-tier matches, without ever letting a random substring in `Alchenflüh, Bernstrasse` outrank the actual `Bern` train station. Values are starting points; adjust after observing behaviour.
 
 ### Selection
 - Selection is the only action that moves the map. Two ways to select:

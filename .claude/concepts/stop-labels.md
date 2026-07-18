@@ -176,6 +176,8 @@ One label per parent station, placed **inside** the station background hull — 
 3. **Nearest-stack alignment**: the label's final angle is always the axis of the **nearest pill-arrow** at the swept position — an averaged in-between angle is never used, including when the label lands in a clear pocket between stacks of different orientations. If the nearest pill-arrow's axis differs from the sweep axis beyond a tolerance, the sweep is redone once with the aligned axis so the re-oriented box is guaranteed clear. This also covers the lying-V case: the sweep crosses the upper leg and the label ends up aligned with the leg it sits above. *(Replaces an earlier "last-crossed" rule, which only fired when the sweep was blocked and left mean angles on labels that started in clear space.)*
 4. If the start position is already clear (hollow station center), the label sits at the centroid — the nearest-stack alignment still sets its angle.
 
+**Cross-station avoidance.** The sweep clears not only the own station's pill-arrows but also **other stations' pill-arrows and already-placed station labels** — neighbouring parents (canonical case: Papiermühle train station over its forecourt bus stop) otherwise collect overlapping labels. Labels are placed in descending font-size order, so large labels claim their space first and smaller ones dodge them; each placed label becomes an obstacle for the rest. Foreign geometry only blocks positions — the angle alignment always uses the own station's pill-arrows.
+
 ### Readability flip
 
 Same rule as pill-arrow text: the label rotates with its axis and flips 180° when it would render upside-down. Since the label axis is undirected, this reduces to always picking the readable orientation of the two.

@@ -203,6 +203,12 @@ CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER = {
     "small_bus":        6.0,
 }
 CLOSE_ZOOM_STATION_LABEL_CLEAR_M = 1.5    # clearance around the label box
+# Extra margin against FOREIGN obstacles (other stations' pill-arrows
+# and labels), ADDITIVE to the ~10 m of effective clearance the label
+# box already carries (em-box half-height overshoot past the visible
+# glyphs + the base clearance). Keep small — this is a nudge, not the
+# total padding.
+CLOSE_ZOOM_STATION_LABEL_FOREIGN_CLEAR_M = 2.0
 CLOSE_ZOOM_STATION_LABEL_STEP_M = 0.5     # sweep step
 CLOSE_ZOOM_STATION_LABEL_MAX_SWEEP_M = 300.0
 # Axial angle difference above which the nearest-stack alignment redoes

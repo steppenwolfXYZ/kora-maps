@@ -22,6 +22,7 @@ from style.basemap_labels import build_border_layers, build_label_layers
 from style.basemap_landuse import (
     build_background_layer,
     build_building_layers,
+    build_hillshade_layer,
     build_landuse_layers,
     build_water_layers,
 )
@@ -38,6 +39,7 @@ from style.transit_stations import build_station_layers
 
 def generate_style(cfg) -> dict:
     g = cfg["global"]
+    t = cfg["terrain"]
 
     source_type = g.get("tile_source_type", "tiles")
     if source_type == "tilejson":
@@ -45,11 +47,24 @@ def generate_style(cfg) -> dict:
     else:
         source_def = {"type": "vector", "tiles": [g["tile_source"]], "maxzoom": 14}
 
+    terrain_src = {
+        "type": "raster-dem",
+        "tiles": [t["source"]["url"]],
+        "encoding": t["source"]["encoding"],
+        "tileSize": t["source"]["tile_size"],
+        "maxzoom": t["source"]["max_zoom"],
+        "attribution": "<a href='https://mapterhorn.com/attribution'>© Mapterhorn</a>",
+    }
+
     style = {
         "version": 8,
         "name": g["name"],
+        "metadata": {
+            "carfree:terrain": t,
+        },
         "sources": {
             "openmaptiles": source_def,
+            "terrain": terrain_src,
             "transit_lines": {
                 "type": "vector",
                 "url": "pmtiles:///map-assets/tl_lines.pmtiles"
@@ -103,6 +118,7 @@ def generate_style(cfg) -> dict:
         }
 
     style["layers"].append(build_background_layer(cfg))
+    style["layers"].append(build_hillshade_layer(cfg))
     style["layers"].extend(build_landuse_layers(cfg))
     style["layers"].extend(build_water_layers(cfg))
     style["layers"].extend(build_building_layers(cfg))

@@ -918,7 +918,64 @@ for parent, parent_sids in per_parent_sids.items():
 n_station_labels = 0
 n_labels_unnamed = 0
 _label_info = parent_label_info or {}
+
+# Cross-station avoidance (stop-labels.md § close-zoom): the sweep must
+# clear OTHER stations' pill-arrows and already-placed station labels
+# too, not just the own station's pill-arrows — neighbouring parents
+# (e.g. a train station and its forecourt bus stop) otherwise collect
+# overlapping labels. A coarse lon/lat grid holds every obstacle; each
+# obstacle registers in all cells its own footprint touches, so queries
+# only need to cover the label's own reach.
+_OBST_CELL_DEG = 0.005  # ~400–550 m per cell at CH latitudes
+_obstacle_grid: dict = defaultdict(list)
+
+def _obst_register(lon, lat, tx, ty, half_L, half_W, owner):
+    reach = sqrt(half_L * half_L + half_W * half_W)
+    o_cl = cos(radians(lat))
+    if o_cl <= 0.0:
+        o_cl = 1.0
+    dlon = reach / (111320.0 * o_cl)
+    dlat = reach / 111320.0
+    entry = (lon, lat, tx, ty, half_L, half_W, owner)
+    for gx in range(int((lon - dlon) / _OBST_CELL_DEG),
+                    int((lon + dlon) / _OBST_CELL_DEG) + 1):
+        for gy in range(int((lat - dlat) / _OBST_CELL_DEG),
+                        int((lat + dlat) / _OBST_CELL_DEG) + 1):
+            _obstacle_grid[(gx, gy)].append(entry)
+
+def _obst_query(lon, lat, radius_m):
+    o_cl = cos(radians(lat))
+    if o_cl <= 0.0:
+        o_cl = 1.0
+    dlon = radius_m / (111320.0 * o_cl)
+    dlat = radius_m / 111320.0
+    seen = set()
+    out = []
+    for gx in range(int((lon - dlon) / _OBST_CELL_DEG),
+                    int((lon + dlon) / _OBST_CELL_DEG) + 1):
+        for gy in range(int((lat - dlat) / _OBST_CELL_DEG),
+                        int((lat + dlat) / _OBST_CELL_DEG) + 1):
+            for entry in _obstacle_grid.get((gx, gy), ()):
+                if entry not in seen:
+                    seen.add(entry)
+                    out.append(entry)
+    return out
+
 for parent, lpills in station_label_pills.items():
+    for p in lpills:
+        _obst_register(p["pt"][0], p["pt"][1], p["T"][0], p["T"][1],
+                       p["half_L"], p["half_W"], parent)
+
+def _parent_font_m(par):
+    tier = (_label_info.get(par) or {}).get("stop_tier") or ""
+    return CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER.get(
+        tier, CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER["small_bus"])
+
+# Larger labels place first and claim their space; smaller ones dodge
+# them (placed labels join the obstacle grid as they are emitted).
+for parent, lpills in sorted(
+        station_label_pills.items(),
+        key=lambda kv: (-_parent_font_m(kv[0]), kv[0])):
     info = _label_info.get(parent) or {}
     label_name = info.get("display_name") or info.get("stop_name") or ""
     if not label_name:
@@ -949,6 +1006,27 @@ for parent, lpills in station_label_pills.items():
     lab_half_h = (lab_font_m * CLOSE_ZOOM_STATION_LABEL_HALF_H_EM
                   + CLOSE_ZOOM_STATION_LABEL_CLEAR_M)
 
+    # Sweep obstacles: own pill-arrows plus nearby FOREIGN pill-arrows
+    # and already-placed labels from the shared grid. The angle
+    # alignment below stays own-station only (lp_obbs) — foreign
+    # geometry blocks positions but never sets the label's angle.
+    search_r = (CLOSE_ZOOM_STATION_LABEL_MAX_SWEEP_M + lab_half_w
+                + lab_half_h + CLOSE_ZOOM_STATION_LABEL_FOREIGN_CLEAR_M
+                + 10.0)
+    sweep_obbs = list(lp_obbs)
+    for (o_lon, o_lat, otx, oty, ohL, ohW, owner) in _obst_query(
+            lp_lon0, lp_lat0, search_r):
+        if owner == parent:
+            continue
+        ocx, ocy = _lp_to_m((o_lon, o_lat))
+        # Foreign obstacles are inflated by the foreign margin so the
+        # label ends up visibly outside the neighbouring station's hull
+        # (whose pad is smaller) instead of hugging its edge.
+        sweep_obbs.append((
+            ocx, ocy, otx, oty,
+            ohL + CLOSE_ZOOM_STATION_LABEL_FOREIGN_CLEAR_M,
+            ohW + CLOSE_ZOOM_STATION_LABEL_FOREIGN_CLEAR_M, None))
+
     def _axial_mean(vecs):
         """Mean direction of undirected axes (doubled-angle trick)."""
         sx = sum(cos(2.0 * atan2(ty, tx)) for tx, ty in vecs)
@@ -969,7 +1047,7 @@ for parent, lpills in station_label_pills.items():
             u = (-u[0], -u[1])
         return u
 
-    def _sweep(axis, u, start, obbs=lp_obbs,
+    def _sweep(axis, u, start, obbs=sweep_obbs,
                hw=None, hh=None):
         """Slide the label box from `start` along `u` until it clears
         every pill-arrow box. Returns (center, last_blocking_obbs)."""
@@ -1067,6 +1145,7 @@ for parent, lpills in station_label_pills.items():
 
     lab_lonlat = _local_offset_to_lonlat(
         lp_lon0, lp_lat0, lab_center[0], lab_center[1], lp_cl)
+    _lp_info = _label_info.get(parent) or {}
     features.append({
         "type": "Feature",
         "tippecanoe": {"minzoom": 15, "maxzoom": 18},
@@ -1078,9 +1157,22 @@ for parent, lpills in station_label_pills.items():
             "font_m":         round(lab_font_m, 3),
             "text_rot":       round(lab_text_rot, 2),
             "parent_station": parent,
+            # Popup payload so a z17+ click on the label opens the same
+            # station popup as a click on the pill / dot at z14–16
+            # (see popups.md § Shared conventions). The pill source
+            # itself isn't loaded at z17+, so the label carries the data.
+            "stop_name":      _lp_info.get("stop_name") or label_name,
+            "lines_json":     _lp_info.get("lines_json", ""),
+            "dep_hr":         float(_lp_info.get("dep_hr", 0.0) or 0.0),
         },
     })
     n_station_labels += 1
+    # The placed label joins the obstacle grid (clearance-inflated box)
+    # so every later — smaller — label's sweep avoids it. The owner tag
+    # is prefixed so no station's own-parent filter ever skips it.
+    _obst_register(lab_lonlat[0], lab_lonlat[1],
+                   lab_axis[0], lab_axis[1],
+                   lab_half_w, lab_half_h, "label:" + str(parent))
     # Hull expansion: the raw text box corners (without the clearance
     # margin — the hull's own pad supplies the breathing room).
     perp = (-lab_axis[1], lab_axis[0])

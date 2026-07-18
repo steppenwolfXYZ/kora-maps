@@ -23,18 +23,19 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 `generate_style.py` builds a MapLibre style JSON via discrete `build_*` functions called in this order in `generate_style()`:
 
 1. `build_background_layer`
-2. `build_landuse_layers`
-3. `build_water_layers`
-4. `build_building_layers`
-5. `build_rail_layers(modes=["tunnel", "normal"])` — rail NOT on bridges
-6. `build_road_layers(modes=["tunnel", "normal"])` — roads NOT on bridges
-7. `build_path_layers(modes=["tunnel", "normal"])` — paths NOT on bridges
-8. `build_bridge_deck_layer` — solid gray deck for all bridge transportation
-9. `build_rail_layers(modes=["bridge"])` — rail ON bridges (above deck)
-10. `build_road_layers(modes=["bridge"])` — roads ON bridges (above deck)
-11. `build_path_layers(modes=["bridge"])` — paths ON bridges (above deck)
-12. `build_border_layers`
-13. `build_label_layers`
+2. `build_hillshade_layer` — terrain relief, directly above background so it only shows through on bare land; below everything else
+3. `build_landuse_layers`
+4. `build_water_layers`
+5. `build_building_layers`
+6. `build_rail_layers(modes=["tunnel", "normal"])` — rail NOT on bridges
+7. `build_road_layers(modes=["tunnel", "normal"])` — roads NOT on bridges
+8. `build_path_layers(modes=["tunnel", "normal"])` — paths NOT on bridges
+9. `build_bridge_deck_layer` — solid gray deck for all bridge transportation
+10. `build_rail_layers(modes=["bridge"])` — rail ON bridges (above deck)
+11. `build_road_layers(modes=["bridge"])` — roads ON bridges (above deck)
+12. `build_path_layers(modes=["bridge"])` — paths ON bridges (above deck)
+13. `build_border_layers`
+14. `build_label_layers`
 
 **Why this order:** Bridge deck must render between normal-mode and bridge-mode features so it appears above roads passing below the bridge but below roads on the bridge.
 
@@ -49,6 +50,8 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 **Transit stop architecture:** All stop features (dots, pills, connectors) are `LineString` features in a single PMTile source (`tl_stop_pills.pmtiles`). Dots are `[pos, pos]` zero-length lines rendered as circles via `line-cap: round`. Layer paint order: dot-casing → connector-casing → pill-casing → dot-fill → pill-fill → connector-fill.
 
 **View modes:** The map has two views, `standard` (place labels visible, all stop symbology hidden) and `transit-focus` (place labels hidden, stops visible), toggled client-side in `src/lib/Map.svelte` via layer visibility — one shared `style.json`, no regeneration. Transit lines render identically in both. See `view-modes.md`. Shipped default is `standard`; the code currently carries a `DEFAULT_VIEW` dev override to `transit-focus` during stop-rendering development.
+
+**Terrain:** A `terrain` raster-DEM source (Mapterhorn free API, Terrarium-encoded WebP, tileSize 512, maxzoom 12) feeds two features (see `hillshade-and-contours.md`). Hillshade is always on, generated into the style (tokens under `terrain:` in `config.yaml`; the layer type has no opacity property, so `terrain.hillshade.opacity` is baked into the shadow/highlight colors as alpha). Contour lines are client-side only: `maplibre-contour` in `Map.svelte` builds them from the same DEM tiles, adaptive intervals from z9 (200/1000 m) tightening to z15+ (10/50 m), inserted below the transit block, off by default behind a floating toggle bottom-right. `maplibre-contour` ships a broken `exports` map, so `vite.config.ts` aliases it to its ESM bundle path, and its `DemSource` is constructed lazily because it spawns a Web Worker (crashes SSR at module scope).
 
 ---
 

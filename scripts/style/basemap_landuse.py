@@ -15,6 +15,35 @@ def build_background_layer(cfg):
     }
 
 
+def _hex_with_alpha(hex_color, alpha):
+    """'#rrggbb' + float alpha → 'rgba(r,g,b,a)'. Passes hex8 through."""
+    h = hex_color.lstrip("#")
+    if len(h) == 8:
+        return hex_color
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def build_hillshade_layer(cfg):
+    hs = cfg["terrain"]["hillshade"]
+    # The hillshade layer type has no opacity paint property — overall
+    # strength is carried as alpha on the shadow/highlight colors.
+    op = hs["opacity"]
+    return {
+        "id": "hillshade",
+        "type": "hillshade",
+        "source": "terrain",
+        "paint": {
+            "hillshade-shadow-color": _hex_with_alpha(hs["shadow_color"], op),
+            "hillshade-highlight-color": _hex_with_alpha(hs["highlight_color"], op),
+            "hillshade-accent-color": hs["accent_color"],
+            "hillshade-illumination-direction": hs["illumination_direction"],
+            "hillshade-exaggeration": hs["exaggeration"],
+            "hillshade-illumination-anchor": "viewport",
+        }
+    }
+
+
 def build_landuse_layers(cfg):
     p = cfg["palette"]
     lu = cfg["landuse"]

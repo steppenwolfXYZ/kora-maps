@@ -194,3 +194,31 @@ borders:
   state_width: 0.8
   state_dasharray: [3, 2]
   state_min_zoom: 4
+
+# ── Terrain (hillshade + contours) ───────────────────────────────────────────
+# Raster-DEM source from Mapterhorn (Terrarium encoding, WebP tiles).
+# Hillshade is always on; contours are togglable client-side (see Map.svelte).
+terrain:
+  source:
+    url: "https://tiles.mapterhorn.com/{z}/{x}/{y}.webp"
+    encoding: "terrarium"
+    tile_size: 512
+    max_zoom: 12
+
+  hillshade:
+    opacity: 0.35
+    shadow_color: "#4a3a2a"       # warm dark brown, blends with palette
+    highlight_color: "#ffffff"
+    accent_color: "#00000000"     # transparent — MapLibre default reads too blue
+    exaggeration: 0.45
+    illumination_direction: 335   # NW, slightly north of default
+
+  contours:
+    color_minor: "#8a6a3c"        # warm brown, minor lines
+    color_major: "#6a4a24"        # deeper brown, major lines
+    width_minor: 0.4
+    width_major: 1.0
+    opacity: 0.7
+    label_color: "#4a3624"
+    label_halo: "#f4ecdccc"       # halo tuned to background/farmland tones
+    label_size: 10

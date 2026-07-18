@@ -2,17 +2,42 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { Protocol } from 'pmtiles';
+	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
 	maplibregl.addProtocol('pmtiles', pmtilesProtocol.tile.bind(pmtilesProtocol));
 
+	// Contour DEM manager — reuses the same Mapterhorn terrain the hillshade
+	// layer consumes (source config in scripts/config.yaml → terrain.source).
+	// Constructed lazily: DemSource spawns a Web Worker, which doesn't exist
+	// during SSR. The $effect below (client-only) triggers creation.
+	let demSource: InstanceType<typeof mlcontour.DemSource> | null = null;
+	function getDemSource() {
+		if (!demSource) {
+			demSource = new mlcontour.DemSource({
+				url: 'https://tiles.mapterhorn.com/{z}/{x}/{y}.webp',
+				encoding: 'terrarium',
+				maxzoom: 12,
+				worker: true,
+				cacheSize: 100,
+				timeoutMs: 10_000
+			});
+			demSource.setupMaplibre(maplibregl);
+		}
+		return demSource;
+	}
+
 	/** Resolved MapLibre style object loaded from /style.json */
 	let { style }: { style: maplibregl.StyleSpecification } = $props();
 
+	const CONTOUR_SOURCE_ID = 'contour-source';
+	const CONTOUR_LAYERS = ['contour-line-minor', 'contour-line-major', 'contour-label-major'];
+
 	let container: HTMLDivElement;
 	let zoom = $state(0);
+	let contoursEnabled = $state(false);
 
 	const TRANSIT_LINE_LAYERS = [
 		'transit-mountain', 'transit-regional_bus', 'transit-bus',
@@ -90,6 +115,102 @@
 		if (mapRef) applyViewMode(mapRef, mode);
 	}
 
+	function addContourLayers(map: maplibregl.Map) {
+		const meta = (style.metadata as any)?.['carfree:terrain'];
+		const c = meta?.contours ?? {};
+		const vis = contoursEnabled ? 'visible' : 'none';
+
+		// Register the vector tile source that maplibre-contour serves via
+		// its own protocol handler. Thresholds pair [minor_m, major_m] per
+		// zoom band; below z9 no contours are generated.
+		map.addSource(CONTOUR_SOURCE_ID, {
+			type: 'vector',
+			tiles: [
+				getDemSource().contourProtocolUrl({
+					multiplier: 1,
+					thresholds: {
+						9: [200, 1000],
+						11: [100, 500],
+						13: [50, 250],
+						15: [10, 50]
+					},
+					elevationKey: 'ele',
+					levelKey: 'level',
+					contourLayer: 'contours'
+				})
+			],
+			maxzoom: 15
+		});
+
+		// Insert contours just below the transit block (station backdrop +
+		// lines + stops): above the basemap and roads, below transit.
+		const beforeId = map.getLayer('close-zoom-station-backdrop')
+			? 'close-zoom-station-backdrop'
+			: undefined;
+
+		map.addLayer({
+			id: 'contour-line-minor',
+			type: 'line',
+			source: CONTOUR_SOURCE_ID,
+			'source-layer': 'contours',
+			minzoom: 9,
+			filter: ['==', ['get', 'level'], 0],
+			layout: { visibility: vis, 'line-join': 'round' },
+			paint: {
+				'line-color': c.color_minor ?? '#8a6a3c',
+				'line-width': c.width_minor ?? 0.4,
+				'line-opacity': c.opacity ?? 0.7
+			}
+		}, beforeId);
+
+		map.addLayer({
+			id: 'contour-line-major',
+			type: 'line',
+			source: CONTOUR_SOURCE_ID,
+			'source-layer': 'contours',
+			minzoom: 9,
+			filter: ['==', ['get', 'level'], 1],
+			layout: { visibility: vis, 'line-join': 'round' },
+			paint: {
+				'line-color': c.color_major ?? '#6a4a24',
+				'line-width': c.width_major ?? 1.0,
+				'line-opacity': c.opacity ?? 0.7
+			}
+		}, beforeId);
+
+		map.addLayer({
+			id: 'contour-label-major',
+			type: 'symbol',
+			source: CONTOUR_SOURCE_ID,
+			'source-layer': 'contours',
+			minzoom: 12,
+			filter: ['==', ['get', 'level'], 1],
+			layout: {
+				visibility: vis,
+				'symbol-placement': 'line',
+				'symbol-spacing': 400,
+				'text-field': ['concat', ['to-string', ['get', 'ele']], ' m'],
+				'text-font': ['Saira Regular'],
+				'text-size': c.label_size ?? 10,
+				'text-max-angle': 25
+			},
+			paint: {
+				'text-color': c.label_color ?? '#4a3624',
+				'text-halo-color': c.label_halo ?? '#f4ecdccc',
+				'text-halo-width': 1.2
+			}
+		}, beforeId);
+	}
+
+	function toggleContours() {
+		contoursEnabled = !contoursEnabled;
+		if (!mapRef) return;
+		const vis = contoursEnabled ? 'visible' : 'none';
+		for (const id of CONTOUR_LAYERS) {
+			if (mapRef.getLayer(id)) mapRef.setLayoutProperty(id, 'visibility', vis);
+		}
+	}
+
 	const DEBUG_STOP_LAYER = 'debug-stop-dot';
 
 	$effect(() => {
@@ -148,11 +269,15 @@
 			// finished loading (the baked default only covers 'standard').
 			applyViewMode(map, viewMode);
 
+			addContourLayers(map);
+
 			// Pointer cursor when hovering transit lines and stops
 			const hoverLayers = [
 				...TRANSIT_LINE_LAYERS,
 				...TRANSIT_STOP_DOT_LAYERS,
 				...TRANSIT_STOP_PILL_LAYERS,
+				...TRANSIT_STOP_LABEL_LAYERS,
+				'close-zoom-station-label',
 				DEBUG_STOP_LAYER
 			];
 			for (const layer of hoverLayers) {
@@ -216,12 +341,39 @@
 				return;
 			}
 
-			// Station click takes priority over line click
+			// Station click takes priority over line click. Includes label
+			// layers so clicking a stop's name text opens its popup too.
+			// Pill labels (z14-17) and close-zoom station labels (z17+)
+			// don't carry the popup data on the label feature itself —
+			// they're dedicated label-anchor / label-only features. Skip
+			// past them to the underlying pill/dot; for z17+ where pills
+			// stop rendering, fall back to querying the pill source by
+			// parent_station.
 			const stopFeatures = map.queryRenderedFeatures(e.point, {
-				layers: [...TRANSIT_STOP_PILL_LAYERS, ...TRANSIT_STOP_DOT_LAYERS]
+				layers: [
+					...TRANSIT_STOP_PILL_LAYERS,
+					...TRANSIT_STOP_DOT_LAYERS,
+					...TRANSIT_STOP_LABEL_LAYERS,
+					'close-zoom-station-label',
+				]
 			});
-			if (stopFeatures.length) {
-				const p = stopFeatures[0].properties as Record<string, unknown>;
+			// Skip label-anchor / label-only features that carry no popup
+			// payload; pick the first hit that actually has lines_json.
+			// Pill-label anchors (z14–17) never carry it, but the underlying
+			// pill feature is also in the hit list. Close-zoom station
+			// labels (z17+) DO carry it (baked at build time), so a click
+			// on the text opens the popup even though pills stop rendering.
+			let stopFeature: maplibregl.MapGeoJSONFeature | null = null;
+			for (const f of stopFeatures) {
+				const props = f.properties as Record<string, unknown> | null;
+				if (!props) continue;
+				if (props.lines_json || props.dep_hr !== undefined) {
+					stopFeature = f;
+					break;
+				}
+			}
+			if (stopFeature) {
+				const p = stopFeature.properties as Record<string, unknown>;
 
 				// Per-zoom lookup: far-zoom absorbers carry lines_json_zN
 				// and dep_hr_zN reflecting the lines / departures folded in
@@ -410,6 +562,21 @@
 		{/if}
 	</div>
 
+	<button
+		class="contour-toggle"
+		class:active={contoursEnabled}
+		onclick={toggleContours}
+		title={contoursEnabled ? 'Hide contour lines' : 'Show contour lines'}
+		aria-pressed={contoursEnabled}
+		aria-label="Toggle contour lines"
+	>
+		<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+			<path d="M2 15 Q 6 8, 10 11 T 18 6" fill="none" stroke="currentColor" stroke-width="1.4" />
+			<path d="M2 17 Q 6 12, 10 14 T 18 10" fill="none" stroke="currentColor" stroke-width="1.4" />
+			<path d="M2 13 Q 6 5, 10 8 T 18 3" fill="none" stroke="currentColor" stroke-width="1.4" />
+		</svg>
+	</button>
+
 	<div class="zoom-badge" aria-label="Current zoom level">
 		z&thinsp;{zoom}
 	</div>
@@ -459,6 +626,31 @@
 	.view-toggle button.active {
 		background: #333;
 		color: #fff;
+	}
+
+	.contour-toggle {
+		/* Bottom-right, stacked above MapLibre's compact attribution (i):
+		   24px button + 2×10px control margin → 44px offset. */
+		position: absolute;
+		right: 10px;
+		bottom: 44px;
+		background: #ffffff;
+		border: none;
+		border-radius: 999px;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		width: 2.1rem;
+		height: 2.1rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+		color: #6a4a24;
+		padding: 0;
+	}
+
+	.contour-toggle.active {
+		background: #6a4a24;
+		color: #f4ecdc;
 	}
 
 	.zoom-badge {

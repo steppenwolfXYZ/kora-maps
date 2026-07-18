@@ -88,17 +88,22 @@ def _cluster_station_uics(cluster_stops):
     return uics
 
 
-def _station_line_tooltip(variants, station_uics):
+def _station_line_tooltip(variants, station_uics, station_name=""):
     """Build the A ↔ B tooltip for one (ref, mode) group at a station.
 
     See `.claude/concepts/popups.md` § Line tooltip. Groups variants by which
     downstream direction they head from the station, applies subsumption
     within each direction (drop variants whose terminus is intermediate on a
-    longer variant's tail), then joins the two sides with `↔`. Falls back to
-    the single side when only one direction has downstream (loop, aerial,
-    variant terminates at station).
+    longer variant's tail), then joins the two sides with `↔`.
+
+    When the station is a terminus of any variant (line starts or ends
+    here), the station itself is added as the missing side so the tooltip
+    always shows both endpoints of the line — e.g. at Klein Matterhorn
+    the aerial reads "Zermatt ↔ Klein Matterhorn" rather than just
+    "Zermatt".
     """
     downstream = []
+    station_is_terminus = False
     for v in variants:
         uics = v.get("parent_uics") or []
         pos = -1
@@ -106,7 +111,14 @@ def _station_line_tooltip(variants, station_uics):
             if u and u in station_uics:
                 pos = i
                 break
-        if pos < 0 or pos >= len(uics) - 1:
+        if pos < 0:
+            continue
+        # Station being FIRST or LAST of any variant qualifies as a
+        # terminus role for this line — record it before the
+        # "no downstream from LAST position" skip below drops the variant.
+        if pos == 0 or pos == len(uics) - 1:
+            station_is_terminus = True
+        if pos >= len(uics) - 1:
             continue
         forward_tail = uics[pos + 1:]
         downstream.append({
@@ -167,6 +179,15 @@ def _station_line_tooltip(variants, station_uics):
         if names:
             sides.append(names)
 
+    # If this station is a terminus of any variant (line starts or ends
+    # here) and the station name isn't already listed among the
+    # downstream sides, add it as the missing side. Restores both
+    # endpoints of the line at terminal stations — bus terminals, aerial
+    # / funicular / ferry termini.
+    if (station_is_terminus and station_name
+            and not any(station_name in side for side in sides)):
+        sides.append([station_name])
+
     if not sides:
         return ""
     if len(sides) == 1:
@@ -213,6 +234,12 @@ def cluster_lines(cluster_stops, line_lookup, oids_by_uic=None):
             }
 
     station_uics = _cluster_station_uics(cluster_stops)
+    station_name = ""
+    for s in cluster_stops:
+        n = s.get("stop_name") or ""
+        if n:
+            station_name = n
+            break
 
     # Broaden the per-(ref, mode) variant set for tooltip generation:
     # include every osm_id at any station_uic matching the same (ref, mode),
@@ -233,7 +260,7 @@ def cluster_lines(cluster_stops, line_lookup, oids_by_uic=None):
     entries = []
     for key, variants in groups.items():
         entry = dict(representative[key])
-        entry["tooltip"] = _station_line_tooltip(variants, station_uics)
+        entry["tooltip"] = _station_line_tooltip(variants, station_uics, station_name)
         entries.append(entry)
     return sorted(entries, key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
 

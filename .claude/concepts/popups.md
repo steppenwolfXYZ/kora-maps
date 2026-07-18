@@ -48,7 +48,8 @@ Format: `A ↔ B`, where A and B are the two termini of the line as seen from th
 - **Diverging termini.** If a downstream direction still has multiple distinct termini after subsumption (neither on the other's sequence), list them joined by ` · ` (middle dot). Example: `A · C ↔ B`.
 - **Direction assignment.** "Downstream" is defined per station: for each variant serving the station, its downstream terminus is the last stop of the variant's stop sequence relative to this station's position in that sequence. Variants group into two sides by which downstream terminus they head toward; the tooltip's two ends of `↔` are those two groups.
 - **Identity for matching.** "Same station" throughout the tooltip logic (locating this station in a variant's sequence, deciding whether a terminus is on another variant's sequence) is matched at the parent-station / merged-UIC level, not by full stop_id with platform suffix. Different platforms of one station are treated as the same location.
-- **Loops and one-direction lines.** If only one side has termini (loop, aerial, funicular's single downstream), the tooltip drops the `↔` and shows just the terminus list.
+- **Include self at terminals.** When the station is a terminus of any variant (line starts or ends here) and the station's own name isn't already in the downstream sides, add it as the missing side. Ensures both endpoints of the line always show up — bus terminals, aerial / funicular / ferry termini all read as `Other end ↔ Here` instead of just `Other end`.
+- **Loops and one-direction lines.** If, even after adding self, only one side remains (rare — genuine one-direction line with no explicit self), the tooltip drops the `↔` and shows just the terminus list.
 
 ### Far-zoom dot behaviour
 
