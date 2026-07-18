@@ -148,7 +148,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
               stop_attrs, end_of_platform_pairs, fill_diag, filled_oids,
               skip_first_oids, skip_last_oids, rail_idx, tram_idx,
               coords_by_uic, uic_serving, gtfs_stop_features,
-              stop_salience):
+              stop_salience, oids_by_uic=None):
 
     _t_phase = time.perf_counter()
     print("Building stop dots and pill candidates...")
@@ -346,8 +346,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
-                        "lines_json":     json.dumps(cluster_lines(mini_cluster, line_lookup)),
-                        "dep_hr":         round(cluster_departures_per_hour(mini_cluster, line_lookup), 3),
+                        "lines_json":     json.dumps(cluster_lines(mini_cluster, line_lookup, oids_by_uic)),
+                        "dep_hr":         round(cluster_departures_per_hour(mini_cluster, line_lookup, oids_by_uic), 3),
                     },
                 })
                 indicator_features.extend(build_indicator_features(
@@ -432,7 +432,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             }
             for c in cands
         ]
-        lines_json_str = json.dumps(cluster_lines(synthetic_cluster, line_lookup))
+        lines_json_str = json.dumps(cluster_lines(synthetic_cluster, line_lookup, oids_by_uic))
         base_props = {
             "color":          rep["color"],
             "mode":           "ferry",
@@ -441,7 +441,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      rep["stop_name"],
             "parent_station": rep["parent_station"],
             "lines_json":     lines_json_str,
-            "dep_hr":         round(cluster_departures_per_hour(synthetic_cluster, line_lookup), 3),
+            "dep_hr":         round(cluster_departures_per_hour(synthetic_cluster, line_lookup, oids_by_uic), 3),
         }
         indicator_stubs = [{"osm_id": str(c["osm_id"]), "mode": "ferry"} for c in cands]
 
@@ -615,7 +615,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         color, mode, max_wb, dom_stop = dominant_line(cluster)
         centroid_lon = sum(s["lon"] for s in cluster) / len(cluster)
         centroid_lat = sum(s["lat"] for s in cluster) / len(cluster)
-        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
+        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup, oids_by_uic))
         centroid_props = {
             "color":          color,
             "mode":           mode,
@@ -624,7 +624,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
-            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup), 3),
+            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup, oids_by_uic), 3),
         }
 
         if mz is None:
@@ -760,7 +760,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         centroid_lon = sum(s["lon"] for s in cluster) / len(cluster)
         centroid_lat = sum(s["lat"] for s in cluster) / len(cluster)
         mode_minzoom = min(MODE_MINZOOM.get(s["mode"], 11) for s in cluster)
-        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup))
+        lines_json_str = json.dumps(cluster_lines(cluster, line_lookup, oids_by_uic))
         centroid_props = {
             "color":          color,
             "mode":           dom_mode,
@@ -769,7 +769,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
-            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup), 3),
+            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup, oids_by_uic), 3),
         }
         payloads.append((cluster, mz, cluster_rail_like, mode_minzoom,
                          centroid_lon, centroid_lat, centroid_props,
@@ -1000,6 +1000,43 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
 
     OUT_DOTS.parent.mkdir(parents=True, exist_ok=True)
     OUT_DOTS.write_text(json.dumps({"type": "FeatureCollection", "features": dot_features}))
+
+    # Stop-search index (stop-search.md): one entry per unique station
+    # (dedup by parent_station UIC), consumed by the client-side search
+    # input. Rebuilt every time step 07 writes dots. Mode with the lowest
+    # MODE_RANK wins when a station is served by multiple modes.
+    _search_seen: dict[str, dict] = {}
+    for f in dot_features:
+        props = f.get("properties", {})
+        name = props.get("stop_name")
+        if not name:
+            continue
+        uic = props.get("parent_station") or props.get("stop_id")
+        if not uic:
+            continue
+        coords = f.get("geometry", {}).get("coordinates")
+        if not coords or len(coords) < 2:
+            continue
+        mode = props.get("mode") or ""
+        rank = MODE_RANK.get(mode, 99)
+        existing = _search_seen.get(uic)
+        if existing is not None and existing["_rank"] <= rank:
+            continue
+        _search_seen[uic] = {
+            "n": name,
+            "u": uic,
+            "c": [round(coords[0], 6), round(coords[1], 6)],
+            "m": mode,
+            "_rank": rank,
+        }
+    _search_entries = [
+        {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"]}
+        for e in sorted(_search_seen.values(), key=lambda e: e["n"])
+    ]
+    OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    OUT_STOP_SEARCH_INDEX.write_text(json.dumps(_search_entries, ensure_ascii=False))
+    print(f"  Stop-search index: {len(_search_entries)} unique stations → {OUT_STOP_SEARCH_INDEX}")
+
     pill_features.extend(ferry_pill_features)
     pill_features.extend(indicator_features)
 
@@ -1125,13 +1162,37 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             cum += seg
         return coords[-1]
 
+    # World-coord half-height used to shift the anchor east on angled
+    # vertical pills. Less than the full em-box half-height because visible
+    # glyphs don't reach the ascender / descender edges — so we give a bit
+    # of leeway. Text also can't clip into pill it doesn't reach, so the
+    # effective half-height is CAPPED at the pill's own vertical half-extent.
+    LABEL_TEXT_HALF_HEIGHT_M = 40.0
+
     def _pill_anchor_base(coords):
-        """Return the pill's anchor base point per the pill-zoom rule:
-        vertical pills → midpoint of the centerline (so the label sits
-        beside the pill's middle); horizontal pills → easternmost coord
-        (so the label sits past the east end)."""
+        """Return the pill's anchor base point per the pill-zoom rule.
+        Vertical pills → midpoint of the centerline, shifted east by the
+        extra distance the pill's slope covers within the smaller of the
+        label's half-height or the pill's own vertical half-extent.
+        Horizontal pills → easternmost coord (label sits past the east end)."""
+        if not coords or len(coords) < 2:
+            return coords[0] if coords else None
         if _pill_is_vertical(coords):
-            return _polyline_midpoint(coords)
+            mid = _polyline_midpoint(coords)
+            if mid is None:
+                return None
+            a, b = coords[0], coords[-1]
+            mean_lat = (a[1] + b[1]) / 2.0
+            dx_m = abs(a[0] - b[0]) * 111320.0 * cos(radians(mean_lat))
+            dy_m = abs(a[1] - b[1]) * 111320.0
+            if dy_m > 1e-6 and dx_m > 0:
+                # Cap effective text half-height at the pill's own half-dy —
+                # text beyond the pill's ends can't clip anything, so it
+                # doesn't drive the correction.
+                effective_half_m = min(LABEL_TEXT_HALF_HEIGHT_M, dy_m / 2.0)
+                extra_m = effective_half_m * (dx_m / dy_m)
+                return (mid[0] + _lon_offset(mid[1], extra_m), mid[1])
+            return mid
         return _easternmost_of(coords)
 
     def _all_coords(feats):

@@ -30,6 +30,7 @@ TRAM_WAYS_GEOJSON   = ROOT / "data" / "osm" / "tram_ways.geojson"
 STREET_WAYS_GEOJSON = ROOT / "data" / "osm" / "street_ways.geojson"
 OUT_DOTS            = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS           = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
+OUT_STOP_SEARCH_INDEX = ROOT / "static" / "map-assets" / "stop_search_index.json"
 OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
 OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 

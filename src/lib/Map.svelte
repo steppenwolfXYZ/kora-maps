@@ -2,6 +2,7 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { Protocol } from 'pmtiles';
+	import StopSearch from './StopSearch.svelte';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -70,7 +71,7 @@
 	// The concept (view-modes.md) specifies 'standard' as the shipped default.
 	const DEFAULT_VIEW = 'transit-focus' as ViewMode;
 	let viewMode = $state<ViewMode>(DEFAULT_VIEW);
-	let mapRef: maplibregl.Map | null = null;
+	let mapRef = $state.raw<maplibregl.Map | null>(null);
 
 	function applyViewMode(map: maplibregl.Map, mode: ViewMode) {
 		for (const id of STOP_SYMBOLOGY_LAYERS) {
@@ -329,15 +330,20 @@
 <div class="map-wrap">
 	<div bind:this={container} class="map"></div>
 
-	<div class="view-toggle" role="group" aria-label="Map view">
-		<button
-			class:active={viewMode === 'standard'}
-			onclick={() => setView('standard')}
-		>Standard</button>
-		<button
-			class:active={viewMode === 'transit-focus'}
-			onclick={() => setView('transit-focus')}
-		>Transit</button>
+	<div class="top-controls">
+		<div class="view-toggle" role="group" aria-label="Map view">
+			<button
+				class:active={viewMode === 'standard'}
+				onclick={() => setView('standard')}
+			>Standard</button>
+			<button
+				class:active={viewMode === 'transit-focus'}
+				onclick={() => setView('transit-focus')}
+			>Transit</button>
+		</div>
+		{#if viewMode === 'transit-focus'}
+			<StopSearch map={mapRef} />
+		{/if}
 	</div>
 
 	<div class="zoom-badge" aria-label="Current zoom level">
@@ -357,10 +363,16 @@
 		height: 100%;
 	}
 
-	.view-toggle {
+	.top-controls {
 		position: absolute;
 		top: 1rem;
 		left: 1rem;
+		display: flex;
+		gap: 0.5rem;
+		align-items: flex-start;
+	}
+
+	.view-toggle {
 		display: flex;
 		background: #ffffff;
 		border-radius: 999px;
@@ -372,9 +384,10 @@
 	.view-toggle button {
 		border: none;
 		background: transparent;
-		font-family: 'Noto Sans', 'Helvetica Neue', Arial, sans-serif;
-		font-size: 0.8rem;
-		padding: 0.35rem 0.8rem;
+		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-size: 0.85rem;
+		line-height: 1.2;
+		padding: 0.4rem 0.8rem;
 		cursor: pointer;
 		color: #333;
 	}

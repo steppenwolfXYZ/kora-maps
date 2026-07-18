@@ -149,6 +149,20 @@ def run():
             info["first_terminus_name"] = first_name
             info["last_terminus_name"]  = last_name
 
+    # Reverse index: parent-UIC → osm_ids whose stop sequence touches that
+    # UIC. Used by cluster_lines / cluster_departures_per_hour to source
+    # ALL variants of a line at a station (including those the terminus
+    # dedup pass drops from the visible-stop pool). Rendering dedup must
+    # not decide which lines a station is served by.
+    with _timed("build oids_by_uic index"):
+        oids_by_uic: dict = defaultdict(list)
+        for oid, info in line_lookup.items():
+            seen_uics: set = set()
+            for uic in info.get("parent_uics") or []:
+                if uic and uic not in seen_uics:
+                    seen_uics.add(uic)
+                    oids_by_uic[uic].append(oid)
+
     # ── Zoom-level rules: per-mode stop min_zoom ─────────────────────────────
     # See .claude/concepts/zoom-level-rules.md.
     print("Building per-UIC line index...")
@@ -356,6 +370,7 @@ def run():
         uic_serving=uic_serving,
         gtfs_stop_features=gtfs_stop_features,
         stop_salience=stop_salience,
+        oids_by_uic=oids_by_uic,
     )
     _dt_total = time.perf_counter() - _t_total
     print(f"\n  ═══════════════════════════════════════════════════════")

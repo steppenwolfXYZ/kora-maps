@@ -174,12 +174,22 @@ def _station_line_tooltip(variants, station_uics):
     return " ↔ ".join(" · ".join(names) for names in sides)
 
 
-def cluster_lines(cluster_stops, line_lookup):
+def cluster_lines(cluster_stops, line_lookup, oids_by_uic=None):
     """
     Return a sorted list of {ref, color, mode, name, tooltip} dicts for all
     distinct lines serving any stop in the cluster, deduped by (ref, mode).
     Both directions of one line merge into a single entry. Sorted by mode
     rank then ref. Tooltip pre-formatted per `.claude/concepts/popups.md`.
+
+    Badges are sourced from `cluster_stops` — a line only gets a badge if
+    at least one of its variants survived the visible-stop dedup. The
+    tooltip, however, sources its variants from `oids_by_uic` (all variants
+    whose stop sequence touches any of this cluster's parent-UICs, no
+    dedup applied). That way the tooltip's downstream directions are
+    complete even when the "outbound" variant of a terminal-line got
+    dropped from the drawn stops by `compute_terminus_skip_oids`.
+    Falls back to cluster_stops-only variant sourcing when `oids_by_uic`
+    is not supplied.
     """
     groups: dict = defaultdict(list)
     representative: dict = {}
@@ -203,6 +213,23 @@ def cluster_lines(cluster_stops, line_lookup):
             }
 
     station_uics = _cluster_station_uics(cluster_stops)
+
+    # Broaden the per-(ref, mode) variant set for tooltip generation:
+    # include every osm_id at any station_uic matching the same (ref, mode),
+    # not just those that survived the visible-stop dedup.
+    if oids_by_uic:
+        for uic in station_uics:
+            for oid in oids_by_uic.get(uic, ()):
+                info = line_lookup.get(oid)
+                if not info:
+                    continue
+                key = (info.get("gtfs_ref") or info.get("ref", ""),
+                       info.get("mode", ""))
+                if key not in groups:
+                    continue
+                if info not in groups[key]:
+                    groups[key].append(info)
+
     entries = []
     for key, variants in groups.items():
         entry = dict(representative[key])
@@ -211,15 +238,31 @@ def cluster_lines(cluster_stops, line_lookup):
     return sorted(entries, key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
 
 
-def cluster_departures_per_hour(cluster_stops, line_lookup):
-    """Sum `f_weighted` across every distinct osm_id in the cluster.
+def cluster_departures_per_hour(cluster_stops, line_lookup, oids_by_uic=None):
+    """Sum `f_weighted` across every variant of a line serving this station.
 
-    Each osm_id is one per-direction line feature — both directions of a
-    bidirectional line contribute independently, matching the "each direction
-    is its own departures" rule from `.claude/concepts/popups.md`.
+    Sources osm_ids from `oids_by_uic` (per-UIC index of variants touching
+    the station), not `cluster_stops`, so departures include variants
+    dropped from the visible dot pool by the terminus dedup — a station's
+    departure count must not depend on which side of a terminal line got
+    drawn. Falls back to a cluster_stops-only sum when `oids_by_uic` is
+    not supplied.
     """
+    if oids_by_uic:
+        station_uics = _cluster_station_uics(cluster_stops)
+        seen: set = set()
+        total = 0.0
+        for uic in station_uics:
+            for oid in oids_by_uic.get(uic, ()):
+                if oid in seen:
+                    continue
+                seen.add(oid)
+                info = line_lookup.get(oid) or {}
+                total += float(info.get("f_weighted", 0.0) or 0.0)
+        return total
+
     total = 0.0
-    seen: set = set()
+    seen = set()
     for s in cluster_stops:
         oid = s.get("osm_id", "")
         if not oid or oid in seen:

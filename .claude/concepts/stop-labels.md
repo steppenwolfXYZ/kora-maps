@@ -147,7 +147,7 @@ Per band, from that band's pill / connector / endpoint features:
   - **Otherwise** (no clear winner): fall back to the easternmost coord across all pills + endpoints (connectors deliberately excluded so a curved connector's east swing can't win).
 
 For the pill case, which point on the pill depends on its orientation:
-  - **Vertical pill** (first→last endpoint's `dy > dx` in metric coords, i.e. steeper than 45°): base = polyline midpoint of the centerline (so the label sits beside the pill's middle rather than at one end).
+  - **Vertical pill** (first→last endpoint's `dy > dx` in metric coords, i.e. steeper than 45°): base = polyline midpoint of the centerline, shifted east by an extra offset that accounts for the pill's slope: `extra_m = effective_half_m × |dx_pill_m / dy_pill_m|`, where `effective_half_m = min(TEXT_HALF_HEIGHT_M, dy_pill_m / 2)`. `TEXT_HALF_HEIGHT_M ≈ 40 m` — less than a full em-box half-height because visible glyphs don't reach the ascender / descender edges. The `min` cap prevents over-correction on short pills: text extending beyond the pill's own ends can't clip anything. Without this correction an angled pill can clip through the top or bottom line of a wrapped label centered at the midpoint.
   - **Horizontal pill** (else): base = pill's easternmost coord (so the label sits past the east end).
   Then `anchor = (base.x + 5 m eastward, base.y)`.
 
