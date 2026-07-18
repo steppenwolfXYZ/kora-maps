@@ -25,7 +25,7 @@ STOP_TIER_RANK = {m: i for i, m in enumerate(STOP_TIER_HIERARCHY)}
 
 # Min_zoom assigned when no per-mode rule matches. Effectively "never visible"
 # at any rendered zoom level.
-UNREACH_Z = 13
+UNREACH_Z = 14
 
 
 def _resolve_stop_tier(modes_present: set) -> str:
@@ -508,7 +508,8 @@ def compute_stop_min_zoom(line_lookup, line_stops, stop_meta,
     # Bus
     _apply_intersection_or_terminus("bus", 10)
     _apply_importance_greedy("bus", 11, 1.0)
-    _apply_all_remaining("bus", 12)
+    _apply_importance_greedy("bus", 12, 0.5)
+    _apply_all_remaining("bus", 13)
 
     # ── Stops follow lines ──────────────────────────────────────────────────
     final: dict = {}

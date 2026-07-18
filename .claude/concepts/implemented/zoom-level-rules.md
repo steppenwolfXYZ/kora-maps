@@ -8,7 +8,7 @@ At low zoom levels, showing every transit line and stop produces an illegible ma
 
 ### Output
 
-Each line and each stop carries an integer `min_zoom` (4–12 inclusive). The MapLibre style renders a feature when `tippecanoe.minzoom <= current_zoom`. No runtime filter, no opacity gate — visibility is binary at integer zoom levels only.
+Each line carries an integer `min_zoom` in 4–12 inclusive; each stop carries an integer `min_zoom` in 4–13 inclusive (bus stops can be held back to z13). The MapLibre style renders a feature when `tippecanoe.minzoom <= current_zoom`. No runtime filter, no opacity gate — visibility is binary at integer zoom levels only.
 
 ### Algorithm overview
 
@@ -159,7 +159,8 @@ Stops
 |---|---|
 | 10 | is_intersection OR is_terminus |
 | 11 | importance-greedy ≤ 1 / 1 km |
-| 12 | all remaining |
+| 12 | importance-greedy ≤ 1 / 0.5 km |
+| 13 | all remaining |
 
 ### Salience score (per line)
 
@@ -277,7 +278,7 @@ A stop's `min_zoom` is at least the smallest `min_zoom` among the lines serving 
 
 ## Constraints
 
-- All zoom values are integers 4–12 inclusive. No fractional `min_zoom`. The MapLibre style uses plain `tippecanoe.minzoom`-driven visibility with constant per-layer opacity.
+- All zoom values are integers. Line `min_zoom` is 4–12 inclusive; stop `min_zoom` is 4–13 inclusive (bus is the only mode using z13). No fractional `min_zoom`. The MapLibre style uses plain `tippecanoe.minzoom`-driven visibility with constant per-layer opacity.
 - Mountain visual style (light yellow, fixed width) is preserved.
 - The salience score and its components are written to every feature for diagnostic use.
 - `tippecanoe.minzoom` is what tile inclusion responds to. The style does NOT carry any runtime `min_zoom` filter — MapLibre's filter context evaluates `["zoom"]` against the tile's integer zoom, so a per-feature fractional zoom gate is not feasible there.
