@@ -115,6 +115,40 @@ def run():
         stop_meta  = load_stop_meta()
         print(f"  {len(line_stops):,} lines with stops, {len(stop_meta):,} GTFS stop entries")
 
+    # Enrich line_lookup with per-variant parent-UIC sequence + terminus
+    # names so the station popup can build A ↔ B tooltips with subsumption
+    # without re-joining line_stops on the client. See
+    # `.claude/concepts/popups.md` § Line tooltip.
+    with _timed("enrich line_lookup with parent_uics + terminus names"):
+        for oid, info in line_lookup.items():
+            stops_seq = (line_stops.get(oid) or {}).get("stops") or []
+            parent_uics: list = []
+            for entry in stops_seq:
+                sid = entry[2] if len(entry) >= 3 else ""
+                meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0], {})
+                uic = meta.get("parent") or (sid.split(":")[0] if sid else "")
+                parent_uics.append(uic)
+            info["parent_uics"] = parent_uics
+            first_name = ""
+            last_name = ""
+            if parent_uics:
+                first_uic = parent_uics[0]
+                last_uic  = parent_uics[-1]
+                first_meta = stop_meta.get(first_uic, {}) if first_uic else {}
+                last_meta  = stop_meta.get(last_uic, {}) if last_uic else {}
+                first_name = first_meta.get("name", "")
+                last_name  = last_meta.get("name", "")
+                if not first_name and stops_seq:
+                    first_sid = stops_seq[0][2] if len(stops_seq[0]) >= 3 else ""
+                    m = stop_meta.get(first_sid) or stop_meta.get(first_sid.split(":")[0], {})
+                    first_name = m.get("name", "")
+                if not last_name and stops_seq:
+                    last_sid = stops_seq[-1][2] if len(stops_seq[-1]) >= 3 else ""
+                    m = stop_meta.get(last_sid) or stop_meta.get(last_sid.split(":")[0], {})
+                    last_name = m.get("name", "")
+            info["first_terminus_name"] = first_name
+            info["last_terminus_name"]  = last_name
+
     # ── Zoom-level rules: per-mode stop min_zoom ─────────────────────────────
     # See .claude/concepts/zoom-level-rules.md.
     print("Building per-UIC line index...")

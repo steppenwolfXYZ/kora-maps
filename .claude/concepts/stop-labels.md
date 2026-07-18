@@ -73,18 +73,38 @@ Per-tier size defined at four zoom anchors (z7 / z10 / z12 / z13); MapLibre line
 
 `small_bus` is never labelled at far-zoom — the tier is the smallest-dot tier and its label range starts at pill-zoom (z14+). `normal_stop` labels appear from z12 in areas where nothing outranks them.
 
+At **z14 (pill-zoom boundary)** every tier participates — including `small_bus` — and a readability floor kicks in so no label drops below 12 px. z14 sizes (px):
+
+| Tier | z14 |
+|---|---|
+| major_train | 24 |
+| main_train | 20 |
+| important_train | 17 |
+| train_station | 15 |
+| small_train | 15 |
+| major_mountain | 15 |
+| ferry_stop | 15 |
+| mountain_stop | 13 |
+| major_hub | 15 |
+| big_station | 13 |
+| normal_stop | 13 |
+| small_bus | 12 |
+
+The style's `text-size` interpolate has anchors at z7 / z10 / z12 / z13 / z14 — MapLibre linearly interpolates between them (so z13.5 has sizes half-way between the two rows).
+
 **Design rule.** The regular-weight tiers (`small_train`, `normal_stop`) size-match the nearest heavier-weight tier just above them in the hierarchy: `small_train` matches `train_station`, `normal_stop` matches `big_station`. The weight change alone carries the visual hierarchy; dropping size on top of that reads as double-demotion and makes the regular labels look too small.
 
-Three weights are in play — Saira Regular, Saira SemiBold, Saira Bold. `big_station`, `mountain_stop`, and `ferry_stop` always render SemiBold (a middle weight between the bold train / hub tiers and the regular rest). Every other tier is either Bold (if the zoom band puts it in the bold set) or Regular. The bold set grows with zoom so the bold-to-regular ratio stays roughly in the one-third range at every zoom band:
+Three weights are in play — Saira Regular, Saira SemiBold, Saira Bold. `mountain_stop` and `ferry_stop` always render SemiBold at every zoom band; `big_station` joins them at z12+. SemiBold is a middle weight between the bold train / hub tiers and the regular rest. Every other tier is either Bold (if the zoom band puts it in the bold set) or Regular. The bold set grows with zoom so the bold-to-regular ratio stays roughly in the one-third range at every zoom band:
 
 | Zoom | Bold tiers |
 |---|---|
 | z7–z8 | `major_train`, `main_train` |
 | z9 | + `important_train` |
 | z10 | + `train_station` |
-| z11+ | + `major_hub`, `major_mountain` |
+| z11 | + `major_hub`, `major_mountain` |
+| z12+ | + `small_train` |
 
-Always SemiBold (independent of zoom): `big_station`, `mountain_stop`, `ferry_stop`. Everything else renders regular. Implemented as a `step` on zoom with a `match` on `stop_tier` inside each branch — SemiBold overrides are placed first in the match so they win regardless of the bold set for that zoom.
+SemiBold: `mountain_stop`, `ferry_stop` at every zoom band; `big_station` from z12+. Everything else renders regular. Implemented as a `step` on zoom with a `match` on `stop_tier` inside each branch — SemiBold overrides are placed first in the match so they win regardless of the bold set for that zoom.
 
 Collision buffer: `text-padding: 4` px for every tier except `normal_stop`, which uses 20 px. The wider buffer on `normal_stop` forces rural stops of that tier to space out from each other rather than pack wherever MapLibre finds room; higher-priority tiers still get the tight 4 px so they collide only when they actually touch.
 
@@ -110,24 +130,36 @@ Stops that far-zoom dedup absorbed away are already hidden from the far-zoom lay
 
 Two shapes depending on the station's construct:
 
-- **Simple** — station has only a dot / endpoint disc or a single straight pill (no connector, no bent pill). Label sits to the east of the geometry with a small metric padding, exactly like a far-zoom label. No leader line.
-- **Complex** — station has any connector, any pill with more than 2 vertices (bent), or more than one pill. Pick the "main pill" (currently longest by segment sum — a proxy for the `f_weighted`-ranked main pill; refine if this proxy misplaces labels). Place the label north-east of the main pill's easternmost point (default 8 m east + 5 m north), and emit a thin leader LineString from that point to the label anchor. The leader makes the label's association with the construct unambiguous — the classic "name tag" look.
+- **Simple** — station has only a dot / endpoint disc or a single straight pill (no connector, no bent pill). Label sits 5 m east of the easternmost coord across all the station's band features.
+- **Complex** — station has any connector, any pill with more than 2 vertices (bent), or more than one pill. Pick the "main pill" (currently longest by segment sum — a proxy for the `f_weighted`-ranked main pill; refine if this proxy misplaces labels). Label sits 5 m east of the main pill's easternmost coord.
+
+Both cases place the label to the east; the difference is only WHICH geometry the eastward-padding is measured from. No leader / connector line — a visual "name tag" connector was tried and reverted; if a future iteration reintroduces it, define the rule in this section first.
 
 ### Anchor computation (step 07)
 
-For each station (grouped by `parent_station`, or `stop_id` fallback), gather the band-C pill / connector / endpoint features (band C has the widest zoom range, so a single anchor stays stable across z14–z16). Classify as complex if any connector, any bent pill, or `pill_count > 1`.
+For each station (grouped by `parent_station`, or `stop_id` fallback), the anchor is computed **per pill design band** (A = z14, B = z15, C = z16+) because bands can produce different pill layouts — a station that's one long pill in band C can split into two discs + a connector in band A. Classification (simple vs complex) is also re-evaluated per band.
 
-- **Simple**: `anchor = (east_x + 3 m eastward, east_y)` where `east` is the easternmost coord across all the station's band-C features (plus the dot's coord as fallback for single-line stations with no pill).
-- **Complex**: pick `main_pill` = longest pill by geodesic segment sum. Take its easternmost coord `east_pt`. `anchor = (east_pt.x + 8 m eastward, east_pt.y + 5 m northward)`. Emit a `LineString` from `east_pt` to `anchor` tagged `feature_type: "stop_label_leader"`.
+Per band, from that band's pill / connector / endpoint features:
 
-Both cases emit a Point feature with `feature_type: "stop_label_anchor"`, carrying `stop_name`, `display_name`, `stop_tier`, `label_priority`, `mode`. All features bundled into the existing `transit_stop_pills` PMTile source — no new bundle.
+- **Simple with no pill** (endpoint disc or dot only): `anchor = (east_x + 5 m eastward, east_y)` where `east` is the easternmost coord across the band's features. Falls back to the far-zoom dot's coord only if the band emitted no pill-zoom geometry at all.
+- **Any pill or endpoint disc present**: pills and endpoints are ranked together by sum of `f_weighted` across their distinct logical-line keys (`(ref, mode, agency_id)`) — same rank rule `_largest_pill_or_disc_position` in `stops/far_zoom.py` uses. Both pills and endpoints carry a `pill_osm_ids` property stamped by `make_pill_features` (comma-separated string); the anchor code looks up `f_weighted` per osm_id via `line_lookup`.
+  - **If the top candidate's score is more than 1.25× the runner-up's** (or there's only one candidate), the winner is used. If the winner is a pill, the vertical/horizontal orientation rule applies; if the winner is an endpoint, the endpoint's coord is the base.
+  - **Otherwise** (no clear winner): fall back to the easternmost coord across all pills + endpoints (connectors deliberately excluded so a curved connector's east swing can't win).
+
+For the pill case, which point on the pill depends on its orientation:
+  - **Vertical pill** (first→last endpoint's `dy > dx` in metric coords, i.e. steeper than 45°): base = polyline midpoint of the centerline (so the label sits beside the pill's middle rather than at one end).
+  - **Horizontal pill** (else): base = pill's easternmost coord (so the label sits past the east end).
+  Then `anchor = (base.x + 5 m eastward, base.y)`.
+
+**Dedup across bands.** After per-band computation, bands whose anchor is identical to 6 decimal places are grouped, and the group is emitted as a single feature covering the merged tippecanoe zoom range. Most stations produce the same anchor across all three bands and emit a single feature (minzoom 14, maxzoom 17); the minority whose topology changes with the band emit 2–3 features with per-band `tippecanoe.minzoom/maxzoom` matching the band's own zoom range (A: 14, B: 15, C: 16–17). Contiguous bands with the same anchor merge into one range (`{A, B}` → 14–15); non-contiguous bands emit separately.
+
+All features bundled into the existing `transit_stop_pills` PMTile source with `feature_type: "stop_label_anchor"` (Point), carrying `stop_name`, `display_name`, `stop_tier`, `label_priority`, `mode`.
 
 ### Rendering (style)
 
-- **Symbol layer(s)** filtered on `feature_type == "stop_label_anchor"`, one per padding tier (`normal_stop` split), `text-anchor: "left"`, `text-field: coalesce(display_name, stop_name)`, same font-weight / size / sort-key / collision expressions as far-zoom, `text-justify: "left"` and the `-0.11` em Saira vertical correction.
-- **Line layer** filtered on `feature_type == "stop_label_leader"`, thin dark hairline (~0.8 px, dark grey), drawn BELOW the symbol layer so the text halo covers the leader's endpoint at the anchor.
+- **Symbol layer(s)** filtered on `feature_type == "stop_label_anchor"`, one per padding tier (`normal_stop` split), `text-anchor: "left"`, `text-field: coalesce(display_name, stop_name)`, same font-weight / size / sort-key / collision expressions as far-zoom, `text-justify: "left"`, `text-offset: [0.5, -0.11]` em (0.5 for clearance from the anchor point, -0.11 for the Saira cap-height correction).
 
-All three layers use `minzoom: 14`, `maxzoom: 17` (close-zoom takes over at z17). Anchor sits beside/outside the pill construct at every zoom in the band, so labels never overlap the drawn geometry.
+Both symbol layers use `minzoom: 14`, `maxzoom: 17` (close-zoom takes over at z17), declared AFTER every pill / disc / connector / indicator paint layer so labels render on top of the drawn geometry.
 
 ## Requirements — close-zoom (z17+)
 

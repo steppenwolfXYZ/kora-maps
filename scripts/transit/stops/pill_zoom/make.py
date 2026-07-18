@@ -37,7 +37,8 @@ from stops.pill_zoom.polyline import (
 )
 
 
-def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
+def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
+                        dep_hr=0.0):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
 
@@ -67,6 +68,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         "stop_name":      dom_stop.get("stop_name", ""),
         "parent_station": dom_stop.get("parent_station", ""),
         "lines_json":     lines_json,
+        "dep_hr":         round(float(dep_hr or 0.0), 3),
     }
 
     def make_feat(coords, feature_type):
@@ -95,7 +97,15 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
         # tolerances (band A's 5 m) silently drop 3-5 m rail-terminal pills
         # like Basel Dreispitz at z14.
         pos = positions[0]
-        feats = [make_endpoint(pos)]
+        ep = make_endpoint(pos)
+        # See _pill_osm_ids_str below — stamped on endpoints too so
+        # bands with no pill (Eigerplatz band A, Zytglogge band B) can still
+        # rank discs by f_weighted for the label anchor.
+        ep["properties"]["pill_osm_ids"] = ",".join(sorted({
+            str(s.get("osm_id", "")) for s in cluster_stops
+            if str(s.get("osm_id", ""))
+        }))
+        feats = [ep]
         if line_lookup is not None:
             feats.extend(build_indicator_features(
                 cluster_stops, pos[0], pos[1], line_lookup,
@@ -136,10 +146,25 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
             out.extend(pos_to_platforms.get((pos[0], pos[1]), []))
         return out
 
+    def _pill_osm_ids_str(grp_stops):
+        # Comma-separated distinct osm_ids of the stops on this pill. Consumed
+        # by the label-anchor code in pipeline_render.py to rank pills by
+        # f_weighted (existing main-pill logic).
+        seen, out = set(), []
+        for s in grp_stops:
+            oid = str(s.get("osm_id", ""))
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
+            out.append(oid)
+        return ",".join(out)
+
     if not split_indices:
         simp = _simplify_pill_lonlat(path, cluster_cos_lat, pill_diameter_m=pill_diameter_m)
         (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
-        feats = [make_feat(simp, "pill")]
+        pill_feat = make_feat(simp, "pill")
+        pill_feat["properties"]["pill_osm_ids"] = _pill_osm_ids_str(cluster_stops)
+        feats = [pill_feat]
         if line_lookup is not None:
             feats.extend(build_indicator_features(
                 cluster_stops, mid_lon, mid_lat, line_lookup,
@@ -166,7 +191,10 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
     for grp in groups:
         if len(grp) >= 2:
             simp = _simplify_pill_lonlat(grp, cluster_cos_lat, pill_diameter_m=pill_diameter_m)
-            feats.append(make_feat(simp, "pill"))
+            pill_feat = make_feat(simp, "pill")
+            pill_feat["properties"]["pill_osm_ids"] = _pill_osm_ids_str(
+                _stops_at_positions(grp))
+            feats.append(pill_feat)
             if line_lookup is not None:
                 (mid_lon, mid_lat), tan_deg = _polyline_midpoint_and_tangent_deg(simp)
                 feats.extend(build_indicator_features(
@@ -180,7 +208,15 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None):
                 mid_attach_tangents[pos] = tan
         else:
             pos = grp[0]
-            feats.append(make_endpoint(pos))
+            ep = make_endpoint(pos)
+            # osm_ids on the endpoint too so the label-anchor code can rank
+            # discs by f_weighted (needed for bands with no pill).
+            ep["properties"]["pill_osm_ids"] = ",".join(sorted({
+                str(s.get("osm_id", ""))
+                for s in pos_to_platforms.get((pos[0], pos[1]), [])
+                if str(s.get("osm_id", ""))
+            }))
+            feats.append(ep)
             if line_lookup is not None:
                 feats.extend(build_indicator_features(
                     pos_to_platforms.get((pos[0], pos[1]), []),

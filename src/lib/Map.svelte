@@ -39,8 +39,7 @@
 		'transit-stop-label-transit_stops_bus-far-normal',
 		'transit-stop-label-transit_stops_bus-far-other',
 		'transit-stop-label-pill-normal',
-		'transit-stop-label-pill-other',
-		'transit-stop-label-leader'
+		'transit-stop-label-pill-other'
 	];
 
 	const TRANSIT_STOP_PILL_LAYERS = [
@@ -202,7 +201,7 @@
 						}
 					} catch { /* ignore malformed */ }
 				}
-				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
+				const html = `<div style="font-family:'Saira',sans-serif;font-size:12px;line-height:1.5">
 					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)}]<br>
 					id: ${fmt(p.stop_id)}<br>
 					platform length: ${lengthVal}
@@ -221,72 +220,79 @@
 			});
 			if (stopFeatures.length) {
 				const p = stopFeatures[0].properties as Record<string, unknown>;
-				const kind = p.feature_type === 'pill' ? 'pill'
-				           : p.feature_type === 'connector' ? 'connector'
-				           : p.feature_type === 'endpoint' ? 'endpoint'
-				           : 'stop';
-				const countLine = p.stop_count != null ? `&ensp;count: ${fmt(p.stop_count)}` : '';
 
-				// Floor zoom used by both the per-zoom lines lookup below
-				// and the per-zoom score line further down.
+				// Per-zoom lookup: far-zoom absorbers carry lines_json_zN
+				// and dep_hr_zN reflecting the lines / departures folded in
+				// at that zoom (see stops-far-zoom-dot-redesign.md and
+				// popups.md). Pills (z ≥ 14) use the base fields.
 				const zoomFloor = Math.max(7, Math.min(12, Math.floor(map.getZoom())));
-
-				// Per-zoom lines for far-zoom dots: the absorber's lines_json
-				// at zoom k reflects only lines absorbed AT zoom k (not the
-				// union across every zoom). Falls back to base `lines_json`
-				// for pill-zoom features (z ≥ 13) and stops that never
-				// absorbed anything.
 				const linesRaw = (p as Record<string, unknown>)[`lines_json_z${zoomFloor}`]
 					?? p.lines_json;
+				const depHrAtZoom = (p as Record<string, unknown>)[`dep_hr_z${zoomFloor}`];
+				const depHr = typeof depHrAtZoom === 'number'
+					? depHrAtZoom
+					: (typeof p.dep_hr === 'number' ? p.dep_hr as number : null);
+
+				let depLine = '';
+				if (typeof depHr === 'number' && depHr > 0) {
+					const disp = depHr < 10 ? depHr.toFixed(1) : String(Math.round(depHr));
+					depLine = `<div style="margin-top:2px">Departures: <b>${disp}</b>/h</div>`;
+				}
+
 				let linesHtml = '';
 				if (linesRaw) {
 					try {
-						const lines: { ref: string; color: string; mode: string; name?: string }[] =
-							JSON.parse(String(linesRaw));
+						const lines: {
+							ref: string; color: string; mode: string;
+							name?: string; tooltip?: string;
+						}[] = JSON.parse(String(linesRaw));
 						if (lines.length) {
-							const badges = lines.map(l => {
+							// Flat alternating children: badge, terminus, badge, terminus…
+							// Collapsed mode hides termini and lets badges flow with
+							// flex-wrap; expanded mode switches to a 2-col grid whose
+							// first column is `max-content` — every badge stretches to
+							// the widest label width so terminus text aligns.
+							const cells = lines.map(l => {
 								const label = l.ref || l.mode || '?';
 								const lum = parseInt(l.color.slice(1, 3), 16) * 0.299
 									+ parseInt(l.color.slice(3, 5), 16) * 0.587
 									+ parseInt(l.color.slice(5, 7), 16) * 0.114;
 								const fg = lum > 140 ? '#000' : '#fff';
-								const title = l.name ? ` title="${l.name.replace(/"/g, '&quot;')}"` : '';
-								return `<span${title} style="display:inline-block;background:${l.color};color:${fg};border-radius:3px;padding:1px 5px;margin:1px 2px 1px 0;font-size:10px;font-weight:600;letter-spacing:0.03em;cursor:default">${label}</span>`;
+								const tip = l.tooltip || l.name || '';
+								const titleAttr = tip
+									? ` title="${tip.replace(/"/g, '&quot;')}"`
+									: '';
+								const badge = `<span class="popup-badge"${titleAttr} style="background:${l.color};color:${fg}">${label}</span>`;
+								const terminus = `<span class="popup-line-terminus">${tip.replace(/</g, '&lt;')}</span>`;
+								return badge + terminus;
 							}).join('');
-							linesHtml = `<div style="margin-top:4px">${badges}</div>`;
+
+							linesHtml = `<details class="popup-lines">
+								<summary class="popup-lines-summary">
+									<span class="popup-chevron">▸</span>
+									<span class="popup-lines-list">${cells}</span>
+								</summary>
+							</details>`;
 						}
 					} catch { /* ignore malformed */ }
 				}
 
-				// Stop score line. `score_zN` is a debug-only per-zoom score
-				// written by step 07's dedup pass — the absorber's tier and
-				// diameter stay fixed, so the per-zoom score just reveals
-				// how much a hub absorbed at that zoom. Show base + per-zoom
-				// if they differ; otherwise just the base.
-				const scoreAtZoom = (p as Record<string, unknown>)[`score_z${zoomFloor}`];
-				const baseScore = p.stop_score;
-				let scoreLine = '';
-				if (typeof scoreAtZoom === 'number') {
-					if (typeof baseScore === 'number'
-						&& Math.abs(scoreAtZoom - baseScore) > 0.01) {
-						scoreLine = `<br>score: ${scoreAtZoom.toFixed(1)} `
-							+ `(base ${baseScore.toFixed(1)})`;
-					} else {
-						scoreLine = `<br>score: ${scoreAtZoom.toFixed(1)}`;
-					}
-				} else if (typeof baseScore === 'number') {
-					scoreLine = `<br>score: ${baseScore.toFixed(1)}`;
-				}
-
-				const tierLine = p.stop_tier
-					? `<br>tier: ${fmt(p.stop_tier)}`
-					: '';
-
-				const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
-					<b>${fmt(p.stop_name) || '(no name)'}</b> &ensp;[${fmt(p.mode)} ${kind}]${countLine}<br>
-					id: ${fmt(p.stop_id)}<br>
-					parent: ${fmt(p.parent_station)}${tierLine}${scoreLine}
+				const html = `<style>
+					.popup-lines { margin-top: 6px; }
+					.popup-lines-summary { list-style: none; cursor: pointer; display: flex; align-items: flex-start; gap: 4px; }
+					.popup-lines-summary::-webkit-details-marker { display: none; }
+					.popup-chevron { display: inline-block; color: #888; font-size: 9px; padding-top: 4px; transition: transform 0.15s ease; flex: 0 0 auto; }
+					.popup-lines[open] .popup-chevron { transform: rotate(90deg); }
+					.popup-badge { display: inline-block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; cursor: default; text-align: center; }
+					.popup-lines-list { display: flex; flex-wrap: wrap; gap: 4px 3px; }
+					.popup-line-terminus { display: none; }
+					.popup-lines[open] .popup-lines-list { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; }
+					.popup-lines[open] .popup-badge { display: block; }
+					.popup-lines[open] .popup-line-terminus { display: inline; color: #444; font-size: 12px; }
+				</style><div style="font-family:'Saira',sans-serif;font-size:13px;line-height:1.4;color:#222">
+					<div style="font-weight:700;font-size:15px">${fmt(p.stop_name) || '(no name)'}</div>
 					${linesHtml}
+					${depLine}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '320px' })
 					.setLngLat(e.lngLat)
@@ -299,7 +305,7 @@
 			if (!lineFeatures.length) return;
 
 			const p = lineFeatures[0].properties as Record<string, unknown>;
-			const html = `<div style="font-family:monospace;font-size:11px;line-height:1.5">
+			const html = `<div style="font-family:'Saira',sans-serif;font-size:12px;line-height:1.5">
 				<b>${fmt(p.mode)}</b> &nbsp;ref: ${fmt(p.ref)}<br>
 				${p.name ? String(p.name).substring(0, 60) : ''}<br>
 				freq: ${typeof p.freq_score === 'number' ? p.freq_score.toFixed(2) : fmt(p.freq_score)}&ensp;

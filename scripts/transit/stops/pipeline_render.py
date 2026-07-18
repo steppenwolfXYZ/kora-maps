@@ -39,8 +39,8 @@ from stops.pill_zoom.geom import (
     PROTECTION_RADIUS_NONRAIL_M, PROTECTION_RADIUS_RAIL_M,
 )
 from stops.pill_zoom.lines import (
-    build_indicator_features, cluster_lines, color_luminance,
-    count_unique_lines, dominant_line, pill_minzoom,
+    build_indicator_features, cluster_departures_per_hour, cluster_lines,
+    color_luminance, count_unique_lines, dominant_line, pill_minzoom,
 )
 from stops.pill_zoom.make import make_pill_features
 from stops.pill_zoom.nn_path import nearest_neighbor_path
@@ -94,7 +94,9 @@ def _bake_nonrail_cluster(payload):
         return (dot_feat, None, ind)
 
     _set_pill_design_band(bands["C"])
-    c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+    cluster_dep_hr = centroid_props.get("dep_hr", 0.0)
+    c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
+                                  dep_hr=cluster_dep_hr)
     if not c_feats:
         # Pill collapsed — fall through to centroid dot + indicators.
         dot_feat = {
@@ -112,7 +114,8 @@ def _bake_nonrail_cluster(payload):
     all_band_feats = list(c_feats)
     for band_id in ("A", "B"):
         _set_pill_design_band(bands[band_id])
-        bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+        bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
+                                     dep_hr=cluster_dep_hr)
         _tag_band_features(bfeats, band_id, bands[band_id])
         all_band_feats.extend(bfeats)
     dot_lon, dot_lat = far_zoom_dot_position(
@@ -317,7 +320,6 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 })
 
         else:
-            line_lines_json = json.dumps([{"ref": line.get("gtfs_ref") or line.get("ref", ""), "color": color, "mode": mode, "name": line.get("name", "")}])
             for idx, entry in enumerate(stop_coords):
                 if idx == 0 and skip_first_here:
                     continue
@@ -327,6 +329,12 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 slon, slat = snap_to_line(lon, lat, flat)
+                mini_cluster = [{
+                    "osm_id":         str(osm_id),
+                    "mode":           mode,
+                    "stop_id":        sid,
+                    "parent_station": meta.get("parent", ""),
+                }]
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},
@@ -338,7 +346,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
                         "parent_station": meta.get("parent", ""),
-                        "lines_json":     line_lines_json,
+                        "lines_json":     json.dumps(cluster_lines(mini_cluster, line_lookup)),
+                        "dep_hr":         round(cluster_departures_per_hour(mini_cluster, line_lookup), 3),
                     },
                 })
                 indicator_features.extend(build_indicator_features(
@@ -409,26 +418,21 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
 
         # Aggregate all lines visiting this pier into one lines_json blob —
         # the popup at the pier should list every ferry line, not just the
-        # one whose feature spawned the dot.
-        lines_seen = set()
-        lines_json_list = []
-        for c in cands:
-            line = c["line"] or {}
-            ref = line.get("gtfs_ref") or line.get("ref", "")
-            name = line.get("name", "")
-            key = (ref, name)
-            if key in lines_seen:
-                continue
-            lines_seen.add(key)
-            lines_json_list.append({
-                "ref":   ref,
-                "color": c["color"],
-                "mode":  "ferry",
-                "name":  name,
-            })
-        lines_json_str = json.dumps(lines_json_list)
-
+        # one whose feature spawned the dot. Reuse cluster_lines /
+        # cluster_departures_per_hour by constructing a synthetic cluster
+        # from the candidates so the (ref, mode) dedup + A↔B tooltip run
+        # the same as for rail / non-rail pills.
         rep = cands[0]
+        synthetic_cluster = [
+            {
+                "osm_id":         c["osm_id"],
+                "mode":           "ferry",
+                "stop_id":        c["stop_id"],
+                "parent_station": c["parent_station"],
+            }
+            for c in cands
+        ]
+        lines_json_str = json.dumps(cluster_lines(synthetic_cluster, line_lookup))
         base_props = {
             "color":          rep["color"],
             "mode":           "ferry",
@@ -437,6 +441,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      rep["stop_name"],
             "parent_station": rep["parent_station"],
             "lines_json":     lines_json_str,
+            "dep_hr":         round(cluster_departures_per_hour(synthetic_cluster, line_lookup), 3),
         }
         indicator_stubs = [{"osm_id": str(c["osm_id"]), "mode": "ferry"} for c in cands]
 
@@ -619,6 +624,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
+            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup), 3),
         }
 
         if mz is None:
@@ -640,13 +646,16 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             # PILL_GAP_ANGLED_M / CURVE_MIN_RADIUS_M values, tagged with
             # per-feature `design_band` + tippecanoe zoom range.
             _set_pill_design_band(PILL_DESIGN_BANDS["C"])
-            c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+            cluster_dep_hr = centroid_props["dep_hr"]
+            c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
+                                          dep_hr=cluster_dep_hr)
             if c_feats:
                 _tag_band_features(c_feats, "C", PILL_DESIGN_BANDS["C"])
                 all_band_feats = list(c_feats)
                 for _band_id in ("A", "B"):
                     _set_pill_design_band(PILL_DESIGN_BANDS[_band_id])
-                    _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup)
+                    _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
+                                                  dep_hr=cluster_dep_hr)
                     _tag_band_features(_bfeats, _band_id, PILL_DESIGN_BANDS[_band_id])
                     all_band_feats.extend(_bfeats)
                 # Far-zoom dot from band C. Rail-like family skips the
@@ -760,6 +769,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "stop_name":      dom_stop.get("stop_name", ""),
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
+            "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup), 3),
         }
         payloads.append((cluster, mz, cluster_rail_like, mode_minzoom,
                          centroid_lon, centroid_lat, centroid_props,
@@ -998,43 +1008,39 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # ==========================================================================
     # Two cases:
     #   Simple  — station has only a dot / endpoint or a single straight pill
-    #             (no connector, no bent pill). Label sits 3 m east of the
-    #             feature's easternmost point, same as the far-zoom rule. No
-    #             leader emitted.
+    #             (no connector, no bent pill). Label sits 5 m east of the
+    #             pill-zoom endpoint / pill's easternmost coord — NOT the
+    #             far-zoom dot's coord, which can differ from the pill-zoom
+    #             disc position (e.g. Bern, Henkerbrünnli: dot is 15 m south
+    #             of the endpoint disc, so anchoring off the dot puts the
+    #             label way off).
     #   Complex — has a connector, a bent pill, or multiple pills. Pick the
     #             "main pill" (longest by segment sum — proxy for f_weighted-
-    #             ranked; refine later if the proxy fails). Place the label
-    #             8 m east + 5 m north of the main pill's easternmost point,
-    #             and emit a thin leader LineString from that pill point to
-    #             the label anchor.
-    # Anchor computation uses band C features only (widest zoom range) so the
-    # world-coord position is stable across zoom bands.
-    SIMPLE_PADDING_X_M = 3.0
-    COMPLEX_PADDING_X_M = 8.0
-    COMPLEX_PADDING_Y_M = 5.0
+    #             ranked; refine later if the proxy fails). Label sits 5 m
+    #             east of the main pill's easternmost coord.
+    LABEL_PADDING_X_M = 5.0
     RELEVANT_PILL_TYPES = {"pill", "connector", "endpoint"}
 
     def _bucket_key(props):
         return props.get("parent_station") or (props.get("stop_id") or "").split(":")[0]
 
-    def _is_band_c(f):
-        band = (f.get("properties") or {}).get("design_band")
-        # design_band is only stamped on rail features (via _tag_band_features);
-        # nonrail features don't carry a band tag but each cluster emits only
-        # once, so treat missing band as band C-equivalent.
-        return band is None or band == "C"
-
-    station_pill_features_by_key = defaultdict(list)
+    # Group pill features by (station_key, design_band). Different bands
+    # (A: z14, B: z15, C: z16+) can produce different pill layouts and even
+    # different simple/complex classifications, so labels are computed per
+    # band and then dedup-emitted for tile efficiency.
+    BAND_ZOOM_RANGES = {"A": (14, 14), "B": (15, 15), "C": (16, 17)}
+    station_pill_features_by_band = defaultdict(lambda: defaultdict(list))
     for f in pill_features:
         p = f.get("properties", {})
         if p.get("feature_type") not in RELEVANT_PILL_TYPES:
             continue
-        if not _is_band_c(f):
-            continue
         key = _bucket_key(p)
         if not key:
             continue
-        station_pill_features_by_key[key].append(f)
+        band = p.get("design_band") or "C"
+        if band not in BAND_ZOOM_RANGES:
+            continue
+        station_pill_features_by_band[key][band].append(f)
 
     # Best (lowest label_priority) dot per parent_station carries the label
     # metadata — a Bern train + tram + bus combined station labels once, at the
@@ -1050,12 +1056,36 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             best_dot_by_key[key] = (f, prio)
 
     def _segment_length_m(coords):
-        if len(coords) < 2:
+        # Robust against Point-geometry coords (flat [lon, lat]) — a Point
+        # has length 0. Only LineString-shaped nested coord lists compute
+        # non-zero length.
+        if not coords or len(coords) < 2 or not isinstance(coords[0], (list, tuple)):
             return 0.0
         return sum(
             haversine_km(coords[i][0], coords[i][1],
                          coords[i + 1][0], coords[i + 1][1]) * 1000.0
             for i in range(len(coords) - 1))
+
+    def _pill_osm_ids(pill):
+        raw = (pill.get("properties") or {}).get("pill_osm_ids") or ""
+        return [x for x in raw.split(",") if x]
+
+    def _pill_rank_fweighted(pill):
+        """Sum of f_weighted across the pill's distinct logical-line keys
+        (ref, mode, agency_id) — same ranking `_largest_pill_or_disc_position`
+        in stops/far_zoom.py uses. Direction variants of one route share a
+        key and contribute only their max f_weighted, not the sum."""
+        fw_by_key = {}
+        for oid in _pill_osm_ids(pill):
+            info = line_lookup.get(oid)
+            if not info:
+                continue
+            ref = info.get("gtfs_ref") or info.get("ref") or ""
+            key = (ref, info.get("mode") or "", info.get("agency_id") or "")
+            fw = info.get("f_weighted", 0.0) or 0.0
+            if key not in fw_by_key or fw > fw_by_key[key]:
+                fw_by_key[key] = fw
+        return sum(fw_by_key.values())
 
     def _easternmost_of(coords_list):
         best = None
@@ -1063,6 +1093,46 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             if best is None or pt[0] > best[0]:
                 best = pt
         return best
+
+    def _pill_is_vertical(coords):
+        """True if the pill's first→last endpoint direction is more
+        vertical than horizontal (in metric coords, so lon-stretching
+        by latitude is accounted for)."""
+        if len(coords) < 2:
+            return False
+        dx_lon = abs(coords[-1][0] - coords[0][0])
+        dy_lat = abs(coords[-1][1] - coords[0][1])
+        mean_lat = (coords[0][1] + coords[-1][1]) / 2.0
+        dx_m = dx_lon * cos(radians(mean_lat))
+        return dy_lat > dx_m
+
+    def _polyline_midpoint(coords):
+        """Point at half of the polyline's total geodesic length."""
+        if len(coords) < 2:
+            return coords[0] if coords else None
+        total = _segment_length_m(coords)
+        if total <= 0:
+            return coords[0]
+        target = total / 2.0
+        cum = 0.0
+        for i in range(len(coords) - 1):
+            a, b = coords[i], coords[i + 1]
+            seg = haversine_km(a[0], a[1], b[0], b[1]) * 1000.0
+            if cum + seg >= target:
+                t = (target - cum) / seg if seg > 0 else 0.0
+                return (a[0] + t * (b[0] - a[0]),
+                        a[1] + t * (b[1] - a[1]))
+            cum += seg
+        return coords[-1]
+
+    def _pill_anchor_base(coords):
+        """Return the pill's anchor base point per the pill-zoom rule:
+        vertical pills → midpoint of the centerline (so the label sits
+        beside the pill's middle); horizontal pills → easternmost coord
+        (so the label sits past the east end)."""
+        if _pill_is_vertical(coords):
+            return _polyline_midpoint(coords)
+        return _easternmost_of(coords)
 
     def _all_coords(feats):
         pts = []
@@ -1083,46 +1153,105 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     def _lat_offset(meters):
         return meters / 111320.0
 
+    # If the top candidate's f_weighted is > SCORE_DOMINANCE_THRESHOLD × the
+    # runner-up's, anchor off that winner (pill or disc, matches the
+    # existing main-pill logic in stops/far_zoom.py). Otherwise fall back to
+    # the easternmost point across pills + endpoints — no clear winner,
+    # so map-right is the deterministic tie-break.
+    SCORE_DOMINANCE_THRESHOLD = 1.25
+
     def _pillzoom_label_geometry(feats, dot_feat):
-        """Return (anchor_lonlat, leader_start_lonlat_or_None). Feats are
-        band-C pill/connector/endpoint features for one station; dot_feat is
-        included as a fallback for single-line stations with no pills."""
+        """Return anchor lon/lat for a station's pill-zoom label. Feats are
+        one band's pill/connector/endpoint features; dot_feat is the
+        fallback when no pill-zoom geometry exists at all."""
         pills = [f for f in feats
                  if (f.get("properties") or {}).get("feature_type") == "pill"]
-        connectors = [f for f in feats
-                      if (f.get("properties") or {}).get("feature_type") == "connector"]
-        has_bent_pill = any(
-            len((p.get("geometry") or {}).get("coordinates") or []) > 2
-            for p in pills)
-        is_complex = bool(connectors) or has_bent_pill or len(pills) > 1
+        endpoints = [f for f in feats
+                     if (f.get("properties") or {}).get("feature_type") == "endpoint"]
+        candidates = pills + endpoints
 
-        if is_complex and pills:
-            main = max(pills, key=lambda p: _segment_length_m(
-                (p.get("geometry") or {}).get("coordinates") or []))
-            east_pt = _easternmost_of(main["geometry"]["coordinates"])
-            if east_pt is None:
-                return None, None
-            anchor = (east_pt[0] + _lon_offset(east_pt[1], COMPLEX_PADDING_X_M),
-                      east_pt[1] + _lat_offset(COMPLEX_PADDING_Y_M))
-            return anchor, tuple(east_pt)
+        def _anchor_from_base(base):
+            return (base[0] + _lon_offset(base[1], LABEL_PADDING_X_M),
+                    base[1])
 
-        pts = _all_coords(feats + [dot_feat])
+        def _base_of(feat):
+            geom = feat.get("geometry") or {}
+            coords = geom.get("coordinates") or []
+            if geom.get("type") == "LineString":
+                return _pill_anchor_base(coords)
+            return coords if len(coords) >= 2 else None
+
+        if candidates:
+            # Rank pills AND endpoints together by f_weighted (mode-neutral;
+            # see `_pill_rank_fweighted`). Tie-break on longest polyline so
+            # zero-weight bands still pick deterministically.
+            scored = sorted(
+                ((f, _pill_rank_fweighted(f)) for f in candidates),
+                key=lambda t: (t[1], _segment_length_m(
+                    (t[0].get("geometry") or {}).get("coordinates") or [])),
+                reverse=True)
+            top_feat, top_score = scored[0]
+            second_score = scored[1][1] if len(scored) > 1 else 0.0
+            dominant = (
+                second_score <= 0
+                or top_score > second_score * SCORE_DOMINANCE_THRESHOLD)
+            if dominant:
+                base = _base_of(top_feat)
+                if base:
+                    return _anchor_from_base(base)
+            # Below threshold → fallback: easternmost coord across pills +
+            # endpoints (skip connectors so a curved connector's east swing
+            # can't win over the actual discs / pills).
+            pts = _all_coords(candidates)
+            east_pt = _easternmost_of(pts)
+            if east_pt is not None:
+                return _anchor_from_base(east_pt)
+
+        # No pill/endpoint at all → dot fallback.
+        pts = _all_coords([dot_feat])
         east_pt = _easternmost_of(pts)
-        if east_pt is None:
-            return None, None
-        anchor = (east_pt[0] + _lon_offset(east_pt[1], SIMPLE_PADDING_X_M),
-                  east_pt[1])
-        return anchor, None
+        return _anchor_from_base(east_pt) if east_pt else None
+
+    def _round_pt(pt):
+        return (round(pt[0], 6), round(pt[1], 6)) if pt else None
+
+    def _bands_to_ranges(bands):
+        """Merge contiguous bands into (minzoom, maxzoom) tuples so a common
+        anchor across bands becomes ONE tippecanoe feature."""
+        ordered = sorted(bands, key=lambda b: BAND_ZOOM_RANGES[b][0])
+        ranges = []
+        for b in ordered:
+            b_min, b_max = BAND_ZOOM_RANGES[b]
+            if ranges and b_min == ranges[-1][1] + 1:
+                ranges[-1] = (ranges[-1][0], b_max)
+            else:
+                ranges.append((b_min, b_max))
+        return ranges
 
     n_anchors = 0
-    n_leaders = 0
     n_missing = 0
+    n_per_band_stations = 0  # stations that needed >1 emission (per-band variance)
     for key, (dot_feat, _) in best_dot_by_key.items():
-        feats = station_pill_features_by_key.get(key, [])
-        anchor, leader_start = _pillzoom_label_geometry(feats, dot_feat)
-        if anchor is None:
+        band_feats = station_pill_features_by_band.get(key, {})
+        # Compute per-band anchor. Missing band → skip (no anchor for that zoom).
+        per_band = {}
+        for band_id in BAND_ZOOM_RANGES:
+            feats_b = band_feats.get(band_id, [])
+            anchor = _pillzoom_label_geometry(feats_b, dot_feat)
+            if anchor is not None:
+                per_band[band_id] = anchor
+        if not per_band:
             n_missing += 1
             continue
+
+        # Group bands by rounded anchor so identical positions emit ONE
+        # feature covering the union of their zoom ranges.
+        groups = defaultdict(list)
+        for band_id, a in per_band.items():
+            groups[_round_pt(a)].append(band_id)
+        if len(groups) > 1:
+            n_per_band_stations += 1
+
         p = dot_feat["properties"]
         label_props = {
             "feature_type":   "stop_label_anchor",
@@ -1134,29 +1263,21 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "parent_station": key,
             "mode":           p.get("mode", ""),
         }
-        pill_features.append({
-            "type": "Feature",
-            "tippecanoe": {"minzoom": 14, "maxzoom": 17},
-            "geometry": {"type": "Point", "coordinates": [anchor[0], anchor[1]]},
-            "properties": label_props,
-        })
-        n_anchors += 1
-        if leader_start is not None:
-            pill_features.append({
-                "type": "Feature",
-                "tippecanoe": {"minzoom": 14, "maxzoom": 17},
-                "geometry": {"type": "LineString",
-                             "coordinates": [[leader_start[0], leader_start[1]],
-                                             [anchor[0], anchor[1]]]},
-                "properties": {
-                    "feature_type":   "stop_label_leader",
-                    "parent_station": key,
-                    "label_priority": p.get("label_priority", 11000.0),
-                },
-            })
-            n_leaders += 1
+
+        for group_bands in groups.values():
+            anchor = per_band[group_bands[0]]
+            for zmin, zmax in _bands_to_ranges(group_bands):
+                pill_features.append({
+                    "type": "Feature",
+                    "tippecanoe": {"minzoom": zmin, "maxzoom": zmax},
+                    "geometry": {"type": "Point",
+                                 "coordinates": [anchor[0], anchor[1]]},
+                    "properties": label_props,
+                })
+                n_anchors += 1
     print(f"  stop_label_anchor: emitted {n_anchors:,} anchors "
-          f"({n_leaders:,} with leader; {n_missing:,} skipped)")
+          f"({n_per_band_stations:,} stations needed multiple emissions "
+          f"across bands; {n_missing:,} skipped)")
 
     OUT_PILLS.write_text(json.dumps({"type": "FeatureCollection", "features": pill_features}))
     print(f"  [{time.perf_counter() - _t_phase:6.1f}s] salience diag + write dot/pill GeoJSON")

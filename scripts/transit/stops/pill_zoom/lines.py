@@ -68,24 +68,166 @@ def dominant_line(stops_in_cluster):
     return best_color, best_stop["mode"], max_wb, best_stop
 
 
+def _cluster_station_uics(cluster_stops):
+    """Set of parent-UIC / station identifiers this cluster represents.
+
+    Used by the tooltip builder to locate the current station inside each
+    variant's stop sequence. Includes both the GTFS parent_station and the
+    base (colon-stripped) stop_id, so lookups match regardless of whether
+    the variant's sequence carries a parent-station id or a platform-suffixed
+    stop_id.
+    """
+    uics: set = set()
+    for s in cluster_stops:
+        parent = s.get("parent_station", "")
+        if parent:
+            uics.add(parent)
+        sid = s.get("stop_id", "")
+        if sid:
+            uics.add(sid.split(":")[0])
+    return uics
+
+
+def _station_line_tooltip(variants, station_uics):
+    """Build the A ↔ B tooltip for one (ref, mode) group at a station.
+
+    See `.claude/concepts/popups.md` § Line tooltip. Groups variants by which
+    downstream direction they head from the station, applies subsumption
+    within each direction (drop variants whose terminus is intermediate on a
+    longer variant's tail), then joins the two sides with `↔`. Falls back to
+    the single side when only one direction has downstream (loop, aerial,
+    variant terminates at station).
+    """
+    downstream = []
+    for v in variants:
+        uics = v.get("parent_uics") or []
+        pos = -1
+        for i, u in enumerate(uics):
+            if u and u in station_uics:
+                pos = i
+                break
+        if pos < 0 or pos >= len(uics) - 1:
+            continue
+        forward_tail = uics[pos + 1:]
+        downstream.append({
+            "forward_tail":  forward_tail,
+            "terminus_uic":  forward_tail[-1],
+            "terminus_name": v.get("last_terminus_name") or "",
+        })
+
+    if not downstream:
+        return ""
+
+    n = len(downstream)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    tail_sets = [set(v["forward_tail"]) for v in downstream]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if tail_sets[i] & tail_sets[j]:
+                union(i, j)
+
+    groups: dict = defaultdict(list)
+    for i in range(n):
+        groups[find(i)].append(i)
+
+    sides: list = []
+    for group_indices in groups.values():
+        group = [downstream[i] for i in group_indices]
+        surviving = []
+        for i, v in enumerate(group):
+            subsumed = False
+            for j, w in enumerate(group):
+                if i == j:
+                    continue
+                if v["terminus_uic"] in set(w["forward_tail"][:-1]):
+                    subsumed = True
+                    break
+            if not subsumed:
+                surviving.append(v)
+        seen_names: set = set()
+        names: list = []
+        for v in surviving:
+            name = v["terminus_name"]
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            names.append(name)
+        if names:
+            sides.append(names)
+
+    if not sides:
+        return ""
+    if len(sides) == 1:
+        return " · ".join(sides[0])
+    return " ↔ ".join(" · ".join(names) for names in sides)
+
+
 def cluster_lines(cluster_stops, line_lookup):
     """
-    Return a sorted list of {ref, color, mode} dicts for all distinct lines
-    serving any stop in the cluster.  Sorted by mode rank then ref.
+    Return a sorted list of {ref, color, mode, name, tooltip} dicts for all
+    distinct lines serving any stop in the cluster, deduped by (ref, mode).
+    Both directions of one line merge into a single entry. Sorted by mode
+    rank then ref. Tooltip pre-formatted per `.claude/concepts/popups.md`.
     """
-    seen = {}
+    groups: dict = defaultdict(list)
+    representative: dict = {}
     for s in cluster_stops:
         oid = s.get("osm_id", "")
-        if oid and oid not in seen:
-            info = line_lookup.get(oid, {})
-            if info:
-                seen[oid] = {
-                    "ref":      info.get("gtfs_ref") or info.get("ref", ""),
-                    "color":    info.get("color", "#888888"),
-                    "mode":     info.get("mode", ""),
-                    "name":     info.get("name", ""),
-                }
-    return sorted(seen.values(), key=lambda x: (MODE_RANK.get(x["mode"], 99), x.get("gtfs_ref") or x["ref"]))
+        if not oid:
+            continue
+        info = line_lookup.get(oid)
+        if not info:
+            continue
+        ref  = info.get("gtfs_ref") or info.get("ref", "")
+        mode = info.get("mode", "")
+        key  = (ref, mode)
+        groups[key].append(info)
+        if key not in representative:
+            representative[key] = {
+                "ref":   ref,
+                "color": info.get("color", "#888888"),
+                "mode":  mode,
+                "name":  info.get("name", ""),
+            }
+
+    station_uics = _cluster_station_uics(cluster_stops)
+    entries = []
+    for key, variants in groups.items():
+        entry = dict(representative[key])
+        entry["tooltip"] = _station_line_tooltip(variants, station_uics)
+        entries.append(entry)
+    return sorted(entries, key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
+
+
+def cluster_departures_per_hour(cluster_stops, line_lookup):
+    """Sum `f_weighted` across every distinct osm_id in the cluster.
+
+    Each osm_id is one per-direction line feature — both directions of a
+    bidirectional line contribute independently, matching the "each direction
+    is its own departures" rule from `.claude/concepts/popups.md`.
+    """
+    total = 0.0
+    seen: set = set()
+    for s in cluster_stops:
+        oid = s.get("osm_id", "")
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        info = line_lookup.get(oid) or {}
+        total += float(info.get("f_weighted", 0.0) or 0.0)
+    return total
 
 
 def build_indicator_features(stops_at_location, lon, lat, line_lookup,

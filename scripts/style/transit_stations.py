@@ -128,6 +128,15 @@ def build_station_layers(cfg) -> list:
         "normal_stop": 11,
         # small_bus: never labelled at far-zoom.
     }
+    # Pill-zoom (z14+) — every tier participates, including small_bus, and
+    # nothing drops below a readable minimum. See stop-labels.md § Pill-zoom.
+    LABEL_SIZE_Z14 = {
+        "major_train": 24, "main_train": 20, "important_train": 17,
+        "train_station": 15, "small_train": 15,
+        "major_mountain": 15, "mountain_stop": 13, "ferry_stop": 15,
+        "major_hub": 15, "big_station": 13,
+        "normal_stop": 13, "small_bus": 12,
+    }
 
     def _label_size_match(sizes):
         cases = []
@@ -140,24 +149,28 @@ def build_station_layers(cfg) -> list:
                 7,  _label_size_match(LABEL_SIZE_Z7),
                 10, _label_size_match(LABEL_SIZE_Z10),
                 12, _label_size_match(LABEL_SIZE_Z12),
-                13, _label_size_match(LABEL_SIZE_Z13)]
+                13, _label_size_match(LABEL_SIZE_Z13),
+                14, _label_size_match(LABEL_SIZE_Z14)]
 
     # Bold set grows with zoom so the ratio of bold-to-regular labels stays
     # in the ~1/3 range at every zoom band. See `stop-labels.md` § Font size.
-    # `big_station`, `mountain_stop`, `ferry_stop` always render SemiBold
-    # (independent of the bold set) — a middle weight between the bold
-    # train / hub / major_mountain tiers and the regular rest.
-    LABEL_SEMIBOLD_TIERS = ("big_station", "mountain_stop", "ferry_stop")
+    # `mountain_stop` and `ferry_stop` always render SemiBold; `big_station`
+    # joins the SemiBold set at z12 (Regular below). SemiBold is the middle
+    # weight between the bold train / hub / major_mountain tiers and the
+    # regular rest.
+    LABEL_SEMIBOLD_BASE = ("mountain_stop", "ferry_stop")
+    LABEL_SEMIBOLD_Z12 = LABEL_SEMIBOLD_BASE + ("big_station",)
     LABEL_BOLD_Z7 = {"major_train", "main_train"}
     LABEL_BOLD_Z9 = LABEL_BOLD_Z7 | {"important_train"}
     LABEL_BOLD_Z10 = LABEL_BOLD_Z9 | {"train_station"}
     LABEL_BOLD_Z11 = LABEL_BOLD_Z10 | {"major_hub", "major_mountain"}
+    LABEL_BOLD_Z12 = LABEL_BOLD_Z11 | {"small_train"}
 
-    def _label_font_match(bold_tiers):
+    def _label_font_match(bold_tiers, semibold_tiers):
         # SemiBold overrides come FIRST so they win the match even at
         # zoom bands where the tier might otherwise sit in bold_tiers.
         cases = []
-        for tier in LABEL_SEMIBOLD_TIERS:
+        for tier in semibold_tiers:
             cases.extend([tier, ["literal", ["Saira SemiBold"]]])
         for tier in bold_tiers:
             cases.extend([tier, ["literal", ["Saira Bold"]]])
@@ -165,10 +178,11 @@ def build_station_layers(cfg) -> list:
                 ["literal", ["Saira Regular"]]]
 
     far_zoom_label_text_font = ["step", ["zoom"],
-        _label_font_match(LABEL_BOLD_Z7),
-        9,  _label_font_match(LABEL_BOLD_Z9),
-        10, _label_font_match(LABEL_BOLD_Z10),
-        11, _label_font_match(LABEL_BOLD_Z11)]
+        _label_font_match(LABEL_BOLD_Z7, LABEL_SEMIBOLD_BASE),
+        9,  _label_font_match(LABEL_BOLD_Z9, LABEL_SEMIBOLD_BASE),
+        10, _label_font_match(LABEL_BOLD_Z10, LABEL_SEMIBOLD_BASE),
+        11, _label_font_match(LABEL_BOLD_Z11, LABEL_SEMIBOLD_BASE),
+        12, _label_font_match(LABEL_BOLD_Z12, LABEL_SEMIBOLD_Z12)]
 
     for source, source_minzoom in stop_groups:
         # Far-zoom: score-driven layer, z(source_minzoom)–z13.99.
@@ -289,6 +303,11 @@ def build_station_layers(cfg) -> list:
                 "text-font": far_zoom_label_text_font,
                 "text-size": far_zoom_label_text_size(),
                 "text-anchor": "left",
+                # Same clearance as far-zoom: 0.5 em horizontal so text
+                # starts clear of the anchor point, -0.11 em vertical for
+                # Saira's cap-height correction.
+                "text-offset": [0.5, -0.11],
+                "text-justify": "left",
                 "text-max-width": 8,
                 "text-padding": padding,
                 "text-allow-overlap": False,
@@ -303,30 +322,10 @@ def build_station_layers(cfg) -> list:
             },
         }
 
-    # Leader line — thin hairline from the main pill to the label anchor.
-    # Rendered BELOW the label symbol layers so the text halo covers where
-    # the leader meets the anchor.
-    layers.append({
-        "id": "transit-stop-label-leader",
-        "type": "line",
-        "source": "transit_stop_pills",
-        "source-layer": "transit_stop_pills",
-        "minzoom": 14,
-        "maxzoom": 17,
-        "filter": ["==", ["get", "feature_type"], "stop_label_leader"],
-        "paint": {
-            "line-color": "#1a1a1a",
-            "line-width": 0.8,
-            "line-opacity": 0.85,
-        },
-    })
-
-    # normal_stop declared FIRST so it yields to "other" (last-declared →
-    # placed first in MapLibre's reverse-order collision pass).
-    layers.append(_pill_label_layer(
-        "normal", ["==", ["get", "stop_tier"], "normal_stop"], 20))
-    layers.append(_pill_label_layer(
-        "other", ["!=", ["get", "stop_tier"], "normal_stop"], 4))
+    # Pill-zoom label layers (leader + text) are declared AFTER the pill /
+    # disc / connector / indicator paint layers so they render on top —
+    # labels must never sit behind a pill or a stop marker.
+    # See end of pill-zoom paint stack below.
 
     # Ferry stops follow the same two-tier pattern as every other mode:
     # a low-zoom dot at z9–z13 (rendered through the regional source above)
@@ -562,6 +561,18 @@ def build_station_layers(cfg) -> list:
             "text-color": ["get", "color"],
         }
     })
+
+    # =========================================================================
+    # Pill-zoom stop labels (z14–z16.99) — declared HERE, after every pill /
+    # disc / connector / indicator paint layer, so the label sits on top of
+    # the drawn geometry instead of behind it.
+    # =========================================================================
+    # normal_stop declared FIRST so it yields to "other" (last-declared →
+    # placed first in MapLibre's reverse-order collision pass).
+    layers.append(_pill_label_layer(
+        "normal", ["==", ["get", "stop_tier"], "normal_stop"], 20))
+    layers.append(_pill_label_layer(
+        "other", ["!=", ["get", "stop_tier"], "normal_stop"], 4))
 
     # =========================================================================
     # Close-zoom (z17+) — see .claude/concepts/stops-close-zoom.md

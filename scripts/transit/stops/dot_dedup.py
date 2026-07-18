@@ -32,8 +32,8 @@ def apply_stop_dedup(dot_features):
     zoom it was eaten and below.
 
     Mutates `dot_features` in place. Adds `score_z7..score_z13` (debug
-    only) and `lines_json_z7..lines_json_z13` (popup) to participating
-    features.
+    only), `lines_json_z7..lines_json_z13` (popup), and
+    `dep_hr_z7..dep_hr_z13` (popup) to participating features.
     """
     sd_cfg = _transit_cfg.get("stop_dot_sizing") or {}
     tier_sizes_cfg = sd_cfg.get("tier_sizes") or {}
@@ -101,6 +101,7 @@ def apply_stop_dedup(dot_features):
                 lines = []
         except (json.JSONDecodeError, TypeError):
             lines = []
+        base_dep_hr = float(p.get("dep_hr", 0.0) or 0.0)
         # Effective minzoom: the lowest zoom at which this dot actually
         # renders. Take max of the layer floor (MODE_MINZOOM, baked into
         # the style as the source's minzoom) and the feature's own
@@ -127,6 +128,8 @@ def apply_stop_dedup(dot_features):
             "absorbed_max_z": None,
             "lines_per_z": {z: list(lines) for z in range(7, 14)},
             "lines_dirty": False,
+            "dep_hr_per_z": {z: base_dep_hr for z in range(7, 14)},
+            "dep_hr_dirty": False,
         })
 
     if not states:
@@ -200,6 +203,7 @@ def apply_stop_dedup(dot_features):
                                 sa_lines = sa["lines_per_z"][z_lo]
                                 existing_keys = {(ln.get("ref", ""), ln.get("mode", ""))
                                                  for ln in sa_lines}
+                                merged_any = False
                                 for ln in sb["lines_per_z"][z_lo]:
                                     key = (ln.get("ref", ""), ln.get("mode", ""))
                                     if key in existing_keys:
@@ -207,6 +211,14 @@ def apply_stop_dedup(dot_features):
                                     existing_keys.add(key)
                                     sa_lines.append(ln)
                                     sa["lines_dirty"] = True
+                                    merged_any = True
+                                # Departures/hour at this zoom: sum absorbee
+                                # into absorber. Same principle as lines —
+                                # the popup at zoom k reflects everything
+                                # folded in at or above k.
+                                if sb["dep_hr_per_z"][z_lo] > 0.0:
+                                    sa["dep_hr_per_z"][z_lo] += sb["dep_hr_per_z"][z_lo]
+                                    sa["dep_hr_dirty"] = True
                             sb["absorbed_max_z"] = (z if sb["absorbed_max_z"] is None
                                                     else max(sb["absorbed_max_z"], z))
                             absorbed_any = True
@@ -243,6 +255,12 @@ def apply_stop_dedup(dot_features):
                     ln.get("ref", "")))
                 p[f"lines_json_z{z}"] = json.dumps(lns_sorted, ensure_ascii=False)
             n_lines_rewritten += 1
+        if s["dep_hr_dirty"]:
+            # Per-zoom dep_hr mirrors lines_json_zN: the popup at zoom k
+            # shows the absorber-plus-absorbed departures folded in at or
+            # above k.
+            for z in range(7, 14):
+                p[f"dep_hr_z{z}"] = round(s["dep_hr_per_z"][z], 3)
     print(f"  Dedup: {n_absorptions:,} absorptions "
           f"({n_full:,} stops fully absorbed at far-zoom, "
           f"{n_partial:,} partially absorbed, "
