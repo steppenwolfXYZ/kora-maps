@@ -328,14 +328,19 @@ def run():
             mode = props.get("mode")
             mo = props.get("mountain_origin")
             oid = str(props.get("osm_id", ""))
+            info = line_lookup.get(oid) if oid else None
+            # Stamp terminus names on every line feature so the line popup
+            # can render "A ↔ B" without a side-channel lookup. Written even
+            # when the geometry itself doesn't get extended below.
+            if info:
+                props["first_terminus_name"] = info.get("first_terminus_name") or ""
+                props["last_terminus_name"]  = info.get("last_terminus_name") or ""
+                feat["properties"] = props
             is_rail_scope = mode == "train" or (
                 mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS)
             if not is_rail_scope and oid not in filled_oids:
                 continue
-            if not oid:
-                continue
-            info = line_lookup.get(oid)
-            if not info or "coords" not in info:
+            if not oid or not info or "coords" not in info:
                 continue
             feat["geometry"]["type"] = "LineString"
             feat["geometry"]["coordinates"] = [list(c) for c in info["coords"]]

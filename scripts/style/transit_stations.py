@@ -769,6 +769,39 @@ def build_station_layers(cfg) -> list:
                 }
             })
 
+    # Station label (stop-labels.md § close-zoom): one white metre-sized
+    # label per parent station, angle + position baked by step 07 so it
+    # sits inside the (label-expanded) backdrop hull. Declared after the
+    # pill-arrow layers so it renders on top of everything at the station.
+    layers.append({
+        "id": "close-zoom-station-label",
+        "type": "symbol",
+        "source": "transit_close_zoom",
+        "source-layer": "transit_close_zoom",
+        "minzoom": 17,
+        "filter": ["==", ["get", "feature_type"], "station_label"],
+        "layout": {
+            "text-field": ["get", "name"],
+            "text-font": ["Saira Bold"],
+            "text-size": font_px_expr,
+            "text-rotate": ["get", "text_rot"],
+            "text-rotation-alignment": "map",
+            "text-pitch-alignment": "map",
+            "text-allow-overlap": True,
+            "text-ignore-placement": True,
+            "text-padding": 0,
+            # Saira cap-height correction, as on the pill-arrow text.
+            "text-offset": [0, -0.11],
+        },
+        "paint": {
+            "text-color": "#ffffff",
+            # Thin black border, fixed 0.5 px at every zoom — a hairline
+            # that does not grow with the metric text size.
+            "text-halo-color": "#000000",
+            "text-halo-width": 0.5,
+        },
+    })
+
     if not cfg.get("transit_pipeline", {}).get("debug", {}).get("debug_overlay", False):
         return layers
 

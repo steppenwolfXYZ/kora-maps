@@ -3,8 +3,8 @@
 
 	let { map }: { map: maplibregl.Map | null } = $props();
 
-	type Entry = { n: string; u: string; c: [number, number]; m?: string };
-	type Indexed = Entry & { fold: string };
+	type Entry = { n: string; u: string; c: [number, number]; m?: string; t?: string };
+	type Indexed = Entry & { fold: string; words: string[] };
 
 	const MAX_RESULTS = 10;
 	const FLYTO_ZOOM = 16;
@@ -18,6 +18,87 @@
 		ferry:        'directions_boat',
 		mountain:     'gondola_lift',
 	};
+
+	// Mirrors MODE_RANK in scripts/transit/_state.py.
+	const MODE_RANK: Record<string, number> = {
+		train:        0,
+		metro:        1,
+		tram:         2,
+		bus:          3,
+		mountain:     4,
+		ferry:        5,
+		regional_bus: 6,
+	};
+	const MODE_RANK_MAX = 6;
+
+	// Mirrors LABEL_TIER_RANK in scripts/transit/stops/pipeline_render.py.
+	const STOP_TIER_RANK: Record<string, number> = {
+		major_train:      0,
+		main_train:       1,
+		important_train:  2,
+		train_station:    3,
+		small_train:      4,
+		major_mountain:   5,
+		ferry_stop:       6,
+		mountain_stop:    7,
+		major_hub:        8,
+		big_station:      9,
+		normal_stop:     10,
+		small_bus:       11,
+	};
+	const STOP_TIER_RANK_MAX = 11;
+
+	// Ranking weights (stop-search.md § Ranking). Starting values.
+	const W_MATCH    = 5;
+	const W_MODE     = 1;
+	const W_TIER     = 1;
+	const W_DISTANCE = 1;
+
+	// Distance decay characteristic length in km (100 * exp(-d / DIST_DECAY_KM)).
+	const DIST_DECAY_KM = 30;
+	const EARTH_KM = 6371;
+
+	// Match tier scores (100 = tier 1 … 10 = tier 5, 0 = no match).
+	const MATCH_TIER_NAME_EXACT      = 100;
+	const MATCH_TIER_NAME_PREFIX     = 70;
+	const MATCH_TIER_WORD_FULL       = 40;
+	const MATCH_TIER_WORD_PREFIX     = 20;
+	const MATCH_TIER_SUBSTRING       = 10;
+
+	function matchTierScore(name: string, words: string[], q: string): number {
+		if (!q) return 0;
+		if (name === q) return MATCH_TIER_NAME_EXACT;
+		if (name.startsWith(q)) return MATCH_TIER_NAME_PREFIX;
+		let hasWordFull = false;
+		let hasWordPrefix = false;
+		for (const w of words) {
+			if (w === q) { hasWordFull = true; break; }
+			if (!hasWordPrefix && w.startsWith(q)) hasWordPrefix = true;
+		}
+		if (hasWordFull) return MATCH_TIER_WORD_FULL;
+		if (hasWordPrefix) return MATCH_TIER_WORD_PREFIX;
+		if (name.includes(q)) return MATCH_TIER_SUBSTRING;
+		return 0;
+	}
+
+	function modeScore(mode: string | undefined): number {
+		const r = MODE_RANK[mode ?? ''];
+		if (r === undefined) return 0;
+		return ((MODE_RANK_MAX - r) / MODE_RANK_MAX) * 100;
+	}
+
+	function tierScore(tier: string | undefined): number {
+		const r = STOP_TIER_RANK[tier ?? ''];
+		if (r === undefined) return 0;
+		return ((STOP_TIER_RANK_MAX - r) / STOP_TIER_RANK_MAX) * 100;
+	}
+
+	function distanceScore(dLon: number, dLat: number, cosLat: number): number {
+		const x = dLon * cosLat * Math.PI / 180;
+		const y = dLat * Math.PI / 180;
+		const distKm = EARTH_KM * Math.sqrt(x * x + y * y);
+		return 100 * Math.exp(-distKm / DIST_DECAY_KM);
+	}
 
 	let index = $state<Indexed[]>([]);
 	let indexError = $state<string | null>(null);
@@ -40,7 +121,10 @@
 			})
 			.then(data => {
 				if (cancelled) return;
-				index = data.map(e => ({ ...e, fold: fold(e.n) }));
+				index = data.map(e => {
+					const f = fold(e.n);
+					return { ...e, fold: f, words: f.split(/[\s,]+/).filter(Boolean) };
+				});
 			})
 			.catch(err => {
 				if (cancelled) return;
@@ -52,20 +136,22 @@
 	const results = $derived.by<Indexed[]>(() => {
 		const q = fold(query.trim());
 		if (!q) return [];
-		const hits = index.filter(e => e.fold.includes(q));
-		if (!map) return hits.slice(0, MAX_RESULTS);
-		const c = map.getCenter();
-		const cLon = c.lng;
-		const cLat = c.lat;
-		const latScale = Math.cos((cLat * Math.PI) / 180);
-		hits.sort((a, b) => {
-			const dxA = (a.c[0] - cLon) * latScale;
-			const dyA = a.c[1] - cLat;
-			const dxB = (b.c[0] - cLon) * latScale;
-			const dyB = b.c[1] - cLat;
-			return dxA * dxA + dyA * dyA - (dxB * dxB + dyB * dyB);
-		});
-		return hits.slice(0, MAX_RESULTS);
+		const c = map?.getCenter();
+		const cLon = c?.lng ?? 0;
+		const cLat = c?.lat ?? 0;
+		const cosLat = c ? Math.cos((cLat * Math.PI) / 180) : 1;
+		const scored: { e: Indexed; score: number }[] = [];
+		for (const e of index) {
+			const match = matchTierScore(e.fold, e.words, q);
+			if (match === 0) continue;
+			const mode = modeScore(e.m);
+			const tier = tierScore(e.t);
+			const dist = c ? distanceScore(e.c[0] - cLon, e.c[1] - cLat, cosLat) : 0;
+			const score = W_MATCH * match + W_MODE * mode + W_TIER * tier + W_DISTANCE * dist;
+			scored.push({ e, score });
+		}
+		scored.sort((a, b) => b.score - a.score);
+		return scored.slice(0, MAX_RESULTS).map(s => s.e);
 	});
 
 	$effect(() => {
@@ -78,6 +164,7 @@
 		map.flyTo({
 			center: entry.c,
 			zoom: FLYTO_ZOOM,
+			speed: 4.8,
 			essential: true,
 		});
 		open = false;
@@ -119,7 +206,10 @@
 		autocomplete="off"
 		placeholder="Search stops"
 		bind:value={query}
-		onfocus={() => (open = true)}
+		onfocus={(e) => {
+			open = true;
+			(e.currentTarget as HTMLInputElement).select();
+		}}
 		onblur={() => {
 			setTimeout(() => { open = false; }, 120);
 		}}

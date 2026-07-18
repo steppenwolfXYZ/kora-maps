@@ -12,7 +12,8 @@ There is no way to jump to a specific transit stop by name. Finding a known stop
 
 ### Search index
 - The searchable set is every stop that appears on a drawn transit line — the same stops that render as dots / pills / pill-arrows on the map. Stops filtered out upstream (excluded agencies, EV-prefix routes, non-drawable trips, foreign termini) do not appear in results.
-- Each entry carries: the stop's display name, its coordinates, and its merged-UIC identifier (the identifier the future highlight step will need to address the correct on-map feature).
+- Each entry carries: display name, coordinates, merged-UIC identifier, transport mode, and stop importance tier (the pipeline's `stop_tier`, e.g. `major_train` … `small_bus`). Mode and tier drive ranking; the UIC is kept for the future highlight step.
+- One entry per unique station (dedup by merged UIC). When a station is served by multiple modes, the entry keeps the highest-ranked mode (train wins over metro, over tram, over bus, etc.) — matches the mode-rank order used elsewhere in the pipeline.
 - The index is built at transit-pipeline time and shipped as a static JSON asset. Small enough to load once and search entirely client-side.
 
 ### Display names
@@ -30,8 +31,31 @@ There is no way to jump to a specific transit stop by name. Finding a known stop
 - When there are no matches, the dropdown shows a "no results" message.
 
 ### Ranking
-- When multiple stops match the query, results are sorted by distance from the **current map view center** (closer first). This resolves same-named stops (many `Bahnhof`, `Post`, `Dorf` entries exist across the country) and biases toward what the user is likely looking at.
-- Ordering is recomputed each keystroke against the live map center — panning between keystrokes changes the order.
+
+Results are sorted by a weighted score. All signals are normalised to 0–100, the weighted sum decides the order (higher = better), the top N are shown. Ordering is recomputed on every keystroke and against the live map center — panning between keystrokes changes the order.
+
+**Signals and their 0–100 normalisation:**
+
+- **Match quality** — one of 5 discrete tiers scoring the query against the stop name (folded case + diacritics):
+  1. Exact match — query equals the full name. Score `100`.
+  2. Prefix of stop name — query starts the name. Score `70`.
+  3. Full-word match anywhere — query equals a whole word inside the name (bounded by start, space, comma, or end). Score `40`.
+  4. Word-prefix match anywhere — query starts some word in the name (but not the first). Score `20`.
+  5. Substring match — appears mid-word. Score `10`.
+- **Mode** — pipeline `MODE_RANK` (train = 0, metro = 1, tram = 2, bus = 3, mountain = 4, ferry = 5, regional_bus = 6). Normalised: `(6 − rank) / 6 × 100`.
+- **Stop tier** — pipeline `stop_tier` string (`major_train` … `small_bus`, 12 buckets). Normalised inversely to the tier rank (0 = highest → `100`; 11 = lowest → `0`).
+- **Distance to map view center** — exponential decay, `100 × exp(−distance_km / 30)`. Bounded [0, 100]; ~37 at 30 km, ~14 at 60 km, ~1 at 150 km.
+
+**Weights** (starting values; expected to be tuned):
+
+| Signal | Weight |
+|---|---|
+| Match quality | 5 |
+| Mode | 1 |
+| Stop tier | 1 |
+| Distance | 1 |
+
+**Design intent:** the 5× weight on match quality makes tier 1 (exact match) uncatchable by any lower tier; tier 2 (name prefix) can be caught by a much-better-signal tier 3 in edge cases (a very close major-station word-prefix outranks a distant unimportant name-prefix). Weights are deliberately not "hard" tiers — the point is to let strong secondary signals promote well-placed lower-tier matches, without ever letting a random substring in `Alchenflüh, Bernstrasse` outrank the actual `Bern` train station. Values are starting points; adjust after observing behaviour.
 
 ### Selection
 - Selection is the only action that moves the map. Two ways to select:

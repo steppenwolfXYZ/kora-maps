@@ -44,7 +44,8 @@ def write_close_zoom_features(line_stops: dict, line_lookup: dict,
                                 skip_first_oids: set,
                                 skip_last_oids: set,
                                 rail_idx=None,
-                                tram_idx=None) -> None:
+                                tram_idx=None,
+                                parent_label_info=None) -> None:
     """Emit transit_close_zoom.geojson — pill-arrow polygons and backdrop
     line-segments that together produce the close-zoom (z17+) station
     representation. See .claude/concepts/stops-close-zoom.md.

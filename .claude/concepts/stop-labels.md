@@ -130,8 +130,10 @@ Stops that far-zoom dedup absorbed away are already hidden from the far-zoom lay
 
 Two shapes depending on the station's construct:
 
-- **Simple** — station has only a dot / endpoint disc or a single straight pill (no connector, no bent pill). Label sits 5 m east of the easternmost coord across all the station's band features.
-- **Complex** — station has any connector, any pill with more than 2 vertices (bent), or more than one pill. Pick the "main pill" (currently longest by segment sum — a proxy for the `f_weighted`-ranked main pill; refine if this proxy misplaces labels). Label sits 5 m east of the main pill's easternmost coord.
+- **Simple** — station has only a dot / endpoint disc or a single straight pill (no connector, no bent pill). Label sits east of the easternmost coord across all the station's band features, padded per the radius-aware rule below.
+- **Complex** — station has any connector, any pill with more than 2 vertices (bent), or more than one pill. Pick the "main pill" (currently longest by segment sum — a proxy for the `f_weighted`-ranked main pill; refine if this proxy misplaces labels). Label sits east of the main pill's easternmost coord, padded per the radius-aware rule below.
+
+**Radius-aware eastward padding.** Pills and discs render with a **pixel** radius while the label anchor is baked geometry (metres), so a flat metre padding under-clears large discs — at z16 a high-`width_base` disc is ~15 px ≈ 12 m and swallows a 5 m offset (canonical case: Deisswil). The padding is therefore computed per band and per feature: the winner's rendered radius (from the per-zoom diameter formula in `stops-pill-zoom.md` § Visual style, driven by `width_base`) converted to metres at the band's **minimum** zoom — the worst case within the band, since a fixed pixel radius spans the most metres at the band's low edge — plus a fixed clearance, floored at 5 m. In the no-clear-winner fallback the easternmost point's owner isn't tracked, so the widest candidate's radius is used; the dot fallback uses the dot's own `width_base` (dots share the same radius formula). Consequence: anchors now differ across bands more often, so more stations emit per-band anchor features instead of one merged feature — accepted.
 
 Both cases place the label to the east; the difference is only WHICH geometry the eastward-padding is measured from. No leader / connector line — a visual "name tag" connector was tried and reverted; if a future iteration reintroduces it, define the rule in this section first.
 
@@ -163,7 +165,33 @@ Both symbol layers use `minzoom: 14`, `maxzoom: 17` (close-zoom takes over at z1
 
 ## Requirements — close-zoom (z17+)
 
-_To be filled in when this phase is worked on._
+One label per parent station, placed **inside** the station background hull — outside-the-hull placement was rejected because the association between label and station gets ambiguous. White, bold, with a **thin black outline** (proportional to the text size so it stays thin across the zoom growth), sized in **metres** (like all close-zoom text) so it scales with the station geometry across z17–z22. Text is the `display_name`, single line, never truncated or wrapped — the hull expands to fit the label instead (see Hull expansion below).
+
+**Font size is tier-dependent** — large stops carry very large labels. Seed glyph heights (metres) per `stop_tier` of the station's best-priority stop: major_train 40, main_train 30, important_train 24, train_station 18, small_train / major_mountain / major_hub 14, ferry_stop 12, mountain_stop / big_station 10, normal_stop 8, small_bus 6. Scaling by hull area is a possible refinement if tier alone misjudges some stations.
+
+### Angle + position (general case)
+
+1. **Dominant direction**: the axial (mod-180°) mean of all pill-arrow axes at the station. A plurality by any margin is enough — no supermajority required. This direction only steers the sweep; it is never the label's final angle by itself.
+2. **Sweep**: starting at the centroid of the pill-arrow centers, the label's bounding box (measured text width × glyph height, plus a clearance margin) moves perpendicular to the dominant direction toward the side that is "rather up" (screen-north). When the dominant direction is near-vertical — so neither perpendicular points up — the sweep goes east instead. It stops as soon as the box clears every pill-arrow.
+3. **Nearest-stack alignment**: the label's final angle is always the axis of the **nearest pill-arrow** at the swept position — an averaged in-between angle is never used, including when the label lands in a clear pocket between stacks of different orientations. If the nearest pill-arrow's axis differs from the sweep axis beyond a tolerance, the sweep is redone once with the aligned axis so the re-oriented box is guaranteed clear. This also covers the lying-V case: the sweep crosses the upper leg and the label ends up aligned with the leg it sits above. *(Replaces an earlier "last-crossed" rule, which only fired when the sweep was blocked and left mean angles on labels that started in clear space.)*
+4. If the start position is already clear (hollow station center), the label sits at the centroid — the nearest-stack alignment still sets its angle.
+
+### Readability flip
+
+Same rule as pill-arrow text: the label rotates with its axis and flips 180° when it would render upside-down. Since the label axis is undirected, this reduces to always picking the readable orientation of the two.
+
+### Ferry piers
+
+When every pill-arrow at the station is a ferry, the flower layout has no meaningful dominant axis, and sweeping "up" could push the label out over the water. Instead the label goes on the **land side**: its angle is the axial mean of each petal's outermost pill-arrow, and the sweep direction is opposite the mean outward direction of the petals, starting at the pier, until clear. If the petals' outward directions cancel out (opposite-direction solos at a through-pier), fall back to the general rule.
+
+### Hull expansion
+
+The label's bounding box joins the hull point cloud, so the backdrop hull always contains the label plus the hull's normal outward padding. For pill-arrow-aligned labels the expansion is minimal; for labels wider than the station it can be substantial — that is accepted.
+
+### Rendering
+
+- Visible from z17 up (no maxzoom), transit-focus only — toggled with the other stop symbology.
+- No collision handling: the label always renders (allow-overlap), like the other close-zoom text. `label_priority` is not consulted at this band — at z17+ one label per station never crowds.
 
 ## Constraints
 

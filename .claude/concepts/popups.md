@@ -56,7 +56,15 @@ Same layout applies. When a dot absorbs other stops (see `stops-far-zoom-dot-red
 
 ## Line popup
 
-TBD — spec to follow. Shares the Saira font and click-open behaviour above.
+Triggered by clicking on a transit line. Renders as a vertical list of lines, visually the same as the station popup's expanded line list: badge on the left (Saira ExtraBold), route text (`A ↔ B`) on the right, all badges the same width so the route texts left-align.
+
+### Capture set
+
+Multiple lines often overlap at the click point (parallel corridors, shared alignments). The popup collects every line rendered within a small pixel-radius bbox around the click, deduped by `(ref, mode)` so both directions of one line merge into a single row. Ordering matches the station popup: mode rank, then ref.
+
+### Route text per line
+
+For each `(ref, mode)` in the capture set, the two termini across all captured variants of the line become the `A ↔ B` string. If exactly two distinct terminus names appear across variants, format as `A ↔ B`. If more (branching variants terminate at different endpoints), list the unique names joined by ` · ` — no per-station subsumption is applied (there is no station reference here).
 
 ## Close-zoom departures popup
 

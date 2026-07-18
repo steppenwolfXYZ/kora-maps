@@ -62,6 +62,7 @@
 		'close-zoom-pill-arrow-casing',
 		'close-zoom-pill-arrow-fill',
 		'close-zoom-pill-arrow-ref',
+		'close-zoom-station-label',
 	];
 
 	const PLACE_LABEL_LAYERS = ['label-place', 'label-state', 'label-country'];
@@ -302,19 +303,82 @@
 				return;
 			}
 
-			const lineFeatures = map.queryRenderedFeatures(e.point, { layers: TRANSIT_LINE_LAYERS });
+			// Line popup: widen the query to a 4-px bbox so parallel lines
+			// on shared corridors are all captured (see popups.md § Line
+			// popup / Capture set).
+			const R = 4;
+			const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+				[e.point.x - R, e.point.y - R],
+				[e.point.x + R, e.point.y + R]
+			];
+			const lineFeatures = map.queryRenderedFeatures(bbox, { layers: TRANSIT_LINE_LAYERS });
 			if (!lineFeatures.length) return;
 
-			const p = lineFeatures[0].properties as Record<string, unknown>;
-			const html = `<div style="font-family:'Saira',sans-serif;font-size:12px;line-height:1.5">
-				<b>${fmt(p.mode)}</b> &nbsp;ref: ${fmt(p.ref)}<br>
-				${p.name ? String(p.name).substring(0, 60) : ''}<br>
-				freq: ${typeof p.freq_score === 'number' ? p.freq_score.toFixed(2) : fmt(p.freq_score)}&ensp;
-				spd: ${fmt(p.speed_kmh)} km/h&ensp;
-				w: ${fmt(p.width_base)}<br>
-				osm: ${fmt(p.osm_id)}
+			// Dedup by (ref, mode). Both directions of one line merge; branch
+			// variants also merge — their termini fold into a single set that
+			// forms the route text.
+			const MODE_RANK: Record<string, number> = {
+				train: 0, metro: 1, tram: 2, bus: 3, mountain: 4, ferry: 5, regional_bus: 6
+			};
+			const groups = new Map<string, {
+				ref: string; mode: string; color: string; name: string;
+				termini: Set<string>;
+			}>();
+			for (const f of lineFeatures) {
+				const fp = f.properties as Record<string, unknown>;
+				const ref = String(fp.ref ?? '');
+				const mode = String(fp.mode ?? '');
+				const key = `${ref} ${mode}`;
+				let g = groups.get(key);
+				if (!g) {
+					g = {
+						ref, mode,
+						color: String(fp.color ?? '#888888'),
+						name: String(fp.name ?? ''),
+						termini: new Set<string>(),
+					};
+					groups.set(key, g);
+				}
+				const first = String(fp.first_terminus_name ?? '');
+				const last  = String(fp.last_terminus_name ?? '');
+				if (first) g.termini.add(first);
+				if (last)  g.termini.add(last);
+			}
+			const lines = Array.from(groups.values()).sort((a, b) => {
+				const ra = MODE_RANK[a.mode] ?? 99;
+				const rb = MODE_RANK[b.mode] ?? 99;
+				if (ra !== rb) return ra - rb;
+				return a.ref.localeCompare(b.ref, undefined, { numeric: true });
+			});
+
+			// Cells: alternating badge + terminus; grid layout in the wrapper
+			// gives every badge the same width (widest ref) and left-flushes
+			// the terminus text — matches the expanded station popup.
+			const cells = lines.map(l => {
+				const label = l.ref || l.mode || '?';
+				const lum = parseInt(l.color.slice(1, 3), 16) * 0.299
+					+ parseInt(l.color.slice(3, 5), 16) * 0.587
+					+ parseInt(l.color.slice(5, 7), 16) * 0.114;
+				const fg = lum > 140 ? '#000' : '#fff';
+				const termini = Array.from(l.termini);
+				const route = termini.length === 2
+					? `${termini[0]} ↔ ${termini[1]}`
+					: termini.join(' · ');
+				const routeSafe = route.replace(/</g, '&lt;');
+				const badge = `<span class="popup-badge" style="background:${l.color};color:${fg}">${label}</span>`;
+				const terminus = `<span class="popup-line-terminus">${routeSafe}</span>`;
+				return badge + terminus;
+			}).join('');
+
+			const html = `<style>
+				.popup-line-list { font-family:'Saira',sans-serif; color:#222; }
+				.popup-line-list .popup-badge { display: block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-align: center; }
+				.popup-line-list .popup-cells { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; }
+				.popup-line-list .popup-line-terminus { color: #444; font-size: 12px; }
+			</style><div class="popup-line-list">
+				<div class="popup-cells">${cells}</div>
 			</div>`;
-			popup = new maplibregl.Popup({ maxWidth: '320px' })
+			popup = new maplibregl.Popup({ maxWidth: '360px' })
 				.setLngLat(e.lngLat)
 				.setHTML(html)
 				.addTo(map);

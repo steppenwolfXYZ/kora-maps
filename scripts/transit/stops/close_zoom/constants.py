@@ -181,6 +181,37 @@ CLOSE_ZOOM_LINE_END_OVERHANG_M = float(
 # primary check is the trip's first-stop index (idx == 0).
 CLOSE_ZOOM_TERMINAL_SNAP_M = 100.0
 
+# Station label (stop-labels.md § close-zoom): one white label per
+# parent station, inside the hull, swept perpendicular ("rather up")
+# to the dominant pill-arrow direction until clear of every pill-arrow,
+# then aligned with the NEAREST pill-arrow stack. Seed values — tune
+# after visual review.
+# Glyph height in metres per stop tier — large stations get very large
+# labels. Fallback when the tier is unknown: small_bus.
+CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER = {
+    "major_train":     40.0,
+    "main_train":      30.0,
+    "important_train": 24.0,
+    "train_station":   18.0,
+    "small_train":     14.0,
+    "major_mountain":  14.0,
+    "ferry_stop":      12.0,
+    "mountain_stop":   10.0,
+    "major_hub":       14.0,
+    "big_station":     10.0,
+    "normal_stop":      8.0,
+    "small_bus":        6.0,
+}
+CLOSE_ZOOM_STATION_LABEL_CLEAR_M = 1.5    # clearance around the label box
+CLOSE_ZOOM_STATION_LABEL_STEP_M = 0.5     # sweep step
+CLOSE_ZOOM_STATION_LABEL_MAX_SWEEP_M = 300.0
+# Axial angle difference above which the nearest-stack alignment redoes
+# the sweep with the aligned axis (stop-labels.md § close-zoom).
+CLOSE_ZOOM_STATION_LABEL_ANGLE_TOL_DEG = 5.0
+# Half-height factor of the label box relative to font_m: visible glyphs
+# don't fill the full em box, but descenders reach below the baseline.
+CLOSE_ZOOM_STATION_LABEL_HALF_H_EM = 0.6
+
 # Modes whose variant priority (representative pick + pill-arrow stacking order)
 # is frequency rather than speed. Frequency is the better proxy for "the
 # canonical variant" on road modes: a rare short-turn variant terminating

@@ -1004,7 +1004,9 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # Stop-search index (stop-search.md): one entry per unique station
     # (dedup by parent_station UIC), consumed by the client-side search
     # input. Rebuilt every time step 07 writes dots. Mode with the lowest
-    # MODE_RANK wins when a station is served by multiple modes.
+    # MODE_RANK wins when a station is served by multiple modes; the
+    # winning dot's `stop_tier` is carried through for the client's
+    # ranking (kept as the pipeline string, not pre-normalised).
     _search_seen: dict[str, dict] = {}
     for f in dot_features:
         props = f.get("properties", {})
@@ -1027,10 +1029,11 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "u": uic,
             "c": [round(coords[0], 6), round(coords[1], 6)],
             "m": mode,
+            "t": props.get("stop_tier") or "",
             "_rank": rank,
         }
     _search_entries = [
-        {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"]}
+        {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"], "t": e["t"]}
         for e in sorted(_search_seen.values(), key=lambda e: e["n"])
     ]
     OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
@@ -1055,7 +1058,29 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     #             "main pill" (longest by segment sum — proxy for f_weighted-
     #             ranked; refine later if the proxy fails). Label sits 5 m
     #             east of the main pill's easternmost coord.
-    LABEL_PADDING_X_M = 5.0
+    # Eastward padding of the label anchor. The pill / disc renders with a
+    # PIXEL radius while the anchor is baked geometry (metres), so a flat
+    # metre padding under-clears large discs: at z16 a high-width_base disc
+    # is ~15 px ≈ 12 m, swallowing a 5 m offset entirely (Deisswil). The
+    # padding therefore covers the rendered radius converted to metres at
+    # the band's MINIMUM zoom — the worst case, since a fixed px radius
+    # spans the most metres at the band's low edge — plus a clearance.
+    # Radius formula mirrors pill_disc_width() in
+    # scripts/style/transit_stations.py (dots use the same values directly
+    # as circle-radius): radius_px = base + slope × min(width_base, 5).
+    LABEL_PADDING_X_M = 5.0        # floor for tiny / width-less features
+    LABEL_CLEARANCE_X_M = 2.0
+    LABEL_BAND_RADIUS_PX = {"A": (2.25, 1.15), "B": (3.0, 1.6),
+                            "C": (4.0, 2.2)}
+    PX_PER_M_Z17 = 2.455
+
+    def _label_pad_m(band_id, width_base):
+        base, slope = LABEL_BAND_RADIUS_PX[band_id]
+        zmin = BAND_ZOOM_RANGES[band_id][0]
+        m_per_px = (2.0 ** (17 - zmin)) / PX_PER_M_Z17
+        r_px = base + slope * min(float(width_base or 0.0), 5.0)
+        return max(LABEL_PADDING_X_M, r_px * m_per_px + LABEL_CLEARANCE_X_M)
+
     RELEVANT_PILL_TYPES = {"pill", "connector", "endpoint"}
 
     def _bucket_key(props):
@@ -1221,19 +1246,24 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # so map-right is the deterministic tie-break.
     SCORE_DOMINANCE_THRESHOLD = 1.25
 
-    def _pillzoom_label_geometry(feats, dot_feat):
+    def _pillzoom_label_geometry(feats, dot_feat, band_id):
         """Return anchor lon/lat for a station's pill-zoom label. Feats are
         one band's pill/connector/endpoint features; dot_feat is the
-        fallback when no pill-zoom geometry exists at all."""
+        fallback when no pill-zoom geometry exists at all. `band_id`
+        drives the eastward padding — the rendered pill/disc radius in
+        metres at the band's minimum zoom (see `_label_pad_m`)."""
         pills = [f for f in feats
                  if (f.get("properties") or {}).get("feature_type") == "pill"]
         endpoints = [f for f in feats
                      if (f.get("properties") or {}).get("feature_type") == "endpoint"]
         candidates = pills + endpoints
 
-        def _anchor_from_base(base):
-            return (base[0] + _lon_offset(base[1], LABEL_PADDING_X_M),
-                    base[1])
+        def _wb_of(feat):
+            return (feat.get("properties") or {}).get("width_base", 0.0)
+
+        def _anchor_from_base(base, width_base):
+            pad_m = _label_pad_m(band_id, width_base)
+            return (base[0] + _lon_offset(base[1], pad_m), base[1])
 
         def _base_of(feat):
             geom = feat.get("geometry") or {}
@@ -1259,19 +1289,23 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             if dominant:
                 base = _base_of(top_feat)
                 if base:
-                    return _anchor_from_base(base)
+                    return _anchor_from_base(base, _wb_of(top_feat))
             # Below threshold → fallback: easternmost coord across pills +
             # endpoints (skip connectors so a curved connector's east swing
-            # can't win over the actual discs / pills).
+            # can't win over the actual discs / pills). The easternmost
+            # point's owner isn't tracked, so pad for the widest candidate.
             pts = _all_coords(candidates)
             east_pt = _easternmost_of(pts)
             if east_pt is not None:
-                return _anchor_from_base(east_pt)
+                return _anchor_from_base(
+                    east_pt, max(_wb_of(f) for f in candidates))
 
-        # No pill/endpoint at all → dot fallback.
+        # No pill/endpoint at all → dot fallback (dots render with the
+        # same radius formula, so the same padding applies).
         pts = _all_coords([dot_feat])
         east_pt = _easternmost_of(pts)
-        return _anchor_from_base(east_pt) if east_pt else None
+        return (_anchor_from_base(east_pt, _wb_of(dot_feat))
+                if east_pt else None)
 
     def _round_pt(pt):
         return (round(pt[0], 6), round(pt[1], 6)) if pt else None
@@ -1298,7 +1332,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         per_band = {}
         for band_id in BAND_ZOOM_RANGES:
             feats_b = band_feats.get(band_id, [])
-            anchor = _pillzoom_label_geometry(feats_b, dot_feat)
+            anchor = _pillzoom_label_geometry(feats_b, dot_feat, band_id)
             if anchor is not None:
                 per_band[band_id] = anchor
         if not per_band:
@@ -1345,10 +1379,21 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     _t_phase = time.perf_counter()
 
     print("Emitting close-zoom stop features...")
+    # Per-parent label metadata for the close-zoom station label
+    # (stop-labels.md § close-zoom): the best dot per parent already
+    # carries the post-strip display_name.
+    parent_label_info = {
+        key: {"stop_name": f["properties"].get("stop_name", ""),
+              "display_name": (f["properties"].get("display_name")
+                               or f["properties"].get("stop_name", "")),
+              "stop_tier": f["properties"].get("stop_tier", "small_bus")}
+        for key, (f, _) in best_dot_by_key.items()
+    }
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
                               end_of_platform_pairs,
                               skip_first_oids, skip_last_oids,
-                              rail_idx=rail_idx, tram_idx=tram_idx)
+                              rail_idx=rail_idx, tram_idx=tram_idx,
+                              parent_label_info=parent_label_info)
     print(f"  [{time.perf_counter() - _t_phase:6.1f}s] write_close_zoom_features (visits + polygon bake + write)")
 
     # Summary

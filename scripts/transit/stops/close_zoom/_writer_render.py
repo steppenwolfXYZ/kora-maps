@@ -1,4 +1,9 @@
 import json
+# Station-label collectors (stop-labels.md § close-zoom): per parent,
+# every drawn pill-arrow's oriented box (hull band, which covers the
+# smaller bands) and — for ferries — each queue's pier point.
+station_label_pills: dict = defaultdict(list)
+station_ferry_piers: dict = defaultdict(list)
 for parent, parent_sids in per_parent_sids.items():
     recs = []
     # Rail per-track clustering (stops-close-zoom.md § Rail
@@ -463,6 +468,11 @@ for parent, parent_sids in per_parent_sids.items():
         # extent) keep the dead-straight rule.
         rear_ground = (0.0 if rec.get("fwd_synth")
                        else _cum_dist_m([tuple(p) for p in ext])[-1])
+        # Ferry pier point for the station label's land-side rule
+        # (stop-labels.md § close-zoom, Ferry piers): the extent's
+        # first point sits at the pier's on-line position.
+        if rec.get("extentless_kind") == "ferry" and len(ext) >= 1:
+            station_ferry_piers[parent].append((ext[0][0], ext[0][1]))
         stretch = False
         front_on_m = 0.0
         course_ext = ext
@@ -879,6 +889,16 @@ for parent, parent_sids in per_parent_sids.items():
             # (largest band only — it covers the smaller ones; the line
             # section stays arc-based since the LINE itself may curve).
             if band_id == CLOSE_ZOOM_HULL_BAND:
+                # Station label input (stop-labels.md § close-zoom):
+                # the pill-arrow's oriented box in this band. `stack`
+                # groups queue-mates (id is unique among the courses
+                # alive within one parent; comparisons stay per-parent).
+                station_label_pills[parent].append({
+                    "pt": origin, "T": T,
+                    "half_L": L / 2.0, "half_W": W / 2.0,
+                    "is_ferry": extentless_kind == "ferry",
+                    "stack": id(course), "k": k,
+                })
                 cloud = parent_cloud[parent]
                 cloud.extend((p[0], p[1]) for p in ring)
                 # Map the pill-arrow's track span back to centerline arc
@@ -887,6 +907,196 @@ for parent, parent_sids in per_parent_sids.items():
                 ct1 = _track_pos(o1, tdists, tcts)
                 for t in _sample_ts(dists, ct0, ct1):
                     cloud.append(_point_at_extrap(polyline, dists, t))
+
+# ── Station labels (stop-labels.md § close-zoom) ─────────────────────
+# One label per parent station, inside the hull: aligned with the
+# dominant pill-arrow axis, swept perpendicular ("rather up") from the
+# pill centroid until its box clears every pill-arrow, with the
+# last-crossed rule re-aligning the label to the geometry it ends up
+# above. Ferry-only stations use the land-side rule instead. The label
+# box joins the hull cloud so the backdrop always contains it.
+n_station_labels = 0
+n_labels_unnamed = 0
+_label_info = parent_label_info or {}
+for parent, lpills in station_label_pills.items():
+    info = _label_info.get(parent) or {}
+    label_name = info.get("display_name") or info.get("stop_name") or ""
+    if not label_name:
+        n_labels_unnamed += 1
+        continue
+    # Local metric frame anchored at the first pill-arrow.
+    lp_lon0, lp_lat0 = lpills[0]["pt"]
+    lp_cl = cos(radians(lp_lat0))
+    if lp_cl <= 0.0:
+        lp_cl = 1.0
+
+    def _lp_to_m(pt, lon0=lp_lon0, lat0=lp_lat0, cl=lp_cl):
+        return ((pt[0] - lon0) * 111320.0 * cl,
+                (pt[1] - lat0) * 111320.0)
+
+    # (cx, cy, tx, ty, half_L, half_W, pill) per pill-arrow.
+    lp_obbs = []
+    for p in lpills:
+        pcx, pcy = _lp_to_m(p["pt"])
+        lp_obbs.append((pcx, pcy, p["T"][0], p["T"][1],
+                        p["half_L"], p["half_W"], p))
+
+    lab_font_m = CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER.get(
+        info.get("stop_tier") or "",
+        CLOSE_ZOOM_STATION_LABEL_FONT_BY_TIER["small_bus"])
+    lab_w_m = _text_width_em_bold(label_name) * lab_font_m
+    lab_half_w = lab_w_m / 2.0 + CLOSE_ZOOM_STATION_LABEL_CLEAR_M
+    lab_half_h = (lab_font_m * CLOSE_ZOOM_STATION_LABEL_HALF_H_EM
+                  + CLOSE_ZOOM_STATION_LABEL_CLEAR_M)
+
+    def _axial_mean(vecs):
+        """Mean direction of undirected axes (doubled-angle trick)."""
+        sx = sum(cos(2.0 * atan2(ty, tx)) for tx, ty in vecs)
+        sy = sum(sin(2.0 * atan2(ty, tx)) for tx, ty in vecs)
+        if abs(sx) < 1e-9 and abs(sy) < 1e-9:
+            return (1.0, 0.0)
+        a = 0.5 * atan2(sy, sx)
+        return (cos(a), sin(a))
+
+    def _up_perp(axis):
+        """Perpendicular of `axis` pointing 'rather up' (screen-north);
+        east when the axis is near-vertical so no perpendicular points
+        meaningfully up."""
+        u = (-axis[1], axis[0])
+        if u[1] < 0.0:
+            u = (-u[0], -u[1])
+        if abs(u[1]) < 0.15 and u[0] < 0.0:
+            u = (-u[0], -u[1])
+        return u
+
+    def _sweep(axis, u, start, obbs=lp_obbs,
+               hw=None, hh=None):
+        """Slide the label box from `start` along `u` until it clears
+        every pill-arrow box. Returns (center, last_blocking_obbs)."""
+        hw = lab_half_w if hw is None else hw
+        hh = lab_half_h if hh is None else hh
+        last_hits = None
+        s = 0.0
+        while s <= CLOSE_ZOOM_STATION_LABEL_MAX_SWEEP_M:
+            bx = start[0] + u[0] * s
+            by = start[1] + u[1] * s
+            hits = [o for o in obbs
+                    if _obb_overlap(bx, by, axis[0], axis[1], hw, hh,
+                                    o[0], o[1], o[2], o[3], o[4], o[5])]
+            if not hits:
+                return (bx, by), last_hits
+            last_hits = hits
+            s += CLOSE_ZOOM_STATION_LABEL_STEP_M
+        return (start[0] + u[0] * s, start[1] + u[1] * s), last_hits
+
+    lab_axis = None
+    lab_center = None
+    if all(p["is_ferry"] for p in lpills):
+        # Ferry pier (stop-labels.md § Ferry piers): angle from the
+        # outermost pill-arrow of each petal, sweep landward (opposite
+        # the petals' mean outward direction) starting at the pier.
+        outer_by_stack: dict = {}
+        for o in lp_obbs:
+            key = o[6]["stack"]
+            if (key not in outer_by_stack
+                    or o[6]["k"] > outer_by_stack[key][6]["k"]):
+                outer_by_stack[key] = o
+        outer = list(outer_by_stack.values())
+        vx = sum(o[2] for o in outer)
+        vy = sum(o[3] for o in outer)
+        vlen = sqrt(vx * vx + vy * vy)
+        # Outward directions that largely cancel (opposite-direction
+        # solos at a through-pier) leave no land side — fall back to
+        # the general rule below.
+        if outer and vlen / len(outer) >= 0.3:
+            lab_axis = _axial_mean([(o[2], o[3]) for o in outer])
+            land_u = (-vx / vlen, -vy / vlen)
+            piers = station_ferry_piers.get(parent)
+            if piers:
+                pm = [_lp_to_m(pt) for pt in piers]
+                start = (sum(x for x, _ in pm) / len(pm),
+                         sum(y for _, y in pm) / len(pm))
+            else:
+                start = (sum(o[0] for o in lp_obbs) / len(lp_obbs),
+                         sum(o[1] for o in lp_obbs) / len(lp_obbs))
+            lab_center, _ = _sweep(lab_axis, land_u, start)
+    def _obb_point_dist(px, py, o):
+        """Distance from a point to the oriented pill-arrow rectangle
+        (0 inside)."""
+        dx = px - o[0]
+        dy = py - o[1]
+        along = abs(dx * o[2] + dy * o[3]) - o[4]
+        perp = abs(dx * -o[3] + dy * o[2]) - o[5]
+        along = along if along > 0.0 else 0.0
+        perp = perp if perp > 0.0 else 0.0
+        return sqrt(along * along + perp * perp)
+
+    if lab_axis is None:
+        # General rule: the dominant axial direction only picks the
+        # sweep direction; the label's FINAL angle always comes from
+        # the NEAREST pill-arrow at the swept position (stop-labels.md
+        # § close-zoom) — never an averaged in-between angle. When the
+        # nearest pill-arrow's axis differs from the sweep axis, the
+        # sweep is redone once with the aligned axis so the re-oriented
+        # box is guaranteed clear.
+        axis = _axial_mean([(o[2], o[3]) for o in lp_obbs])
+        start = (sum(o[0] for o in lp_obbs) / len(lp_obbs),
+                 sum(o[1] for o in lp_obbs) / len(lp_obbs))
+        lab_center = start
+        for realign_pass in range(2):
+            u = _up_perp(axis)
+            lab_center, _ = _sweep(axis, u, start)
+            near = min(lp_obbs,
+                       key=lambda o: _obb_point_dist(
+                           lab_center[0], lab_center[1], o))
+            dot = abs(axis[0] * near[2] + axis[1] * near[3])
+            if dot >= cos(radians(CLOSE_ZOOM_STATION_LABEL_ANGLE_TOL_DEG)):
+                break
+            if realign_pass == 0:
+                axis = (near[2], near[3])
+            # Second pass still misaligned → keep the swept axis; the
+            # box was cleared with it, so no further angle change.
+        lab_axis = axis
+
+    # Readability flip: undirected axis → pick the orientation whose
+    # text reads left-to-right (east-ish; same net effect as the
+    # pill-arrow text flip rule).
+    if lab_axis[0] < 0.0 or (lab_axis[0] == 0.0 and lab_axis[1] < 0.0):
+        lab_axis = (-lab_axis[0], -lab_axis[1])
+    lab_text_rot = (-degrees(atan2(lab_axis[1], lab_axis[0]))) % 360.0
+
+    lab_lonlat = _local_offset_to_lonlat(
+        lp_lon0, lp_lat0, lab_center[0], lab_center[1], lp_cl)
+    features.append({
+        "type": "Feature",
+        "tippecanoe": {"minzoom": 15, "maxzoom": 18},
+        "geometry": {"type": "Point",
+                     "coordinates": [lab_lonlat[0], lab_lonlat[1]]},
+        "properties": {
+            "feature_type":   "station_label",
+            "name":           label_name,
+            "font_m":         round(lab_font_m, 3),
+            "text_rot":       round(lab_text_rot, 2),
+            "parent_station": parent,
+        },
+    })
+    n_station_labels += 1
+    # Hull expansion: the raw text box corners (without the clearance
+    # margin — the hull's own pad supplies the breathing room).
+    perp = (-lab_axis[1], lab_axis[0])
+    raw_hw = lab_w_m / 2.0
+    raw_hh = lab_font_m * CLOSE_ZOOM_STATION_LABEL_HALF_H_EM
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            mx = (lab_center[0] + sx * raw_hw * lab_axis[0]
+                  + sy * raw_hh * perp[0])
+            my = (lab_center[1] + sx * raw_hw * lab_axis[1]
+                  + sy * raw_hh * perp[1])
+            parent_cloud[parent].append(_local_offset_to_lonlat(
+                lp_lon0, lp_lat0, mx, my, lp_cl))
+print(f"  Station labels: {n_station_labels:,} emitted"
+      + (f" ({n_labels_unnamed:,} parents without a name skipped)"
+         if n_labels_unnamed else ""))
 
 # ── Backdrop: one rounded hull polygon per parent station ────────────
 n_backdrops = 0
