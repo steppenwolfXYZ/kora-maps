@@ -206,9 +206,9 @@ MODE_HUE = {
     "tram":       180,    # turquoise
     "metro":      120,    # green
     "bus":        220,    # blue
-    "regional_bus": 290,  # purple-red
+    "regional_bus":  25,  # bright orange
     "ferry":      220,    # blue
-    "mountain":   320,    # deep pink (not used; mountain has fixed color)
+    "mountain":   290,    # purple
 }
 
 MODE_MAX_SPEED = {
@@ -218,21 +218,32 @@ MODE_MAX_SPEED = {
     "bus":           35,
     "regional_bus":  65,
     "ferry":         22,
+    "mountain":      40,
 }
 
 
 def speed_to_color(mode: str, speed_kmh) -> str:
     """Convert mode + speed to hex color via HSL. Faster = darker + more saturated."""
-    if mode == "mountain":
-        return "#ffe566"
     hue = MODE_HUE.get(mode, 220) / 360.0
     if speed_kmh is None:
         speed_score = 0.5
     else:
         max_speed = MODE_MAX_SPEED.get(mode, 80)
         speed_score = min(1.0, speed_kmh / max_speed)
-    s = 0.20 + speed_score * 0.72
-    l = 0.77 - speed_score * 0.50
+    if mode == "regional_bus":
+        # Orange loses identity under the shared curve (goes tan when
+        # desaturated, brown when dark). Stay near max saturation; slow end
+        # matches other modes' lightness, max = pure bright orange.
+        s = 0.95 + speed_score * 0.05
+        l = 0.77 - speed_score * 0.27
+    elif mode == "mountain":
+        # Deliberately narrow range, centered on the previous fixed #b340c9
+        # mid-tone — mountain keeps a strong single-color identity.
+        s = 0.50 + speed_score * 0.15
+        l = 0.60 - speed_score * 0.15
+    else:
+        s = 0.20 + speed_score * 0.72
+        l = 0.77 - speed_score * 0.50
     r, g, b = colorsys.hls_to_rgb(hue, l, s)
     return "#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255))
 

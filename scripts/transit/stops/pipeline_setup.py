@@ -315,6 +315,31 @@ def run():
     OUT_STOP_EXTENT_FILL.write_text(json.dumps(fill_diag, ensure_ascii=False))
     print(f"  {len(fill_diag):,} fill records → {OUT_STOP_EXTENT_FILL}")
 
+    # Per-line-group union bbox (line-detail-view.md): all variants of a
+    # (ref, agency_id, mode) group share one bbox covering every variant's
+    # full geometry, so the client can fit the camera to the whole line.
+    # Computed AFTER the terminal fills so extensions are covered. Stored on
+    # line_lookup (for the popup badge entries built in run_pills) and
+    # stamped on every line feature below.
+    with _timed("compute per-line-group bboxes + line keys"):
+        group_bbox: dict = {}
+        for oid, info in line_lookup.items():
+            key = line_key_of(info)
+            info["line_key"] = key
+            for lon, lat in flatten_coords(info["coords"]):
+                bb = group_bbox.get(key)
+                if bb is None:
+                    group_bbox[key] = [lon, lat, lon, lat]
+                else:
+                    if lon < bb[0]: bb[0] = lon
+                    if lat < bb[1]: bb[1] = lat
+                    if lon > bb[2]: bb[2] = lon
+                    if lat > bb[3]: bb[3] = lat
+        for info in line_lookup.values():
+            bb = group_bbox.get(info.get("line_key", ""))
+            if bb:
+                info["group_bbox"] = [round(v, 5) for v in bb]
+
     # Sync extended polylines into lines_data and write the FULL feature set
     # (extended and untouched lines alike) to transit_lines_extended.geojson —
     # step 08's pmtile build reads that file. The step-06 transit_lines.geojson
@@ -335,6 +360,13 @@ def run():
             if info:
                 props["first_terminus_name"] = info.get("first_terminus_name") or ""
                 props["last_terminus_name"]  = info.get("last_terminus_name") or ""
+                # Line-detail-view identity + camera fit (line-detail-view.md):
+                # canonical key of the feature's (ref, agency_id, mode) group
+                # and the group's union bbox as "minLon,minLat,maxLon,maxLat".
+                props["line_key"] = info.get("line_key", "")
+                bb = info.get("group_bbox")
+                if bb:
+                    props["line_bbox"] = ",".join(str(v) for v in bb)
                 feat["properties"] = props
             is_rail_scope = mode == "train" or (
                 mode == "mountain" and mo in MOUNTAIN_RAIL_ORIGINS)

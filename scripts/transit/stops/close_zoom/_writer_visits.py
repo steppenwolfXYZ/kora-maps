@@ -58,7 +58,14 @@ parent_cloud: dict = defaultdict(list)
 parent_colors: dict = defaultdict(set)
 
 def _parent_of(sid):
-    return stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
+    # Cross-parent grouping (stops-close-zoom.md § Cross-parent grouping):
+    # remap raw GTFS parent_station to the pill clusterer's leader parent
+    # so multi-parent stations (Gümligen, Melchenbühl (Tram) 8507052 +
+    # (Bus) 8577013) render as ONE hull, backdrop, and station label.
+    raw = stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
+    if parent_leader:
+        return parent_leader.get(raw, raw)
+    return raw
 
 max_L = max(bc["length_m"] for bc in CLOSE_ZOOM_BANDS.values())
 max_step = max(bc["length_m"] + CLOSE_ZOOM_STACK_GAP_M

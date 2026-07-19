@@ -227,10 +227,11 @@ def cluster_lines(cluster_stops, line_lookup, oids_by_uic=None):
         groups[key].append(info)
         if key not in representative:
             representative[key] = {
-                "ref":   ref,
-                "color": info.get("color", "#888888"),
-                "mode":  mode,
-                "name":  info.get("name", ""),
+                "ref":       ref,
+                "color":     info.get("color", "#888888"),
+                "mode":      mode,
+                "name":      info.get("name", ""),
+                "agency_id": info.get("agency_id", ""),
             }
 
     station_uics = _cluster_station_uics(cluster_stops)
@@ -261,8 +262,67 @@ def cluster_lines(cluster_stops, line_lookup, oids_by_uic=None):
     for key, variants in groups.items():
         entry = dict(representative[key])
         entry["tooltip"] = _station_line_tooltip(variants, station_uics, station_name)
+        # Line-detail-view payload (line-detail-view.md): canonical keys of
+        # every variant in this (ref, mode) badge group (normally one key;
+        # more when two agencies share ref+mode), the group's union bbox
+        # for the camera fit, and the line-global A ↔ B route text (line
+        # popup rule — no per-station subsumption).
+        entry["keys"] = sorted({line_key_of(v) for v in variants if line_key_of(v)})
+        bbox = None
+        for v in variants:
+            bb = v.get("group_bbox")
+            if not bb:
+                continue
+            if bbox is None:
+                bbox = list(bb)
+            else:
+                bbox = [min(bbox[0], bb[0]), min(bbox[1], bb[1]),
+                        max(bbox[2], bb[2]), max(bbox[3], bb[3])]
+        if bbox:
+            entry["bbox"] = bbox
+        entry["route"] = _line_route_text(variants)
         entries.append(entry)
     return sorted(entries, key=lambda x: (MODE_RANK.get(x["mode"], 99), x["ref"]))
+
+
+def _line_route_text(variants):
+    """Line-global route text across all variants of a badge group: the
+    unique terminus names, `A ↔ B` when exactly two, ` · `-joined
+    otherwise. Mirrors the line popup's client-side rule (popups.md § Line
+    popup / Route text per line)."""
+    seen: set = set()
+    names: list = []
+    for v in variants:
+        for name in (v.get("first_terminus_name"), v.get("last_terminus_name")):
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    if len(names) == 2:
+        return f"{names[0]} ↔ {names[1]}"
+    return " · ".join(names)
+
+
+def cluster_line_keys(cluster_stops, line_lookup, oids_by_uic=None):
+    """Membership string for a station cluster (line-detail-view.md):
+    ";"-padded canonical keys of every line whose stop sequence touches the
+    station. Variants are sourced from `oids_by_uic` (like the tooltip /
+    departures logic) so membership doesn't depend on which variants
+    survived the visible-stop dedup; falls back to cluster_stops-only
+    sourcing when the index is not supplied."""
+    oids: set = set()
+    for s in cluster_stops:
+        oid = str(s.get("osm_id", ""))
+        if oid:
+            oids.add(oid)
+    if oids_by_uic:
+        for uic in _cluster_station_uics(cluster_stops):
+            oids.update(oids_by_uic.get(uic, ()))
+    keys = []
+    for oid in oids:
+        info = line_lookup.get(oid)
+        if info:
+            keys.append(line_key_of(info))
+    return line_keys_str(keys)
 
 
 def cluster_departures_per_hour(cluster_stops, line_lookup, oids_by_uic=None):
@@ -303,7 +363,7 @@ def cluster_departures_per_hour(cluster_stops, line_lookup, oids_by_uic=None):
 def build_indicator_features(stops_at_location, lon, lat, line_lookup,
                               tangent_deg=0.0,
                               parent_width_base=None, parent_mode=None,
-                              parent_type="disc"):
+                              parent_type="disc", line_keys=None):
     """
     Emit color-indicator Point features for a single rendered location.
 
@@ -363,6 +423,15 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup,
         if parent_width_base is None:
             parent_width_base = _stop_wb(derived_max_wb, parent_mode)
 
+    # Station membership for the line-detail-view filter. Callers pass the
+    # parent station's full membership string; fall back to the lines
+    # visible at this location when not supplied.
+    if line_keys is None:
+        line_keys = line_keys_str(
+            line_key_of(line_lookup[str(s.get("osm_id", ""))])
+            for s in stops_at_location
+            if line_lookup.get(str(s.get("osm_id", ""))))
+
     groups_present = [g for g in COLOR_GROUP_ORDER if g in by_group]
     n = len(groups_present)
 
@@ -399,6 +468,7 @@ def build_indicator_features(stops_at_location, lon, lat, line_lookup,
                 "n_indicators":      n,
                 "row_factor":        round(row_factor, 3),
                 "parent_width_base": round(float(parent_width_base), 3),
+                "line_keys":         line_keys,
             },
         })
     return feats

@@ -544,7 +544,7 @@ def _blend_colors(hex_colors) -> str:
         except ValueError:
             continue
     if n == 0:
-        return "#ffe566"
+        return "#b340c9"
     return "#%02x%02x%02x" % (rs // n, gs // n, bs // n)
 
 

@@ -44,6 +44,8 @@
 		'transit-ferry', 'transit-metro', 'transit-tram', 'transit-train'
 	];
 
+	const TRANSIT_LINE_CASING_LAYERS = TRANSIT_LINE_LAYERS.map((id) => `${id}-casing`);
+
 	const TRANSIT_STOP_DOT_LAYERS = [
 		'transit-stop-fill-transit_stops_rail',
 		'transit-stop-fill-transit_stops_tram',
@@ -75,6 +77,22 @@
 		'transit-stop-pill-connector-casing',
 		'transit-stop-pill-endpoint',
 	];
+
+	// Close-zoom pill-arrow layers (z17+). Any click on the visible arrow
+	// — the polygon fill, its border, the disc at the number end, the
+	// number itself, or the destination text — should open the pill-arrow
+	// popup. Style splits per band (A–E) so exactly one band is visible
+	// at any given zoom step. Every one of these features carries the
+	// popup payload (baked via `common` in _writer_render.py), so any hit
+	// is enough.
+	const CLOSE_ZOOM_BANDS = ['A', 'B', 'C', 'D', 'E'];
+	const TRANSIT_PILL_ARROW_LAYERS = CLOSE_ZOOM_BANDS.flatMap((b) => [
+		`close-zoom-pill-arrow-fill-${b}`,
+		`close-zoom-pill-arrow-border-${b}`,
+		`close-zoom-pill-disc-${b}`,
+		`close-zoom-pill-ref-${b}`,
+		`close-zoom-pill-dest-${b}`
+	]);
 
 	// Every stop-symbology layer, toggled as one unit by the view switch
 	// (see .claude/concepts/view-modes.md). Debug layers stay independent.
@@ -113,6 +131,401 @@
 	function setView(mode: ViewMode) {
 		viewMode = mode;
 		if (mapRef) applyViewMode(mapRef, mode);
+	}
+
+	// ── Line detail view (line-detail-view.md) ──────────────────────────────
+	// Entered by clicking a line badge in the station or line popup. "The
+	// line" is all variants of its (ref, agency_id, mode) group: `keys` are
+	// the canonical line keys baked into badge entries / line features,
+	// `bbox` the group's union bbox for the camera fit.
+	interface LineDetailSelection {
+		keys: string[];
+		bbox: [number, number, number, number];
+		ref: string;
+		mode: string;
+		color: string;
+		route: string;
+	}
+
+	let lineDetail = $state<LineDetailSelection | null>(null);
+	// Original layer state captured on entry and restored on close.
+	// Non-reactive — pure bookkeeping.
+	let savedLinePaints: Map<string, Record<string, unknown>> | null = null;
+	let savedStopFilters: Map<string, unknown> | null = null;
+
+	const LINE_DETAIL_DIM_SOURCE = 'line-detail-dim';
+	const LINE_DETAIL_DIM_LAYER = 'line-detail-dim';
+	const LINE_DETAIL_HIGHLIGHT_CASING = 'line-detail-highlight-casing';
+	const LINE_DETAIL_HIGHLIGHT_FILL = 'line-detail-highlight';
+	const LINE_DETAIL_WIDTH_FACTOR = 1.7;
+	const LINE_DETAIL_GRAY = '#c4c4c4';
+	const LINE_DETAIL_OTHER_OPACITY = 0.25;
+	const LINE_DETAIL_CASING_OTHER_OPACITY = 0.12;
+
+	/** Multiply a line-width value by a factor. The style's widths are
+	 * top-level `["interpolate", …, ["zoom"], …]` expressions — MapLibre
+	 * forbids nesting those inside `["*", …]`, so the factor is folded into
+	 * each interpolate output instead. */
+	function scaleLineWidthExpr(expr: unknown, factor: number): unknown {
+		if (typeof expr === 'number') return expr * factor;
+		if (Array.isArray(expr) && expr[0] === 'interpolate') {
+			const out = expr.slice(0, 3);
+			for (let i = 3; i < expr.length; i += 2) {
+				out.push(expr[i], ['*', factor, expr[i + 1]]);
+			}
+			return out;
+		}
+		return expr;
+	}
+
+	// Stop-symbology layers filtered to member stations while the view is
+	// active. Every feature in them carries the `line_keys` membership
+	// string baked by step 07. Close-zoom (z17+) layers are out of scope.
+	const LINE_DETAIL_FILTER_LAYERS = [
+		...TRANSIT_STOP_DOT_LAYERS,
+		...TRANSIT_STOP_PILL_LAYERS,
+		...TRANSIT_STOP_LABEL_LAYERS,
+		'transit-stop-indicator'
+	];
+
+	function badgeTextColor(hexColor: string): string {
+		const lum = parseInt(hexColor.slice(1, 3), 16) * 0.299
+			+ parseInt(hexColor.slice(3, 5), 16) * 0.587
+			+ parseInt(hexColor.slice(5, 7), 16) * 0.114;
+		return lum > 140 ? '#000' : '#fff';
+	}
+
+	// ── Label text-bbox hit test ────────────────────────────────────────────
+	// Stop labels use MapLibre's `text-padding` for placement spacing, which
+	// also inflates the layer's queryRenderedFeatures / hover collision box.
+	// The click / cursor should only hit the actual rendered text — not the
+	// padding gap. We rebuild the text bbox client-side (canvas measureText
+	// on the same Saira font the map renders) and hit-test against it.
+	//
+	// Font sizes mirror scripts/style/transit_stations.py LABEL_SIZE_Z*
+	// dicts (per stop_tier at zoom stops 7 / 10 / 12 / 13 / 14). Close-zoom
+	// station_label features already carry `font_m` and are used directly.
+	const LABEL_SIZE_STOPS: Record<number, Record<string, number>> = {
+		7:  { major_train: 11, main_train: 10, important_train: 9,
+		      major_mountain: 9, ferry_stop: 9 },
+		10: { major_train: 16, main_train: 14, important_train: 12,
+		      train_station: 11, small_train: 11,
+		      major_mountain: 11, ferry_stop: 11 },
+		12: { major_train: 20, main_train: 16, important_train: 14,
+		      train_station: 12, small_train: 12,
+		      major_mountain: 12, mountain_stop: 10, ferry_stop: 12,
+		      major_hub: 11, big_station: 10, normal_stop: 10 },
+		13: { major_train: 22, main_train: 18, important_train: 15,
+		      train_station: 13, small_train: 13,
+		      major_mountain: 13, mountain_stop: 11, ferry_stop: 13,
+		      major_hub: 13, big_station: 11, normal_stop: 11 },
+		14: { major_train: 24, main_train: 20, important_train: 17,
+		      train_station: 15, small_train: 15,
+		      major_mountain: 15, mountain_stop: 13, ferry_stop: 15,
+		      major_hub: 15, big_station: 13, normal_stop: 13, small_bus: 12 }
+	};
+	const LABEL_SIZE_ZOOMS = [7, 10, 12, 13, 14];
+
+	// Close-zoom station_label features carry `font_m` in metres (world
+	// units); the style converts to pixels via _font_px_expr in
+	// scripts/style/transit_stations.py, an exponential-base-2 interp
+	// between z17 (px = m × PX_PER_M_Z17) and z22 (px = m × PX_PER_M_Z22).
+	const PX_PER_M_Z17 = 2.455;
+	const PX_PER_M_Z22 = PX_PER_M_Z17 * 32.0;
+	function pxPerMAtZoom(zoom: number): number {
+		if (zoom <= 17) return PX_PER_M_Z17;
+		if (zoom >= 22) return PX_PER_M_Z22;
+		const progress = (zoom - 17) / (22 - 17);
+		const factor = Math.pow(2, progress) - 1; // exponential base 2
+		return PX_PER_M_Z17 + factor * (PX_PER_M_Z22 - PX_PER_M_Z17);
+	}
+
+	function labelFontPx(props: Record<string, unknown>, zoom: number): number {
+		if (typeof props.font_m === 'number') {
+			// Convert font_m (metres) → pixels via the zoom-dependent scale.
+			return (props.font_m as number) * pxPerMAtZoom(zoom);
+		}
+		const tier = String(props.stop_tier ?? 'normal_stop');
+		let zLow = LABEL_SIZE_ZOOMS[0];
+		let zHigh = LABEL_SIZE_ZOOMS[LABEL_SIZE_ZOOMS.length - 1];
+		for (let i = 0; i < LABEL_SIZE_ZOOMS.length - 1; i++) {
+			if (zoom <= LABEL_SIZE_ZOOMS[i + 1]) {
+				zLow = LABEL_SIZE_ZOOMS[i];
+				zHigh = LABEL_SIZE_ZOOMS[i + 1];
+				break;
+			}
+		}
+		const sLow = LABEL_SIZE_STOPS[zLow]?.[tier] ?? 10;
+		const sHigh = LABEL_SIZE_STOPS[zHigh]?.[tier] ?? 10;
+		const t = zHigh === zLow ? 0 : (zoom - zLow) / (zHigh - zLow);
+		return sLow + t * (sHigh - sLow);
+	}
+
+	// Text-width memo keyed by font+size+text. `measureText` is O(μs) but
+	// hover fires it 60+ times per second — the cache keeps repeated
+	// mousemoves free.
+	const textWidthCache = new Map<string, number>();
+	let measureCtx: CanvasRenderingContext2D | null = null;
+	function textWidthPx(text: string, fontPx: number, weight = '700'): number {
+		const key = `${weight}|${fontPx.toFixed(2)}|${text}`;
+		let w = textWidthCache.get(key);
+		if (w !== undefined) return w;
+		if (!measureCtx) {
+			const c = document.createElement('canvas');
+			measureCtx = c.getContext('2d');
+		}
+		if (!measureCtx) return text.length * fontPx * 0.55;
+		measureCtx.font = `${weight} ${fontPx}px 'Saira', sans-serif`;
+		w = measureCtx.measureText(text).width;
+		textWidthCache.set(key, w);
+		return w;
+	}
+
+	// A label feature that carries popup data (or is `station_label` /
+	// `stop_label_anchor` — those don't have data on the anchor itself but
+	// still gate clicks upstream). Returns true when the point sits inside
+	// the label's rendered text rectangle.
+	function isPointInLabelText(
+		feat: maplibregl.MapGeoJSONFeature,
+		point: { x: number; y: number },
+		map: maplibregl.Map
+	): boolean {
+		const props = feat.properties as Record<string, unknown> | null;
+		if (!props) return false;
+		const text = String(props.display_name ?? props.name ?? props.stop_name ?? '');
+		if (!text) return false;
+		const geom = feat.geometry as { type: string; coordinates?: [number, number] } | null;
+		if (!geom || geom.type !== 'Point' || !geom.coordinates) return false;
+		const anchorPx = map.project(geom.coordinates);
+		const zoom = map.getZoom();
+		const fontPx = labelFontPx(props, zoom);
+		if (!(fontPx > 0)) return false;
+		const width = textWidthPx(text, fontPx, '700');
+		const height = fontPx; // cap-height approximation
+		// Text-anchor + text-offset per feature type. Matches the layer
+		// definitions in scripts/style/transit_stations.py.
+		const ft = String(props.feature_type ?? '');
+		let cx = anchorPx.x;
+		let cy = anchorPx.y;
+		let leftEdge: number;
+		let rightEdge: number;
+		if (ft === 'stop_label_anchor') {
+			// Pill label: anchor "left", offset [0.5em, -0.11em].
+			leftEdge  = cx + 0.5 * fontPx;
+			rightEdge = leftEdge + width;
+			cy       += -0.11 * fontPx;
+		} else if (ft === 'station_label') {
+			// Close-zoom station label: anchor default centre, offset
+			// [0, -0.11em].
+			leftEdge  = cx - width / 2;
+			rightEdge = cx + width / 2;
+			cy       += -0.11 * fontPx;
+		} else {
+			// Far-zoom labels: default centre anchor.
+			leftEdge  = cx - width / 2;
+			rightEdge = cx + width / 2;
+		}
+		const halo = 2;
+		return point.x >= leftEdge - halo
+		    && point.x <= rightEdge + halo
+		    && point.y >= cy - height / 2 - halo
+		    && point.y <= cy + height / 2 + halo;
+	}
+
+	// Layer id looks like a stop label. Used to gate the bbox check without
+	// touching non-label features (pills, dots, lines).
+	function isLabelLayer(layerId: string | undefined): boolean {
+		if (!layerId) return false;
+		return layerId.startsWith('transit-stop-label-')
+		    || layerId === 'close-zoom-station-label';
+	}
+
+	function enterLineDetail(sel: LineDetailSelection) {
+		const map = mapRef;
+		if (!map || !sel.keys?.length || !sel.bbox || sel.bbox.length !== 4) return;
+
+		map.fitBounds(
+			[[sel.bbox[0], sel.bbox[1]], [sel.bbox[2], sel.bbox[3]]],
+			{ padding: { top: 96, bottom: 48, left: 48, right: 48 }, maxZoom: 15, duration: 900 }
+		);
+
+		// Dim veil under the transit block: above basemap / roads / contours,
+		// below the station backdrop, lines and stops. Darkens the basemap
+		// slightly. Created once, then toggled via visibility.
+		if (!map.getSource(LINE_DETAIL_DIM_SOURCE)) {
+			map.addSource(LINE_DETAIL_DIM_SOURCE, {
+				type: 'geojson',
+				data: {
+					type: 'Feature',
+					properties: {},
+					geometry: {
+						type: 'Polygon',
+						coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]
+					}
+				}
+			});
+		}
+		if (!map.getLayer(LINE_DETAIL_DIM_LAYER)) {
+			const beforeId = map.getLayer('close-zoom-station-backdrop')
+				? 'close-zoom-station-backdrop'
+				: TRANSIT_LINE_CASING_LAYERS.find((id) => map.getLayer(id));
+			map.addLayer({
+				id: LINE_DETAIL_DIM_LAYER,
+				type: 'fill',
+				source: LINE_DETAIL_DIM_SOURCE,
+				paint: { 'fill-color': '#000000', 'fill-opacity': 0.25 }
+			}, beforeId);
+		} else {
+			map.setLayoutProperty(LINE_DETAIL_DIM_LAYER, 'visibility', 'visible');
+		}
+
+		// Capture originals on first entry only — switching lines while the
+		// view is open re-derives every override from the same originals.
+		if (!savedLinePaints) {
+			savedLinePaints = new Map();
+			for (const id of [...TRANSIT_LINE_LAYERS, ...TRANSIT_LINE_CASING_LAYERS]) {
+				if (!map.getLayer(id)) continue;
+				savedLinePaints.set(id, {
+					'line-color': map.getPaintProperty(id, 'line-color'),
+					'line-width': map.getPaintProperty(id, 'line-width'),
+					'line-opacity': map.getPaintProperty(id, 'line-opacity')
+				});
+			}
+		}
+		if (!savedStopFilters) {
+			savedStopFilters = new Map();
+			for (const id of LINE_DETAIL_FILTER_LAYERS) {
+				if (!map.getLayer(id)) continue;
+				savedStopFilters.set(id, map.getFilter(id) ?? null);
+			}
+		}
+
+		const isSelected = ['in', ['get', 'line_key'], ['literal', sel.keys]];
+
+		// Base line layers: EVERYTHING goes gray and translucent — the
+		// selected line is redrawn by the highlight pair on top, so it also
+		// sits above lines of higher-ranked modes. Widths stay original.
+		for (const id of TRANSIT_LINE_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setPaintProperty(id, 'line-color', LINE_DETAIL_GRAY);
+			map.setPaintProperty(id, 'line-opacity', LINE_DETAIL_OTHER_OPACITY);
+		}
+		for (const id of TRANSIT_LINE_CASING_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setPaintProperty(id, 'line-opacity', LINE_DETAIL_CASING_OTHER_OPACITY);
+		}
+
+		// Highlight pair: casing + fill for the selected line only, inserted
+		// directly above the topmost transit line layer (below the stop
+		// symbology). Width is the style's own interpolate with the widen
+		// factor folded into each output (see scaleLineWidthExpr).
+		if (!map.getLayer(LINE_DETAIL_HIGHLIGHT_CASING)) {
+			const styleLayers = map.getStyle().layers ?? [];
+			const trainIdx = styleLayers.findIndex((l) => l.id === 'transit-train');
+			const beforeId = trainIdx >= 0 ? styleLayers[trainIdx + 1]?.id : undefined;
+			const casingOrig = savedLinePaints.get('transit-train-casing');
+			const fillOrig = savedLinePaints.get('transit-train');
+			const lineLayout = {
+				'line-cap': 'round' as const,
+				'line-join': 'round' as const,
+				'line-sort-key': ['coalesce', ['get', 'speed_kmh'], 0] as any
+			};
+			map.addLayer({
+				id: LINE_DETAIL_HIGHLIGHT_CASING,
+				type: 'line',
+				source: 'transit_lines',
+				'source-layer': 'transit_lines',
+				minzoom: 4,
+				filter: isSelected as any,
+				layout: lineLayout,
+				paint: {
+					'line-color': '#ffffff',
+					'line-width': scaleLineWidthExpr(
+						casingOrig?.['line-width'], LINE_DETAIL_WIDTH_FACTOR) as any,
+					'line-opacity': 0.9
+				}
+			}, beforeId);
+			map.addLayer({
+				id: LINE_DETAIL_HIGHLIGHT_FILL,
+				type: 'line',
+				source: 'transit_lines',
+				'source-layer': 'transit_lines',
+				minzoom: 4,
+				filter: isSelected as any,
+				layout: lineLayout,
+				paint: {
+					'line-color': ['get', 'color'],
+					'line-width': scaleLineWidthExpr(
+						fillOrig?.['line-width'], LINE_DETAIL_WIDTH_FACTOR) as any,
+					'line-opacity': 1
+				}
+			}, beforeId);
+		} else {
+			for (const id of [LINE_DETAIL_HIGHLIGHT_CASING, LINE_DETAIL_HIGHLIGHT_FILL]) {
+				map.setFilter(id, isSelected as any);
+				map.setLayoutProperty(id, 'visibility', 'visible');
+			}
+		}
+
+		// Stops: hide stations the line does not serve. Membership is an
+		// exact-key substring test against the ";"-padded `line_keys`.
+		const isMember = ['any', ...sel.keys.map((k) =>
+			['in', `;${k};`, ['coalesce', ['get', 'line_keys'], '']])];
+		for (const [id, orig] of savedStopFilters) {
+			map.setFilter(id, (orig ? ['all', orig, isMember] : isMember) as any);
+		}
+
+		lineDetail = sel;
+	}
+
+	function exitLineDetail() {
+		const map = mapRef;
+		lineDetail = null;
+		if (!map) {
+			savedLinePaints = null;
+			savedStopFilters = null;
+			return;
+		}
+		if (map.getLayer(LINE_DETAIL_DIM_LAYER)) {
+			map.setLayoutProperty(LINE_DETAIL_DIM_LAYER, 'visibility', 'none');
+		}
+		for (const id of [LINE_DETAIL_HIGHLIGHT_CASING, LINE_DETAIL_HIGHLIGHT_FILL]) {
+			if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', 'none');
+		}
+		if (savedLinePaints) {
+			for (const [id, props] of savedLinePaints) {
+				for (const [prop, val] of Object.entries(props)) {
+					map.setPaintProperty(id, prop as any, val as any);
+				}
+			}
+		}
+		if (savedStopFilters) {
+			for (const [id, orig] of savedStopFilters) {
+				map.setFilter(id, (orig ?? null) as any);
+			}
+		}
+		savedLinePaints = null;
+		savedStopFilters = null;
+	}
+
+	/** Delegated click handler for `[data-line-detail]` badges inside a
+	 * popup: parses the encoded selection payload and enters the view. */
+	function wireLineDetailClicks(p: maplibregl.Popup, closePopup: () => void) {
+		const el = p.getElement();
+		if (!el) return;
+		el.addEventListener('click', (ev) => {
+			const target = (ev.target as HTMLElement | null)?.closest?.('[data-line-detail]');
+			if (!target) return;
+			// Badges live inside <summary> — stop the details toggle.
+			ev.preventDefault();
+			ev.stopPropagation();
+			try {
+				const sel = JSON.parse(decodeURIComponent(
+					target.getAttribute('data-line-detail') || ''));
+				closePopup();
+				enterLineDetail(sel);
+			} catch { /* malformed payload — ignore */ }
+		});
 	}
 
 	function addContourLayers(map: maplibregl.Map) {
@@ -271,19 +684,42 @@
 
 			addContourLayers(map);
 
-			// Pointer cursor when hovering transit lines and stops
+			// Pointer cursor when hovering transit lines and stops.
+			// Uses a single mousemove handler (not per-layer mouseenter)
+			// so the label bbox test can decide per-cursor-position whether
+			// the cursor is on actual label text vs the label's placement
+			// padding — matches the click behaviour so cursor and click
+			// always agree.
 			const hoverLayers = [
 				...TRANSIT_LINE_LAYERS,
 				...TRANSIT_STOP_DOT_LAYERS,
 				...TRANSIT_STOP_PILL_LAYERS,
 				...TRANSIT_STOP_LABEL_LAYERS,
+				...TRANSIT_PILL_ARROW_LAYERS,
 				'close-zoom-station-label',
 				DEBUG_STOP_LAYER
 			];
-			for (const layer of hoverLayers) {
-				map.on('mouseenter', layer, () => { map.getCanvas().style.cursor = 'pointer'; });
-				map.on('mouseleave', layer, () => { map.getCanvas().style.cursor = ''; });
-			}
+			// Filter to layers actually registered in the style —
+			// queryRenderedFeatures throws on any unknown id, and the debug
+			// stop dot in particular is optional (see popups.md).
+			const activeHoverLayers = hoverLayers.filter((id) => !!map.getLayer(id));
+			map.on('mousemove', (e) => {
+				const feats = map.queryRenderedFeatures(e.point, { layers: activeHoverLayers });
+				let hit = false;
+				for (const f of feats) {
+					if (isLabelLayer(f.layer?.id)) {
+						if (isPointInLabelText(f, e.point, map)) {
+							hit = true;
+							break;
+						}
+						// Padding hit — keep scanning for a non-label match.
+						continue;
+					}
+					hit = true;
+					break;
+				}
+				map.getCanvas().style.cursor = hit ? 'pointer' : '';
+			});
 		});
 
 		map.on('click', (e) => {
@@ -367,10 +803,15 @@
 			for (const f of stopFeatures) {
 				const props = f.properties as Record<string, unknown> | null;
 				if (!props) continue;
-				if (props.lines_json || props.dep_hr !== undefined) {
-					stopFeature = f;
-					break;
+				if (!(props.lines_json || props.dep_hr !== undefined)) continue;
+				// For label features, verify the click landed on the actual
+				// rendered text — not the placement-padding zone that
+				// MapLibre's own hit test would otherwise accept.
+				if (isLabelLayer(f.layer?.id) && !isPointInLabelText(f, e.point, map)) {
+					continue;
 				}
+				stopFeature = f;
+				break;
 			}
 			if (stopFeature) {
 				const p = stopFeature.properties as Record<string, unknown>;
@@ -399,6 +840,7 @@
 						const lines: {
 							ref: string; color: string; mode: string;
 							name?: string; tooltip?: string;
+							keys?: string[]; bbox?: number[]; route?: string;
 						}[] = JSON.parse(String(linesRaw));
 						if (lines.length) {
 							// Flat alternating children: badge, terminus, badge, terminus…
@@ -416,7 +858,19 @@
 								const titleAttr = tip
 									? ` title="${tip.replace(/"/g, '&quot;')}"`
 									: '';
-								const badge = `<span class="popup-badge"${titleAttr} style="background:${l.color};color:${fg}">${label}</span>`;
+								// Line-detail payload: present only when the tiles carry
+								// the baked keys + bbox (line-detail-view.md).
+								const canDetail = Array.isArray(l.keys) && l.keys.length > 0
+									&& Array.isArray(l.bbox) && l.bbox.length === 4;
+								const dataAttr = canDetail
+									? ` data-line-detail="${encodeURIComponent(JSON.stringify({
+										keys: l.keys, bbox: l.bbox, ref: l.ref || '',
+										mode: l.mode || '', color: l.color,
+										route: l.route || l.tooltip || ''
+									}))}"`
+									: '';
+								const cursor = canDetail ? 'cursor:pointer' : 'cursor:default';
+								const badge = `<span class="popup-badge"${titleAttr}${dataAttr} style="background:${l.color};color:${fg};${cursor}">${label}</span>`;
 								const terminus = `<span class="popup-line-terminus">${tip.replace(/</g, '&lt;')}</span>`;
 								return badge + terminus;
 							}).join('');
@@ -440,7 +894,7 @@
 					.popup-badge { display: inline-block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; cursor: default; text-align: center; }
 					.popup-lines-list { display: flex; flex-wrap: wrap; gap: 4px 3px; }
 					.popup-line-terminus { display: none; }
-					.popup-lines[open] .popup-lines-list { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; }
+					.popup-lines[open] .popup-lines-list { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; max-height: 200px; overflow-y: auto; overflow-x: hidden; }
 					.popup-lines[open] .popup-badge { display: block; }
 					.popup-lines[open] .popup-line-terminus { display: inline; color: #444; font-size: 12px; }
 				</style><div style="font-family:'Saira',sans-serif;font-size:13px;line-height:1.4;color:#222">
@@ -452,6 +906,69 @@
 					.setLngLat(e.lngLat)
 					.setHTML(html)
 					.addTo(map);
+				wireLineDetailClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
+				return;
+			}
+
+			// Pill-arrow popup (z17+): single-line summary for the specific
+			// (station, line) the pill-arrow represents. Rendered as one row
+			// in the same visual grid as the line popup (badge + A ↔ B).
+			// See popups.md § Pill-arrow popup.
+			const pillArrowHits = map.queryRenderedFeatures(e.point, {
+				layers: TRANSIT_PILL_ARROW_LAYERS.filter((id) => !!map.getLayer(id))
+			});
+			if (pillArrowHits.length) {
+				const pa = pillArrowHits[0].properties as Record<string, unknown>;
+				const ref = String(pa.ref ?? '');
+				const mode = String(pa.mode ?? '');
+				const color = String(pa.color ?? '#888888');
+				const stopName = String(pa.stop_name ?? '');
+				const first = String(pa.first_terminus_name ?? '');
+				const last  = String(pa.last_terminus_name ?? '');
+				let route = '';
+				if (first && last) route = first === last ? first : `${first} ↔ ${last}`;
+				else if (first) route = first;
+				else if (last)  route = last;
+				const routeSafe = route.replace(/</g, '&lt;');
+				const label = ref || mode || '?';
+				const lum = parseInt(color.slice(1, 3), 16) * 0.299
+					+ parseInt(color.slice(3, 5), 16) * 0.587
+					+ parseInt(color.slice(5, 7), 16) * 0.114;
+				const fg = lum > 140 ? '#000' : '#fff';
+				// Line-detail-view payload: mirror of the station / line
+				// popup badges. Enabled only when the tiles carry line_key
+				// + line_bbox on the pill-arrow feature.
+				const lineKey = String(pa.line_key ?? '');
+				const bboxStr = String(pa.line_bbox ?? '');
+				const bboxParts = bboxStr.split(',').map(Number);
+				const canDetail = !!lineKey && bboxParts.length === 4
+					&& bboxParts.every((n) => Number.isFinite(n));
+				const dataAttr = canDetail
+					? ` data-line-detail="${encodeURIComponent(JSON.stringify({
+						keys: [lineKey],
+						bbox: bboxParts,
+						ref, mode, color,
+						route
+					}))}"`
+					: '';
+				const cursor = canDetail ? 'cursor:pointer' : 'cursor:default';
+				const html = `<style>
+					.popup-pa-title { font-weight:700; font-size:15px; margin-bottom:6px; }
+					.popup-pa-row { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; align-items: center; }
+					.popup-pa-badge { display: block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-align: center; }
+					.popup-pa-route { color: #444; font-size: 12px; }
+				</style><div style="font-family:'Saira',sans-serif;font-size:13px;line-height:1.4;color:#222">
+					<div class="popup-pa-title">${fmt(stopName) || '(no name)'}</div>
+					<div class="popup-pa-row">
+						<span class="popup-pa-badge"${dataAttr} style="background:${color};color:${fg};${cursor}">${label}</span>
+						<span class="popup-pa-route">${routeSafe}</span>
+					</div>
+				</div>`;
+				popup = new maplibregl.Popup({ maxWidth: '360px' })
+					.setLngLat(e.lngLat)
+					.setHTML(html)
+					.addTo(map);
+				wireLineDetailClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
 				return;
 			}
 
@@ -475,6 +992,8 @@
 			const groups = new Map<string, {
 				ref: string; mode: string; color: string; name: string;
 				termini: Set<string>;
+				lineKeys: Set<string>;
+				bbox: [number, number, number, number] | null;
 			}>();
 			for (const f of lineFeatures) {
 				const fp = f.properties as Record<string, unknown>;
@@ -488,6 +1007,8 @@
 						color: String(fp.color ?? '#888888'),
 						name: String(fp.name ?? ''),
 						termini: new Set<string>(),
+						lineKeys: new Set<string>(),
+						bbox: null,
 					};
 					groups.set(key, g);
 				}
@@ -495,6 +1016,22 @@
 				const last  = String(fp.last_terminus_name ?? '');
 				if (first) g.termini.add(first);
 				if (last)  g.termini.add(last);
+				// Line-detail identity + camera fit (baked at build time —
+				// line-detail-view.md). The group bbox is identical on every
+				// variant of one line; the union only matters when two
+				// agencies share (ref, mode) in one badge row.
+				if (fp.line_key) g.lineKeys.add(String(fp.line_key));
+				const bboxRaw = String(fp.line_bbox ?? '');
+				if (bboxRaw) {
+					const parts = bboxRaw.split(',').map(Number);
+					if (parts.length === 4 && parts.every((v) => Number.isFinite(v))) {
+						const bb = parts as [number, number, number, number];
+						g.bbox = g.bbox
+							? [Math.min(g.bbox[0], bb[0]), Math.min(g.bbox[1], bb[1]),
+							   Math.max(g.bbox[2], bb[2]), Math.max(g.bbox[3], bb[3])]
+							: bb;
+					}
+				}
 			}
 			const lines = Array.from(groups.values()).sort((a, b) => {
 				const ra = MODE_RANK[a.mode] ?? 99;
@@ -517,7 +1054,15 @@
 					? `${termini[0]} ↔ ${termini[1]}`
 					: termini.join(' · ');
 				const routeSafe = route.replace(/</g, '&lt;');
-				const badge = `<span class="popup-badge" style="background:${l.color};color:${fg}">${label}</span>`;
+				const canDetail = l.lineKeys.size > 0 && l.bbox !== null;
+				const dataAttr = canDetail
+					? ` data-line-detail="${encodeURIComponent(JSON.stringify({
+						keys: Array.from(l.lineKeys), bbox: l.bbox, ref: l.ref,
+						mode: l.mode, color: l.color, route
+					}))}"`
+					: '';
+				const cursor = canDetail ? 'cursor:pointer' : 'cursor:default';
+				const badge = `<span class="popup-badge"${dataAttr} style="background:${l.color};color:${fg};${cursor}">${label}</span>`;
 				const terminus = `<span class="popup-line-terminus">${routeSafe}</span>`;
 				return badge + terminus;
 			}).join('');
@@ -525,7 +1070,7 @@
 			const html = `<style>
 				.popup-line-list { font-family:'Saira',sans-serif; color:#222; }
 				.popup-line-list .popup-badge { display: block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-align: center; }
-				.popup-line-list .popup-cells { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; }
+				.popup-line-list .popup-cells { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; max-height: 200px; overflow-y: auto; overflow-x: hidden; }
 				.popup-line-list .popup-line-terminus { color: #444; font-size: 12px; }
 			</style><div class="popup-line-list">
 				<div class="popup-cells">${cells}</div>
@@ -534,33 +1079,58 @@
 				.setLngLat(e.lngLat)
 				.setHTML(html)
 				.addTo(map);
+			wireLineDetailClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
 		});
 
 		return () => {
+			lineDetail = null;
+			savedLinePaints = null;
+			savedStopFilters = null;
 			mapRef = null;
 			map.remove();
 		};
 	});
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && lineDetail) exitLineDetail(); }} />
+
 <div class="map-wrap">
 	<div bind:this={container} class="map"></div>
 
-	<div class="top-controls">
-		<div class="view-toggle" role="group" aria-label="Map view">
+	{#if lineDetail}
+		<div class="line-detail-bar" role="status">
+			<span
+				class="line-detail-badge"
+				style="background:{lineDetail.color};color:{badgeTextColor(lineDetail.color)}"
+			>{lineDetail.ref || lineDetail.mode}</span>
+			{#if lineDetail.route}
+				<span class="line-detail-route">{lineDetail.route}</span>
+			{/if}
 			<button
-				class:active={viewMode === 'standard'}
-				onclick={() => setView('standard')}
-			>Standard</button>
-			<button
-				class:active={viewMode === 'transit-focus'}
-				onclick={() => setView('transit-focus')}
-			>Transit</button>
+				class="line-detail-close"
+				onclick={exitLineDetail}
+				aria-label="Close line detail view"
+			>×</button>
 		</div>
-		{#if viewMode === 'transit-focus'}
-			<StopSearch map={mapRef} />
-		{/if}
-	</div>
+	{/if}
+
+	{#if !lineDetail}
+		<div class="top-controls">
+			<div class="view-toggle" role="group" aria-label="Map view">
+				<button
+					class:active={viewMode === 'standard'}
+					onclick={() => setView('standard')}
+				>Standard</button>
+				<button
+					class:active={viewMode === 'transit-focus'}
+					onclick={() => setView('transit-focus')}
+				>Transit</button>
+			</div>
+			{#if viewMode === 'transit-focus'}
+				<StopSearch map={mapRef} />
+			{/if}
+		</div>
+	{/if}
 
 	<button
 		class="contour-toggle"
@@ -601,6 +1171,57 @@
 		display: flex;
 		gap: 0.5rem;
 		align-items: flex-start;
+	}
+
+	.line-detail-bar {
+		position: absolute;
+		top: 1rem;
+		left: 50%;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+		max-width: min(70vw, 34rem);
+		background: #ffffff;
+		border-radius: 999px;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		padding: 0.7rem 0.9rem 0.7rem 1rem;
+		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		z-index: 5;
+	}
+
+	.line-detail-badge {
+		border-radius: 3px;
+		padding: 2px 8px;
+		font-size: 0.8rem;
+		font-weight: 800;
+		letter-spacing: 0.02em;
+		white-space: nowrap;
+	}
+
+	.line-detail-route {
+		font-size: 0.85rem;
+		color: #333;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.line-detail-close {
+		border: none;
+		background: transparent;
+		color: #555;
+		font-size: 1.1rem;
+		line-height: 1;
+		cursor: pointer;
+		padding: 0.15rem 0.35rem;
+		border-radius: 999px;
+		flex: 0 0 auto;
+	}
+
+	.line-detail-close:hover {
+		background: #eee;
+		color: #000;
 	}
 
 	.view-toggle {

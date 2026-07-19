@@ -38,7 +38,7 @@ from stops.pill_zoom.polyline import (
 
 
 def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
-                        dep_hr=0.0):
+                        dep_hr=0.0, line_keys=""):
     """
     Build pill (and optional connector) GeoJSON features for a stop cluster.
 
@@ -69,6 +69,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
         "parent_station": dom_stop.get("parent_station", ""),
         "lines_json":     lines_json,
         "dep_hr":         round(float(dep_hr or 0.0), 3),
+        "line_keys":      line_keys,
     }
 
     def make_feat(coords, feature_type):
@@ -110,7 +111,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
             feats.extend(build_indicator_features(
                 cluster_stops, pos[0], pos[1], line_lookup,
                 parent_width_base=stop_props["width_base"],
-                parent_mode=stop_props["mode"]))
+                parent_mode=stop_props["mode"], line_keys=line_keys))
         return feats
 
     path = nearest_neighbor_path(positions)
@@ -170,7 +171,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
                 cluster_stops, mid_lon, mid_lat, line_lookup,
                 tangent_deg=tan_deg, parent_type="pill",
                 parent_width_base=stop_props["width_base"],
-                parent_mode=stop_props["mode"]))
+                parent_mode=stop_props["mode"], line_keys=line_keys))
         return feats
 
     # Split path at every large gap → N groups
@@ -201,7 +202,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
                     _stops_at_positions(grp), mid_lon, mid_lat, line_lookup,
                     tangent_deg=tan_deg, parent_type="pill",
                     parent_width_base=stop_props["width_base"],
-                    parent_mode=stop_props["mode"]))
+                    parent_mode=stop_props["mode"], line_keys=line_keys))
             mids = _pill_mid_attach_candidates(simp, cluster_cos_lat)
             group_mid_attach.append(mids)
             for pos, tan in mids:
@@ -222,7 +223,7 @@ def make_pill_features(cluster_stops, minzoom, lines_json="", line_lookup=None,
                     pos_to_platforms.get((pos[0], pos[1]), []),
                     pos[0], pos[1], line_lookup,
                     parent_width_base=stop_props["width_base"],
-                    parent_mode=stop_props["mode"]))
+                    parent_mode=stop_props["mode"], line_keys=line_keys))
             group_mid_attach.append([])
 
     # MST connectors (Kruskal's) — produces tree topology so branches are shorter than

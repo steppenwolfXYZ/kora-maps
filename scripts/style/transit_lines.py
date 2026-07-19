@@ -102,7 +102,7 @@ def build_close_zoom_backdrop_layers() -> list:
         "minzoom": 17,
         "filter": ["==", ["get", "feature_type"], "backdrop"],
         "paint": {
-            "fill-color": ["coalesce", ["get", "bg_color"], "#ffe566"],
+            "fill-color": ["coalesce", ["get", "bg_color"], "#b340c9"],
             "fill-opacity": 0.35,
             "fill-antialias": True,
         },

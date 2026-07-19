@@ -572,12 +572,25 @@ for parent, parent_sids in per_parent_sids.items():
         dest_full = " / ".join(c["destinations"])
         ref_text = c["ref"] or ""
 
+        # Popup payload: station name (from the parent's dot props), the
+        # line's two termini, and the line-detail-view identity + camera
+        # fit so clicking the badge in the pill-arrow popup can enter the
+        # detail view exactly like the station / line popups do.
+        _pa_line_info = line_lookup.get(c["osm_id"]) or {}
+        _pa_label_info = (parent_label_info or {}).get(parent) or {}
+        _pa_bbox = _pa_line_info.get("group_bbox")
+        _pa_bbox_str = ",".join(str(v) for v in _pa_bbox) if _pa_bbox else ""
         common = {
             "mode":           c["mode"],
             "color":          c["color"],
             "ref":            ref_text,
             "stop_id":        sid,
             "parent_station": parent,
+            "stop_name":      _pa_label_info.get("stop_name", ""),
+            "first_terminus_name": _pa_line_info.get("first_terminus_name", ""),
+            "last_terminus_name":  _pa_line_info.get("last_terminus_name", ""),
+            "line_key":       _pa_line_info.get("line_key", ""),
+            "line_bbox":      _pa_bbox_str,
         }
 
         parent_colors[parent].add(c["color"])

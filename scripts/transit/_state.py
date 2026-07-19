@@ -114,6 +114,26 @@ MODE_TO_COLOR_GROUP = {
 
 COLOR_GROUP_ORDER = ["train", "metro", "tram", "bus", "regional_bus", "mountain"]
 
+# ── Line identity keys (line-detail-view.md) ─────────────────────────────────
+# One canonical key per logical line: all variants (directions, branches,
+# short-turns) of a (ref, agency_id, mode) group share it. Stamped as
+# `line_key` on line features and collected into the `line_keys` membership
+# string on stop features, so the client can highlight a line and filter
+# stops without extra fetches. "~" joins the fields; the membership string
+# wraps every key in ";" so an exact-key substring test can't false-positive.
+
+def line_key_of(d) -> str:
+    """Canonical line key from any dict carrying ref / agency_id / mode
+    (line-feature properties or a line_lookup info entry)."""
+    return f'{d.get("ref", "")}~{d.get("agency_id", "")}~{d.get("mode", "")}'
+
+
+def line_keys_str(keys) -> str:
+    """Delimiter-padded membership string from an iterable of line keys:
+    ";key1;key2;" — the client matches ";key;" as a substring."""
+    uniq = sorted({k for k in keys if k})
+    return (";" + ";".join(uniq) + ";") if uniq else ""
+
 PILL_CLUSTER_RAIL_KM    = 0.300
 PILL_CLUSTER_NONRAIL_KM = 0.050
 

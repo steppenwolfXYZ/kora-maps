@@ -39,8 +39,9 @@ from stops.pill_zoom.geom import (
     PROTECTION_RADIUS_NONRAIL_M, PROTECTION_RADIUS_RAIL_M,
 )
 from stops.pill_zoom.lines import (
-    build_indicator_features, cluster_departures_per_hour, cluster_lines,
-    color_luminance, count_unique_lines, dominant_line, pill_minzoom,
+    build_indicator_features, cluster_departures_per_hour, cluster_line_keys,
+    cluster_lines, color_luminance, count_unique_lines, dominant_line,
+    pill_minzoom,
 )
 from stops.pill_zoom.make import make_pill_features
 from stops.pill_zoom.nn_path import nearest_neighbor_path
@@ -80,6 +81,7 @@ def _bake_nonrail_cluster(payload):
      lines_json_str) = payload
     line_lookup = _WORKER_LINE_LOOKUP
     bands = _WORKER_PILL_DESIGN_BANDS
+    cluster_keys_str = centroid_props.get("line_keys", "")
 
     if mz is None:
         dot_feat = {
@@ -90,13 +92,15 @@ def _bake_nonrail_cluster(payload):
             "properties": centroid_props,
         }
         ind = list(build_indicator_features(
-            cluster, centroid_lon, centroid_lat, line_lookup))
+            cluster, centroid_lon, centroid_lat, line_lookup,
+            line_keys=cluster_keys_str))
         return (dot_feat, None, ind)
 
     _set_pill_design_band(bands["C"])
     cluster_dep_hr = centroid_props.get("dep_hr", 0.0)
     c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
-                                  dep_hr=cluster_dep_hr)
+                                  dep_hr=cluster_dep_hr,
+                                  line_keys=cluster_keys_str)
     if not c_feats:
         # Pill collapsed — fall through to centroid dot + indicators.
         dot_feat = {
@@ -107,7 +111,8 @@ def _bake_nonrail_cluster(payload):
             "properties": centroid_props,
         }
         ind = list(build_indicator_features(
-            cluster, centroid_lon, centroid_lat, line_lookup))
+            cluster, centroid_lon, centroid_lat, line_lookup,
+            line_keys=cluster_keys_str))
         return (dot_feat, None, ind)
 
     _tag_band_features(c_feats, "C", bands["C"])
@@ -115,7 +120,8 @@ def _bake_nonrail_cluster(payload):
     for band_id in ("A", "B"):
         _set_pill_design_band(bands[band_id])
         bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
-                                     dep_hr=cluster_dep_hr)
+                                     dep_hr=cluster_dep_hr,
+                                     line_keys=cluster_keys_str)
         _tag_band_features(bfeats, band_id, bands[band_id])
         all_band_feats.extend(bfeats)
     dot_lon, dot_lat = far_zoom_dot_position(
@@ -170,6 +176,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         coords  = feat["geometry"]["coordinates"]
         minzoom = MODE_MINZOOM.get(mode, 11)
         oid     = str(p.get("osm_id", ""))
+        feat_line_keys = line_keys_str([line_key_of(p)])
         for lon, lat in p["gtfs_stops"]:
             slon, slat = snap_to_line(lon, lat, coords)
             other_features.append({
@@ -177,12 +184,14 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 "tippecanoe": {"minzoom": minzoom},
                 "geometry": {"type": "Point", "coordinates": [slon, slat]},
                 "properties": {"color": color, "mode": mode,
-                               "width_base": _stop_wb(wb, mode)},
+                               "width_base": _stop_wb(wb, mode),
+                               "line_keys": feat_line_keys},
             })
             indicator_features.extend(build_indicator_features(
                 [{"osm_id": oid, "width_base": wb, "mode": mode}],
                 slon, slat, line_lookup,
-                parent_width_base=_stop_wb(wb, mode), parent_mode=mode))
+                parent_width_base=_stop_wb(wb, mode), parent_mode=mode,
+                line_keys=feat_line_keys))
         # Mountain/ferry via gtfs_stops: no pills
 
     # --- Per-line stops ---
@@ -335,6 +344,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                     "stop_id":        sid,
                     "parent_station": meta.get("parent", ""),
                 }]
+                mini_line_keys = cluster_line_keys(mini_cluster, line_lookup, oids_by_uic)
                 other_features.append({
                     "type": "Feature",
                     "tippecanoe": {"minzoom": minzoom},
@@ -348,13 +358,14 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                         "parent_station": meta.get("parent", ""),
                         "lines_json":     json.dumps(cluster_lines(mini_cluster, line_lookup, oids_by_uic)),
                         "dep_hr":         round(cluster_departures_per_hour(mini_cluster, line_lookup, oids_by_uic), 3),
+                        "line_keys":      mini_line_keys,
                     },
                 })
                 indicator_features.extend(build_indicator_features(
                     [{"osm_id": str(osm_id), "width_base": width_base, "mode": mode}],
                     slon, slat, line_lookup,
                     parent_width_base=_stop_wb(width_base, mode),
-                    parent_mode=mode))
+                    parent_mode=mode, line_keys=mini_line_keys))
 
     print(f"  [{time.perf_counter() - _t_phase:6.1f}s] build stop dots + per-line pill candidates")
     _t_phase = time.perf_counter()
@@ -433,6 +444,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             for c in cands
         ]
         lines_json_str = json.dumps(cluster_lines(synthetic_cluster, line_lookup, oids_by_uic))
+        pier_line_keys = cluster_line_keys(synthetic_cluster, line_lookup, oids_by_uic)
         base_props = {
             "color":          rep["color"],
             "mode":           "ferry",
@@ -442,6 +454,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "parent_station": rep["parent_station"],
             "lines_json":     lines_json_str,
             "dep_hr":         round(cluster_departures_per_hour(synthetic_cluster, line_lookup, oids_by_uic), 3),
+            "line_keys":      pier_line_keys,
         }
         indicator_stubs = [{"osm_id": str(c["osm_id"]), "mode": "ferry"} for c in cands]
 
@@ -482,7 +495,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "properties": {**base_props, "feature_type": "endpoint"},
         })
         indicator_features.extend(build_indicator_features(
-            indicator_stubs, canon[0], canon[1], line_lookup))
+            indicator_stubs, canon[0], canon[1], line_lookup,
+            line_keys=pier_line_keys))
 
         if max_vertex_dist_m > FERRY_CONVERGE_M:
             # Non-convergent: per-line endpoints at each line's own snap, as
@@ -519,7 +533,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 })
                 indicator_features.extend(build_indicator_features(
                     [{"osm_id": str(c["osm_id"])}],
-                    slon, slat, line_lookup))
+                    slon, slat, line_lookup,
+                    line_keys=pier_line_keys))
             continue
 
         dist_m = haversine_km(gtfs_repr[0], gtfs_repr[1],
@@ -616,6 +631,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         centroid_lon = sum(s["lon"] for s in cluster) / len(cluster)
         centroid_lat = sum(s["lat"] for s in cluster) / len(cluster)
         lines_json_str = json.dumps(cluster_lines(cluster, line_lookup, oids_by_uic))
+        cluster_keys_str = cluster_line_keys(cluster, line_lookup, oids_by_uic)
         centroid_props = {
             "color":          color,
             "mode":           mode,
@@ -625,6 +641,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
             "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup, oids_by_uic), 3),
+            "line_keys":      cluster_keys_str,
         }
 
         if mz is None:
@@ -638,7 +655,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 "properties": centroid_props,
             })
             indicator_features.extend(build_indicator_features(
-                cluster, centroid_lon, centroid_lat, line_lookup))
+                cluster, centroid_lon, centroid_lat, line_lookup,
+                line_keys=cluster_keys_str))
         else:
             # Bake band C first — its features drive the far-zoom-dot
             # decision and the pill-collapse fallback (matches previous
@@ -648,14 +666,16 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             _set_pill_design_band(PILL_DESIGN_BANDS["C"])
             cluster_dep_hr = centroid_props["dep_hr"]
             c_feats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
-                                          dep_hr=cluster_dep_hr)
+                                          dep_hr=cluster_dep_hr,
+                                          line_keys=cluster_keys_str)
             if c_feats:
                 _tag_band_features(c_feats, "C", PILL_DESIGN_BANDS["C"])
                 all_band_feats = list(c_feats)
                 for _band_id in ("A", "B"):
                     _set_pill_design_band(PILL_DESIGN_BANDS[_band_id])
                     _bfeats = make_pill_features(cluster, mz, lines_json_str, line_lookup,
-                                                  dep_hr=cluster_dep_hr)
+                                                  dep_hr=cluster_dep_hr,
+                                                  line_keys=cluster_keys_str)
                     _tag_band_features(_bfeats, _band_id, PILL_DESIGN_BANDS[_band_id])
                     all_band_feats.extend(_bfeats)
                 # Far-zoom dot from band C. Rail-like family skips the
@@ -684,7 +704,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                     "properties": centroid_props,
                 })
                 indicator_features.extend(build_indicator_features(
-                    cluster, centroid_lon, centroid_lat, line_lookup))
+                    cluster, centroid_lon, centroid_lat, line_lookup,
+                    line_keys=cluster_keys_str))
 
     rail_pill_count = len(pill_features_rail)
     print(f"  → {rail_pill_count} rail pill/connector features "
@@ -770,6 +791,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "parent_station": dom_stop.get("parent_station", ""),
             "lines_json":     lines_json_str,
             "dep_hr":         round(cluster_departures_per_hour(cluster, line_lookup, oids_by_uic), 3),
+            "line_keys":      cluster_line_keys(cluster, line_lookup, oids_by_uic),
         }
         payloads.append((cluster, mz, cluster_rail_like, mode_minzoom,
                          centroid_lon, centroid_lat, centroid_props,
@@ -1357,6 +1379,12 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "label_priority": p.get("label_priority", 11000.0),
             "parent_station": key,
             "mode":           p.get("mode", ""),
+            "line_keys":      p.get("line_keys", ""),
+            # Popup payload — mirror of the close-zoom station_label so a
+            # click on the pill label text opens the same station popup
+            # (see popups.md § Shared conventions).
+            "lines_json":     p.get("lines_json", ""),
+            "dep_hr":         float(p.get("dep_hr", 0.0) or 0.0),
         }
 
         for group_bands in groups.values():
@@ -1379,23 +1407,78 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     _t_phase = time.perf_counter()
 
     print("Emitting close-zoom stop features...")
+    # Cross-parent grouping (stops-close-zoom.md § Cross-parent grouping):
+    # The pill clusterer authoritatively decides which stops belong to one
+    # station (spatial + same-line guard). Where its clusters group several
+    # GTFS parent_station UICs together — canonical case: Gümligen,
+    # Melchenbühl (Tram) 8507052 + (Bus) 8577013 — close-zoom rendering
+    # keys hulls, backdrops, and station labels on the CLUSTER LEADER
+    # rather than the individual GTFS parents, so the merged station gets
+    # one hull and one label. Leader is the far-zoom dot's parent (the
+    # dominant stop's parent), so parent_label_info naturally holds the
+    # leader's entry.
+    parent_leader: dict = {}
+    cluster_parents_by_leader: dict = defaultdict(set)
+    for cluster in list(rail_pill_clusters) + list(nonrail_clusters):
+        parents_in_cluster = {
+            s.get("parent_station") for s in cluster if s.get("parent_station")
+        }
+        if not parents_in_cluster:
+            continue
+        _, _, _, dom_stop = dominant_line(cluster)
+        leader = dom_stop.get("parent_station") or min(parents_in_cluster)
+        if leader not in parents_in_cluster:
+            leader = min(parents_in_cluster)
+        for p in parents_in_cluster:
+            parent_leader[p] = leader
+        cluster_parents_by_leader[leader] |= parents_in_cluster
+    n_merged_clusters = sum(
+        1 for parents in cluster_parents_by_leader.values() if len(parents) > 1)
+    print(f"  parent_leader: {n_merged_clusters:,} clusters span >1 GTFS parent "
+          f"(merged for close-zoom hull / label)")
+
+    # Trailing mode-suffix parenthetical stripped when the cluster spans
+    # multiple parents so the merged label reads "Melchenbühl" instead of
+    # "Melchenbühl (Tram)". Single-parent clusters keep the suffix — it may
+    # be meaningful (e.g. a standalone "(Tram)" station).
+    import re as _re
+    _MODE_SUFFIX_RE = _re.compile(
+        r"\s*\((?:Tram|Bus|Zug|Bahn|Metro|Train|Ferry|Schiff)\)\s*$",
+        _re.IGNORECASE)
+
+    def _strip_mode_suffix(name: str) -> str:
+        return _MODE_SUFFIX_RE.sub("", name).strip() or name
+
     # Per-parent label metadata for the close-zoom station label
     # (stop-labels.md § close-zoom): the best dot per parent already
-    # carries the post-strip display_name.
-    parent_label_info = {
-        key: {"stop_name": f["properties"].get("stop_name", ""),
-              "display_name": (f["properties"].get("display_name")
-                               or f["properties"].get("stop_name", "")),
-              "stop_tier": f["properties"].get("stop_tier", "small_bus"),
-              "lines_json": f["properties"].get("lines_json", ""),
-              "dep_hr":     f["properties"].get("dep_hr", 0.0)}
-        for key, (f, _) in best_dot_by_key.items()
-    }
+    # carries the post-strip display_name. Keys are leader parents; a
+    # cluster spanning multiple parents surfaces one entry (its leader),
+    # with the mode-suffix parenthetical stripped from BOTH the visible
+    # display_name and the popup-title stop_name so the merged station
+    # doesn't announce itself as "(Tram)" when it also covers buses.
+    parent_label_info = {}
+    for key, (f, _) in best_dot_by_key.items():
+        props = f["properties"]
+        stop_name = props.get("stop_name", "")
+        display = (props.get("display_name") or stop_name)
+        if len(cluster_parents_by_leader.get(key, set())) > 1:
+            if display:
+                display = _strip_mode_suffix(display)
+            if stop_name:
+                stop_name = _strip_mode_suffix(stop_name)
+        parent_label_info[key] = {
+            "stop_name":    stop_name,
+            "display_name": display,
+            "stop_tier":    props.get("stop_tier", "small_bus"),
+            "lines_json":   props.get("lines_json", ""),
+            "dep_hr":       props.get("dep_hr", 0.0),
+        }
     write_close_zoom_features(line_stops, line_lookup, stop_meta, stop_attrs,
                               end_of_platform_pairs,
                               skip_first_oids, skip_last_oids,
                               rail_idx=rail_idx, tram_idx=tram_idx,
-                              parent_label_info=parent_label_info)
+                              parent_label_info=parent_label_info,
+                              parent_leader=parent_leader)
     print(f"  [{time.perf_counter() - _t_phase:6.1f}s] write_close_zoom_features (visits + polygon bake + write)")
 
     # Summary

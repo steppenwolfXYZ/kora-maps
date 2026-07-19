@@ -6,8 +6,10 @@ Click-popups on the map give a short human-readable summary of what was clicked.
 
 - Font: Saira across every popup.
 - Opened on click, closed by clicking elsewhere or clicking a different feature.
+- Clicking a line badge (station popup or line popup) closes the popup and enters the line detail view for that line — see `line-detail-view.md`.
 - Click priority when features overlap: station > line. The close-zoom departures popup is triggered only in its own zoom band.
 - Stop names appear in full — no shortening, even where the base map style abbreviates them for space.
+- Line lists have a bounded height. The vertical badge / terminus list in the line popup and the expanded state of the station popup capped so a very busy station or corridor doesn't push the popup off-screen — the list itself scrolls, while the popup header (station name, departures per hour, chevron) stays in place.
 
 ## Station popup
 
@@ -66,6 +68,19 @@ Multiple lines often overlap at the click point (parallel corridors, shared alig
 ### Route text per line
 
 For each `(ref, mode)` in the capture set, the two termini across all captured variants of the line become the `A ↔ B` string. If exactly two distinct terminus names appear across variants, format as `A ↔ B`. If more (branching variants terminate at different endpoints), list the unique names joined by ` · ` — no per-station subsumption is applied (there is no station reference here).
+
+## Pill-arrow popup
+
+Triggered by clicking a pill-arrow (the z17+ elongated stop labels with the line drawn through them). Represents a single (station, line) pair — a compact summary of "this line, at this station".
+
+Two sections stacked:
+
+1. **Station name** — title, bold, same as the station popup's title.
+2. **Line row** — one row in the same visual grid as the line popup's list: badge on the left, route (`first ↔ last`) on the right.
+
+Data flow: pill-arrow features carry `stop_name` (from the parent station's dot), `first_terminus_name` / `last_terminus_name` (from `line_lookup[osm_id]`), and the line-detail-view identity + camera fit (`line_key`, `line_bbox`) all baked at emission time. No client-side joins. Clicking the badge closes the popup and enters the line detail view for that line — same behaviour as the badges in the station / line popups.
+
+Click priority at z17+: station-label click → full station popup (label bbox check). Pill-arrow click (outside any station-label text) → pill-arrow popup. Everything else → line popup.
 
 ## Close-zoom departures popup
 

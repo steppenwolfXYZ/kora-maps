@@ -91,7 +91,7 @@ The `intercity` mode no longer exists. All rail (IC, IR, EC, TGV, ICE, S-Bahn, R
 Transit line casing is WHITE (`#ffffff`) for ALL modes including mountain. Never use black. User has confirmed white multiple times.
 
 ## Transit style: mountain line
-Mountain line color is fixed light yellow `#ffe566` — no frequency-based color variance. Width carries a deliberately narrow frequency-driven spread (current `line_width.mountain` is 1.5 / 2.5). Do not change these without explicit instruction.
+Mountain line color is purple (hue 290) with a deliberately narrow speed-driven curve centered on `#b340c9` — see the mountain branch in `speed_to_color` (`gtfs/frequency.py`). Width carries a deliberately narrow frequency-driven spread (current `line_width.mountain` is 1.5 / 2.5). Do not widen either range without explicit instruction.
 
 ## Bridge deck
 Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` transportation. Do NOT split into per-class deck layers — they produce hollow "donut" artifacts. This has been tried and reverted multiple times; do not attempt again.

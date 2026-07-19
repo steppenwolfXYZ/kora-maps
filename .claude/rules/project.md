@@ -59,16 +59,17 @@ Car-Free Map — a MapLibre GL map style focused on walkability and car-free tra
 
 | Mode | Color | Notes |
 |---|---|---|
-| Train (all rail) | red | one color for all types; speed shown via thickness |
-| Tram | purple | |
-| City bus | blue | |
-| Ferry | blue | same as city bus |
-| Long-distance bus | turquoise | |
-| Mountain railway | light yellow `#ffe566` | funicular, cable car, gondola (GTFS route_type 5/6/7) plus rack-rail operators in the `mountain_agency_ids` whitelist (WAB, JB, GGB, RB, PB, BRB, MG, DFB, BOB-spb, VerAlp) — fixed color, no freq variance. |
+| Train (all rail) | red (hue 0) | one color for all types; speed shown via saturation/lightness |
+| Tram | turquoise (hue 180) | |
+| Metro | green (hue 120) | |
+| City bus | blue (hue 220) | |
+| Regional bus | bright orange (hue 25) | own s/l curve — stays vivid throughout; slow end light peach, max = pure bright orange |
+| Ferry | blue (hue 220) | same hue as city bus |
+| Mountain | purple (hue 290) | funicular, cable car, gondola (extended GTFS `route_type` 1300/1303/1400/116) plus rack-rail operators in the `mountain_agency_ids` whitelist (WAB, JB, GGB, RB, PB, BRB, MG, DFB, BOB-spb, VerAlp) — own s/l curve, deliberately narrow range centered on `#b340c9`. |
 
 **Speed and frequency encoding:**
-- Line thickness = speed (faster = thicker)
-- Color saturation = frequency (higher freq = more saturated)
+- Line thickness = frequency (higher freq = thicker) — `score_to_width_base(freq_score, mode)` over the per-mode `line_width` min/max bounds
+- Color = speed (faster = darker + more saturated) — `speed_to_color(mode, speed_kmh)` over each mode's s/l curve
 
 ---
 

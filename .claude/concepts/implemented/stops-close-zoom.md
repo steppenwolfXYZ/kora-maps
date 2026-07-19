@@ -75,11 +75,19 @@ One pill-arrow per (stop, line, direction). Same-direction variants of a line at
 
 ### Station background polygon
 
-One translucent polygon per parent station, sitting behind the transit lines (not just behind the stop layers).
+One translucent polygon per station group, sitting behind the transit lines (not just behind the stop layers).
 
 - **Shape**: a rounded convex envelope ("hull") around everything the station comprises: all pill-arrow outlines, the line sections adjacent to them, and — for rail — the **full platform extent** along the track (the same platform-extent logic used by the platform debug overlay), plus a fixed outward padding. The outline only bulges outward; it never notches inward between platforms. Covering somewhat more than the exact union is fine.
-- No overlapping shapes — exactly one polygon per parent station.
+- No overlapping shapes — exactly one polygon per station group.
 - **Color**: the serving line's color. When lines of several colors serve the station, a blend of all their colors stands in for a gradient (a true polygon gradient fill is not possible in the rendering engine).
+
+### Cross-parent grouping
+
+Swiss GTFS sometimes splits one physical station between multiple `parent_station` UICs — canonical case: `Gümligen, Melchenbühl (Tram)` (UIC 8507052) and `Gümligen, Melchenbühl (Bus)` (UIC 8577013), two parents whose platforms sit within ~20 m of each other. The pill clusterer already treats them as one station (spatial cluster within `PILL_CLUSTER_NONRAIL_KM`, filtered by the same-line guard). Close-zoom rendering follows the pill clusterer's decision rather than raw GTFS `parent_station`.
+
+- **Grouping key**: for every cluster produced by `cluster_stops_for_pills`, one **leader parent** represents the whole group. The leader is the parent of the cluster's dominant stop (same choice already used to pick the far-zoom dot's `parent_station`). All other parents in the same cluster remap to the leader. Close-zoom pill-arrow queue keying, hull cloud accumulation, backdrop emission, and station-label emission all use the leader parent as the grouping key. A single hull, one backdrop color blend, and one station label cover the whole cluster.
+- **Pill-arrow rules unchanged**: aerials-never-pool, ferries-never-pool, rail per-track clustering, same-curb resolution, direction grouping etc. all continue to run within the leader-scoped group. The same-line guard from the pill clusterer prevents accidental merging — two parents that share a drawn line don't cluster in the first place, so cross-parent pooling only affects parents that carry disjoint line sets.
+- **Display name**: the leader's `stop_name` runs through the standard city-prefix strip; when the cluster contains **multiple** parents, any trailing mode-suffix parenthetical (`(Tram)`, `(Bus)`, `(Zug)`, `(Bahn)`, `(Metro)`, `(Train)`, `(Ferry)`, `(Schiff)`, case-insensitive) is stripped so the merged label reads `Gümligen, Melchenbühl` rather than `Melchenbühl (Tram)`. The same strip runs on the popup-title `stop_name` so a click on the merged label doesn't announce the station as one mode when it covers both. Single-parent clusters keep the suffix intact — it may be meaningful (e.g. a `(Tram)` stop that stands alone should still say so).
 
 ## Retired approaches (do not retry without new renderer capabilities)
 
