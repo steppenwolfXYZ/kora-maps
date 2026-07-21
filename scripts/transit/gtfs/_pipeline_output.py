@@ -488,6 +488,17 @@ emitted_count = sum(1 for e in diag_out for v in e["variants"]
 print(f"  Full groups:   {len(diag_out)} entries "
       f"({drawable_count} drawable, {emitted_count} variants emitted) → {OUT_GROUPS_FULL}")
 
+# City-bus promotion audit (citybus-landuse-promotion.md § diagnostics):
+# one record per evaluated regional_bus group.
+OUT_CITYBUS_PROMO = ROOT / "data" / "transit" / "citybus_promotion.json"
+citybus_promotion_diag.sort(key=lambda e: -e["share"])
+OUT_CITYBUS_PROMO.write_text(
+    json.dumps(citybus_promotion_diag, ensure_ascii=False))
+promoted_count = sum(1 for e in citybus_promotion_diag if e["promoted"])
+print(f"  City-bus promotion: {promoted_count} of "
+      f"{len(citybus_promotion_diag)} evaluated groups promoted "
+      f"→ {OUT_CITYBUS_PROMO}")
+
 # Summary
 mode_counts: dict = defaultdict(int)
 for f in features:

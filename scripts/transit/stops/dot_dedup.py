@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 from math import cos, radians
 
-from _state import *  # noqa: F401,F403 — MODE_RANK, MODE_MINZOOM, ...
+from _state import *  # noqa: F401,F403 — MODE_RANK, MODE_MINZOOM, line_keys_str
 from _state import _transit_cfg  # underscore names skipped by *
 from geometry import haversine_km
 
@@ -32,8 +32,12 @@ def apply_stop_dedup(dot_features):
     zoom it was eaten and below.
 
     Mutates `dot_features` in place. Adds `score_z7..score_z13` (debug
-    only), `lines_json_z7..lines_json_z13` (popup), and
-    `dep_hr_z7..dep_hr_z13` (popup) to participating features.
+    only), `lines_json_z7..lines_json_z13` (popup), `dep_hr_z7..dep_hr_z13`
+    (popup), and `line_keys_z7..line_keys_z13` (line-detail-view highlight
+    membership at each zoom) to participating features. `line_keys_zN`
+    grows with absorption at zooms ≤ N so an eater represents the eaten's
+    line only where the eaten is not visible; at higher zooms the eaten's
+    own dot carries membership and the eater falls back to its own keys.
     """
     sd_cfg = _transit_cfg.get("stop_dot_sizing") or {}
     tier_sizes_cfg = sd_cfg.get("tier_sizes") or {}
@@ -102,6 +106,11 @@ def apply_stop_dedup(dot_features):
         except (json.JSONDecodeError, TypeError):
             lines = []
         base_dep_hr = float(p.get("dep_hr", 0.0) or 0.0)
+        # Line-detail-view membership keys. Parsed once from the baked
+        # ";key1;key2;" string into a set so per-zoom unions stay cheap.
+        base_line_keys_raw = p.get("line_keys") or ""
+        base_line_keys = frozenset(
+            k for k in base_line_keys_raw.strip(";").split(";") if k)
         # Effective minzoom: the lowest zoom at which this dot actually
         # renders. Take max of the layer floor (MODE_MINZOOM, baked into
         # the style as the source's minzoom) and the feature's own
@@ -130,6 +139,8 @@ def apply_stop_dedup(dot_features):
             "lines_dirty": False,
             "dep_hr_per_z": {z: base_dep_hr for z in range(7, 14)},
             "dep_hr_dirty": False,
+            "keys_per_z": {z: set(base_line_keys) for z in range(7, 14)},
+            "keys_dirty": False,
         })
 
     if not states:
@@ -219,6 +230,18 @@ def apply_stop_dedup(dot_features):
                                 if sb["dep_hr_per_z"][z_lo] > 0.0:
                                     sa["dep_hr_per_z"][z_lo] += sb["dep_hr_per_z"][z_lo]
                                     sa["dep_hr_dirty"] = True
+                                # Line-detail-view membership keys at THIS
+                                # zoom: union B's per-zoom key set into A's.
+                                # Because the absorbed B is invisible at
+                                # z_lo, A must carry B's membership to keep
+                                # the highlight visible; at higher zooms
+                                # where B renders on its own, A's zN key set
+                                # stays unchanged and doesn't inherit B.
+                                sa_keys = sa["keys_per_z"][z_lo]
+                                sb_keys = sb["keys_per_z"][z_lo]
+                                if sb_keys - sa_keys:
+                                    sa_keys |= sb_keys
+                                    sa["keys_dirty"] = True
                             sb["absorbed_max_z"] = (z if sb["absorbed_max_z"] is None
                                                     else max(sb["absorbed_max_z"], z))
                             absorbed_any = True
@@ -261,6 +284,13 @@ def apply_stop_dedup(dot_features):
             # above k.
             for z in range(7, 14):
                 p[f"dep_hr_z{z}"] = round(s["dep_hr_per_z"][z], 3)
+        if s["keys_dirty"]:
+            # Per-zoom line-detail-view membership. `line_keys_zN` covers
+            # zoom N (inclusive) and gets read by the client filter via a
+            # step-over-zoom expression; base `line_keys` is left untouched
+            # and covers z ≥ 14 (pill zoom onwards, no far-zoom absorption).
+            for z in range(7, 14):
+                p[f"line_keys_z{z}"] = line_keys_str(s["keys_per_z"][z])
     print(f"  Dedup: {n_absorptions:,} absorptions "
           f"({n_full:,} stops fully absorbed at far-zoom, "
           f"{n_partial:,} partially absorbed, "

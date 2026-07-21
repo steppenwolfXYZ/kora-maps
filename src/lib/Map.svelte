@@ -162,6 +162,81 @@
 	const LINE_DETAIL_OTHER_OPACITY = 0.25;
 	const LINE_DETAIL_CASING_OTHER_OPACITY = 0.12;
 
+	// Deep link (line-detail-view.md § Deep link). The URL carries the
+	// selection as `?line=<key1>[,<key2>...]`. Multiple keys occur when a
+	// popup badge merges same-(ref, mode) lines across agencies. The keys
+	// resolve against `/map-assets/line_index.json` (baked by step 07:
+	// pipeline_setup.py § "write OUT_LINE_INDEX"). replaceState is used so
+	// per-interaction updates don't pollute browser history.
+	const URL_LINE_PARAM = 'line';
+	const LINE_INDEX_URL = '/map-assets/line_index.json';
+
+	interface LineIndexEntry {
+		ref: string;
+		mode: string;
+		color: string;
+		bbox: [number, number, number, number];
+		route: string;
+	}
+
+	function readLineDeepLinkFromUrl(): string[] | null {
+		if (typeof window === 'undefined') return null;
+		const params = new URLSearchParams(window.location.search);
+		const raw = params.get(URL_LINE_PARAM);
+		if (!raw) return null;
+		const keys = raw.split(',').map((s) => s.trim()).filter(Boolean);
+		return keys.length ? keys : null;
+	}
+
+	function syncLineDeepLinkToUrl(keys: string[] | null) {
+		if (typeof window === 'undefined') return;
+		const url = new URL(window.location.href);
+		if (keys && keys.length) {
+			url.searchParams.set(URL_LINE_PARAM, keys.join(','));
+		} else {
+			url.searchParams.delete(URL_LINE_PARAM);
+		}
+		window.history.replaceState(null, '', url.toString());
+	}
+
+	async function resolveLineDeepLink(keys: string[]): Promise<LineDetailSelection | null> {
+		try {
+			const res = await fetch(LINE_INDEX_URL);
+			if (!res.ok) return null;
+			const index = (await res.json()) as Record<string, LineIndexEntry>;
+			const resolved: LineIndexEntry[] = [];
+			const resolvedKeys: string[] = [];
+			for (const k of keys) {
+				const e = index[k];
+				if (e && Array.isArray(e.bbox) && e.bbox.length === 4
+				    && e.bbox.every((v) => Number.isFinite(v))) {
+					resolved.push(e);
+					resolvedKeys.push(k);
+				}
+			}
+			if (!resolved.length) return null;
+			let bb: [number, number, number, number] =
+				[resolved[0].bbox[0], resolved[0].bbox[1],
+				 resolved[0].bbox[2], resolved[0].bbox[3]];
+			for (let i = 1; i < resolved.length; i++) {
+				const b = resolved[i].bbox;
+				bb = [Math.min(bb[0], b[0]), Math.min(bb[1], b[1]),
+				      Math.max(bb[2], b[2]), Math.max(bb[3], b[3])];
+			}
+			const first = resolved[0];
+			return {
+				keys: resolvedKeys,
+				bbox: bb,
+				ref: first.ref,
+				mode: first.mode,
+				color: first.color,
+				route: first.route,
+			};
+		} catch {
+			return null;
+		}
+	}
+
 	/** Multiply a line-width value by a factor. The style's widths are
 	 * top-level `["interpolate", …, ["zoom"], …]` expressions — MapLibre
 	 * forbids nesting those inside `["*", …]`, so the factor is folded into
@@ -469,18 +544,37 @@
 
 		// Stops: hide stations the line does not serve. Membership is an
 		// exact-key substring test against the ";"-padded `line_keys`.
-		const isMember = ['any', ...sel.keys.map((k) =>
-			['in', `;${k};`, ['coalesce', ['get', 'line_keys'], '']])];
+		// At far zoom, an "eater" dot inherits an absorbed member's key
+		// only at zooms where absorption is active — so a step-over-zoom
+		// expression picks `line_keys_zN` for the current zoom and falls
+		// back to base `line_keys` at pill zoom (z ≥ 14, no absorption).
+		const keysExprAt = (n: number): unknown =>
+			['coalesce', ['get', `line_keys_z${n}`], ['get', 'line_keys'], ''];
+		const baseKeysExpr: unknown = ['coalesce', ['get', 'line_keys'], ''];
+		const memberAt = (keysExpr: unknown): unknown =>
+			['any', ...sel.keys.map((k) => ['in', `;${k};`, keysExpr])];
+		const isMember = ['step', ['zoom'],
+			memberAt(keysExprAt(7)),
+			8,  memberAt(keysExprAt(8)),
+			9,  memberAt(keysExprAt(9)),
+			10, memberAt(keysExprAt(10)),
+			11, memberAt(keysExprAt(11)),
+			12, memberAt(keysExprAt(12)),
+			13, memberAt(keysExprAt(13)),
+			14, memberAt(baseKeysExpr),
+		];
 		for (const [id, orig] of savedStopFilters) {
 			map.setFilter(id, (orig ? ['all', orig, isMember] : isMember) as any);
 		}
 
 		lineDetail = sel;
+		syncLineDeepLinkToUrl(sel.keys);
 	}
 
 	function exitLineDetail() {
 		const map = mapRef;
 		lineDetail = null;
+		syncLineDeepLinkToUrl(null);
 		if (!map) {
 			savedLinePaints = null;
 			savedStopFilters = null;
@@ -658,6 +752,16 @@
 
 		(window as any).map = map;
 		mapRef = map;
+
+		// Start the deep-link resolution in parallel with style load. Reads
+		// the URL synchronously so the initial value can't drift; the fetch
+		// runs alongside tile/glyph loading and is awaited inside the
+		// map.on('load') handler below.
+		const deepLinkKeys = readLineDeepLinkFromUrl();
+		const deepLinkPromise: Promise<LineDetailSelection | null> = deepLinkKeys
+			? resolveLineDeepLink(deepLinkKeys)
+			: Promise.resolve(null);
+
 		// Navigation controls (zoom +/-, compass)
 		map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -720,6 +824,16 @@
 				}
 				map.getCanvas().style.cursor = hit ? 'pointer' : '';
 			});
+
+			// Deep link (line-detail-view.md § Deep link): once the style
+			// is loaded, apply the pre-fetched selection. Unknown / malformed
+			// keys drop the param silently.
+			if (deepLinkKeys) {
+				deepLinkPromise.then((sel) => {
+					if (sel) enterLineDetail(sel);
+					else syncLineDeepLinkToUrl(null);
+				});
+			}
 		});
 
 		map.on('click', (e) => {

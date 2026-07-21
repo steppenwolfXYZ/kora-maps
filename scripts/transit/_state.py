@@ -31,6 +31,7 @@ STREET_WAYS_GEOJSON = ROOT / "data" / "osm" / "street_ways.geojson"
 OUT_DOTS            = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS           = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_SEARCH_INDEX = ROOT / "static" / "map-assets" / "stop_search_index.json"
+OUT_LINE_INDEX      = ROOT / "static" / "map-assets" / "line_index.json"
 OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
 OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 
@@ -115,17 +116,23 @@ MODE_TO_COLOR_GROUP = {
 COLOR_GROUP_ORDER = ["train", "metro", "tram", "bus", "regional_bus", "mountain"]
 
 # ── Line identity keys (line-detail-view.md) ─────────────────────────────────
-# One canonical key per logical line: all variants (directions, branches,
-# short-turns) of a (ref, agency_id, mode) group share it. Stamped as
+# One canonical key per logical line: all variants (both directions, branch
+# and short-turn merged_stop_sets) of a (ref, agency_id, mode, trip_group_id)
+# group share it. trip_group_id is required — without it, physically disjoint
+# lines that reuse the same number under one agency (canonical case: PostAuto
+# bus 100 in the Bern region vs the Basel region — same ref+agency+mode, zero
+# shared stops, step-06 union-find gives them different trip_group_ids)
+# collapse into one "line" and the highlight lights both up. Stamped as
 # `line_key` on line features and collected into the `line_keys` membership
 # string on stop features, so the client can highlight a line and filter
 # stops without extra fetches. "~" joins the fields; the membership string
 # wraps every key in ";" so an exact-key substring test can't false-positive.
 
 def line_key_of(d) -> str:
-    """Canonical line key from any dict carrying ref / agency_id / mode
-    (line-feature properties or a line_lookup info entry)."""
-    return f'{d.get("ref", "")}~{d.get("agency_id", "")}~{d.get("mode", "")}'
+    """Canonical line key from any dict carrying ref / agency_id / mode /
+    trip_group_id (line-feature properties or a line_lookup info entry)."""
+    return (f'{d.get("ref", "")}~{d.get("agency_id", "")}~'
+            f'{d.get("mode", "")}~{d.get("trip_group_id", "")}')
 
 
 def line_keys_str(keys) -> str:

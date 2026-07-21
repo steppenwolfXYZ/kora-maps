@@ -22,6 +22,7 @@ Docker. Outputs:
     data/osm/tram_ways.geojson
     data/osm/street_ways.geojson
     data/osm/buildings.geojson
+    data/osm/builtup_grid_100m.json
 
 `tram_ways.geojson` and `street_ways.geojson` back the tram / bus stop-extent
 walk (stop-extent-osm-walk.md). Both are clipped to buffers of
@@ -36,6 +37,12 @@ geometry beyond `[lon, lat]`). It feeds the urbanness bracket in step 07
 how many buildings sit within 200 m and 500 m to derive a city / town /
 village / rural bracket.
 
+`builtup_grid_100m.json` is the built-up landuse raster: OSM `landuse`
+polygons of the built-up classes rasterized onto a 100 m grid. It feeds the
+regional_bus → city_bus promotion in step 06 (citybus-landuse-promotion.md)
+and is shared with the v2 candidate diagnostic. Class list, grid convention,
+and rasterization live in gtfs/citybus_promotion.py.
+
 Idempotent: skips if all outputs are newer than every input. Pass --force to rerun.
 """
 
@@ -48,6 +55,14 @@ from math import cos, radians
 from pathlib import Path
 
 import yaml
+
+from gtfs.citybus_promotion import (
+    GRID_PATH as OUT_BUILTUP_GRID,
+    LANDUSE_TAG_FILTER,
+    iter_polygons,
+    rasterize_polygon,
+    save_builtup_grid,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 OSM_DIR = ROOT / "data" / "osm"
@@ -175,6 +190,20 @@ def is_valid_buildings_geojson(path: Path) -> bool:
         if (f.get("geometry") or {}).get("type") == "Point"
     )
     return n_pts >= 100_000
+
+
+def is_valid_builtup_grid(path: Path) -> bool:
+    """Validate the built-up landuse raster. The bbox holds a few hundred
+    thousand built-up 100 m cells; demand a plausible floor to catch
+    crashed-mid-write files."""
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    cells = data.get("cells")
+    return isinstance(cells, list) and len(cells) >= 50_000
 
 
 def load_stop_grid(buffer_m: float):
@@ -389,14 +418,20 @@ def main() -> None:
         and newer_than(OUT_BUILDINGS_GEOJSON, [OUT_PBF])
         and is_valid_buildings_geojson(OUT_BUILDINGS_GEOJSON)
     )
+    builtup_fresh = (
+        (not force) and pbf_fresh
+        and newer_than(OUT_BUILTUP_GRID, [OUT_PBF])
+        and is_valid_builtup_grid(OUT_BUILTUP_GRID)
+    )
 
     if (pbf_fresh and rail_fresh and tram_fresh and street_fresh
-            and buildings_fresh):
+            and buildings_fresh and builtup_fresh):
         size_mb = OUT_PBF.stat().st_size / 1_000_000
         gj_sizes = ", ".join(
             f"{p.name} ({p.stat().st_size / 1_000_000:.0f} MB)"
             for p in (OUT_RAIL_GEOJSON, OUT_TRAM_GEOJSON,
-                      OUT_STREET_GEOJSON, OUT_BUILDINGS_GEOJSON))
+                      OUT_STREET_GEOJSON, OUT_BUILDINGS_GEOJSON,
+                      OUT_BUILTUP_GRID))
         print(f"Up-to-date: {OUT_PBF} ({size_mb:.0f} MB), {gj_sizes}. "
               "Pass --force to rebuild.")
         return
@@ -446,6 +481,9 @@ def main() -> None:
 
     if not buildings_fresh:
         extract_buildings(image, cuts)
+
+    if not builtup_fresh:
+        extract_builtup_grid(image, cuts)
 
     for cut in cuts:
         cut.unlink(missing_ok=True)
@@ -638,6 +676,72 @@ def extract_buildings(image: str, cuts: list) -> None:
     bldg_mb = OUT_BUILDINGS_GEOJSON.stat().st_size / 1_000_000
     print(f"Done. Building centroids: {len(coords):,} buildings, "
           f"{bldg_mb:.0f} MB → {OUT_BUILDINGS_GEOJSON}")
+
+
+def extract_builtup_grid(image: str, cuts: list) -> None:
+    """Extract built-up landuse polygons and rasterize them onto the 100 m
+    grid consumed by step 06's city-bus promotion
+    (citybus-landuse-promotion.md). Same per-country-slice pattern as the
+    other extracts: tags-filter → export (GeoJSONSeq, streamed) → Python
+    dedup by feature id → scanline rasterization (gtfs/citybus_promotion
+    .py) → atomic write."""
+    lu_pbfs: list = []
+    lu_geojsons: list = []
+    print(f"Extracting built-up landuse per country slice → "
+          f"{OUT_BUILTUP_GRID.name}")
+    for cut in cuts:
+        stem = cut.stem.replace(".osm", "")
+        lu_pbf = OSM_DIR / f"{stem}.lu.osm.pbf"
+        lu_gj = OSM_DIR / f"{stem}.lu.geojson"
+        docker_run(
+            image, "osmium", "tags-filter",
+            "--overwrite",
+            "-o", f"/work/{relpath(lu_pbf)}",
+            f"/work/{relpath(cut)}",
+            LANDUSE_TAG_FILTER,
+        )
+        docker_run(
+            image, "osmium", "export",
+            "--overwrite",
+            "-f", "geojsonseq",
+            "-o", f"/work/{relpath(lu_gj)}",
+            f"/work/{relpath(lu_pbf)}",
+        )
+        lu_pbfs.append(lu_pbf)
+        lu_geojsons.append(lu_gj)
+
+    cells: set = set()
+    seen_ids: set = set()
+    n_polys = n_dupes = 0
+    for gj in lu_geojsons:
+        with open(gj, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip().lstrip("\x1e")
+                if not line:
+                    continue
+                try:
+                    feat = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                fid = feat.get("id")
+                if fid is not None:
+                    if fid in seen_ids:
+                        n_dupes += 1
+                        continue
+                    seen_ids.add(fid)
+                for rings in iter_polygons(feat.get("geometry") or {}):
+                    rasterize_polygon(rings, cells)
+                    n_polys += 1
+
+    save_builtup_grid(cells)
+
+    for p in lu_pbfs + lu_geojsons:
+        p.unlink(missing_ok=True)
+
+    grid_mb = OUT_BUILTUP_GRID.stat().st_size / 1_000_000
+    print(f"Done. Built-up landuse: {n_polys:,} polygons "
+          f"({n_dupes:,} cross-border dupes skipped), {len(cells):,} cells, "
+          f"{grid_mb:.0f} MB → {OUT_BUILTUP_GRID}")
 
 
 if __name__ == "__main__":

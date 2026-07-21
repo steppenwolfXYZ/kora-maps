@@ -9,6 +9,55 @@ feature_id_counter = 0
 # Per-(tg_key, var_key) emission outcome for the comprehensive diagnostic.
 diag_emission: dict = {}
 
+# ── City-bus promotion (citybus-landuse-promotion.md) ────────────────────
+# Landuse-based regional_bus → city_bus promotion, evaluated per line
+# group directly after the number-based rule inside the variant loop.
+from gtfs.citybus_promotion import (
+    evaluate_polylines as _promo_evaluate,
+    load_builtup_grid as _promo_load_grid,
+    load_promotion_cfg as _promo_load_cfg,
+    pass_threshold as _promo_pass_threshold,
+)
+
+_promo_cfg = _promo_load_cfg(load_cfg())
+_builtup_cells = _promo_load_grid()
+print(f"City-bus promotion: {len(_builtup_cells):,} built-up landuse cells")
+_promo_cache: dict = {}
+citybus_promotion_diag: list = []
+
+
+def _citybus_promoted(tg_key, all_trips, short_name, agency_id) -> bool:
+    """Group-memoized promotion decision over the union of every shape any
+    trip of the group uses, so all variants (directions, branches) agree.
+    Groups with seasonal-rescue variants are never promoted — the rescue
+    exists only for regional buses and rescued variants that classify as
+    city bus get dropped, so promotion would delete the line from the map
+    instead of recoloring it (concept § constraints)."""
+    if tg_key in _promo_cache:
+        return _promo_cache[tg_key]
+    promoted = False
+    if not regional_bus_rescued.get(tg_key):
+        shape_ids = {trip_lookup.get(t, {}).get("shape_id", "")
+                     for t in all_trips}
+        polylines = [shapes[s] for s in shape_ids if s and s in shapes]
+        if polylines:
+            share, spread = _promo_evaluate(polylines, _builtup_cells)
+            threshold = _promo_pass_threshold(spread, _promo_cfg)
+            promoted = share >= threshold
+            citybus_promotion_diag.append({
+                "ref": short_name,
+                "agency_id": agency_id,
+                "agency_name": agency_names.get(agency_id, ""),
+                "trip_group_id": tg_key[2],
+                "share": round(share, 4),
+                "spread_km": round(spread, 2),
+                "threshold": round(threshold, 4),
+                "promoted": promoted,
+            })
+    _promo_cache[tg_key] = promoted
+    return promoted
+
+
 _ZERO_FREQ = {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
 for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
     short_name, long_name, bucket = line_key
@@ -107,6 +156,12 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
         mode = gtfs_to_mode(bucket, agency_id,
                             short_name=short_name, length_km=length_km,
                             route_type=route_type)
+
+        # Landuse-based promotion directly after the number rule
+        # (citybus-landuse-promotion.md).
+        if mode == "regional_bus" and _citybus_promoted(
+                tg_key, all_trips, short_name, agency_id):
+            mode = "bus"
 
         # Drop seasonal-rescue bus variants that landed in city `bus`.
         if (var_key in regional_bus_rescued.get(tg_key, ())

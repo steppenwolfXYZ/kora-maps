@@ -329,6 +329,20 @@ window_weights:
   eve:  0.2
   we:   0.2
 
+# ── City-bus promotion (citybus-landuse-promotion.md) ────────────────────────
+# Dynamic regional_bus → city_bus promotion in step 06: a line group whose
+# side-aware built-up landuse share reaches the spread-coupled threshold
+#   1 − (1 − pass_anchor_share) · 0.5^((spread − pass_anchor_km) / pass_halving_km)
+#     − pass_soften
+# is promoted to city bus. pass_soften shifts the whole curve down uniformly
+# and is the primary tuning knob. The same keys drive the v2 candidate
+# diagnostic (data/transit/diagnostics/find_citybus_candidates_v2.py).
+citybus_promotion:
+  pass_anchor_km: 1.0
+  pass_anchor_share: 0.5
+  pass_halving_km: 4.0
+  pass_soften: 0.049
+
 # ── Line width endpoints per bucket ──────────────────────────────────────────
 # min: width_base for a line at score = 0 (worst_freq); max: at score = 1
 # (best_freq). Train is set wider than other modes. Mountain has min = max

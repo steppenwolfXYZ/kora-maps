@@ -80,6 +80,7 @@ def run():
                     "ref":             p.get("ref", ""),
                     "name":            p.get("name", ""),
                     "agency_id":       p.get("agency_id", ""),
+                    "trip_group_id":   p.get("trip_group_id", ""),
                 }
             if p.get("gtfs_stops"):
                 gtfs_stop_features.append(feat)
@@ -316,11 +317,11 @@ def run():
     print(f"  {len(fill_diag):,} fill records → {OUT_STOP_EXTENT_FILL}")
 
     # Per-line-group union bbox (line-detail-view.md): all variants of a
-    # (ref, agency_id, mode) group share one bbox covering every variant's
-    # full geometry, so the client can fit the camera to the whole line.
-    # Computed AFTER the terminal fills so extensions are covered. Stored on
-    # line_lookup (for the popup badge entries built in run_pills) and
-    # stamped on every line feature below.
+    # (ref, agency_id, mode, trip_group_id) group share one bbox covering
+    # every variant's full geometry, so the client can fit the camera to
+    # the whole line. Computed AFTER the terminal fills so extensions are
+    # covered. Stored on line_lookup (for the popup badge entries built in
+    # run_pills) and stamped on every line feature below.
     with _timed("compute per-line-group bboxes + line keys"):
         group_bbox: dict = {}
         for oid, info in line_lookup.items():
@@ -361,8 +362,9 @@ def run():
                 props["first_terminus_name"] = info.get("first_terminus_name") or ""
                 props["last_terminus_name"]  = info.get("last_terminus_name") or ""
                 # Line-detail-view identity + camera fit (line-detail-view.md):
-                # canonical key of the feature's (ref, agency_id, mode) group
-                # and the group's union bbox as "minLon,minLat,maxLon,maxLat".
+                # canonical key of the feature's (ref, agency_id, mode,
+                # trip_group_id) group and the group's union bbox as
+                # "minLon,minLat,maxLon,maxLat".
                 props["line_key"] = info.get("line_key", "")
                 bb = info.get("group_bbox")
                 if bb:
@@ -380,6 +382,61 @@ def run():
         LINES_EXTENDED.write_text(json.dumps(lines_data, ensure_ascii=False))
         print(f"  Wrote {n_synced:,} extended polylines → {LINES_EXTENDED.name} "
               f"({LINES.name} left pristine)")
+
+    # Line index (line-detail-view.md § Deep link): line_key → {ref, mode,
+    # color, bbox, route}. Consumed client-side to resolve a ?line=<key>
+    # URL param into a full LineDetailSelection payload. Aggregates from
+    # the lines_data features written above; every feature already carries
+    # line_key + line_bbox (per-group union bbox is identical on all
+    # variants) + termini names + color/mode/ref.
+    with _timed("write OUT_LINE_INDEX"):
+        line_index: dict[str, dict] = {}
+        for feat in lines_data["features"]:
+            props = feat.get("properties") or {}
+            key = props.get("line_key") or ""
+            if not key:
+                continue
+            entry = line_index.get(key)
+            if entry is None:
+                bbox_str = props.get("line_bbox") or ""
+                bbox_parts = bbox_str.split(",") if bbox_str else []
+                bbox: list[float] | None = None
+                if len(bbox_parts) == 4:
+                    try:
+                        bbox = [float(v) for v in bbox_parts]
+                    except ValueError:
+                        bbox = None
+                if bbox is None:
+                    continue
+                entry = {
+                    "ref":     props.get("ref") or "",
+                    "mode":    props.get("mode") or "",
+                    "color":   props.get("color") or "#888888",
+                    "bbox":    bbox,
+                    "termini": [],
+                }
+                line_index[key] = entry
+            for tk in ("first_terminus_name", "last_terminus_name"):
+                name = props.get(tk) or ""
+                if name and name not in entry["termini"]:
+                    entry["termini"].append(name)
+        out: dict[str, dict] = {}
+        for key, entry in line_index.items():
+            termini = entry["termini"]
+            if len(termini) == 2:
+                route = f"{termini[0]} ↔ {termini[1]}"
+            else:
+                route = " · ".join(termini)
+            out[key] = {
+                "ref":   entry["ref"],
+                "mode":  entry["mode"],
+                "color": entry["color"],
+                "bbox":  entry["bbox"],
+                "route": route,
+            }
+        OUT_LINE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+        OUT_LINE_INDEX.write_text(json.dumps(out, ensure_ascii=False))
+        print(f"  Line index: {len(out):,} lines → {OUT_LINE_INDEX}")
 
     with _timed("compute_terminus_skip_oids"):
         skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
