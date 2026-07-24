@@ -1,0 +1,17 @@
+{
+	"name": "Kora Maps",
+	"short_name": "Kora",
+	"description": "A map for car-free travel — walkability and public transit first.",
+	"id": "/",
+	"start_url": "/",
+	"scope": "/",
+	"display": "standalone",
+	"background_color": "#ffffff",
+	"theme_color": "#740013",
+	"lang": "en",
+	"icons": [
+		{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+		{ "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+		{ "src": "/maskable_icon_x512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+	]
+}
