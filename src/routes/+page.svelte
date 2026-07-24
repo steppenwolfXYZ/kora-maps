@@ -5,8 +5,4 @@
 	let { data }: { data: PageData } = $props();
 </script>
 
-<svelte:head>
-	<title>Map</title>
-</svelte:head>
-
 <Map style={data.style} />

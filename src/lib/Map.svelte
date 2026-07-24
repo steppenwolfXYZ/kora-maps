@@ -720,7 +720,34 @@
 
 	const DEBUG_STOP_LAYER = 'debug-stop-dot';
 
+	// Splash screen (rendered in app.html) is faded out and removed on the
+	// map's `load` event, once the first tiles for the resolved initial
+	// center are rendered. Idempotent — safe to call multiple times.
+	let splashHidden = false;
+	function hideSplash() {
+		if (splashHidden) return;
+		splashHidden = true;
+		const s = typeof document !== 'undefined'
+			? document.getElementById('kora-splash')
+			: null;
+		if (!s) return;
+		s.classList.add('kora-splash-hidden');
+		setTimeout(() => s.remove(), 400);
+	}
+
+	function setSplashStatus(text: string) {
+		const el = typeof document !== 'undefined'
+			? document.getElementById('kora-splash-status')
+			: null;
+		if (el) el.textContent = text;
+	}
+
 	$effect(() => {
+		// Safety net: if map creation or the load event never completes
+		// (tile server down, script error), don't strand the user on the
+		// splash forever.
+		const safety = setTimeout(hideSplash, 15000);
+
 		// Bake the default view into the style before map creation so the
 		// first frame already matches — no flash on load. DEFAULT_VIEW (a
 		// plain const, not the reactive viewMode) so this effect never
@@ -740,10 +767,18 @@
 			}
 		}
 
+		// Read the URL BEFORE creating the map: with hash: true, MapLibre
+		// writes the current position into the URL hash on init, so checking
+		// afterwards would always see a hash and never geolocate.
+		const hasUrlHash = typeof window !== 'undefined' && window.location.hash.length > 1;
+		const deepLinkKeys = readLineDeepLinkFromUrl();
+
 		const map = new maplibregl.Map({
 			container,
 			style,
-			// Honor center & zoom from the style file; fall back to safe defaults
+			// Style default center (Swiss overview). A URL hash overrides it
+			// via MapLibre's hash reader; a geolocation fix arriving below
+			// re-centers behind the splash.
 			center: (style.center as [number, number]) ?? [0, 0],
 			zoom: style.zoom ?? 2,
 			hash: true,
@@ -753,14 +788,48 @@
 		(window as any).map = map;
 		mapRef = map;
 
-		// Start the deep-link resolution in parallel with style load. Reads
-		// the URL synchronously so the initial value can't drift; the fetch
+		// Deep-link resolution runs in parallel with style load; the fetch
 		// runs alongside tile/glyph loading and is awaited inside the
 		// map.on('load') handler below.
-		const deepLinkKeys = readLineDeepLinkFromUrl();
 		const deepLinkPromise: Promise<LineDetailSelection | null> = deepLinkKeys
 			? resolveLineDeepLink(deepLinkKeys)
 			: Promise.resolve(null);
+
+		// Geolocation runs in PARALLEL with map/tile loading — the map loads
+		// at the style default underneath the splash, and a fix arriving
+		// re-centers via jumpTo while still hidden. The splash lifts only
+		// when both the map has loaded and geolocation has settled (fix,
+		// error, or timeout), so the jump is never visible. Skipped when the
+		// URL carries an explicit view (#zoom/lat/lng hash or ?line= deep
+		// link). maybeHideSplash waits for map.loaded() so a late jump's
+		// freshly requested tiles render before the reveal.
+		const wantsGeolocation = !hasUrlHash && !deepLinkKeys
+			&& typeof navigator !== 'undefined' && !!navigator.geolocation;
+		let mapLoaded = false;
+		let geoSettled = !wantsGeolocation;
+		const maybeHideSplash = () => {
+			if (!mapLoaded || !geoSettled) return;
+			if (map.loaded()) hideSplash();
+			else map.once('idle', hideSplash);
+		};
+		if (wantsGeolocation) {
+			const settleGeo = () => {
+				geoSettled = true;
+				setSplashStatus('loading map...');
+				maybeHideSplash();
+			};
+			navigator.geolocation.getCurrentPosition(
+				(pos) => {
+					map.jumpTo({
+						center: [pos.coords.longitude, pos.coords.latitude],
+						zoom: 13
+					});
+					settleGeo();
+				},
+				settleGeo,
+				{ timeout: 4000, maximumAge: 5 * 60_000 }
+			);
+		}
 
 		// Navigation controls (zoom +/-, compass)
 		map.addControl(new maplibregl.NavigationControl(), 'top-right');
@@ -782,6 +851,12 @@
 		let popup: maplibregl.Popup | null = null;
 
 		map.on('load', () => {
+			// Splash screen (see app.html) — lift once geolocation has also
+			// settled; until then the status shows what we're waiting for.
+			mapLoaded = true;
+			if (!geoSettled) setSplashStatus('waiting for location...');
+			maybeHideSplash();
+
 			// Sync the view in case the user toggled before the style
 			// finished loading (the baked default only covers 'standard').
 			applyViewMode(map, viewMode);
@@ -1197,6 +1272,7 @@
 		});
 
 		return () => {
+			clearTimeout(safety);
 			lineDetail = null;
 			savedLinePaints = null;
 			savedStopFilters = null;

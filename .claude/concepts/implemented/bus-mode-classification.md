@@ -25,6 +25,8 @@ The set covers operators that follow the "1-digit = city, 2-digit = regional" co
 - Chur-Dreibündenstein (BCD).
 - PostAuto AG (the main PAG agency).
 - Trägerverein Historische Postautolinie (THP).
+- Auto AG Rothenburg (AAGR, Lucerne region).
+- Automobil Rottal AG (ARAG, Lucerne region).
 
 The PostAuto sub-agency for Bus Commune Sion (PAG/BCS) is explicitly **not** in the set: it is a PostAuto-operated city service whose 2-digit refs are city lines.
 

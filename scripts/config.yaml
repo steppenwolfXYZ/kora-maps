@@ -13,8 +13,8 @@
 # ── Global ───────────────────────────────────────────────────────────────────
 global:
   name: "Car-Free Map"
-  center: [7.4474, 46.9480]   # Bern
-  zoom: 13
+  center: [8.2269, 46.8012]   # geographic center of Switzerland (Älggi-Alp)
+  zoom: 8
   min_zoom: 0
   max_zoom: 20
   tile_source: "https://tiles.openfreemap.org/planet"

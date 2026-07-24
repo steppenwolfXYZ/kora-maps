@@ -50,6 +50,8 @@ TWO_DIGIT_REGIONAL_AGENCIES = {
     "236",   # BCD (Chur-Dreibündenstein)
     "801",   # PAG (PostAuto AG)
     "7088",  # THP (Trägerverein Historische Postautolinie)
+    "812",   # AAGR (Auto AG Rothenburg)
+    "819",   # ARAG (Automobil Rottal AG)
 }
 # 765 (PAG/BCS, PostAuto AG Bus Commune Sion) is deliberately excluded:
 # PostAuto-operated city service whose 2-digit refs are city lines.

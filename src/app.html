@@ -7,14 +7,57 @@
 		<link rel="apple-touch-icon" href="%sveltekit.assets%/apple-touch-icon.png" />
 		<link rel="manifest" href="%sveltekit.assets%/manifest.json" />
 		<meta name="theme-color" content="#740013" />
+		<title>Kora Maps</title>
+		<meta name="description" content="A public-transit-first map: every train, tram and bus line drawn by how often it runs — plus walkable streets, paths and places." />
+		<meta property="og:title" content="Kora Maps" />
+		<meta property="og:description" content="A public-transit-first map — lines drawn by frequency and speed, walkability built in." />
+		<meta property="og:type" content="website" />
+		<meta property="og:url" content="https://koramaps.app" />
+		<meta property="og:image" content="https://koramaps.app/icon-512.png" />
+		<meta name="twitter:card" content="summary" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<link rel="preconnect" href="https://fonts.googleapis.com" />
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link href="https://fonts.googleapis.com/css2?family=Saira:wght@400;600;700;800&display=swap" rel="stylesheet" />
 		<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" rel="stylesheet" />
+		<style>
+			/* Splash screen shown while the map loads and geolocation
+			   resolves. Hidden by Map.svelte on the map's `load` event.
+			   Inline so it paints on the very first frame, before any
+			   external CSS/JS finishes loading. */
+			#kora-splash {
+				position: fixed;
+				inset: 0;
+				z-index: 9999;
+				background: linear-gradient(135deg, #a0c8a0 0%, #c4a078 100%);
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+				justify-content: center;
+				gap: 24px;
+				transition: opacity 400ms ease-out;
+				pointer-events: none;
+			}
+			#kora-splash.kora-splash-hidden { opacity: 0; }
+			#kora-splash img {
+				width: min(60vmin, 320px);
+				height: auto;
+				filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.12));
+			}
+			#kora-splash-status {
+				font-family: 'Saira', sans-serif;
+				font-size: 15px;
+				color: rgba(40, 34, 26, 0.75);
+				letter-spacing: 0.03em;
+			}
+		</style>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">
+		<div id="kora-splash">
+			<img src="%sveltekit.assets%/logo.svg" alt="Kora Maps" />
+			<div id="kora-splash-status">loading map...</div>
+		</div>
 		<div style="display: contents">%sveltekit.body%</div>
 	</body>
 </html>
