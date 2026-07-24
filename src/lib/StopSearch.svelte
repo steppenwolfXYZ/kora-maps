@@ -283,6 +283,15 @@
 		width: 18rem;
 		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
 	}
+	@media (max-width: 600px) {
+		.stop-search {
+			/* Shrink to fill whatever the parent .top-controls row leaves
+			   after the view toggle, instead of overflowing the viewport. */
+			width: auto;
+			flex: 1 1 auto;
+			min-width: 0;
+		}
+	}
 	input {
 		width: 100%;
 		box-sizing: border-box;

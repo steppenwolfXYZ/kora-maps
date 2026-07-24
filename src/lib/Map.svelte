@@ -1424,6 +1424,17 @@
 		align-items: flex-start;
 	}
 
+	@media (max-width: 600px) {
+		.top-controls {
+			/* Leave room for MapLibre's top-right NavigationControl
+			   (~29 px + 10 px margin) so nothing overlaps its tap area. */
+			right: 3.5rem;
+		}
+		.view-toggle {
+			flex-direction: column;
+		}
+	}
+
 	.line-detail-bar {
 		position: absolute;
 		top: 1rem;
@@ -1478,7 +1489,10 @@
 	.view-toggle {
 		display: flex;
 		background: #ffffff;
-		border-radius: 999px;
+		/* Fixed radius so horizontal (one-line) and vertical (stacked,
+		   mobile) shapes get the same corner rounding — 999px would clamp
+		   to half the *shorter* side, which changes when orientation flips. */
+		border-radius: 0.9rem;
 		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 		overflow: hidden;
 		user-select: none;
