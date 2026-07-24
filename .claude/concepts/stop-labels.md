@@ -169,6 +169,8 @@ One label per station group, placed **inside** the station background hull — o
 
 **Font size is tier-dependent** — large stops carry very large labels. Seed glyph heights (metres) per `stop_tier` of the station's best-priority stop: major_train 40, main_train 30, important_train 24, train_station 18, small_train / major_mountain / major_hub 14, ferry_stop 12, mountain_stop / big_station 10, normal_stop 8, small_bus 6. Scaling by hull area is a possible refinement if tier alone misjudges some stations.
 
+**Renderer cap:** MapLibre hard-limits symbol text to 255 px, so the style caps every close-zoom text-size anchor just under it (254 px) — metre scaling holds until a label reaches that size, then it stops growing (a 40 m major_train label plateaus around z18.5). Uncapped anchors would not only warn but render large labels far smaller than the metre curve intends.
+
 ### Angle + position (general case)
 
 1. **Dominant direction**: the axial (mod-180°) mean of all pill-arrow axes at the station. A plurality by any margin is enough — no supermajority required. This direction only steers the sweep; it is never the label's final angle by itself.

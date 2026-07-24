@@ -593,14 +593,27 @@ def build_station_layers(cfg) -> list:
                 17, m * PX_PER_M_Z17,
                 22, m * PX_PER_M_Z22]
 
+    # MapLibre packs each feature's text-size, pre-evaluated at the
+    # expression's covering zoom anchors, into vertex data hard-capped at
+    # 255 px (MAX_GLYPH_ICON_SIZE) — larger values warn and clamp. With
+    # anchors only at z17/z22, big station fonts (up to 40 m ≈ 3140 px at
+    # the z22 anchor) both spammed the warning and interpolated toward the
+    # silently clamped anchor, rendering far smaller than the metre curve
+    # intends. Anchors at every integer zoom, each min-capped just under
+    # the limit, keep the true curve until it hits the cap and plateau
+    # from there.
+    FONT_PX_CAP = 254.0
+
     def _font_px_expr(scale=1.0):
         # MapLibre requires ["zoom"] at the top level of interpolate, so a
         # per-band scale factor cannot wrap the whole expression — it multiplies
         # each anchor's per-metre conversion instead.
-        return ["interpolate", ["exponential", 2], ["zoom"],
-            17, ["*", ["get", "font_m"], scale * PX_PER_M_Z17],
-            22, ["*", ["get", "font_m"], scale * PX_PER_M_Z22],
-        ]
+        expr = ["interpolate", ["exponential", 2], ["zoom"]]
+        for z in range(17, 23):
+            px_per_m = scale * PX_PER_M_Z17 * (2 ** (z - 17))
+            expr += [z, ["min", FONT_PX_CAP,
+                         ["*", ["get", "font_m"], px_per_m]]]
+        return expr
 
     font_px_expr = _font_px_expr()
 

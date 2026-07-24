@@ -1,0 +1,86 @@
+name: Main Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Create .env file for Build
+        env:
+          ENV_VARS: ${{ secrets.ENV_VARS }}
+        run: |
+          echo "$ENV_VARS" > .env
+
+      - name: Build Project
+        run: npm run build
+
+      - name: Prune Dev Dependencies
+        run: npm prune --omit=dev
+
+      # App only. Map assets (pmtiles, style.json, fonts) deploy separately
+      # via scripts/deploy_map_assets.sh — they are pipeline artifacts, not
+      # repo content.
+      - name: Prepare Deployment Artifact
+        run: |
+          mkdir deploy_artifact
+          cp -r build deploy_artifact/
+          cp -r node_modules deploy_artifact/
+          cp package.json deploy_artifact/
+          cp ecosystem.config.cjs deploy_artifact/
+          cp .env deploy_artifact/
+
+      - name: Ensure Remote Directory Exists
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 91.99.74.183
+          username: ga_koramaps
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: mkdir -p /var/www/koramaps.app/build-environment/
+
+      - name: Sync to Build Environment (Server)
+        uses: burnett01/rsync-deployments@5.2
+        with:
+          switches: -avzr --delete
+          path: deploy_artifact/
+          remote_host: 91.99.74.183
+          remote_user: ga_koramaps
+          remote_path: /var/www/koramaps.app/build-environment/
+          remote_key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Finalize Deploy and Restart (Server)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: 91.99.74.183
+          username: ga_koramaps
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            # Ensure target parent exists
+            mkdir -p /var/www/koramaps.app/app
+
+            # Sync staging to live
+            rsync -a --delete /var/www/koramaps.app/build-environment/ /var/www/koramaps.app/app/
+
+            # Clean up staging
+            rm -rf /var/www/koramaps.app/build-environment
+
+            # Restart
+            cd /var/www/koramaps.app/app
+            pm2 startOrRestart ecosystem.config.cjs
