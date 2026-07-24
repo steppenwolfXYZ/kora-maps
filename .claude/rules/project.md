@@ -1,6 +1,13 @@
 # Project Overview
 
-Car-Free Map — a MapLibre GL map style focused on walkability and car-free travel.
+**Kora Maps** (`koramaps.app`) — a MapLibre GL map focused on walkability and public transit.
+
+**Branding:**
+- Name: "Kora Maps" (brand), "Kora" (short name, e.g. PWA `short_name`). The name is a fantasy word; nearby associations the user welcomes: "core", French *cœur* (heart), Tibetan *kora* (pilgrimage walked on foot).
+- Positioning in user-facing copy: "public-transit-first map". Never mention cars ("car-free", "carless" etc.) in outward-facing text — the map is *for* something, not against cars.
+- Brand red: `#740013` (used as `theme_color` in the manifest and `<meta name="theme-color">`).
+- Logo/icon files in `static/`: `icon.svg` (default favicon), `favicon.ico` (16/32/48), `apple-touch-icon.png` (180², opaque), `icon-192.png`, `icon-512.png`, `maskable_icon_x512.png` (PWA maskable). Icon masters (1024² transparent PNG, 3662² opaque PNG) live in the user's Google Drive, not in the repo. Title and meta/OG tags are static in `src/app.html`; no page-level `<svelte:head>` titles (a page title would override app.html — one was removed deliberately).
+- PWA: `static/manifest.json`, linked from `app.html`. No service worker yet (caching/offline deliberately deferred).
 
 **Stack:** SvelteKit frontend (`src/routes/`), MapLibre GL JS (`src/routes/Map.svelte`), style generated from `scripts/config.yaml` → `scripts/generate_style.py` → `static/map-assets/style.json`.
 

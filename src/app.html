@@ -20,6 +20,10 @@
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 		<link href="https://fonts.googleapis.com/css2?family=Saira:wght@400;600;700;800&display=swap" rel="stylesheet" />
 		<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0" rel="stylesheet" />
+		<!-- style.json is fetched client-side in +page.svelte (the map is
+		     WebGL-only, so the page SSRs without it); preload so the download
+		     starts with the document instead of after hydration. -->
+		<link rel="preload" href="/map-assets/style.json" as="fetch" crossorigin="anonymous" />
 		<style>
 			/* Splash screen shown while the map loads and geolocation
 			   resolves. Hidden by Map.svelte on the map's `load` event.

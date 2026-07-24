@@ -1,6 +1,7 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { replaceState } from '$app/navigation';
 	import { Protocol } from 'pmtiles';
 	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
@@ -196,7 +197,53 @@
 		} else {
 			url.searchParams.delete(URL_LINE_PARAM);
 		}
-		window.history.replaceState(null, '', url.toString());
+		// SvelteKit's replaceState, not window.history.replaceState — the
+		// raw call wipes the router's history state and trips its dev
+		// warning.
+		replaceState(url, {});
+	}
+
+	// --- URL position hash sync -------------------------------------------
+	// Replaces MapLibre's `hash: true`, whose internal writer calls raw
+	// window.history.replaceState and so conflicts with SvelteKit's router.
+	// Same URL format as MapLibre: #zoom/lat/lng[/bearing[/pitch]], so
+	// previously shared links keep working.
+
+	function readPositionHash(): {
+		center: [number, number]; zoom: number; bearing: number; pitch: number
+	} | null {
+		if (typeof window === 'undefined') return null;
+		const parts = window.location.hash.slice(1).split('/');
+		if (parts.length < 3) return null;
+		const [zoom, lat, lng, bearing, pitch] = parts.map(Number);
+		if (![zoom, lat, lng].every(Number.isFinite)) return null;
+		return {
+			center: [lng, lat],
+			zoom,
+			bearing: Number.isFinite(bearing) ? bearing : 0,
+			pitch: Number.isFinite(pitch) ? pitch : 0
+		};
+	}
+
+	function writePositionHash(map: maplibregl.Map) {
+		const zoom = Math.round(map.getZoom() * 100) / 100;
+		// MapLibre's precision rule: enough decimals that rounding moves
+		// the map by less than half a pixel at this zoom.
+		const precision = Math.ceil(
+			(zoom * Math.LN2 + Math.log(512 / 360 / 0.5)) / Math.LN10);
+		const m = Math.pow(10, Math.max(0, precision));
+		const center = map.getCenter();
+		const lat = Math.round(center.lat * m) / m;
+		const lng = Math.round(center.lng * m) / m;
+		const bearing = map.getBearing();
+		const pitch = map.getPitch();
+		let hash = `#${zoom}/${lat}/${lng}`;
+		if (bearing || pitch) hash += `/${Math.round(bearing * 10) / 10}`;
+		if (pitch) hash += `/${Math.round(pitch)}`;
+		const url = new URL(window.location.href);
+		url.hash = hash;
+		if (url.href === window.location.href) return;
+		replaceState(url, {});
 	}
 
 	async function resolveLineDeepLink(keys: string[]): Promise<LineDetailSelection | null> {
@@ -767,23 +814,36 @@
 			}
 		}
 
-		// Read the URL BEFORE creating the map: with hash: true, MapLibre
-		// writes the current position into the URL hash on init, so checking
-		// afterwards would always see a hash and never geolocate.
-		const hasUrlHash = typeof window !== 'undefined' && window.location.hash.length > 1;
+		// A position hash in the URL (shared link / reload) overrides the
+		// style default and suppresses geolocation below.
+		const initialPos = readPositionHash();
+		const hasUrlHash = initialPos !== null;
 		const deepLinkKeys = readLineDeepLinkFromUrl();
 
 		const map = new maplibregl.Map({
 			container,
 			style,
-			// Style default center (Swiss overview). A URL hash overrides it
-			// via MapLibre's hash reader; a geolocation fix arriving below
-			// re-centers behind the splash.
-			center: (style.center as [number, number]) ?? [0, 0],
-			zoom: style.zoom ?? 2,
-			hash: true,
+			// Style default center (Swiss overview) unless the URL carries a
+			// position; a geolocation fix arriving below re-centers behind
+			// the splash.
+			center: initialPos?.center ?? (style.center as [number, number]) ?? [0, 0],
+			zoom: initialPos?.zoom ?? style.zoom ?? 2,
+			bearing: initialPos?.bearing ?? 0,
+			pitch: initialPos?.pitch ?? 0,
 			attributionControl: false
 		});
+
+		// Keep the URL hash in sync with the camera (router-aware
+		// replacement for MapLibre's `hash: true`). moveend covers user
+		// gestures and programmatic jumps alike; hashchange covers manual
+		// URL edits and back/forward (replaceState never fires hashchange,
+		// so the two can't feed back into each other).
+		map.on('moveend', () => writePositionHash(map));
+		const onHashChange = () => {
+			const pos = readPositionHash();
+			if (pos) map.jumpTo(pos);
+		};
+		window.addEventListener('hashchange', onHashChange);
 
 		(window as any).map = map;
 		mapRef = map;
@@ -1273,6 +1333,7 @@
 
 		return () => {
 			clearTimeout(safety);
+			window.removeEventListener('hashchange', onHashChange);
 			lineDetail = null;
 			savedLinePaints = null;
 			savedStopFilters = null;
