@@ -128,6 +128,10 @@
 					</div>
 				</div>
 			</div>
+
+			<div class="section about">
+				Contact: <a href="mailto:info@steppenwolfx.ch">info@steppenwolfx.ch</a>
+			</div>
 		</div>
 	{/if}
 </div>
@@ -320,5 +324,14 @@
 		justify-content: space-between;
 		font-size: 0.8rem;
 		color: #444;
+	}
+
+	.about {
+		font-size: 0.8rem;
+		color: #888;
+	}
+
+	.about a {
+		color: #666;
 	}
 </style>
