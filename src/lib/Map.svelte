@@ -5,6 +5,7 @@
 	import { Protocol } from 'pmtiles';
 	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
+	import MapMenu from './MapMenu.svelte';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -117,6 +118,14 @@
 	const DEFAULT_VIEW = 'transit-focus' as ViewMode;
 	let viewMode = $state<ViewMode>(DEFAULT_VIEW);
 	let mapRef = $state.raw<maplibregl.Map | null>(null);
+	// Menu panel state (bound into MapMenu). Non-modal: stays open during
+	// map interaction on large screens; on small screens any map move or
+	// click closes it (breakpoint matches the .top-controls media query).
+	let menuOpen = $state(false);
+	const MENU_AUTOCLOSE_MAX_WIDTH = 600;
+	function closeMenuOnSmallScreen() {
+		if (menuOpen && window.innerWidth <= MENU_AUTOCLOSE_MAX_WIDTH) menuOpen = false;
+	}
 
 	function applyViewMode(map: maplibregl.Map, mode: ViewMode) {
 		for (const id of STOP_SYMBOLOGY_LAYERS) {
@@ -158,8 +167,7 @@
 	const LINE_DETAIL_DIM_LAYER = 'line-detail-dim';
 	const LINE_DETAIL_HIGHLIGHT_CASING = 'line-detail-highlight-casing';
 	const LINE_DETAIL_HIGHLIGHT_FILL = 'line-detail-highlight';
-	const LINE_DETAIL_WIDTH_FACTOR = 1.7;
-	const LINE_DETAIL_GRAY = '#c4c4c4';
+	const LINE_DETAIL_WIDTH_ADD_PX = 4;
 	const LINE_DETAIL_OTHER_OPACITY = 0.25;
 	const LINE_DETAIL_CASING_OTHER_OPACITY = 0.12;
 
@@ -284,16 +292,16 @@
 		}
 	}
 
-	/** Multiply a line-width value by a factor. The style's widths are
+	/** Add a fixed pixel amount to a line-width value. The style's widths are
 	 * top-level `["interpolate", …, ["zoom"], …]` expressions — MapLibre
-	 * forbids nesting those inside `["*", …]`, so the factor is folded into
+	 * forbids nesting those inside `["+", …]`, so the addend is folded into
 	 * each interpolate output instead. */
-	function scaleLineWidthExpr(expr: unknown, factor: number): unknown {
-		if (typeof expr === 'number') return expr * factor;
+	function widenLineWidthExpr(expr: unknown, addPx: number): unknown {
+		if (typeof expr === 'number') return expr + addPx;
 		if (Array.isArray(expr) && expr[0] === 'interpolate') {
 			const out = expr.slice(0, 3);
 			for (let i = 3; i < expr.length; i += 2) {
-				out.push(expr[i], ['*', factor, expr[i + 1]]);
+				out.push(expr[i], ['+', addPx, expr[i + 1]]);
 			}
 			return out;
 		}
@@ -524,12 +532,16 @@
 
 		const isSelected = ['in', ['get', 'line_key'], ['literal', sel.keys]];
 
-		// Base line layers: EVERYTHING goes gray and translucent — the
-		// selected line is redrawn by the highlight pair on top, so it also
-		// sits above lines of higher-ranked modes. Widths stay original.
+		// Base line layers: EVERYTHING switches to the baked desaturated
+		// color (same hue/lightness, saturation reduced at build time —
+		// pipeline_setup.py) and goes translucent. The selected line is
+		// redrawn by the highlight pair on top, so it also sits above lines
+		// of higher-ranked modes. Widths stay original. Fallback gray covers
+		// tiles built before `color_desat` existed.
 		for (const id of TRANSIT_LINE_LAYERS) {
 			if (!map.getLayer(id)) continue;
-			map.setPaintProperty(id, 'line-color', LINE_DETAIL_GRAY);
+			map.setPaintProperty(id, 'line-color',
+				['coalesce', ['get', 'color_desat'], '#c4c4c4'] as any);
 			map.setPaintProperty(id, 'line-opacity', LINE_DETAIL_OTHER_OPACITY);
 		}
 		for (const id of TRANSIT_LINE_CASING_LAYERS) {
@@ -539,8 +551,8 @@
 
 		// Highlight pair: casing + fill for the selected line only, inserted
 		// directly above the topmost transit line layer (below the stop
-		// symbology). Width is the style's own interpolate with the widen
-		// factor folded into each output (see scaleLineWidthExpr).
+		// symbology). Width is the style's own interpolate with the fixed
+		// widen addend folded into each output (see widenLineWidthExpr).
 		if (!map.getLayer(LINE_DETAIL_HIGHLIGHT_CASING)) {
 			const styleLayers = map.getStyle().layers ?? [];
 			const trainIdx = styleLayers.findIndex((l) => l.id === 'transit-train');
@@ -562,8 +574,8 @@
 				layout: lineLayout,
 				paint: {
 					'line-color': '#ffffff',
-					'line-width': scaleLineWidthExpr(
-						casingOrig?.['line-width'], LINE_DETAIL_WIDTH_FACTOR) as any,
+					'line-width': widenLineWidthExpr(
+						casingOrig?.['line-width'], LINE_DETAIL_WIDTH_ADD_PX) as any,
 					'line-opacity': 0.9
 				}
 			}, beforeId);
@@ -577,8 +589,8 @@
 				layout: lineLayout,
 				paint: {
 					'line-color': ['get', 'color'],
-					'line-width': scaleLineWidthExpr(
-						fillOrig?.['line-width'], LINE_DETAIL_WIDTH_FACTOR) as any,
+					'line-width': widenLineWidthExpr(
+						fillOrig?.['line-width'], LINE_DETAIL_WIDTH_ADD_PX) as any,
 					'line-opacity': 1
 				}
 			}, beforeId);
@@ -839,6 +851,8 @@
 		// URL edits and back/forward (replaceState never fires hashchange,
 		// so the two can't feed back into each other).
 		map.on('moveend', () => writePositionHash(map));
+		map.on('movestart', closeMenuOnSmallScreen);
+		map.on('click', closeMenuOnSmallScreen);
 		const onHashChange = () => {
 			const pos = readPositionHash();
 			if (pos) map.jumpTo(pos);
@@ -1367,36 +1381,12 @@
 
 	{#if !lineDetail}
 		<div class="top-controls">
-			<div class="view-toggle" role="group" aria-label="Map view">
-				<button
-					class:active={viewMode === 'standard'}
-					onclick={() => setView('standard')}
-				>Standard</button>
-				<button
-					class:active={viewMode === 'transit-focus'}
-					onclick={() => setView('transit-focus')}
-				>Transit</button>
-			</div>
+			<MapMenu {viewMode} {setView} {contoursEnabled} {toggleContours} bind:open={menuOpen} />
 			{#if viewMode === 'transit-focus'}
 				<StopSearch map={mapRef} />
 			{/if}
 		</div>
 	{/if}
-
-	<button
-		class="contour-toggle"
-		class:active={contoursEnabled}
-		onclick={toggleContours}
-		title={contoursEnabled ? 'Hide contour lines' : 'Show contour lines'}
-		aria-pressed={contoursEnabled}
-		aria-label="Toggle contour lines"
-	>
-		<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
-			<path d="M2 15 Q 6 8, 10 11 T 18 6" fill="none" stroke="currentColor" stroke-width="1.4" />
-			<path d="M2 17 Q 6 12, 10 14 T 18 10" fill="none" stroke="currentColor" stroke-width="1.4" />
-			<path d="M2 13 Q 6 5, 10 8 T 18 3" fill="none" stroke="currentColor" stroke-width="1.4" />
-		</svg>
-	</button>
 
 	<div class="zoom-badge" aria-label="Current zoom level">
 		z&thinsp;{zoom}
@@ -1429,9 +1419,6 @@
 			/* Leave room for MapLibre's top-right NavigationControl
 			   (~29 px + 10 px margin) so nothing overlaps its tap area. */
 			right: 3.5rem;
-		}
-		.view-toggle {
-			flex-direction: column;
 		}
 	}
 
@@ -1484,59 +1471,6 @@
 	.line-detail-close:hover {
 		background: #eee;
 		color: #000;
-	}
-
-	.view-toggle {
-		display: flex;
-		background: #ffffff;
-		/* Fixed radius so horizontal (one-line) and vertical (stacked,
-		   mobile) shapes get the same corner rounding — 999px would clamp
-		   to half the *shorter* side, which changes when orientation flips. */
-		border-radius: 0.9rem;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-		overflow: hidden;
-		user-select: none;
-	}
-
-	.view-toggle button {
-		border: none;
-		background: transparent;
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
-		font-size: 0.85rem;
-		line-height: 1.2;
-		padding: 0.4rem 0.8rem;
-		cursor: pointer;
-		color: #333;
-	}
-
-	.view-toggle button.active {
-		background: #333;
-		color: #fff;
-	}
-
-	.contour-toggle {
-		/* Bottom-right, stacked above MapLibre's compact attribution (i):
-		   24px button + 2×10px control margin → 44px offset. */
-		position: absolute;
-		right: 10px;
-		bottom: 44px;
-		background: #ffffff;
-		border: none;
-		border-radius: 999px;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-		width: 2.1rem;
-		height: 2.1rem;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		cursor: pointer;
-		color: #6a4a24;
-		padding: 0;
-	}
-
-	.contour-toggle.active {
-		background: #6a4a24;
-		color: #f4ecdc;
 	}
 
 	.zoom-badge {

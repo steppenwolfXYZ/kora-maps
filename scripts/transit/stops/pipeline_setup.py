@@ -4,6 +4,7 @@ file.
 
 All shared constants (paths, MODE_*, PILL_CFG, ...) come in via
 `from _state import *`; every helper it needs is imported explicitly."""
+import colorsys
 import json
 import time
 from collections import defaultdict
@@ -53,6 +54,21 @@ from stops.pill_zoom.lines import (
 from stops.pill_zoom.make import make_pill_features
 from stops.pill_zoom.nn_path import nearest_neighbor_path
 from stops.pill_zoom.place import coordinate_dots_global_stab
+
+
+# Line-detail view (line-detail-view.md): saturation kept on the baked
+# `color_desat` variant of each line's color — non-selected lines render
+# with it while the view is open. Hue and lightness stay untouched.
+LINE_DETAIL_DESAT_KEEP = 0.3
+
+
+def _desaturate_hex(hex_color: str, keep: float) -> str:
+    r = int(hex_color[1:3], 16) / 255
+    g = int(hex_color[3:5], 16) / 255
+    b = int(hex_color[5:7], 16) / 255
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    r, g, b = colorsys.hls_to_rgb(h, l, s * keep)
+    return "#%02x%02x%02x" % (round(r * 255), round(g * 255), round(b * 255))
 
 
 def run():
@@ -355,6 +371,13 @@ def run():
             mo = props.get("mountain_origin")
             oid = str(props.get("osm_id", ""))
             info = line_lookup.get(oid) if oid else None
+            # Desaturated color for the line-detail view's non-selected
+            # lines. Stamped on every feature that carries a color.
+            color = props.get("color")
+            if color:
+                props["color_desat"] = _desaturate_hex(
+                    color, LINE_DETAIL_DESAT_KEEP)
+                feat["properties"] = props
             # Stamp terminus names on every line feature so the line popup
             # can render "A ↔ B" without a side-channel lookup. Written even
             # when the geometry itself doesn't get extended below.

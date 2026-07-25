@@ -295,7 +295,10 @@
 	input {
 		width: 100%;
 		box-sizing: border-box;
-		padding: 0.4rem 0.8rem;
+		/* Same height as the menu toggle button so the top-controls row
+		   aligns (MapMenu .menu-toggle is 2.1rem). */
+		height: 2.1rem;
+		padding: 0 0.8rem;
 		border: none;
 		border-radius: 999px;
 		background: #ffffff;
