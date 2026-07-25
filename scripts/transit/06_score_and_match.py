@@ -59,12 +59,14 @@ from gtfs.frequency import (
     weighted_freq,
 )
 from gtfs.identity import (
+    _trip_dep_span_export,
     _trip_direction_export,
     _trip_group_export,
     _trip_merged_export,
     _trip_stops_export,
     _trip_weight_export,
     _trip_weight_seasonal_export,
+    content_tg_id,
     stream_stop_times,
 )
 from gtfs.loaders import (

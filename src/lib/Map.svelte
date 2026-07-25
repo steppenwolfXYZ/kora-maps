@@ -1,6 +1,7 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { slide } from 'svelte/transition';
 	import { replaceState } from '$app/navigation';
 	import { Protocol } from 'pmtiles';
 	import mlcontour from 'maplibre-contour';
@@ -168,8 +169,8 @@
 	const LINE_DETAIL_HIGHLIGHT_CASING = 'line-detail-highlight-casing';
 	const LINE_DETAIL_HIGHLIGHT_FILL = 'line-detail-highlight';
 	const LINE_DETAIL_WIDTH_ADD_PX = 4;
-	const LINE_DETAIL_OTHER_OPACITY = 0.25;
-	const LINE_DETAIL_CASING_OTHER_OPACITY = 0.12;
+	const LINE_DETAIL_OTHER_OPACITY = 0.5;
+	const LINE_DETAIL_CASING_OTHER_OPACITY = 0.24;
 
 	// Deep link (line-detail-view.md § Deep link). The URL carries the
 	// selection as `?line=<key1>[,<key2>...]`. Multiple keys occur when a
@@ -180,12 +181,53 @@
 	const URL_LINE_PARAM = 'line';
 	const LINE_INDEX_URL = '/map-assets/line_index.json';
 
+	interface LineServiceVariant {
+		route: string;
+		/** 7-char Mo..Su mask, '1' = served */
+		days: string;
+		/** Average first/last departure of both ends, seconds from midnight
+		 * (may exceed 24 h) */
+		dep?: [number, number];
+		/** Runs per active day (busiest direction) — departures on a day
+		 * the line actually runs */
+		rpd: number;
+		/** Irregular departure pattern (e.g. peak-only service) */
+		irr?: boolean;
+		/** ISO operating period — present only when the line is seasonal */
+		from?: string;
+		to?: string;
+	}
+
+	interface LineServiceInfo {
+		days: string;
+		dep?: [number, number];
+		rpd: number;
+		irr?: boolean;
+		from?: string;
+		to?: string;
+		/** One row per distinct terminus pair, busiest first */
+		variants: LineServiceVariant[];
+	}
+
 	interface LineIndexEntry {
 		ref: string;
 		mode: string;
 		color: string;
 		bbox: [number, number, number, number];
 		route: string;
+		service?: LineServiceInfo;
+	}
+
+	// line_index.json is fetched once per session and shared between the
+	// deep-link resolver and the service summary in the title bar.
+	let lineIndexPromise: Promise<Record<string, LineIndexEntry> | null> | null = null;
+	function loadLineIndex(): Promise<Record<string, LineIndexEntry> | null> {
+		if (!lineIndexPromise) {
+			lineIndexPromise = fetch(LINE_INDEX_URL)
+				.then((res) => (res.ok ? res.json() : null))
+				.catch(() => null);
+		}
+		return lineIndexPromise;
 	}
 
 	function readLineDeepLinkFromUrl(): string[] | null {
@@ -256,9 +298,8 @@
 
 	async function resolveLineDeepLink(keys: string[]): Promise<LineDetailSelection | null> {
 		try {
-			const res = await fetch(LINE_INDEX_URL);
-			if (!res.ok) return null;
-			const index = (await res.json()) as Record<string, LineIndexEntry>;
+			const index = await loadLineIndex();
+			if (!index) return null;
 			const resolved: LineIndexEntry[] = [];
 			const resolvedKeys: string[] = [];
 			for (const k of keys) {
@@ -290,6 +331,101 @@
 		} catch {
 			return null;
 		}
+	}
+
+	// ── Line service summary (title-bar info) ───────────────────────────────
+	// Per-line service data baked into line_index.json by the pipeline:
+	// weekday mask, first/last departure, per-window trips/hour, seasonal
+	// operating period, per-terminus-pair variant rows. Loaded lazily when
+	// the detail view opens; absent for indexes built before the feature.
+	let lineService = $state<LineServiceInfo | null>(null);
+	let serviceExpanded = $state(false);
+
+	/** Merge the service blocks of a multi-key selection (same ref+mode
+	 * across agencies): busiest entry carries the headline cadence, span
+	 * and season, days union, variant rows concatenate. */
+	function mergeServiceInfo(infos: LineServiceInfo[]): LineServiceInfo | null {
+		if (!infos.length) return null;
+		if (infos.length === 1) return infos[0];
+		const busiest = infos.reduce((a, b) => (b.rpd > a.rpd ? b : a));
+		const days = Array.from({ length: 7 }, (_, i) =>
+			infos.some((s) => s.days[i] === '1') ? '1' : '0').join('');
+		return {
+			...busiest,
+			days,
+			variants: infos.flatMap((s) => s.variants)
+				.sort((a, b) => b.rpd - a.rpd)
+		};
+	}
+
+	function loadLineService(sel: LineDetailSelection) {
+		lineService = null;
+		serviceExpanded = false;
+		const token = sel.keys.join(',');
+		void loadLineIndex().then((index) => {
+			if (!index || !lineDetail || lineDetail.keys.join(',') !== token) return;
+			lineService = mergeServiceInfo(
+				sel.keys.map((k) => index[k]?.service)
+					.filter(Boolean) as LineServiceInfo[]);
+		});
+	}
+
+	const SERVICE_DAY_ABBR = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+
+	function fmtServiceDays(mask: string): string {
+		if (mask === '1111111') return 'daily';
+		const runs: string[] = [];
+		let i = 0;
+		while (i < 7) {
+			if (mask[i] !== '1') { i++; continue; }
+			let j = i;
+			while (j + 1 < 7 && mask[j + 1] === '1') j++;
+			runs.push(j > i
+				? `${SERVICE_DAY_ABBR[i]}–${SERVICE_DAY_ABBR[j]}`
+				: SERVICE_DAY_ABBR[i]);
+			i = j + 1;
+		}
+		return runs.join(', ') || '–';
+	}
+
+	/** Format a departure time rounded to the nearest quarter hour. */
+	function fmtDep(secs: number): string {
+		const q = Math.round(secs / 900) * 900;
+		const h = Math.floor(q / 3600) % 24;
+		const m = Math.floor((q % 3600) / 60);
+		return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+	}
+
+	/** Cadence on a day the line runs: regular service reads as a rate
+	 * (headway / ×-per-hour / every 2 h); rarer than ~every 2 h or an
+	 * irregular pattern falls back to runs per day. */
+	function fmtCadence(rpd: number, dep?: [number, number], irr?: boolean): string {
+		if (rpd <= 0) return '–';
+		const perDay = `≈${Math.max(1, Math.round(rpd))}×/day`;
+		if (irr || rpd < 3) return perDay;
+		const spanMin = dep ? (dep[1] - dep[0]) / 60 : 17 * 60;
+		const headway = spanMin / Math.max(1, rpd - 1);
+		if (headway > 130) return perDay;
+		if (headway < 24) return `every ~${Math.max(1, Math.round(headway))} min`;
+		if (headway < 40) return '≈2×/h';
+		if (headway < 80) return '≈1×/h';
+		return 'every ~2 h';
+	}
+
+	function fmtDateShort(iso: string): string {
+		return new Date(iso + 'T12:00:00')
+			.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+	}
+
+	function serviceSummary(svc: LineServiceInfo): string {
+		const parts: string[] = [];
+		if (svc.from && svc.to) {
+			parts.push(`${fmtDateShort(svc.from)} – ${fmtDateShort(svc.to)}`);
+		}
+		parts.push(fmtServiceDays(svc.days));
+		if (svc.dep) parts.push(`${fmtDep(svc.dep[0])}–${fmtDep(svc.dep[1])}`);
+		parts.push(fmtCadence(svc.rpd, svc.dep, svc.irr));
+		return parts.join(' · ');
 	}
 
 	/** Add a fixed pixel amount to a line-width value. The style's widths are
@@ -627,12 +763,15 @@
 		}
 
 		lineDetail = sel;
+		loadLineService(sel);
 		syncLineDeepLinkToUrl(sel.keys);
 	}
 
 	function exitLineDetail() {
 		const map = mapRef;
 		lineDetail = null;
+		lineService = null;
+		serviceExpanded = false;
 		syncLineDeepLinkToUrl(null);
 		if (!map) {
 			savedLinePaints = null;
@@ -1364,18 +1503,48 @@
 
 	{#if lineDetail}
 		<div class="line-detail-bar" role="status">
-			<span
-				class="line-detail-badge"
-				style="background:{lineDetail.color};color:{badgeTextColor(lineDetail.color)}"
-			>{lineDetail.ref || lineDetail.mode}</span>
-			{#if lineDetail.route}
-				<span class="line-detail-route">{lineDetail.route}</span>
+			<div class="line-detail-head">
+				<span
+					class="line-detail-badge"
+					style="background:{lineDetail.color};color:{badgeTextColor(lineDetail.color)}"
+				>{lineDetail.ref || lineDetail.mode}</span>
+				{#if lineDetail.route}
+					<span class="line-detail-route">{lineDetail.route}</span>
+				{/if}
+				<button
+					class="line-detail-close"
+					onclick={exitLineDetail}
+					aria-label="Close line detail view"
+				>×</button>
+			</div>
+			{#if lineService}
+				<div class="line-detail-summary">{serviceSummary(lineService)}</div>
+				{#if serviceExpanded}
+					<div class="line-detail-details" transition:slide={{ duration: 250 }}>
+						<div class="line-detail-variants">
+							{#each lineService.variants as v (v.route)}
+								<div class="line-detail-variant">
+									<span class="line-detail-variant-route">{v.route}</span>
+									<span class="line-detail-variant-meta">
+										{fmtServiceDays(v.days)}{#if v.dep}
+											&nbsp;· {fmtDep(v.dep[0])}–{fmtDep(v.dep[1])}{/if}
+										· {fmtCadence(v.rpd, v.dep, v.irr)}{#if v.from && v.to}
+											&nbsp;· {fmtDateShort(v.from)} – {fmtDateShort(v.to)}{/if}
+									</span>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+				{#if lineService.variants.length > 1}
+					<button
+						class="line-detail-toggle"
+						onclick={() => (serviceExpanded = !serviceExpanded)}
+						aria-label={serviceExpanded ? 'Hide line details' : 'Show line details'}
+						aria-expanded={serviceExpanded}
+					><span class="line-detail-chevron" class:flipped={serviceExpanded}>▾</span></button>
+				{/if}
 			{/if}
-			<button
-				class="line-detail-close"
-				onclick={exitLineDetail}
-				aria-label="Close line detail view"
-			>×</button>
 		</div>
 	{/if}
 
@@ -1428,15 +1597,95 @@
 		left: 50%;
 		transform: translateX(-50%);
 		display: flex;
-		align-items: center;
-		gap: 0.65rem;
-		max-width: min(70vw, 34rem);
+		flex-direction: column;
+		gap: 0.2rem;
+		max-width: min(85vw, 34rem);
 		background: #ffffff;
-		border-radius: 999px;
+		border-radius: 1.1rem;
 		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-		padding: 0.7rem 0.9rem 0.7rem 1rem;
+		padding: 0.6rem 0.9rem 0.6rem 1rem;
 		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
 		z-index: 5;
+	}
+
+	.line-detail-head {
+		display: flex;
+		align-items: center;
+		gap: 0.65rem;
+	}
+
+	/* Push the action buttons to the right edge even when there is no
+	   route text to grow into the gap. */
+	.line-detail-head > button:first-of-type {
+		margin-left: auto;
+	}
+
+	.line-detail-summary {
+		font-size: 0.75rem;
+		color: #666;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.line-detail-details {
+		border-top: 1px solid #eee;
+		margin-top: 0.35rem;
+		padding-top: 0.45rem;
+		max-height: 45vh;
+		overflow-y: auto;
+		font-size: 0.8rem;
+		color: #333;
+	}
+
+	.line-detail-variants {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+	}
+
+	.line-detail-variant {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.line-detail-variant-route {
+		font-weight: 600;
+		font-size: 0.78rem;
+	}
+
+	.line-detail-variant-meta {
+		color: #666;
+		font-size: 0.72rem;
+	}
+
+	.line-detail-toggle {
+		border: none;
+		background: transparent;
+		color: #555;
+		font-size: 0.8rem;
+		line-height: 1;
+		cursor: pointer;
+		/* Span the card's horizontal padding so the strip runs edge to
+		   edge and closes off the bottom of the bar. */
+		margin: 0.25rem -0.9rem -0.6rem -1rem;
+		padding: 0.3rem 0 0.4rem;
+		border-top: 1px solid #eee;
+		border-radius: 0 0 1.1rem 1.1rem;
+	}
+
+	.line-detail-toggle:hover {
+		background: #f5f5f5;
+		color: #000;
+	}
+
+	.line-detail-chevron {
+		display: inline-block;
+		transition: transform 0.25s ease;
+	}
+
+	.line-detail-chevron.flipped {
+		transform: rotate(180deg);
 	}
 
 	.line-detail-badge {

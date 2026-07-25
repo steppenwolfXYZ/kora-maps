@@ -59,7 +59,7 @@ from stops.pill_zoom.place import coordinate_dots_global_stab
 # Line-detail view (line-detail-view.md): saturation kept on the baked
 # `color_desat` variant of each line's color — non-selected lines render
 # with it while the view is open. Hue and lightness stay untouched.
-LINE_DETAIL_DESAT_KEEP = 0.3
+LINE_DETAIL_DESAT_KEEP = 0.5
 
 
 def _desaturate_hex(hex_color: str, keep: float) -> str:
@@ -413,6 +413,14 @@ def run():
     # line_key + line_bbox (per-group union bbox is identical on all
     # variants) + termini names + color/mode/ref.
     with _timed("write OUT_LINE_INDEX"):
+        # Per-line service summary (season / weekdays / times / frequency)
+        # written by step 06; attached to each entry for the detail-view
+        # title bar. Missing file (older step-06 output) degrades to
+        # entries without a `service` block.
+        service_info_path = ROOT / "data" / "transit" / "line_service_info.json"
+        service_info: dict = {}
+        if service_info_path.exists():
+            service_info = json.loads(service_info_path.read_text())
         line_index: dict[str, dict] = {}
         for feat in lines_data["features"]:
             props = feat.get("properties") or {}
@@ -457,6 +465,9 @@ def run():
                 "bbox":  entry["bbox"],
                 "route": route,
             }
+            svc = service_info.get(key)
+            if svc:
+                out[key]["service"] = svc
         OUT_LINE_INDEX.parent.mkdir(parents=True, exist_ok=True)
         OUT_LINE_INDEX.write_text(json.dumps(out, ensure_ascii=False))
         print(f"  Line index: {len(out):,} lines → {OUT_LINE_INDEX}")

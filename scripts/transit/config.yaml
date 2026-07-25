@@ -74,6 +74,34 @@ gtfs_trip_overrides:
     before_stop_id: "8572205"       # Dornach, Gwändweg (parent)
     waypoint: [7.61093, 47.489587]  # vertex of OSM way 379902479 — forecourt exit lane ~25 m north of platform E
     reason: "Platform E departures must leave the forecourt northbound (doors toward the platform) and turn around via Amthausstrasse; the bay lane is two-way in OSM, so pfaedle otherwise exits south directly and poisons the direction at the platform."
+  - agency_id: "48"               # Matterhorn Gotthard Bahn
+    route_short_name: "R43"
+    action: insert_waypoint
+    after_stop_id: "8501661"        # Oberwald (parent)
+    before_stop_id: "8505163"       # Realp (parent)
+    waypoint: [8.4481645, 46.531923]  # mid-tunnel vertex of the Furka-Basistunnel OSM way
+    reason: "Pfaedle routes over the DFB heritage line (Furka pass): the base tunnel is demoted to lvl1 by usage=branch (90 km/h assumed) while the untagged heritage line stays lvl0 (120 km/h), so the pass 'wins' on estimated time. Regular service uses the tunnel."
+  - agency_id: "48"               # Matterhorn Gotthard Bahn
+    route_short_name: "R43"
+    action: insert_waypoint
+    after_stop_id: "8505163"        # Realp (parent)
+    before_stop_id: "8501661"       # Oberwald (parent)
+    waypoint: [8.4481645, 46.531923]  # mid-tunnel vertex of the Furka-Basistunnel OSM way
+    reason: "Reverse direction of the R43 Furka base tunnel override above."
+  - agency_id: "48"               # Matterhorn Gotthard Bahn
+    route_short_name: "GEX"
+    action: insert_waypoint
+    after_stop_id: "8515296"        # Brig Bahnhofplatz (parent)
+    before_stop_id: "8505165"       # Andermatt (parent)
+    waypoint: [8.4481645, 46.531923]  # mid-tunnel vertex of the Furka-Basistunnel OSM way
+    reason: "Glacier Express runs Brig-Andermatt nonstop through the Furka base tunnel; same heritage-line misroute as R43."
+  - agency_id: "48"               # Matterhorn Gotthard Bahn
+    route_short_name: "GEX"
+    action: insert_waypoint
+    after_stop_id: "8505165"        # Andermatt (parent)
+    before_stop_id: "8515296"       # Brig Bahnhofplatz (parent)
+    waypoint: [8.4481645, 46.531923]  # mid-tunnel vertex of the Furka-Basistunnel OSM way
+    reason: "Reverse direction of the GEX Furka base tunnel override above."
 
 # ── GTFS preprocessing: agency denylists ─────────────────────────────────────
 # Both lists key on substrings of agency_name (case-insensitive) as found in

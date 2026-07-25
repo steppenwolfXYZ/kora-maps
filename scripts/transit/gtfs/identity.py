@@ -5,9 +5,20 @@ buckets trips into groups by shared merged-stop overlap, and populates the
 module-level `_trip_*_export` maps that the driver's main() reads.
 """
 import csv
+import hashlib
 from collections import defaultdict
 
 from geometry import haversine_km, parse_time
+
+
+def content_tg_id(merged_uics) -> str:
+    """Content-based trip_group_id — 8 hex chars of blake2s over the sorted
+    merged-UIC set of the (sub-)group. Same UIC set always yields the same
+    id, so line_keys stay stable across pipeline rebuilds (and are naturally
+    stable across the post-emission split — the same hash function keys both
+    partition-level parent groups and post-split sub-groups)."""
+    payload = ",".join(sorted(str(u) for u in merged_uics)).encode("utf-8")
+    return hashlib.blake2s(payload, digest_size=4).hexdigest()
 
 from .loaders import GTFS
 from .frequency import (
@@ -34,6 +45,9 @@ _trip_merged_export: dict = {}       # trip_id → frozenset(merged_stop_id)  (v
 _trip_weight_export: dict = {}       # trip_id → int (≈ trip-runs across calendar)
 _trip_weight_seasonal_export: dict = {}  # trip_id → {"annual": n, "winter": n, "summer": n}
 _trip_direction_export: dict = {}    # trip_id → (first_merged_uic, last_merged_uic)
+_trip_dep_span_export: dict = {}     # trip_id → (dep_lo, dep_hi) seconds — origin
+                                     # departure (both equal), or the
+                                     # frequencies.txt template window
 _dwell_export: dict = {}             # merged_uic → avg dwell (seconds) — piggybacks
                                      # on this streaming pass so step 07 doesn't have
                                      # to walk the 1.7 GB stop_times.txt a second time.
@@ -45,7 +59,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     `_trip_stops_export`, `_trip_merged_export`, `_trip_weight_export`,
     and `_trip_direction_export`.
     """
-    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export, _dwell_export
+    global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export, _trip_dep_span_export, _dwell_export
 
     stop_merge: dict = {}
     for sid, meta in stop_meta.items():
@@ -110,6 +124,10 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         core_n = eve_n = we_n = 0
         freq_entries = trip_frequencies.get(trip_id, [])
         if freq_entries:
+            _trip_dep_span_export[trip_id] = (
+                min(e[0] for e in freq_entries),
+                max(e[1] for e in freq_entries),
+            )
             for start, end, headway in freq_entries:
                 if headway <= 0:
                     continue
@@ -117,6 +135,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
                 eve_n  += max(0, (min(end, EVENING_END) - max(start, EVENING_START)) // headway)
                 we_n   += max(0, (min(end, WEEKEND_END) - max(start, WEEKEND_START)) // headway)
         else:
+            _trip_dep_span_export[trip_id] = (first_dep, first_dep)
             if CORE_START <= first_dep < CORE_END:
                 core_n = 1
             elif EVENING_START <= first_dep < EVENING_END:
@@ -202,8 +221,9 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         pattern_tids = list(patterns.values())
         P = len(pattern_sets)
         if P == 1:
+            tg_hash = content_tg_id(pattern_sets[0])
             for tid in pattern_tids[0]:
-                trip_group[tid] = 0
+                trip_group[tid] = tg_hash
             n_groups_total += 1
             continue
 
@@ -230,16 +250,29 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
                             parent[ri] = rj
                             break
 
+        # Content-hash tg_ids: each connected component's id is a hash of
+        # its union-of-merged-UICs, so re-running the pipeline on the same
+        # feed yields the same line_keys (see .claude/concepts/line-key-
+        # split-after-filter.md). Uniqueness within a partition is asserted
+        # below; parent (this) and post-split sub-groups (in
+        # _pipeline_grouping.py) share the same hashing scheme.
+        component_uics: dict = {}
+        for i in range(P):
+            r = find(i)
+            component_uics.setdefault(r, set()).update(pattern_sets[i])
         cc_ids: dict = {}
-        next_id = 0
+        for root, uics in component_uics.items():
+            cc_ids[root] = content_tg_id(uics)
+        if len(set(cc_ids.values())) != len(cc_ids):
+            raise RuntimeError(
+                f"content_tg_id collision inside a single partition: "
+                f"{sorted(cc_ids.values())}"
+            )
         for i in range(P):
             root = find(i)
-            if root not in cc_ids:
-                cc_ids[root] = next_id
-                next_id += 1
             for tid in pattern_tids[i]:
                 trip_group[tid] = cc_ids[root]
-        n_groups_total += next_id
+        n_groups_total += len(cc_ids)
 
     print(f"  {len(partition_trips):,} partitions → {n_groups_total:,} trip-groups")
 

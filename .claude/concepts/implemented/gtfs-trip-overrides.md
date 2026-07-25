@@ -41,9 +41,12 @@ The canonical case is Niesenbahn (Mülenen — Schwandegg — Kulm), a two-cable
 
 ## Problem
 
-Pfaedle sometimes routes a legally permitted but physically wrong path in the first metres of a trip, because the real-world constraint is not encoded anywhere it can see. Canonical case: Dornach Bahnhof, bus 56. The bus departs platform E, where a vehicle must stand facing north (doors toward the platform) and leave through the forecourt's northbound exit, turning around via Amthausstrasse to head south. The bay lane is correctly mapped as two-way in OSM (platform F uses it southbound), GTFS has no door-side concept, and pfaedle has no notion of "platform dictates standing direction" — so it legally exits south through the back of the bay. The wrong initial direction poisons everything downstream: direction classification at the platform, pill-arrow side and orientation, and the stop position line at close zoom.
+Pfaedle sometimes routes a legally permitted but physically wrong path, because the real-world constraint is not encoded anywhere it can see. The mechanism is general: forcing the shape through a via point corrects any such misroute, anywhere along the trip, in any mode. Two known error classes so far, each illustrated by an example:
 
-No automatic signal can fix this class of error; it needs a manual, per-case override — but a reusable one, not route-specific code.
+- **Wrong path in the first metres of a trip.** Example: Dornach Bahnhof, bus 56. The bus departs platform E, where a vehicle must stand facing north (doors toward the platform) and leave through the forecourt's northbound exit, turning around via Amthausstrasse to head south. The bay lane is correctly mapped as two-way in OSM (platform F uses it southbound), GTFS has no door-side concept, and pfaedle has no notion of "platform dictates standing direction" — so it legally exits south through the back of the bay. The wrong initial direction poisons everything downstream: direction classification at the platform, pill-arrow side and orientation, and the stop position line at close zoom.
+- **Wrong route choice between parallel infrastructure.** Example: R43 and Glacier Express over the Furka. Pfaedle's cost model estimates travel time from tag-class speed assumptions, not real speeds: the base tunnel is demoted by `usage=branch` while the DFB heritage line over the pass matches no class and keeps the fastest default, so pfaedle draws regular services over the mountain line. A mid-tunnel waypoint forces the correct path.
+
+No automatic signal can fix these errors; they need a manual, per-case override — but a reusable one, not route-specific code.
 
 ## Requirements
 

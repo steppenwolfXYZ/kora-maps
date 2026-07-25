@@ -59,6 +59,19 @@ def _citybus_promoted(tg_key, all_trips, short_name, agency_id) -> bool:
 
 
 _ZERO_FREQ = {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
+
+# Raw per-emitted-variant service data, keyed by the canonical line key
+# (ref~agency_id~mode~trip_group_id — same format step 07's line_key_of
+# produces). Reduced to the per-line service summary in the output phase
+# and baked into line_index.json by step 07.
+service_raw: dict = defaultdict(list)
+
+
+def _stop_display_name(sid: str) -> str:
+    entry = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
+    return entry.get("name") or ""
+
+
 for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
     short_name, long_name, bucket = line_key
     all_trips = [tid for trips in variant_map.values() for tid in trips]
@@ -234,6 +247,35 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
             "gtfs_ref": short_name,
             "direction_key": direction_key_str,
         }
+
+        # Service-summary raw record for this emitted variant. "runs" is
+        # the variant's total yearly departures counted against the FULL
+        # calendar (variant_runs_full, grouping phase); divided by the
+        # variant's active days downstream it yields the departures on a
+        # day the line actually runs — self-normalizing for seasonal and
+        # weekday-only service.
+        dep_lo = dep_hi = None
+        for tid in trip_ids:
+            span = _trip_dep_span_export.get(tid)
+            if span is None:
+                continue
+            dep_lo = span[0] if dep_lo is None else min(dep_lo, span[0])
+            dep_hi = span[1] if dep_hi is None else max(dep_hi, span[1])
+        vkey_full = (line_key, agency_id, tg_id, merged_set, direction_key)
+        service_raw[f"{short_name}~{agency_id}~{mode}~{tg_id}"].append({
+            "termini": (_stop_display_name(stop_ids[0]) if stop_ids else "",
+                        _stop_display_name(stop_ids[-1]) if stop_ids else ""),
+            "date_stats": variant_date_stats.get(vkey_full),
+            "dep": (dep_lo, dep_hi),
+            # Distinct origin departure times — the output phase reads the
+            # gap pattern off them to flag irregular (e.g. peak-only)
+            # service. Not written to the JSON.
+            "dep_times": sorted({_trip_dep_span_export[t][0]
+                                 for t in trip_ids
+                                 if t in _trip_dep_span_export}),
+            "runs": variant_runs_full.get(vkey_full, 0),
+            "active_days": variant_active_days.get(vkey_full, 0),
+        })
 
         matched_tg_keys.add(tg_key)
         diag_emission[(tg_key, var_key)] = {

@@ -130,6 +130,12 @@ for tg_key, vmap in groups.items():
 # trip group. Per direction-coverage concept: ferry, aerial, and funicular
 # are exempt; rebucketed mountain rail is gated like normal train.
 variant_service_ids: dict = defaultdict(set)
+# Per-variant total yearly departures for the line service summary: each
+# trip contributes its FULL-calendar active-day count. Deliberately not
+# `_trip_weight_export` — those weights count sample dates only, and
+# dividing them by full-calendar active days would understate cadence
+# roughly tenfold.
+variant_runs_full: dict = defaultdict(int)
 for tid, (lk, tg_id_v, aid) in _trip_group_export.items():
     merged_set = _trip_merged_export.get(tid)
     if merged_set is None:
@@ -139,14 +145,56 @@ for tid, (lk, tg_id_v, aid) in _trip_group_export.items():
         continue
     t = trip_lookup.get(tid)
     if t:
-        variant_service_ids[(lk, aid, tg_id_v, merged_set, direction_key)] \
-            .add(t["service_id"])
+        vkey_ids = (lk, aid, tg_id_v, merged_set, direction_key)
+        variant_service_ids[vkey_ids].add(t["service_id"])
+        # A frequencies.txt template trip stands for (window // headway)
+        # departures per day, not one — continuous services (gondolas
+        # etc.) would otherwise read as "1×/day".
+        freq_entries = trip_frequencies.get(tid)
+        deps_per_day = 1
+        if freq_entries:
+            deps_per_day = sum(
+                max(0, (end - start) // headway)
+                for start, end, headway in freq_entries if headway > 0
+            ) or 1
+        variant_runs_full[vkey_ids] += (
+            deps_per_day * len(svc_dates_full.get(t["service_id"], ())))
 variant_active_days: dict = {}
+# Per-variant calendar stats for the line service summary (baked into
+# line_index.json by step 07): first/last active date plus per-weekday
+# active-date counts (Mo..Su). Computed here because svc_dates_full is
+# released right below.
+variant_date_stats: dict = {}  # vkey → (first_date, last_date, [7 counts])
+from datetime import date as _date_cls
+_weekday_cache: dict = {}
+def _weekday_of(d: str) -> int:
+    wd = _weekday_cache.get(d)
+    if wd is None:
+        wd = _date_cls(int(d[:4]), int(d[4:6]), int(d[6:8])).weekday()
+        _weekday_cache[d] = wd
+    return wd
+# Feed validity period — the yardstick the seasonal check measures line
+# date ranges against.
+feed_first_date: str = ""
+feed_last_date: str = ""
+for dates in svc_dates_full.values():
+    if not dates:
+        continue
+    lo, hi = min(dates), max(dates)
+    if not feed_first_date or lo < feed_first_date:
+        feed_first_date = lo
+    if not feed_last_date or hi > feed_last_date:
+        feed_last_date = hi
 for vkey, sids in variant_service_ids.items():
     u: set = set()
     for sid in sids:
         u |= svc_dates_full.get(sid, set())
     variant_active_days[vkey] = len(u)
+    if u:
+        wd_counts = [0] * 7
+        for d in u:
+            wd_counts[_weekday_of(d)] += 1
+        variant_date_stats[vkey] = (min(u), max(u), wd_counts)
 # svc_dates_full is the heaviest object after stop_times; release.
 svc_dates_full.clear()
 variant_service_ids.clear()
@@ -519,3 +567,193 @@ n_rescued_drawable = sum(1 for k, v in drawable_groups.items()
                          if freq_gate_window_passed.get(k) not in (None, "annual"))
 print(f"  {len(drawable_groups):,} drawable (line_key, agency, trip_group) entries "
       f"({n_rescued_drawable} via seasonal window)")
+
+# ── Post-emission split (concept: line-key-split-after-filter.md) ────────
+# For each drawable group, run union-find on its SURVIVING variants
+# (post-freq/rare-variant/short-active-period filters). If the group
+# breaks into ≥2 connected components (variants sharing <2 merged stops
+# across the split boundary), spin each component off into its own
+# tg_key with a content-hash tg_id, recompute freq per sub-group, and
+# drop sub-groups that fall below worst_freq. Prevents the pathology
+# where a single line_key covers multiple geographically-disjoint
+# corridors after low-freq "bridging" variants get filtered out (e.g.
+# SBB IR routes filed without a discriminating name — see the concept).
+_split_new = 0
+_split_dropped = 0
+_split_parents = 0
+for _parent_tg_key in list(drawable_groups.keys()):
+    _parent_line_key, _parent_aid, _parent_tg_id = _parent_tg_key
+    _vmap = drawable_groups[_parent_tg_key]
+    _vlist = list(_vmap.keys())
+    if len(_vlist) <= 1:
+        continue
+    _uf = list(range(len(_vlist)))
+    def _uf_find(x):
+        while _uf[x] != x:
+            _uf[x] = _uf[_uf[x]]
+            x = _uf[x]
+        return x
+    _msets = [vk[0] for vk in _vlist]
+    for _i in range(len(_vlist)):
+        _si = _msets[_i]
+        for _j in range(_i + 1, len(_vlist)):
+            _ri, _rj = _uf_find(_i), _uf_find(_j)
+            if _ri == _rj:
+                continue
+            _sj = _msets[_j]
+            _small, _big = (_si, _sj) if len(_si) <= len(_sj) else (_sj, _si)
+            _shared = 0
+            for _s in _small:
+                if _s in _big:
+                    _shared += 1
+                    if _shared >= 2:
+                        _uf[_ri] = _rj
+                        break
+    _comps = defaultdict(list)
+    for _i in range(len(_vlist)):
+        _comps[_uf_find(_i)].append(_vlist[_i])
+    if len(_comps) <= 1:
+        continue
+
+    _split_parents += 1
+    _bucket = _parent_line_key[2]
+    _mode_approx = _BUCKET_MODE_APPROX.get(_bucket, "regional_bus")
+    _worst_f = worst_freq_map.get(_mode_approx, 0.0)
+    _exempt = _freq_gate_exempt(_bucket, tg_mountain_origin.get(_parent_tg_key))
+    _is_rescued_parent = bool(regional_bus_rescued.get(_parent_tg_key))
+    _parent_speed = tg_speed.get(_parent_tg_key)
+    _parent_mo = tg_mountain_origin.get(_parent_tg_key)
+    _parent_rt = tg_route_type.get(_parent_tg_key)
+    _parent_sg = supergroup_id_by_tg.get(_parent_tg_key)
+    _parent_rescued_vars = regional_bus_rescued.get(_parent_tg_key, set())
+
+    # Retire the parent tg_key from every per-tg map that downstream
+    # emission / diagnostics read; sub-groups replace it entry-by-entry.
+    del drawable_groups[_parent_tg_key]
+    freq_gate_window_passed.pop(_parent_tg_key, None)
+    tg_freq.pop(_parent_tg_key, None)
+    tg_freq_seasonal.pop(_parent_tg_key, None)
+    tg_speed.pop(_parent_tg_key, None)
+    tg_mountain_origin.pop(_parent_tg_key, None)
+    tg_route_type.pop(_parent_tg_key, None)
+    supergroup_id_by_tg.pop(_parent_tg_key, None)
+    regional_bus_rescued.pop(_parent_tg_key, None)
+    _parent_diag_original = diag_original.pop(_parent_tg_key, {})
+    _parent_diag_filter = diag_filter.pop(_parent_tg_key, {})
+    _parent_variant_counts = variant_counts.pop(_parent_tg_key, {})
+    _parent_variant_counts_seasonal = {
+        s: variant_counts_seasonal[s].pop(_parent_tg_key, {}) for s in SEASONS
+    }
+    tg_total_weight.pop(_parent_tg_key, None)
+
+    _new_ids: set = set()
+    for _comp_vars in _comps.values():
+        # Recompute per-sub-group freq from the retained per-variant
+        # seasonal freq. Same window sweep as the initial freq gate:
+        # rescued-bearing sub-groups get evaluated over all seasons;
+        # others only against the annual window.
+        _sub_seasonal = {s: {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
+                         for s in SEASONS}
+        for _vk in _comp_vars:
+            _v_seasonal = var_freq_seasonal.get((_parent_tg_key, _vk)) or {}
+            for _s in SEASONS:
+                _per = _v_seasonal.get(_s) \
+                    or {"f_core": 0.0, "f_eve": 0.0, "f_we": 0.0}
+                _sub_seasonal[_s]["f_core"] += _per["f_core"]
+                _sub_seasonal[_s]["f_eve"] += _per["f_eve"]
+                _sub_seasonal[_s]["f_we"] += _per["f_we"]
+
+        _sub_rescued_vars = {vk for vk in _comp_vars if vk in _parent_rescued_vars}
+        _is_rescued_sub = _is_rescued_parent and bool(_sub_rescued_vars)
+
+        _passed = False
+        _winning_window = None
+        if _exempt:
+            _passed = True
+            _winning_window = "annual"
+        else:
+            _windows = SEASONS if _is_rescued_sub else ("annual",)
+            for _s in _windows:
+                if weighted_freq(_sub_seasonal[_s]) > _worst_f:
+                    _passed = True
+                    _winning_window = _s
+                    break
+
+        if not _passed:
+            _split_dropped += 1
+            continue
+
+        # Content-hash tg_id from the sub-group's merged UIC union —
+        # same hashing scheme as stream_stop_times.
+        _comp_uics: set = set()
+        for _vk in _comp_vars:
+            _comp_uics |= _vk[0]
+        _new_tg_id = content_tg_id(_comp_uics)
+        if _new_tg_id in _new_ids:
+            raise RuntimeError(
+                f"post-split content_tg_id collision under "
+                f"{_parent_tg_key}: {_new_tg_id}")
+        _new_ids.add(_new_tg_id)
+        _new_tg_key = (_parent_line_key, _parent_aid, _new_tg_id)
+
+        drawable_groups[_new_tg_key] = {vk: _vmap[vk] for vk in _comp_vars}
+        _win_raw = _sub_seasonal[_winning_window]
+        tg_freq[_new_tg_key] = dict(_win_raw)
+        tg_freq_seasonal[_new_tg_key] = {s: dict(_sub_seasonal[s]) for s in SEASONS}
+        tg_speed[_new_tg_key] = _parent_speed
+        tg_mountain_origin[_new_tg_key] = _parent_mo
+        tg_route_type[_new_tg_key] = _parent_rt
+        freq_gate_window_passed[_new_tg_key] = _winning_window
+        if _parent_sg is not None:
+            supergroup_id_by_tg[_new_tg_key] = _parent_sg
+        if _sub_rescued_vars:
+            regional_bus_rescued[_new_tg_key] = _sub_rescued_vars
+
+        for _vk in _comp_vars:
+            _seasonal = var_freq_seasonal.get((_parent_tg_key, _vk))
+            if _seasonal is not None:
+                var_freq_seasonal[(_new_tg_key, _vk)] = _seasonal
+            variant_counts[_new_tg_key][_vk] = _parent_variant_counts.get(_vk, 0)
+            for _s in SEASONS:
+                variant_counts_seasonal[_s][_new_tg_key][_vk] = \
+                    _parent_variant_counts_seasonal[_s].get(_vk, 0)
+            _mset, _dkey = _vk
+            _parent_va_key = (_parent_line_key, _parent_aid, _parent_tg_id,
+                              _mset, _dkey)
+            _new_va_key = (_parent_line_key, _parent_aid, _new_tg_id,
+                           _mset, _dkey)
+            if _parent_va_key in variant_active_days:
+                variant_active_days[_new_va_key] = variant_active_days[_parent_va_key]
+            if _parent_va_key in variant_date_stats:
+                variant_date_stats[_new_va_key] = variant_date_stats[_parent_va_key]
+            if _parent_va_key in variant_runs_full:
+                variant_runs_full[_new_va_key] = variant_runs_full[_parent_va_key]
+            _rvwp = rare_variant_window_passed.pop((_parent_tg_key, _vk), None)
+            if _rvwp is not None:
+                rare_variant_window_passed[(_new_tg_key, _vk)] = _rvwp
+            _rvpct = rare_variant_threshold_pct_passed.pop(
+                (_parent_tg_key, _vk), None)
+            if _rvpct is not None:
+                rare_variant_threshold_pct_passed[(_new_tg_key, _vk)] = _rvpct
+
+        tg_total_weight[_new_tg_key] = sum(variant_counts[_new_tg_key].values())
+
+        # Diagnostic: seed diag_original + diag_filter for the sub-group
+        # so gtfs_groups_full.json shows each sub-group as its own entry.
+        diag_original[_new_tg_key] = {
+            vk: list(_parent_diag_original.get(vk, []))
+            for vk in _comp_vars
+        }
+        diag_filter[_new_tg_key] = {
+            vk: _parent_diag_filter.get(vk,
+                ("kept",
+                 rare_variant_threshold_pct_passed.get((_new_tg_key, vk))))
+            for vk in _comp_vars
+        }
+
+        _split_new += 1
+
+if _split_parents:
+    print(f"  Post-emission split: {_split_parents} groups → "
+          f"{_split_new} sub-groups drawable "
+          f"({_split_dropped} dropped by re-checked freq gate)")

@@ -331,6 +331,137 @@ OUT_DWELL_BY_UIC = ROOT / "data" / "transit" / "dwell_by_uic.json"
 OUT_DWELL_BY_UIC.write_text(json.dumps(_dwell_export, ensure_ascii=False))
 print(f"  Dwell by UIC: {len(_dwell_export)} UICs → {OUT_DWELL_BY_UIC}")
 
+# ── Per-line service summary ─────────────────────────────────────────────
+# Reduce the per-emitted-variant raw records (service_raw, emission phase)
+# to one summary per canonical line key: operating period (only when
+# seasonal, i.e. clearly shorter than the feed validity period), weekday
+# mask, first/last departure (average of both directions), runs per
+# active day (`rpd` — total yearly departures / days the line actually
+# runs, so seasonal and weekday-only service self-normalize), an
+# irregular-service flag (`irr`), plus one row per distinct terminus pair
+# for the expanded view. Step 07 attaches these to the line_index.json
+# entries; all text formatting happens client-side.
+
+def _svc_iso(d: str) -> str:
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+
+def _svc_days_mask(wd_counts: list) -> str:
+    # A weekday counts as served when it has at least half as many active
+    # dates as the line's best weekday — tolerant of holiday gaps without
+    # flagging one-off exception dates as regular service.
+    mx = max(wd_counts) if wd_counts else 0
+    if mx <= 0:
+        return "0000000"
+    return "".join("1" if c >= 0.5 * mx else "0" for c in wd_counts)
+
+def _svc_day_diff(a: str, b: str) -> int:
+    from datetime import date as _d
+    return ( _d(int(b[:4]), int(b[4:6]), int(b[6:8]))
+           - _d(int(a[:4]), int(a[4:6]), int(a[6:8]))).days
+
+_feed_span_days = (_svc_day_diff(feed_first_date, feed_last_date) + 1
+                   if feed_first_date and feed_last_date else 0)
+
+def _svc_rec_rpd(r: dict) -> float:
+    return (r["runs"] / r["active_days"]) if r["active_days"] else 0.0
+
+service_out: dict = {}
+for svc_key, recs in service_raw.items():
+    # Merge opposite directions / duplicates by unordered terminus pair.
+    by_pair: dict = {}
+    for r in recs:
+        pair = tuple(sorted(r["termini"]))
+        by_pair.setdefault(pair, []).append(r)
+
+    rows = []
+    for pair, rs in by_pair.items():
+        # Cadence per direction: same-termini sub-variants pool their runs
+        # (they serve the same relation); opposite directions don't — the
+        # busiest direction carries the row's runs-per-active-day.
+        # First/last departures are taken per direction, then averaged
+        # across the (≤2) directions: "average of both ends".
+        by_dir: dict = {}
+        for r in rs:
+            by_dir.setdefault(r["termini"], []).append(r)
+        best_rpd = 0.0
+        best_irr = False
+        dir_firsts: list = []
+        dir_lasts: list = []
+        for drs in by_dir.values():
+            runs = sum(r["runs"] for r in drs)
+            days_active = max((r["active_days"] for r in drs), default=0)
+            rpd_dir = (runs / days_active) if days_active else 0.0
+            # Irregular when the biggest gap between departures dwarfs the
+            # typical one (e.g. peak-only commuter service): largest gap
+            # over 3× the median gap and over 90 minutes.
+            deps = sorted({t for r in drs for t in r["dep_times"]})
+            gaps = sorted(b - a for a, b in zip(deps, deps[1:]))
+            irr = (len(deps) >= 4
+                   and gaps[-1] > max(3 * gaps[len(gaps) // 2], 5400))
+            if rpd_dir > best_rpd:
+                best_rpd = rpd_dir
+                best_irr = irr
+            firsts = [r["dep"][0] for r in drs if r["dep"][0] is not None]
+            lasts = [r["dep"][1] for r in drs if r["dep"][1] is not None]
+            if firsts:
+                dir_firsts.append(min(firsts))
+            if lasts:
+                dir_lasts.append(max(lasts))
+        wd = [0] * 7
+        first = last = ""
+        for r in rs:
+            ds = r["date_stats"]
+            if ds:
+                f, l, counts = ds
+                first = f if not first or f < first else first
+                last = l if not last or l > last else last
+                wd = [max(x, y) for x, y in zip(wd, counts)]
+        a, b = max(rs, key=_svc_rec_rpd)["termini"]
+        row = {
+            "route": f"{a} ↔ {b}" if a != b else a,
+            "days": _svc_days_mask(wd),
+            "rpd": round(best_rpd, 1),
+        }
+        if best_irr:
+            row["irr"] = True
+        if dir_firsts and dir_lasts:
+            row["dep"] = [round(sum(dir_firsts) / len(dir_firsts)),
+                          round(sum(dir_lasts) / len(dir_lasts))]
+        if first and last:
+            row["_first"], row["_last"] = first, last
+            if (_feed_span_days
+                    and _svc_day_diff(first, last) + 1 < 0.75 * _feed_span_days):
+                row["from"], row["to"] = _svc_iso(first), _svc_iso(last)
+        rows.append(row)
+    rows.sort(key=lambda r: -r["rpd"])
+
+    # Group summary: busiest row's cadence and span, union of days / dates.
+    g_wd_mask = "".join(
+        "1" if any(r["days"][i] == "1" for r in rows) else "0"
+        for i in range(7))
+    g_first = min((r["_first"] for r in rows if "_first" in r), default="")
+    g_last = max((r["_last"] for r in rows if "_last" in r), default="")
+    summary = {
+        "days": g_wd_mask,
+        "rpd": rows[0]["rpd"],
+    }
+    if rows[0].get("irr"):
+        summary["irr"] = True
+    if "dep" in rows[0]:
+        summary["dep"] = rows[0]["dep"]
+    if (g_first and g_last and _feed_span_days
+            and _svc_day_diff(g_first, g_last) + 1 < 0.75 * _feed_span_days):
+        summary["from"], summary["to"] = _svc_iso(g_first), _svc_iso(g_last)
+    summary["variants"] = [
+        {k: v for k, v in r.items() if not k.startswith("_")} for r in rows
+    ]
+    service_out[svc_key] = summary
+
+OUT_LINE_SERVICE = ROOT / "data" / "transit" / "line_service_info.json"
+OUT_LINE_SERVICE.write_text(json.dumps(service_out, ensure_ascii=False))
+print(f"  Line service info: {len(service_out)} lines "
+      f"(feed {feed_first_date}–{feed_last_date}) → {OUT_LINE_SERVICE}")
+
 # ── Comprehensive grouping diagnostic ──────────────────────────────────
 # One entry per (line_key, agency_id, trip_group_id) including groups that
 # never reached emission (low_frequency). One sub-entry per merged-stop
