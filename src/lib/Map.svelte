@@ -1050,6 +1050,16 @@
 		// Compact attribution in the corner
 		map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
 
+		// Locate button: centers on the device position, shows a dot marker
+		// plus a translucent accuracy circle when the fix is imprecise.
+		// trackUserLocation keeps following until the user pans away.
+		map.addControl(new maplibregl.GeolocateControl({
+			positionOptions: { enableHighAccuracy: true },
+			trackUserLocation: true,
+			showAccuracyCircle: true,
+			fitBoundsOptions: { maxZoom: 15 }
+		}), 'bottom-right');
+
 		// Scale bar (metric) — shows real-world distance for the current zoom
 		map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
