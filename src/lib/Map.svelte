@@ -2,7 +2,8 @@
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { slide } from 'svelte/transition';
-	import { replaceState } from '$app/navigation';
+	import { pushState, replaceState } from '$app/navigation';
+	import { page } from '$app/state';
 	import { Protocol } from 'pmtiles';
 	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
@@ -163,6 +164,14 @@
 	// Non-reactive — pure bookkeeping.
 	let savedLinePaints: Map<string, Record<string, unknown>> | null = null;
 	let savedStopFilters: Map<string, unknown> | null = null;
+	// History integration: true while the view sits on its own pushed
+	// history record (browser back then closes it — see the back/forward
+	// $effect). False for deep-link entries, which have no in-app record
+	// to return to.
+	let enteredViaPush = false;
+	// Guards double-firing history.back() while a close is in flight, and
+	// suppresses the position-hash camera jump for that back step.
+	let closingViaBack = false;
 
 	const LINE_DETAIL_DIM_SOURCE = 'line-detail-dim';
 	const LINE_DETAIL_DIM_LAYER = 'line-detail-dim';
@@ -239,14 +248,14 @@
 		return keys.length ? keys : null;
 	}
 
-	function syncLineDeepLinkToUrl(keys: string[] | null) {
+	/** Remove the ?line param in place — used when the view closes without
+	 * a history record to pop (deep-link entry) or when deep-link
+	 * resolution fails. The empty state also drops any `lineDetail`
+	 * marker from page.state. */
+	function clearLineDeepLinkFromUrl() {
 		if (typeof window === 'undefined') return;
 		const url = new URL(window.location.href);
-		if (keys && keys.length) {
-			url.searchParams.set(URL_LINE_PARAM, keys.join(','));
-		} else {
-			url.searchParams.delete(URL_LINE_PARAM);
-		}
+		url.searchParams.delete(URL_LINE_PARAM);
 		// SvelteKit's replaceState, not window.history.replaceState — the
 		// raw call wipes the router's history state and trips its dev
 		// warning.
@@ -293,7 +302,10 @@
 		const url = new URL(window.location.href);
 		url.hash = hash;
 		if (url.href === window.location.href) return;
-		replaceState(url, {});
+		// Preserve page.state — wiping it would drop the line-detail
+		// view's history marker on every camera move (see the
+		// back/forward $effect).
+		replaceState(url, page.state);
 	}
 
 	async function resolveLineDeepLink(keys: string[]): Promise<LineDetailSelection | null> {
@@ -606,7 +618,10 @@
 		    || layerId === 'close-zoom-station-label';
 	}
 
-	function enterLineDetail(sel: LineDetailSelection) {
+	function enterLineDetail(
+		sel: LineDetailSelection,
+		source: 'user' | 'deeplink' | 'history' = 'user'
+	) {
 		const map = mapRef;
 		if (!map || !sel.keys?.length || !sel.bbox || sel.bbox.length !== 4) return;
 
@@ -762,17 +777,55 @@
 			map.setFilter(id, (orig ? ['all', orig, isMember] : isMember) as any);
 		}
 
+		const wasOpen = lineDetail !== null;
 		lineDetail = sel;
 		loadLineService(sel);
-		syncLineDeepLinkToUrl(sel.keys);
+
+		// History: a fresh user entry pushes ONE record whose state carries
+		// the selection, so browser back closes the view (handled by the
+		// back/forward $effect) and forward can restore it. Switching
+		// lines while the view is open replaces that record — back always
+		// closes fully rather than stepping through previously viewed
+		// lines. Deep-link entries replace in place (no prior in-app
+		// record), and 'history' reopens write nothing — their record is
+		// already current.
+		const url = new URL(window.location.href);
+		url.searchParams.set(URL_LINE_PARAM, sel.keys.join(','));
+		if (source === 'user' && !wasOpen) {
+			pushState(url, { lineDetail: sel });
+			enteredViaPush = true;
+		} else if (source === 'history') {
+			enteredViaPush = true;
+		} else {
+			replaceState(url, { lineDetail: sel });
+		}
 	}
 
+	/** Close request from the UI (× button / Escape). When the view sits
+	 * on its own pushed history record, consume it via history.back() —
+	 * the back/forward $effect performs the teardown — so a later back
+	 * press cannot land on the record and reopen the view. Deep-link
+	 * entries have no record and clear the param in place. */
 	function exitLineDetail() {
+		if (!lineDetail || closingViaBack) return;
+		if (enteredViaPush) {
+			closingViaBack = true;
+			history.back();
+			return;
+		}
+		teardownLineDetail();
+		clearLineDeepLinkFromUrl();
+	}
+
+	/** Visual/state teardown shared by every close path. No history or
+	 * URL writes. */
+	function teardownLineDetail() {
 		const map = mapRef;
 		lineDetail = null;
 		lineService = null;
 		serviceExpanded = false;
-		syncLineDeepLinkToUrl(null);
+		enteredViaPush = false;
+		closingViaBack = false;
 		if (!map) {
 			savedLinePaints = null;
 			savedStopFilters = null;
@@ -799,6 +852,21 @@
 		savedLinePaints = null;
 		savedStopFilters = null;
 	}
+
+	// Browser back/forward ↔ line detail. Back while open pops the pushed
+	// record → page.state loses `lineDetail` → teardown. Forward while
+	// closed restores the record → reopen from the selection stored in
+	// its state. Guarded on a loaded style so a page.state restored on
+	// reload can't fire before the map is ready (the deep-link path owns
+	// that case).
+	$effect(() => {
+		const histSel = page.state.lineDetail;
+		if (!histSel && lineDetail) {
+			teardownLineDetail();
+		} else if (histSel && !lineDetail && mapRef?.isStyleLoaded()) {
+			enterLineDetail(histSel, 'history');
+		}
+	});
 
 	/** Delegated click handler for `[data-line-detail]` badges inside a
 	 * popup: parses the encoded selection payload and enters the view. */
@@ -993,6 +1061,15 @@
 		map.on('movestart', closeMenuOnSmallScreen);
 		map.on('click', closeMenuOnSmallScreen);
 		const onHashChange = () => {
+			// A history.back() issued by the × close of the line-detail
+			// view must not also snap the camera to the previous entry's
+			// position hash — the view closes in place. Re-sync the stale
+			// hash to the current camera instead. (A user-pressed back
+			// keeps the jump: going back restores the previous viewport.)
+			if (closingViaBack) {
+				writePositionHash(map);
+				return;
+			}
 			const pos = readPositionHash();
 			if (pos) map.jumpTo(pos);
 		};
@@ -1128,8 +1205,8 @@
 			// keys drop the param silently.
 			if (deepLinkKeys) {
 				deepLinkPromise.then((sel) => {
-					if (sel) enterLineDetail(sel);
-					else syncLineDeepLinkToUrl(null);
+					if (sel) enterLineDetail(sel, 'deeplink');
+					else clearLineDeepLinkFromUrl();
 				});
 			}
 		});
@@ -1500,6 +1577,8 @@
 			lineDetail = null;
 			savedLinePaints = null;
 			savedStopFilters = null;
+			enteredViaPush = false;
+			closingViaBack = false;
 			mapRef = null;
 			map.remove();
 		};
@@ -1583,6 +1662,20 @@
 	.map {
 		width: 100%;
 		height: 100%;
+	}
+
+	/* Match the geolocate button to the round menu button (size + shadow,
+	   see MapMenu's .menu-toggle). It is the only ctrl-group in the
+	   bottom-right corner — the compact attribution is not a group. */
+	.map :global(.maplibregl-ctrl-bottom-right .maplibregl-ctrl-group) {
+		border-radius: 999px;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+	}
+
+	.map :global(.maplibregl-ctrl-bottom-right .maplibregl-ctrl-group button) {
+		width: 2.1rem;
+		height: 2.1rem;
+		border-radius: 999px;
 	}
 
 	.top-controls {
