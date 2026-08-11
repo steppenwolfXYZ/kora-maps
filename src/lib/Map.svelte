@@ -8,6 +8,11 @@
 	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
 	import MapMenu from './MapMenu.svelte';
+	import RoutingPanel from './routing/RoutingPanel.svelte';
+	import MapContextMenu from './routing/MapContextMenu.svelte';
+	import { routingState } from './routing/state.svelte';
+	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
+	import { loadStationIndex } from './routing/stationIndex';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -128,6 +133,10 @@
 	function closeMenuOnSmallScreen() {
 		if (menuOpen && window.innerWidth <= MENU_AUTOCLOSE_MAX_WIDTH) menuOpen = false;
 	}
+
+	// Map context menu (right-click / long-press). See MapContextMenu.svelte
+	// and transit-routing.md § Entry points / Map context menu.
+	let contextAnchor = $state<{ x: number; y: number; lng: number; lat: number } | null>(null);
 
 	function applyViewMode(map: maplibregl.Map, mode: ViewMode) {
 		for (const id of STOP_SYMBOLOGY_LAYERS) {
@@ -868,6 +877,13 @@
 		}
 	});
 
+	// Routing panel opens → close any open line-detail (transit-routing.md
+	// § Routing panel: "Opening the routing panel closes any open
+	// line-detail-view").
+	$effect(() => {
+		if (routingState.open && lineDetail) exitLineDetail();
+	});
+
 	/** Delegated click handler for `[data-line-detail]` badges inside a
 	 * popup: parses the encoded selection payload and enters the view. */
 	function wireLineDetailClicks(p: maplibregl.Popup, closePopup: () => void) {
@@ -884,6 +900,33 @@
 					target.getAttribute('data-line-detail') || ''));
 				closePopup();
 				enterLineDetail(sel);
+			} catch { /* malformed payload — ignore */ }
+		});
+	}
+
+	/** Delegated click handler for the station popup's Route from/to
+	 * buttons — sets the corresponding routing endpoint, opens the panel,
+	 * and closes the popup. See transit-routing.md § Entry points /
+	 * Station popup buttons. */
+	function wirePopupRouteClicks(p: maplibregl.Popup, closePopup: () => void) {
+		const el = p.getElement();
+		if (!el) return;
+		el.addEventListener('click', (ev) => {
+			const target = (ev.target as HTMLElement | null)?.closest?.('[data-route-endpoint]') as HTMLElement | null;
+			if (!target) return;
+			ev.preventDefault();
+			ev.stopPropagation();
+			try {
+				const payload = JSON.parse(decodeURIComponent(
+					target.getAttribute('data-route-endpoint') || ''));
+				const side = target.getAttribute('data-route-side') === 'to' ? 'to' : 'from';
+				const ep = payload.uic
+					? { type: 'station' as const, uic: String(payload.uic), name: String(payload.name ?? ''), coord: payload.coord as [number, number] }
+					: { type: 'point' as const, coord: payload.coord as [number, number] };
+				if (side === 'from') routingState.setFrom(ep);
+				else routingState.setTo(ep);
+				if (!routingState.open) routingState.openPanel();
+				closePopup();
 			} catch { /* malformed payload — ignore */ }
 		});
 	}
@@ -1049,6 +1092,7 @@
 			zoom: initialPos?.zoom ?? style.zoom ?? 2,
 			bearing: initialPos?.bearing ?? 0,
 			pitch: initialPos?.pitch ?? 0,
+			maxPitch: 0,
 			attributionControl: false
 		});
 
@@ -1059,7 +1103,55 @@
 		// so the two can't feed back into each other).
 		map.on('moveend', () => writePositionHash(map));
 		map.on('movestart', closeMenuOnSmallScreen);
+		map.on('movestart', () => (contextAnchor = null));
 		map.on('click', closeMenuOnSmallScreen);
+
+		// Map context menu (transit-routing.md § Entry points / Map
+		// context menu). Right-click on desktop opens it; on touch, a
+		// long-press (~500 ms) that doesn't move opens it. Any other
+		// interaction closes it.
+		map.on('contextmenu', (ev) => {
+			contextAnchor = {
+				x: ev.point.x,
+				y: ev.point.y,
+				lng: ev.lngLat.lng,
+				lat: ev.lngLat.lat
+			};
+		});
+		map.on('click', () => { contextAnchor = null; });
+
+		const LONG_PRESS_MS = 500;
+		const LONG_PRESS_MAX_MOVE = 8;
+		let touchTimer: number | null = null;
+		let touchStartPx: { x: number; y: number } | null = null;
+		function cancelLongPress() {
+			if (touchTimer !== null) { clearTimeout(touchTimer); touchTimer = null; }
+			touchStartPx = null;
+		}
+		container.addEventListener('touchstart', (ev) => {
+			if (ev.touches.length !== 1) { cancelLongPress(); return; }
+			const t = ev.touches[0];
+			const rect = container.getBoundingClientRect();
+			const px = { x: t.clientX - rect.left, y: t.clientY - rect.top };
+			touchStartPx = px;
+			touchTimer = window.setTimeout(() => {
+				touchTimer = null;
+				if (!touchStartPx) return;
+				const ll = map.unproject([touchStartPx.x, touchStartPx.y]);
+				contextAnchor = { x: touchStartPx.x, y: touchStartPx.y, lng: ll.lng, lat: ll.lat };
+			}, LONG_PRESS_MS);
+		}, { passive: true });
+		container.addEventListener('touchmove', (ev) => {
+			if (!touchStartPx || !touchTimer) return;
+			const t = ev.touches[0];
+			if (!t) return;
+			const rect = container.getBoundingClientRect();
+			const dx = t.clientX - rect.left - touchStartPx.x;
+			const dy = t.clientY - rect.top - touchStartPx.y;
+			if (Math.hypot(dx, dy) > LONG_PRESS_MAX_MOVE) cancelLongPress();
+		}, { passive: true });
+		container.addEventListener('touchend', cancelLongPress, { passive: true });
+		container.addEventListener('touchcancel', cancelLongPress, { passive: true });
 		const onHashChange = () => {
 			// A history.back() issued by the × close of the line-detail
 			// view must not also snap the camera to the previous entry's
@@ -1084,6 +1176,21 @@
 		const deepLinkPromise: Promise<LineDetailSelection | null> = deepLinkKeys
 			? resolveLineDeepLink(deepLinkKeys)
 			: Promise.resolve(null);
+
+		// Routing cold-load restore (transit-routing.md § Deep link). If
+		// ?from / ?to is on the URL, hydrate routing state from it — this
+		// opens the panel and reissues the query. `station` endpoints need
+		// the search index to resolve UIC → name/coord, so we await it.
+		const routingUrl = new URL(window.location.href);
+		if (urlHasRoutingQuery(routingUrl)) {
+			void loadStationIndex().then((idx) => {
+				const parsed = readRoutingQuery(routingUrl, (uic) => {
+					const e = idx?.get(uic);
+					return e ? { name: e.n, coord: e.c } : null;
+				});
+				routingState.hydrate(parsed);
+			});
+		}
 
 		// Geolocation runs in PARALLEL with map/tile loading — the map loads
 		// at the style default underneath the splash, and a fix arriving
@@ -1307,6 +1414,35 @@
 			if (stopFeature) {
 				const p = stopFeature.properties as Record<string, unknown>;
 
+				// Station endpoint payload for the popup route buttons —
+				// see transit-routing.md § Entry points / Station popup
+				// buttons. UIC comes from `parent_station` (bare UIC) or
+				// the un-suffixed `stop_id`; coord from the feature's own
+				// geometry (not the click position).
+				const stopGeom = stopFeature.geometry as {
+					type: string; coordinates?: [number, number]
+				} | null;
+				const stopCoord: [number, number] | null =
+					stopGeom?.type === 'Point' && stopGeom.coordinates
+						? [stopGeom.coordinates[0], stopGeom.coordinates[1]]
+						: null;
+				const stopUic = String(
+					p.parent_station ?? String(p.stop_id ?? '').split(':')[0] ?? ''
+				);
+				const stopName = String(p.stop_name ?? '');
+				const routeBtnHtml = stopCoord ? `<div class="popup-route-btns">
+					<button class="popup-route-btn" data-route-side="from" data-route-endpoint="${encodeURIComponent(JSON.stringify({
+						uic: stopUic || undefined, name: stopName, coord: stopCoord
+					}))}">
+						<span class="material-symbols-outlined" aria-hidden="true">trip_origin</span>Route from here
+					</button>
+					<button class="popup-route-btn" data-route-side="to" data-route-endpoint="${encodeURIComponent(JSON.stringify({
+						uic: stopUic || undefined, name: stopName, coord: stopCoord
+					}))}">
+						<span class="material-symbols-outlined" aria-hidden="true">place</span>Route to here
+					</button>
+				</div>` : '';
+
 				// Per-zoom lookup: far-zoom absorbers carry lines_json_zN
 				// and dep_hr_zN reflecting the lines / departures folded in
 				// at that zoom (see stops-far-zoom-dot-redesign.md and
@@ -1388,16 +1524,22 @@
 					.popup-lines[open] .popup-lines-list { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; max-height: 200px; overflow-y: auto; overflow-x: hidden; }
 					.popup-lines[open] .popup-badge { display: block; }
 					.popup-lines[open] .popup-line-terminus { display: inline; color: #444; font-size: 12px; }
+					.popup-route-btns { display: flex; gap: 4px; margin-top: 8px; }
+					.popup-route-btn { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; color: #222; font-family: inherit; font-size: 11px; cursor: pointer; }
+					.popup-route-btn:hover { background: #eee; }
+					.popup-route-btn .material-symbols-outlined { font-size: 14px; color: #666; }
 				</style><div style="font-family:'Saira',sans-serif;font-size:13px;line-height:1.4;color:#222">
 					<div style="font-weight:700;font-size:15px">${fmt(p.stop_name) || '(no name)'}</div>
 					${linesHtml}
 					${depLine}
+					${routeBtnHtml}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '320px' })
 					.setLngLat(e.lngLat)
 					.setHTML(html)
 					.addTo(map);
 				wireLineDetailClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
+				wirePopupRouteClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
 				return;
 			}
 
@@ -1410,10 +1552,35 @@
 			});
 			if (pillArrowHits.length) {
 				const pa = pillArrowHits[0].properties as Record<string, unknown>;
+				const paGeom = pillArrowHits[0].geometry as { type: string; coordinates?: unknown } | null;
 				const ref = String(pa.ref ?? '');
 				const mode = String(pa.mode ?? '');
 				const color = String(pa.color ?? '#888888');
 				const stopName = String(pa.stop_name ?? '');
+				const paStopUic = String(
+					pa.parent_station ?? String(pa.stop_id ?? '').split(':')[0] ?? ''
+				);
+				// Pill-arrow features are polygons — take a representative
+				// point (e.g. the first ring's first coord) for the endpoint.
+				let paCoord: [number, number] | null = null;
+				if (paGeom?.type === 'Polygon' && Array.isArray(paGeom.coordinates)) {
+					const ring = (paGeom.coordinates as number[][][])[0];
+					if (ring && ring[0] && ring[0].length >= 2) {
+						paCoord = [ring[0][0], ring[0][1]];
+					}
+				}
+				const paRouteBtnHtml = paCoord ? `<div class="popup-route-btns">
+					<button class="popup-route-btn" data-route-side="from" data-route-endpoint="${encodeURIComponent(JSON.stringify({
+						uic: paStopUic || undefined, name: stopName, coord: paCoord
+					}))}">
+						<span class="material-symbols-outlined" aria-hidden="true">trip_origin</span>Route from here
+					</button>
+					<button class="popup-route-btn" data-route-side="to" data-route-endpoint="${encodeURIComponent(JSON.stringify({
+						uic: paStopUic || undefined, name: stopName, coord: paCoord
+					}))}">
+						<span class="material-symbols-outlined" aria-hidden="true">place</span>Route to here
+					</button>
+				</div>` : '';
 				const first = String(pa.first_terminus_name ?? '');
 				const last  = String(pa.last_terminus_name ?? '');
 				let route = '';
@@ -1448,18 +1615,24 @@
 					.popup-pa-row { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; align-items: center; }
 					.popup-pa-badge { display: block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-align: center; }
 					.popup-pa-route { color: #444; font-size: 12px; }
+					.popup-route-btns { display: flex; gap: 4px; margin-top: 8px; }
+					.popup-route-btn { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 6px; border: 1px solid #ddd; border-radius: 4px; background: #f5f5f5; color: #222; font-family: inherit; font-size: 11px; cursor: pointer; }
+					.popup-route-btn:hover { background: #eee; }
+					.popup-route-btn .material-symbols-outlined { font-size: 14px; color: #666; }
 				</style><div style="font-family:'Saira',sans-serif;font-size:13px;line-height:1.4;color:#222">
 					<div class="popup-pa-title">${fmt(stopName) || '(no name)'}</div>
 					<div class="popup-pa-row">
 						<span class="popup-pa-badge"${dataAttr} style="background:${color};color:${fg};${cursor}">${label}</span>
 						<span class="popup-pa-route">${routeSafe}</span>
 					</div>
+					${paRouteBtnHtml}
 				</div>`;
 				popup = new maplibregl.Popup({ maxWidth: '360px' })
 					.setLngLat(e.lngLat)
 					.setHTML(html)
 					.addTo(map);
 				wireLineDetailClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
+				wirePopupRouteClicks(popup, () => { if (popup) { popup.remove(); popup = null; } });
 				return;
 			}
 
@@ -1589,7 +1762,7 @@
 
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && lineDetail) exitLineDetail(); }} />
 
-<div class="map-wrap">
+<div class="map-wrap" class:routing-active={routingState.open}>
 	<div bind:this={container} class="map"></div>
 
 	{#if lineDetail}
@@ -1639,7 +1812,11 @@
 		</div>
 	{/if}
 
-	{#if !lineDetail}
+	{#if routingState.open}
+		<div class="top-controls">
+			<RoutingPanel />
+		</div>
+	{:else if !lineDetail}
 		<div class="top-controls">
 			<MapMenu {viewMode} {setView} {contoursEnabled} {toggleContours} bind:open={menuOpen} />
 			{#if viewMode === 'transit-focus'}
@@ -1647,6 +1824,8 @@
 			{/if}
 		</div>
 	{/if}
+
+	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
 	<div class="zoom-badge" aria-label="Current zoom level">
 		z&thinsp;{zoom}
@@ -1696,6 +1875,12 @@
 		height: 2.1rem;
 	}
 
+	/* Hide the scale bar while routing — the panel already dominates the
+	   left column and the ruler competes visually with the results. */
+	.map-wrap.routing-active :global(.maplibregl-ctrl-bottom-left .maplibregl-ctrl-scale) {
+		display: none;
+	}
+
 	.top-controls {
 		position: absolute;
 		top: 1rem;
@@ -1706,6 +1891,14 @@
 		display: flex;
 		gap: 0.5rem;
 		align-items: flex-start;
+		/* The absolute box covers a strip across the top of the map even
+		   when the visible children are narrow; disable pointer events
+		   here and re-enable them per child so map pan/click through the
+		   empty flex area still works. */
+		pointer-events: none;
+	}
+	.top-controls > :global(*) {
+		pointer-events: auto;
 	}
 
 	.line-detail-bar {

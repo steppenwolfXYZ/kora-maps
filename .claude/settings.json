@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(awk *)"
+      "Bash(awk *)",
+      "Bash(mkdir -p motis motis/data src/lib/routing)",
+      "Bash(curl -s https://raw.githubusercontent.com/motis-project/osr/master/include/osr/extract/tags.h)",
+      "Bash(python3 -c ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/georgbrodbeck/Documents/prog/newmap"
     ]
   },
   "hooks": {

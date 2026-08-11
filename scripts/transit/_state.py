@@ -32,6 +32,7 @@ OUT_DOTS            = ROOT / "data" / "transit" / "transit_stops.geojson"
 OUT_PILLS           = ROOT / "data" / "transit" / "transit_stop_pills.geojson"
 OUT_STOP_SEARCH_INDEX = ROOT / "static" / "map-assets" / "stop_search_index.json"
 OUT_LINE_INDEX      = ROOT / "static" / "map-assets" / "line_index.json"
+OUT_ROUTE_COLOR_INDEX = ROOT / "static" / "map-assets" / "route_color_index.json"
 OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
 OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 

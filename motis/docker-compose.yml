@@ -1,0 +1,34 @@
+# Local MOTIS routing backend (Switzerland).
+#
+# One-time import:
+#   docker compose --profile import up motis-import
+# Serve API on :8080:
+#   docker compose up motis
+#
+# Data mounts read from the transit pipeline outputs — no duplicate downloads.
+# Nigiri and OSR indexes are memory-mapped from ./data on the host.
+services:
+  motis:
+    image: ghcr.io/motis-project/motis:latest
+    container_name: kora-motis
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.yml:/data/config.yml:ro
+      - ../data/gtfs_filtered:/data/gtfs:ro
+      - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
+      - ./data:/data/data
+    working_dir: /data
+    command: ["/motis", "server"]
+    restart: unless-stopped
+
+  motis-import:
+    image: ghcr.io/motis-project/motis:latest
+    profiles: ["import"]
+    volumes:
+      - ./config.yml:/data/config.yml:ro
+      - ../data/gtfs_filtered:/data/gtfs:ro
+      - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
+      - ./data:/data/data
+    working_dir: /data
+    command: ["/motis", "import"]

@@ -204,6 +204,17 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
         feature_id_counter += 1
         feat_id = f"tg{tg_id}_s{feature_id_counter}"
 
+        # GTFS route_ids contributing to this variant. Consumed downstream
+        # by step 07 to build route_color_index.json (routing result cards
+        # look up the same color the map draws).
+        route_ids: list = []
+        seen_rids: set = set()
+        for tid in trip_ids:
+            rid = trip_lookup.get(tid, {}).get("route_id", "")
+            if rid and rid not in seen_rids:
+                seen_rids.add(rid)
+                route_ids.append(rid)
+
         # Geometry — always LineString for new emission.
         geometry = {"type": "LineString", "coordinates": polyline}
         props = {
@@ -226,6 +237,7 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
             "shape_id":     shape_id or "",
             "gtfs_matched": True,
             "geometry_source": geometry_source,
+            "route_ids":    route_ids,
         }
         if mountain_origin:
             props["mountain_origin"] = mountain_origin

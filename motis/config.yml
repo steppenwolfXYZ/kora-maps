@@ -1,0 +1,29 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+osm: /data/osm.pbf
+
+timetable:
+  first_day: TODAY
+  num_days: 365
+  with_shapes: true
+  # Allow up to 2 h walking transfers between transit legs — the default
+  # (15 min) prevents non-official walking connections that route users
+  # want when they help find a faster or otherwise-useful option.
+  max_footpath_length: 120
+  datasets:
+    ch:
+      path: /data/gtfs
+
+street_routing: true
+
+geocoding: false
+
+# Raise walking hard caps. Defaults are 60 min pre/post transit and
+# 6 h direct — both clipped short here. Lift to 8 h so remote clicks
+# can walk in and out of the transit graph on the real OSM network
+# rather than being teleported (or refused) by the router.
+limits:
+  street_routing_max_prepost_transit_seconds: 28800
+  street_routing_max_direct_seconds: 28800

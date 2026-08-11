@@ -472,6 +472,29 @@ def run():
         OUT_LINE_INDEX.write_text(json.dumps(out, ensure_ascii=False))
         print(f"  Line index: {len(out):,} lines → {OUT_LINE_INDEX}")
 
+    # Route-color index — GTFS `route_id` → drawn color, consumed by the
+    # routing result cards so a leg's badge matches the map. Emitted here
+    # because the same iteration over line features already carries color
+    # per line, and step 06 bakes `route_ids` onto each line feature.
+    with _timed("write OUT_ROUTE_COLOR_INDEX"):
+        route_color: dict[str, str] = {}
+        for feat in lines_data["features"]:
+            props = feat.get("properties") or {}
+            color = props.get("color") or ""
+            rids = props.get("route_ids") or []
+            if not color or not isinstance(rids, list):
+                continue
+            for rid in rids:
+                if not rid:
+                    continue
+                # If the same route_id feeds several line features (e.g.
+                # both directions), first color wins — they share it since
+                # both directions run the same mode + speed_kmh.
+                route_color.setdefault(str(rid), color)
+        OUT_ROUTE_COLOR_INDEX.parent.mkdir(parents=True, exist_ok=True)
+        OUT_ROUTE_COLOR_INDEX.write_text(json.dumps(route_color, ensure_ascii=False))
+        print(f"  Route color index: {len(route_color):,} route_ids → {OUT_ROUTE_COLOR_INDEX}")
+
     with _timed("compute_terminus_skip_oids"):
         skip_first_oids, skip_last_oids = compute_terminus_skip_oids(
             line_stops, line_lookup, stop_meta)

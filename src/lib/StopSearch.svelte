@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type maplibregl from 'maplibre-gl';
+	import { routingState } from './routing/state.svelte';
 
 	let { map }: { map: maplibregl.Map | null } = $props();
 
@@ -245,6 +246,15 @@
 		}}
 		onkeydown={onKey}
 	/>
+	<button
+		class="route-icon"
+		type="button"
+		aria-label="Plan a route"
+		onmousedown={(e) => e.preventDefault()}
+		onclick={() => routingState.openPanel()}
+	>
+		<span class="material-symbols-outlined" aria-hidden="true">directions</span>
+	</button>
 	{#if open && query.trim().length > 0}
 		<ul bind:this={listEl} class="results" role="listbox">
 			{#if indexError}
@@ -298,7 +308,8 @@
 		/* Same height as the menu toggle button so the top-controls row
 		   aligns (MapMenu .menu-toggle is 2.1rem). */
 		height: 2.1rem;
-		padding: 0 0.8rem;
+		/* Right padding reserves space for the .route-icon overlay. */
+		padding: 0 2.3rem 0 0.8rem;
 		border: none;
 		border-radius: 999px;
 		background: #ffffff;
@@ -311,6 +322,31 @@
 	}
 	input:focus {
 		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 2px #333;
+	}
+	.route-icon {
+		position: absolute;
+		top: 50%;
+		right: 0.25rem;
+		transform: translateY(-50%);
+		width: 1.7rem;
+		height: 1.7rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		background: transparent;
+		color: #555;
+		cursor: pointer;
+		border-radius: 999px;
+		padding: 0;
+	}
+	.route-icon :global(.material-symbols-outlined) {
+		font-size: 1.2rem;
+		line-height: 1;
+	}
+	.route-icon:hover {
+		background: #eee;
+		color: #000;
 	}
 	.results {
 		position: absolute;
