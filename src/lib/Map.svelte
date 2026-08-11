@@ -1666,6 +1666,20 @@
 		height: 100%;
 	}
 
+	/* Align the top-right controls with the top-left search bar
+	   (.top-controls sits at top: 1rem, right: 4rem — see below). */
+	.map :global(.maplibregl-ctrl-top-right) {
+		top: 1rem;
+		right: 1rem;
+	}
+
+	/* Zero MapLibre's default per-ctrl margin so the pill's top edge
+	   matches .top-controls exactly. Keep a small bottom gap between
+	   the navigation pill and the geolocate disc below it. */
+	.map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl) {
+		margin: 0 0 0.5rem 0;
+	}
+
 	/* Round the top-right controls to match the round menu button (see
 	   MapMenu's .menu-toggle). The single-button geolocate group becomes
 	   a circle; the 3-button navigation stack becomes a vertical pill.
@@ -1686,17 +1700,12 @@
 		position: absolute;
 		top: 1rem;
 		left: 1rem;
+		/* Keep the search bar clear of the top-right pill (~2.1rem wide
+		   + 1rem right margin, plus a bit of visual breathing room). */
+		right: 4rem;
 		display: flex;
 		gap: 0.5rem;
 		align-items: flex-start;
-	}
-
-	@media (max-width: 600px) {
-		.top-controls {
-			/* Leave room for MapLibre's top-right NavigationControl
-			   (~29 px + 10 px margin) so nothing overlaps its tap area. */
-			right: 3.5rem;
-		}
 	}
 
 	.line-detail-bar {
