@@ -37,7 +37,7 @@ Map assets never exist inside the server build, so the app must not touch them d
 
 - `style.json` is fetched client-side in `+page.svelte` (`onMount`), never in a load function — a server-side fetch would 404 in production. app.html carries a `<link rel="preload">` so the download still starts with the document.
 - The style object is held in `$state.raw` — Map.svelte's init effect mutates `style.layers` in place, and a deeply reactive proxy would make that effect re-trigger itself in an endless map-recreate loop.
-- All URL writes go through SvelteKit's `replaceState` (`$app/navigation`), never raw `history.replaceState`. MapLibre's `hash: true` is NOT used — Map.svelte has its own position-hash sync (same `#zoom/lat/lng` format, written on `moveend`).
+- All URL writes go through SvelteKit's `replaceState` / `pushState` (`$app/navigation`), never raw `history.replaceState`. MapLibre's `hash: true` is NOT used — Map.svelte has its own position-hash sync (same `#zoom/lat/lng` format, written on `moveend`). Opening the line detail view is the one write that pushes rather than replaces, so browser back closes it; its close button correspondingly calls `history.back()` to consume that entry (see `line-detail-view.md` § Deep link). The selection rides along in SvelteKit's `page.state` (typed in `src/app.d.ts`), so the position-hash writer must preserve that state instead of overwriting it with an empty object.
 
 ## UI fonts (self-hosted, no Google CDN)
 

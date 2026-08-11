@@ -55,7 +55,10 @@ All numbers are baked raw (seconds, runs/day, masks, ISO dates); wording, roundi
 
 - The current line detail view is reflected in the URL via a `line` query parameter carrying the line's canonical key (`ref`, `agency_id`, `mode`). Format is an implementation detail; the requirement is that the key round-trips unambiguously and is URL-safe.
 - Opening the page with `?line=<key>` present enters line detail view for that line automatically, as if the badge had been clicked — same camera fit, same visual state, same title bar.
-- Entering, switching, and closing the view keeps the URL in sync (entry / switch sets the param, close removes it) so any moment of the view is a shareable link. The URL update must not push a history entry per interaction (replace, don't push) — the browser back button should not become a per-click undo of highlight state.
+- Entering, switching, and closing the view keeps the URL in sync (entry / switch sets the param, close removes it) so any moment of the view is a shareable link.
+- Opening the view occupies exactly **one** browser history entry, so the back button closes it and returns to the map as it was. Switching lines while the view is open must not add further entries — back closes the view outright rather than stepping back through previously viewed lines, and the back button never becomes a per-click undo of highlight state.
+- Closing the view by any other means (close button, Escape) must consume that same history entry, so a subsequent back press continues into the history that preceded the view instead of reopening it. Reopening via the browser's **forward** button is allowed and expected.
+- A view entered from a deep link has no preceding in-app history entry: closing it drops the param in place and adds nothing to history.
 - An unknown or malformed `line` key on load is ignored silently: the map opens normally with no line highlighted and the param is dropped from the URL.
 - The `view` param (see `view-modes.md`) is independent. A deep link may combine both (e.g. `?view=transit-focus&line=...`); a `line` link without `view` respects the user's current / default view mode — line detail does not force transit-focus.
 

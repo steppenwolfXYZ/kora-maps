@@ -1130,12 +1130,14 @@
 		// Locate button: centers on the device position, shows a dot marker
 		// plus a translucent accuracy circle when the fix is imprecise.
 		// trackUserLocation keeps following until the user pans away.
+		// Added after NavigationControl so it stacks directly below it in
+		// the top-right column.
 		map.addControl(new maplibregl.GeolocateControl({
 			positionOptions: { enableHighAccuracy: true },
 			trackUserLocation: true,
 			showAccuracyCircle: true,
 			fitBoundsOptions: { maxZoom: 15 }
-		}), 'bottom-right');
+		}), 'top-right');
 
 		// Scale bar (metric) — shows real-world distance for the current zoom
 		map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
@@ -1664,18 +1666,20 @@
 		height: 100%;
 	}
 
-	/* Match the geolocate button to the round menu button (size + shadow,
-	   see MapMenu's .menu-toggle). It is the only ctrl-group in the
-	   bottom-right corner — the compact attribution is not a group. */
-	.map :global(.maplibregl-ctrl-bottom-right .maplibregl-ctrl-group) {
+	/* Round the top-right controls to match the round menu button (see
+	   MapMenu's .menu-toggle). The single-button geolocate group becomes
+	   a circle; the 3-button navigation stack becomes a vertical pill.
+	   overflow:hidden clips the square button faces to the group's
+	   rounded outline so we don't need per-button corner rules. */
+	.map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group) {
 		border-radius: 999px;
 		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		overflow: hidden;
 	}
 
-	.map :global(.maplibregl-ctrl-bottom-right .maplibregl-ctrl-group button) {
+	.map :global(.maplibregl-ctrl-top-right .maplibregl-ctrl-group button) {
 		width: 2.1rem;
 		height: 2.1rem;
-		border-radius: 999px;
 	}
 
 	.top-controls {
