@@ -1,0 +1,7 @@
+{
+	"model": "openrouter/moonshotai/kimi-k3",
+	"instructions": [
+    ".claude/rules/*.md",
+    ".claude/concepts/*.md"
+  ]
+}

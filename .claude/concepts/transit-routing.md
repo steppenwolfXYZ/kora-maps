@@ -52,10 +52,33 @@ Three ways to enter routing state:
 
 - Up to 5 alternatives per query.
 - **Sort** — earliest arrival first for `leave-at`, latest departure first for `arrive-by`. Chronological, not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus.
+- **Quality filter** — after the cascade has merged windows, itineraries are pruned by a soft-Pareto rule against a quality score before slicing to 5. See § Ranking.
 - The MOTIS response's `direct` walk-only options merge into the same list — walking is offered whenever it competes with transit.
 - Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index).
 - Before any query is issued for the current inputs: the results list is absent (not "no results shown").
 - No route found: a message row appears in place of cards.
+
+### Ranking
+
+MOTIS returns itineraries that are Pareto-optimal within a single query, but the time-advance cascade merges multiple windows, so nonsensical results (huge walking, extra transfers) can accumulate. A post-processing quality filter runs on the merged list before it's sliced to 5.
+
+- **Score** — a single number combining transfer count and walking time:
+
+  `score = TRANSFER_PENALTY_SEC * transfers + WALK_WEIGHT * sqrt(walk_seconds)`
+
+  - Walking cost is **concave** (`sqrt`), so an extra 20 min of walking hurts far more when the baseline is 3 min than when it's 60 min. Matches the intuition that "20 more minutes on a long walk is a minor regression, 20 more minutes on a short walk is a major one".
+  - `TRANSFER_PENALTY_SEC` — cost of one transfer, tuned so ~1 transfer ≈ ~10 min of mid-range walking (600s baseline).
+  - `WALK_WEIGHT` — chosen so `WALK_WEIGHT * sqrt(600s)` ≈ one `TRANSFER_PENALTY_SEC` (i.e. `WALK_WEIGHT ≈ 25` when `TRANSFER_PENALTY_SEC = 600`).
+
+- **Soft Pareto filter** — itinerary A is dropped when there exists another itinerary B such that:
+
+  `B.duration ≤ A.duration + SLACK_SEC`  **AND**  `B.score < A.score - MARGIN`
+
+  In words: a slower option only survives if it isn't clearly beaten on the score. `SLACK_SEC` (~120s) and `MARGIN` (~180s) leave near-ties intact so marginal differences don't force a prune.
+
+- **Chronological sort survives.** Ranking is applied only as a filter — surviving itineraries are still sorted earliest-arrival first (leave-at) or latest-departure first (arrive-by), so the "leave now" answer stays at the top.
+
+- **Direct walk-only options** are scored the same way (`transfers = 0`, `walk = duration`). A multi-hour walk is dropped when a transit option matches its arrival with a much better score, and surfaces on its own when it wins outright.
 
 ### Route color index
 

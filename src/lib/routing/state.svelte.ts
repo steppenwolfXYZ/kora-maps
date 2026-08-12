@@ -38,6 +38,14 @@ const NARROW_PRE_POST_SEC = 7200;   // 2 h — narrow default per query
 const WIDE_PRE_POST_SEC   = 28800;  // 8 h — server hard cap, used on escalation
 const LONG_WAIT_THRESHOLD_SEC = 3600; // 1 h wait triggers pre/post escalation
 const TARGET_RESULT_COUNT = 5;
+// Stage 3 time-advance cascade — MOTIS's nextPageCursor stalls on remote
+// destinations (returns 0 with the same cursor value), so instead of
+// paging via cursor we advance `time` past the last returned itinerary
+// and re-query fresh.
+const HOP_MS = 2 * 3600 * 1000;         // 2 h step when a hop returns empty
+const HOP_SEARCH_WINDOW_SEC = 7200;     // matches HOP_MS so windows don't gap
+const MAX_SPAN_MS = 5 * 24 * 3600 * 1000; // stop after 5 days of advance
+const MAX_EMPTY_STREAK = 3;             // stop after N consecutive empty hops
 
 /** True when any transit leg in the itinerary is preceded by a wait
  * longer than `LONG_WAIT_THRESHOLD_SEC`. Signals that expanding the
@@ -272,30 +280,24 @@ export const routingState = {
 			let pre = NARROW_PRE_POST_SEC;
 			let post = NARROW_PRE_POST_SEC;
 			let combined: Itinerary[] = [];
-			let cursor: string | undefined;
 
 			const publish = () => {
 				results = [...combined].sort(sortFn).slice(0, TARGET_RESULT_COUNT);
 			};
 
-			const cursorField: () => 'nextPageCursor' | 'previousPageCursor' =
-				() => (mode === 'arrive' ? 'previousPageCursor' : 'nextPageCursor');
-
-			const doQuery = async (pageCursor?: string) => {
-				const res = await plan({
-					from: from!, to: to!, mode, time, currentCoord,
+			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
+				return await plan({
+					from: from!, to: to!, mode, time: timeArg, currentCoord,
 					maxPreTransitTime: pre,
 					maxPostTransitTime: post,
-					pageCursor
+					searchWindow
 				}, ac.signal);
-				return res;
 			};
 
 			// Stage 1 — narrow initial query (fast for typical cases).
-			let res = await doQuery();
+			let res = await doQuery(time);
 			if (ac.signal.aborted) return;
 			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-			cursor = res[cursorField()];
 
 			// Stage 2 — escalate walking budget on trigger:
 			//   (a) narrow query returned nothing, or
@@ -308,24 +310,60 @@ export const routingState = {
 			if (needsEscalation) {
 				pre = WIDE_PRE_POST_SEC;
 				post = WIDE_PRE_POST_SEC;
-				res = await doQuery();
+				res = await doQuery(time);
 				if (ac.signal.aborted) return;
 				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-				cursor = res[cursorField()];
 			}
 			publish();
 
-			// Stage 3 — cursor cascade: fetch further windows until we
-			// have TARGET_RESULT_COUNT results or MOTIS returns nothing
-			// more (weekend gaps etc.).
-			while (results.length < TARGET_RESULT_COUNT && cursor && !ac.signal.aborted) {
-				res = await doQuery(cursor);
+			// Stage 3 — time-advance cascade. MOTIS's nextPageCursor stalls
+			// on remote destinations (returns 0 with an unchanged cursor
+			// value even when later timetable entries exist), so we walk
+			// forward by re-querying with `time` bumped past the last known
+			// result. Dedupe by fingerprint; stop at TARGET_RESULT_COUNT,
+			// MAX_SPAN_MS, or MAX_EMPTY_STREAK consecutive empty hops.
+			const initialEpoch = time ? Date.parse(time) : Date.now();
+			const advanceDir = mode === 'arrive' ? -1 : 1;
+			const seen = new Set(combined.map(itineraryFingerprint));
+			const startsOf = (its: Itinerary[]) => its.map(i => Date.parse(i.startTime));
+
+			let queryEpoch: number;
+			if (combined.length) {
+				const starts = startsOf(combined);
+				queryEpoch = (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
+					+ advanceDir * 60_000;
+			} else {
+				queryEpoch = initialEpoch + advanceDir * HOP_MS;
+			}
+			let emptyStreak = 0;
+
+			while (results.length < TARGET_RESULT_COUNT && !ac.signal.aborted) {
+				if (Math.abs(queryEpoch - initialEpoch) > MAX_SPAN_MS) break;
+				if (emptyStreak >= MAX_EMPTY_STREAK) break;
+
+				const hopTime = new Date(queryEpoch).toISOString();
+				res = await doQuery(hopTime, HOP_SEARCH_WINDOW_SEC);
 				if (ac.signal.aborted) return;
-				const newItems = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-				if (newItems.length === 0) break;
-				combined = [...combined, ...newItems];
-				cursor = res[cursorField()];
-				publish();
+
+				const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
+				const fresh = items.filter((it) => {
+					const fp = itineraryFingerprint(it);
+					if (seen.has(fp)) return false;
+					seen.add(fp);
+					return true;
+				});
+
+				if (fresh.length === 0) {
+					emptyStreak++;
+					queryEpoch += advanceDir * HOP_MS;
+				} else {
+					emptyStreak = 0;
+					combined = [...combined, ...fresh];
+					publish();
+					const starts = startsOf(fresh);
+					queryEpoch = (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
+						+ advanceDir * 60_000;
+				}
 			}
 
 			// Reconcile a pending fingerprint from a cold-load restore

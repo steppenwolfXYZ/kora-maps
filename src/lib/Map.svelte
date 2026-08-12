@@ -12,7 +12,7 @@
 	import MapContextMenu from './routing/MapContextMenu.svelte';
 	import { routingState } from './routing/state.svelte';
 	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
-	import { loadStationIndex } from './routing/stationIndex';
+	import { loadStationIndex, type StationEntry } from './routing/stationIndex';
 	import { buildRouteGeoJSON } from './routing/routeGeoJSON';
 	import {
 		installRouteLayers, removeRouteLayers,
@@ -916,8 +916,12 @@
 	// line-detail-view) and non-route stops hide (filter by parent UIC).
 	let routeMarkers: RouteMarkerHandles | null = null;
 	let savedRouteLinePaints: Map<string, Record<string, unknown>> | null = null;
-	let savedRouteStopFilters: Map<string, unknown> | null = null;
+	// While a route is displayed, every map stop-symbology layer is hidden
+	// so the map's default dots/pills don't misalign against the route's
+	// own MOTIS-coord discs. Original visibilities restored on exit.
+	let savedRouteStopVisibilities: Map<string, string> | null = null;
 	let routeColorIndex: Map<string, string> | null = null;
+	let routeStationIndex: Map<string, StationEntry> | null = null;
 	// Guards double-firing history.back() while a close is in flight —
 	// mirrors the line-detail equivalent so the position-hash listener
 	// skips the camera jump for that step.
@@ -931,9 +935,12 @@
 	$effect(() => {
 		void loadRouteColorIndex().then((idx) => { routeColorIndex = idx; });
 	});
+	$effect(() => {
+		void loadStationIndex().then((idx) => { routeStationIndex = idx; });
+	});
 
 	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
-		const geo = buildRouteGeoJSON(it, routeColorIndex);
+		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
 
 		// Auto-frame the route bbox. Left padding is heavier to keep the
 		// route clear of the panel on desktop; on mobile the panel spans
@@ -1011,28 +1018,40 @@
 			map.setPaintProperty(id, 'line-opacity', ROUTE_LINE_DESAT_CASING_OPACITY);
 		}
 
-		// Filter stops to route members (by parent UIC). Uses the same
-		// filter list as line-detail; the membership test is different
-		// (parent_station in memberUics vs. line_keys substring).
-		if (!savedRouteStopFilters) {
-			savedRouteStopFilters = new Map();
-			for (const id of LINE_DETAIL_FILTER_LAYERS) {
+		// Hide every map stop-symbology layer entirely (dots, pills,
+		// pill-arrows, labels, indicators, close-zoom backdrops). Route
+		// stops render from our own source at MOTIS's exact coordinates,
+		// and the map's merged-UIC positions don't line up — showing both
+		// looks like a doubled, misaligned station. Save current
+		// visibility per layer so exit can restore whatever the view mode
+		// / dev override had set.
+		// Close-zoom pill-arrows stay visible during route mode — they carry
+		// the specific line/platform info at z17+ that the route's own
+		// discs don't. Everything else in the stop-symbology set hides.
+		const layersToHide = STOP_SYMBOLOGY_LAYERS.filter(
+			(id) => !id.startsWith('close-zoom-pill-')
+		);
+		if (!savedRouteStopVisibilities) {
+			savedRouteStopVisibilities = new Map();
+			for (const id of layersToHide) {
 				if (!map.getLayer(id)) continue;
-				savedRouteStopFilters.set(id, map.getFilter(id) ?? null);
+				const vis = map.getLayoutProperty(id, 'visibility');
+				savedRouteStopVisibilities.set(id, (vis as string) ?? 'visible');
 			}
 		}
-		const uics = geo.memberUics;
-		const isMember = uics.length
-			? ['in', ['get', 'parent_station'], ['literal', uics]]
-			// If MOTIS returned no parent ids on any leg (unlikely — every
-			// transit stop has one), hide everything so nothing conflicts
-			// with our discs.
-			: ['==', ['literal', true], ['literal', false]];
-		for (const [id, orig] of savedRouteStopFilters) {
-			map.setFilter(id, (orig ? ['all', orig, isMember] : isMember) as any);
+		for (const id of layersToHide) {
+			if (!map.getLayer(id)) continue;
+			map.setLayoutProperty(id, 'visibility', 'none');
 		}
 
-		routeMarkers = installRouteLayers(map, geo, routeMarkers);
+		// Insert route layers below the first close-zoom pill-arrow layer
+		// so pill-arrows always render on top of the route (their platform
+		// / line info is finer-grained than the route polyline can show).
+		const styleLayers = map.getStyle().layers ?? [];
+		const pillArrowBeforeId = styleLayers.find(
+			(l) => l.id.startsWith('close-zoom-pill-')
+		)?.id;
+		routeMarkers = installRouteLayers(map, geo, routeMarkers, pillArrowBeforeId);
 	}
 
 	function exitRouteOverlay(map: maplibregl.Map) {
@@ -1049,11 +1068,12 @@
 			}
 			savedRouteLinePaints = null;
 		}
-		if (savedRouteStopFilters) {
-			for (const [id, orig] of savedRouteStopFilters) {
-				map.setFilter(id, (orig ?? null) as any);
+		if (savedRouteStopVisibilities) {
+			for (const [id, vis] of savedRouteStopVisibilities) {
+				if (!map.getLayer(id)) continue;
+				map.setLayoutProperty(id, 'visibility', vis as any);
 			}
-			savedRouteStopFilters = null;
+			savedRouteStopVisibilities = null;
 		}
 	}
 
@@ -1976,7 +1996,7 @@
 			routeMarkers?.goal?.remove();
 			routeMarkers = null;
 			savedRouteLinePaints = null;
-			savedRouteStopFilters = null;
+			savedRouteStopVisibilities = null;
 			closingRouteViaBack = false;
 			mapRef = null;
 			map.remove();

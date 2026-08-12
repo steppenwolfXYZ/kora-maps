@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Itinerary, LegMode } from './types';
+	import type { Itinerary, Leg, LegMode } from './types';
 	import { legBadgeColor, loadRouteColorIndex } from './legColor';
 	import { itineraryFingerprint } from './fingerprint';
 	import { routingState } from './state.svelte';
@@ -67,13 +67,14 @@
 		return rem ? `${h} h ${rem} min` : `${h} h`;
 	}
 
+	function legDuration(leg: Leg): number {
+		return leg.duration ?? Math.max(0, (new Date(leg.endTime).getTime() - new Date(leg.startTime).getTime()) / 1000);
+	}
+
 	function walkSecs(it: Itinerary): number {
 		let s = 0;
 		for (const l of it.legs) {
-			if (l.mode === 'WALK') {
-				const dur = l.duration ?? Math.max(0, (new Date(l.endTime).getTime() - new Date(l.startTime).getTime()) / 1000);
-				s += dur;
-			}
+			if (l.mode === 'WALK') s += legDuration(l);
 		}
 		return s;
 	}
@@ -83,6 +84,40 @@
 		let transit = 0;
 		for (const l of it.legs) if (l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR') transit++;
 		return Math.max(0, transit - 1);
+	}
+
+	// Legs to render in the strip: short inter-transit transfer walks (≤ 6 min
+	// between two transit rides) are dropped entirely; first/last-mile walks
+	// and longer inter-transit walks are kept, always with their minutes.
+	function displayLegs(it: Itinerary): { leg: Leg; dur: number; isWalk: boolean }[] {
+		const transitIdx = it.legs
+			.map((l, i) => (l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR' ? i : -1))
+			.filter((i) => i >= 0);
+		const firstT = transitIdx[0] ?? -1;
+		const lastT = transitIdx[transitIdx.length - 1] ?? -1;
+		const out: { leg: Leg; dur: number; isWalk: boolean }[] = [];
+		it.legs.forEach((leg, i) => {
+			const dur = legDuration(leg);
+			const isWalk = leg.mode === 'WALK';
+			if (isWalk && i > firstT && i < lastT && dur <= 6 * 60) return;
+			out.push({ leg, dur, isWalk });
+		});
+		return out;
+	}
+
+	// First/last transit station of the trip, with departure / arrival times.
+	// Null for walk-only itineraries (direct walking options).
+	function transitEndpoints(it: Itinerary): { fromName: string; fromTime: string; toName: string; toTime: string } | null {
+		const transit = it.legs.filter((l) => l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR');
+		if (!transit.length) return null;
+		const first = transit[0];
+		const last = transit[transit.length - 1];
+		return {
+			fromName: first.from?.name ?? '',
+			fromTime: first.startTime,
+			toName: last.to?.name ?? '',
+			toTime: last.endTime
+		};
 	}
 
 	function iconFor(mode: LegMode): string {
@@ -116,17 +151,27 @@
 			>×</button>
 		{/if}
 	</div>
+	{#if transitEndpoints(itinerary)}
+		{@const endpoints = transitEndpoints(itinerary)!}
+		<div class="card-route">
+			<strong>{endpoints.fromName}</strong> {fmtTime(endpoints.fromTime)} – <strong>{endpoints.toName}</strong> {fmtTime(endpoints.toTime)}
+		</div>
+	{/if}
 	<div class="card-legs">
-		{#each itinerary.legs as leg, i}
+		{#each displayLegs(itinerary) as { leg, dur, isWalk }, i}
 			{#if i > 0}<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>{/if}
-			<span class="card-leg" class:walk={leg.mode === 'WALK'}>
-				<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-				{#if leg.mode !== 'WALK' && leg.routeShortName}
+			<span class="card-leg" class:walk={isWalk}>
+				{#if isWalk}
+					<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
+					<span class="card-leg-dur">{fmtDuration(dur)}</span>
+				{:else if leg.routeShortName}
 					{@const bg = legBadgeColor(colorIndex, leg)}
 					<span
 						class="card-ref"
 						style="background:{bg};color:{badgeTextColor(bg)}"
 					>{leg.routeShortName}</span>
+				{:else}
+					<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
 				{/if}
 			</span>
 		{/each}
@@ -185,6 +230,11 @@
 	.card-time { font-weight: 700; font-size: 0.95rem; color: #222; }
 	.card-dur  { font-size: 0.85rem; color: #555; }
 
+	.card-route {
+		font-size: 0.8rem;
+		color: #444;
+	}
+
 	.card-legs {
 		display: flex;
 		flex-wrap: wrap;
@@ -202,6 +252,11 @@
 		color: #444;
 	}
 	.card-leg.walk .card-mode { color: #888; }
+	.card-leg-dur {
+		font-size: 0.72rem;
+		color: #666;
+		white-space: nowrap;
+	}
 	.card-ref {
 		display: inline-block;
 		padding: 1px 5px;

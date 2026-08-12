@@ -24,11 +24,11 @@ export interface PlanArgs {
 	 * this from 7200 (2 h) to 28800 (8 h) on trigger. */
 	maxPreTransitTime?: number;
 	maxPostTransitTime?: number;
-	/** MOTIS's paging cursor from a previous PlanResponse. When set, MOTIS
-	 * returns the next window of transit departures (leave-at) or earlier
-	 * ones (arrive-by). searchWindow is ignored in favour of the cursor's
-	 * own window. */
-	pageCursor?: string;
+	/** Time-window size passed to MOTIS in seconds. Defaults to 900 (15 min)
+	 * for a fast initial query; the cascade in state.svelte.ts widens this
+	 * to 7200 (2 h) once it's advancing `time` forward to accumulate more
+	 * results. */
+	searchWindow?: number;
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -60,14 +60,7 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	// past that, it falls back to weird walking-heavy transit hybrids
 	// (WALK 45m + BUS 0m + WALK 1m). Lift to the 8 h server ceiling.
 	params.set('maxDirectTime', '28800');
-	if (args.pageCursor) {
-		params.set('pageCursor', args.pageCursor);
-	} else {
-		// Fresh query — start with the MOTIS default 15-min window. The
-		// caller cascades via `nextPageCursor`/`previousPageCursor` if
-		// fewer than NUM_ITINERARIES results come back.
-		params.set('searchWindow', '900');
-	}
+	params.set('searchWindow', String(args.searchWindow ?? 900));
 
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });
