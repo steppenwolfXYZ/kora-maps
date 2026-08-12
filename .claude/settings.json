@@ -4,7 +4,11 @@
       "Bash(awk *)",
       "Bash(mkdir -p motis motis/data src/lib/routing)",
       "Bash(curl -s https://raw.githubusercontent.com/motis-project/osr/master/include/osr/extract/tags.h)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s \"http://localhost:8080/api/v1/plan?fromPlace=47.5476,7.5896&toPlace=47.1449,8.0553&numItineraries=1\")",
+      "Bash(curl -s \"http://localhost:8080/api/v1/plan?fromPlace=8500010&toPlace=8503000&numItineraries=1\")",
+      "Bash(curl -s \"http://localhost:8080/api/v1/plan?fromPlace=47.5476,7.5896&toPlace=46.9481,7.4474&numItineraries=1\")",
+      "Bash(python3 -c *)"
     ],
     "additionalDirectories": [
       "/Users/georgbrodbeck/Documents/prog/newmap"

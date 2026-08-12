@@ -13,6 +13,14 @@
 	import { routingState } from './routing/state.svelte';
 	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
 	import { loadStationIndex } from './routing/stationIndex';
+	import { buildRouteGeoJSON } from './routing/routeGeoJSON';
+	import {
+		installRouteLayers, removeRouteLayers,
+		type RouteMarkerHandles
+	} from './routing/routeLayers';
+	import { loadRouteColorIndex } from './routing/legColor';
+	import { itineraryFingerprint } from './routing/fingerprint';
+	import type { Itinerary } from './routing/types';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -634,6 +642,23 @@
 		const map = mapRef;
 		if (!map || !sel.keys?.length || !sel.bbox || sel.bbox.length !== 4) return;
 
+		// Line-detail and routing are mutually exclusive shells (both
+		// occupy the top-left slot and demand the map's foreground).
+		// Two coordinated moves so the paint/filter capture below sees
+		// the true pre-route baseline, not the route overlay's overrides:
+		//   1. Tear the route overlay down synchronously first — the
+		//      reactive $effect that watches selectedItinerary would run
+		//      later (microtask), by which time line-detail has already
+		//      captured savedLinePaints from the still-desaturated map
+		//      and applied its own edits; the delayed revert would then
+		//      overwrite them with the pre-route baseline.
+		//   2. Then closePanel so the "routing open → close line-detail"
+		//      effect doesn't fire mid-entry and tear us back down.
+		if (routingState.open) {
+			if (routingState.selectedItinerary) exitRouteOverlay(map);
+			routingState.closePanel();
+		}
+
 		map.fitBounds(
 			[[sel.bbox[0], sel.bbox[1]], [sel.bbox[2], sel.bbox[3]]],
 			{ padding: { top: 96, bottom: 48, left: 48, right: 48 }, maxZoom: 15, duration: 900 }
@@ -882,6 +907,188 @@
 	// line-detail-view").
 	$effect(() => {
 		if (routingState.open && lineDetail) exitLineDetail();
+	});
+
+	// ── Route overlay (route-display.md) ────────────────────────────────────
+	// A selected itinerary from the routing panel renders on the map as
+	// polylines + discs + walk dashes + pass-through dots + start/goal
+	// icons. Everything else on the map desaturates (same treatment as
+	// line-detail-view) and non-route stops hide (filter by parent UIC).
+	let routeMarkers: RouteMarkerHandles | null = null;
+	let savedRouteLinePaints: Map<string, Record<string, unknown>> | null = null;
+	let savedRouteStopFilters: Map<string, unknown> | null = null;
+	let routeColorIndex: Map<string, string> | null = null;
+	// Guards double-firing history.back() while a close is in flight —
+	// mirrors the line-detail equivalent so the position-hash listener
+	// skips the camera jump for that step.
+	let closingRouteViaBack = false;
+
+	const ROUTE_DIM_SOURCE = 'route-dim';
+	const ROUTE_DIM_LAYER = 'route-dim';
+	const ROUTE_LINE_DESAT_OPACITY = 0.5;
+	const ROUTE_LINE_DESAT_CASING_OPACITY = 0.24;
+
+	$effect(() => {
+		void loadRouteColorIndex().then((idx) => { routeColorIndex = idx; });
+	});
+
+	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
+		const geo = buildRouteGeoJSON(it, routeColorIndex);
+
+		// Auto-frame the route bbox. Left padding is heavier to keep the
+		// route clear of the panel on desktop; on mobile the panel spans
+		// the full width so a modest padding is fine either way.
+		if (geo.bbox) {
+			const isNarrow = window.innerWidth < 700;
+			map.fitBounds(
+				[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
+				{
+					padding: {
+						top: 96,
+						bottom: 48,
+						left: isNarrow ? 32 : 380,
+						right: 48
+					},
+					maxZoom: 15,
+					duration: 900
+				}
+			);
+		}
+
+		// Dim veil — same construction as line-detail but on its own source
+		// so the two features never race for layer ownership. Sits just
+		// below the transit block so the basemap darkens without pulling
+		// the transit / stop symbology down with it.
+		if (!map.getSource(ROUTE_DIM_SOURCE)) {
+			map.addSource(ROUTE_DIM_SOURCE, {
+				type: 'geojson',
+				data: {
+					type: 'Feature',
+					properties: {},
+					geometry: {
+						type: 'Polygon',
+						coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]
+					}
+				}
+			});
+		}
+		if (!map.getLayer(ROUTE_DIM_LAYER)) {
+			const beforeId = map.getLayer('close-zoom-station-backdrop')
+				? 'close-zoom-station-backdrop'
+				: TRANSIT_LINE_CASING_LAYERS.find((id) => map.getLayer(id));
+			map.addLayer({
+				id: ROUTE_DIM_LAYER,
+				type: 'fill',
+				source: ROUTE_DIM_SOURCE,
+				paint: { 'fill-color': '#000000', 'fill-opacity': 0.25 }
+			}, beforeId);
+		} else {
+			map.setLayoutProperty(ROUTE_DIM_LAYER, 'visibility', 'visible');
+		}
+
+		// Desaturate all map transit lines (same treatment as line-detail).
+		// Save originals once on first entry; switching itineraries reuses
+		// the same saved set (revert-then-reapply idempotent).
+		if (!savedRouteLinePaints) {
+			savedRouteLinePaints = new Map();
+			for (const id of [...TRANSIT_LINE_LAYERS, ...TRANSIT_LINE_CASING_LAYERS]) {
+				if (!map.getLayer(id)) continue;
+				savedRouteLinePaints.set(id, {
+					'line-color': map.getPaintProperty(id, 'line-color'),
+					'line-width': map.getPaintProperty(id, 'line-width'),
+					'line-opacity': map.getPaintProperty(id, 'line-opacity')
+				});
+			}
+		}
+		for (const id of TRANSIT_LINE_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setPaintProperty(id, 'line-color',
+				['coalesce', ['get', 'color_desat'], '#c4c4c4'] as any);
+			map.setPaintProperty(id, 'line-opacity', ROUTE_LINE_DESAT_OPACITY);
+		}
+		for (const id of TRANSIT_LINE_CASING_LAYERS) {
+			if (!map.getLayer(id)) continue;
+			map.setPaintProperty(id, 'line-opacity', ROUTE_LINE_DESAT_CASING_OPACITY);
+		}
+
+		// Filter stops to route members (by parent UIC). Uses the same
+		// filter list as line-detail; the membership test is different
+		// (parent_station in memberUics vs. line_keys substring).
+		if (!savedRouteStopFilters) {
+			savedRouteStopFilters = new Map();
+			for (const id of LINE_DETAIL_FILTER_LAYERS) {
+				if (!map.getLayer(id)) continue;
+				savedRouteStopFilters.set(id, map.getFilter(id) ?? null);
+			}
+		}
+		const uics = geo.memberUics;
+		const isMember = uics.length
+			? ['in', ['get', 'parent_station'], ['literal', uics]]
+			// If MOTIS returned no parent ids on any leg (unlikely — every
+			// transit stop has one), hide everything so nothing conflicts
+			// with our discs.
+			: ['==', ['literal', true], ['literal', false]];
+		for (const [id, orig] of savedRouteStopFilters) {
+			map.setFilter(id, (orig ? ['all', orig, isMember] : isMember) as any);
+		}
+
+		routeMarkers = installRouteLayers(map, geo, routeMarkers);
+	}
+
+	function exitRouteOverlay(map: maplibregl.Map) {
+		removeRouteLayers(map, routeMarkers);
+		routeMarkers = null;
+		if (map.getLayer(ROUTE_DIM_LAYER)) {
+			map.setLayoutProperty(ROUTE_DIM_LAYER, 'visibility', 'none');
+		}
+		if (savedRouteLinePaints) {
+			for (const [id, props] of savedRouteLinePaints) {
+				for (const [prop, val] of Object.entries(props)) {
+					map.setPaintProperty(id, prop as any, val as any);
+				}
+			}
+			savedRouteLinePaints = null;
+		}
+		if (savedRouteStopFilters) {
+			for (const [id, orig] of savedRouteStopFilters) {
+				map.setFilter(id, (orig ?? null) as any);
+			}
+			savedRouteStopFilters = null;
+		}
+	}
+
+	// Route selection reconciled with the map: install / update the
+	// overlay when a selection exists, tear it down when it clears. The
+	// effect fans out both to fresh in-session picks and to the delayed
+	// cold-load restore (state.svelte.ts sets selectedItinerary only once
+	// runQuery has matched the pending fingerprint).
+	$effect(() => {
+		const it = routingState.selectedItinerary;
+		const map = mapRef;
+		if (!map || !map.isStyleLoaded()) return;
+		if (it) enterRouteOverlay(map, it);
+		else exitRouteOverlay(map);
+	});
+
+	// Browser back / forward ↔ route selection. The pushed history entry
+	// (state.svelte.ts § selectItinerary) carries `routeSelection`; on
+	// back it disappears from page.state, so we clear the selection to
+	// match. Forward-restore: if the entry reappears while results still
+	// hold the matching itinerary, re-select it silently (no fresh push).
+	$effect(() => {
+		const histFp = page.state.routeSelection;
+		const curFp = routingState.selectedFingerprint;
+		if (!histFp && curFp && !routingState.selectionInvalid) {
+			closingRouteViaBack = true;
+			routingState.clearSelectedItineraryFromHistory();
+			// One frame later — long enough for the hashchange listener
+			// to have skipped its jump.
+			queueMicrotask(() => { closingRouteViaBack = false; });
+		} else if (histFp && !curFp && routingState.results.length > 0) {
+			const match = routingState.results.find(
+				(r) => itineraryFingerprint(r) === histFp);
+			if (match) routingState.selectItinerary(match);
+		}
 	});
 
 	/** Delegated click handler for `[data-line-detail]` badges inside a
@@ -1158,7 +1365,8 @@
 			// position hash — the view closes in place. Re-sync the stale
 			// hash to the current camera instead. (A user-pressed back
 			// keeps the jump: going back restores the previous viewport.)
-			if (closingViaBack) {
+			// The same rule applies to a route-view close.
+			if (closingViaBack || closingRouteViaBack) {
 				writePositionHash(map);
 				return;
 			}
@@ -1317,6 +1525,16 @@
 					if (sel) enterLineDetail(sel, 'deeplink');
 					else clearLineDeepLinkFromUrl();
 				});
+			}
+
+			// Route overlay (route-display.md § Lifecycle): the reactive
+			// $effect on selectedItinerary may have fired before this
+			// point with an unloaded style — apply it here now that the
+			// style is ready. If runQuery hasn't returned yet, the effect
+			// will run again once it does; both paths converge on the
+			// same enterRouteOverlay call.
+			if (routingState.selectedItinerary) {
+				enterRouteOverlay(map, routingState.selectedItinerary);
 			}
 		});
 
@@ -1754,6 +1972,12 @@
 			savedStopFilters = null;
 			enteredViaPush = false;
 			closingViaBack = false;
+			routeMarkers?.start?.remove();
+			routeMarkers?.goal?.remove();
+			routeMarkers = null;
+			savedRouteLinePaints = null;
+			savedRouteStopFilters = null;
+			closingRouteViaBack = false;
 			mapRef = null;
 			map.remove();
 		};

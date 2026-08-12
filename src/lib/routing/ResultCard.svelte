@@ -1,12 +1,17 @@
 <script lang="ts">
 	import type { Itinerary, LegMode } from './types';
 	import { legBadgeColor, loadRouteColorIndex } from './legColor';
+	import { itineraryFingerprint } from './fingerprint';
+	import { routingState } from './state.svelte';
 
 	interface Props {
 		itinerary: Itinerary;
 	}
 
 	let { itinerary }: Props = $props();
+
+	let fingerprint = $derived(itineraryFingerprint(itinerary));
+	let selected = $derived(routingState.selectedFingerprint === fingerprint);
 
 	let colorIndex = $state<Map<string, string> | null>(null);
 	$effect(() => {
@@ -85,10 +90,31 @@
 	}
 </script>
 
-<article class="card">
+<div
+	class="card"
+	class:selected
+	role="button"
+	tabindex="0"
+	aria-pressed={selected}
+	onclick={() => routingState.selectItinerary(itinerary)}
+	onkeydown={(e) => {
+		if (e.key === 'Enter' || e.key === ' ') {
+			e.preventDefault();
+			routingState.selectItinerary(itinerary);
+		}
+	}}
+>
 	<div class="card-head">
 		<span class="card-time">{fmtTime(itinerary.startTime)} – {fmtTime(itinerary.endTime)}</span>
 		<span class="card-dur">{fmtDuration(itinerary.duration)}</span>
+		{#if selected}
+			<button
+				class="card-clear"
+				type="button"
+				aria-label="Clear route from map"
+				onclick={(e) => { e.stopPropagation(); routingState.dismissSelectedItinerary(); }}
+			>×</button>
+		{/if}
 	</div>
 	<div class="card-legs">
 		{#each itinerary.legs as leg, i}
@@ -110,7 +136,7 @@
 		<span>·</span>
 		<span>{fmtDuration(walkSecs(itinerary))} walking</span>
 	</div>
-</article>
+</div>
 
 <style>
 	.card {
@@ -122,8 +148,33 @@
 		border: 1px solid #eee;
 		border-radius: 0.6rem;
 		font-family: 'Saira', sans-serif;
+		text-align: left;
+		width: 100%;
+		cursor: pointer;
+		color: inherit;
+		transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+	}
+	.card:hover { border-color: #ccc; background: #fafafa; }
+	.card.selected {
+		border-color: #1a1a1a;
+		background: #f2f2f2;
+		box-shadow: 0 0 0 1px #1a1a1a inset;
 	}
 	.card + :global(.card) { margin-top: 0.4rem; }
+
+	.card-clear {
+		border: none;
+		background: transparent;
+		color: #444;
+		font-size: 1.1rem;
+		line-height: 1;
+		cursor: pointer;
+		padding: 0 0.35rem;
+		margin-left: 0.15rem;
+		border-radius: 999px;
+		flex: 0 0 auto;
+	}
+	.card-clear:hover { background: #ddd; color: #000; }
 
 	.card-head {
 		display: flex;

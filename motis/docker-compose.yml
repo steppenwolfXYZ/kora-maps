@@ -15,7 +15,7 @@ services:
       - "8080:8080"
     volumes:
       - ./config.yml:/data/config.yml:ro
-      - ../data/gtfs_filtered:/data/gtfs:ro
+      - ../data/gtfs_routed:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
     working_dir: /data
@@ -27,7 +27,7 @@ services:
     profiles: ["import"]
     volumes:
       - ./config.yml:/data/config.yml:ro
-      - ../data/gtfs_filtered:/data/gtfs:ro
+      - ../data/gtfs_routed:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
     working_dir: /data

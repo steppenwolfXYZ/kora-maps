@@ -14,7 +14,7 @@ Transit routing (MOTIS) returns a sequence of legs describing a chosen journey. 
 
 ### Per-leg rendering
 
-- **Transit leg** — polyline drawn in the leg's mode/line color, with the same visual language as a selected line in the line detail view (same casing, same width scaling). A transit leg using a line normally hidden on the default map renders identically to a visible one; the user should not have to notice the difference.
+- **Transit leg** — polyline drawn in the leg's mode/line color, with white casing (same casing color as the map's own transit lines). Drawn substantially **wider** than any map line — thicker than the line-detail view's highlight — so the route reads unambiguously as the primary content against the desaturated basemap. A transit leg using a line normally hidden on the default map renders identically to a visible one; the user should not have to notice the difference.
 - **Walking leg** — thick dashed line in a neutral color. Applies to any walk: to the first station, between stations during a transfer that involves outdoor walking, from the final station to the goal.
 
 ### Stops on the route
@@ -37,23 +37,25 @@ Transit routing (MOTIS) returns a sequence of legs describing a chosen journey. 
 
 ### Lifecycle
 
-- The route is deep-linkable. URL carries the **full leg breakdown** as the source of truth: canonical `line_key` per transit leg, boarding and alighting stop ids (with platform suffix), leg times, walking-leg endpoints.
-- On load, MOTIS is queried again to verify the URL's legs are still valid against the current timetable state.
-  - If valid → render the route as described.
-  - If no longer valid (trip removed, platform changed, timetable rebuilt) → show an error message. The route is not partially rendered from stale URL data.
+- The route is deep-linkable. URL carries a **fingerprint** of the leg breakdown as the source of truth: a short stable hash derived from every leg's mode, transit route / trip identity, boarding + alighting stop ids (with platform suffix), and leg times. The fingerprint identifies one specific itinerary within the panel query's result set; the panel query itself (from / to / mode / time) rides in the URL alongside.
+- On load, MOTIS is queried again with the panel-query params, and the URL fingerprint is matched against the returned itineraries' fingerprints:
+  - Match → render that itinerary as described.
+  - No match (trip removed, platform changed, timetable rebuilt) → show an error message in the routing panel. The route is not partially rendered from stale URL data.
+- On a fresh in-session query with no fingerprint pending, the **first result is auto-selected** so the user sees a route on the map immediately.
 - The map auto-frames to the route's bbox on open.
-- Opening the route pushes a history entry, so browser back closes it (same pattern the line detail view uses). A close X in the route title bar also closes it and consumes the history entry.
+- Opening the route pushes a history entry, so browser back closes it (same pattern the line detail view uses). A close × on the selected result card also closes it and consumes the history entry.
 
 ### Identifiers introduced
 
-- URL param `?route=…` carrying the encoded full leg breakdown.
+- URL param `?route=…` carrying the itinerary fingerprint.
 - Route-scoped "neutral routing color" for discs, connectors, walking dashes, and pass-through dots — one shared color, decided during implementation.
 - `start` and `goal` icons: filled circle and checkered flag respectively.
 
 ## Constraints
 
-- No pipeline output is modified to precompute route variants.
+- No pipeline output is modified to precompute route variants. Shape availability for routing lives in the pfaedle output that already exists (see transit-routing.md § Backend).
 - The two-disc transfer visual is a new dedicated element for route display; it is **not** a variant of the per-platform pill or the merged pill and does not interact with the existing pill/pill-arrow rendering.
 - Discs, connectors, walking dashes, and pass-through dots are always in the same neutral color. Leg mode/line colors appear only on the transit-leg polylines.
 - The route line uses no fallback shaping (no on-the-fly pfaedle, no straight-line fallback). If MOTIS returns no polyline for a leg, treat that as an invalid-route condition rather than filling with a heuristic.
 - Platform-accurate rendering here is scoped to the transfer discs sitting on the leg polyline endpoints. The default map's merged pills are not changed by this feature.
+- Route display and line-detail view are mutually exclusive: opening the routing panel closes any open line-detail (already covered by transit-routing.md); entering line-detail from a route context — clicking a line badge in a popup while a route is displayed — closes the routing panel and tears the route overlay down first.

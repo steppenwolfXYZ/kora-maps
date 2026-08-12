@@ -74,6 +74,11 @@
 			{:else if routingState.results.length === 0}
 				<div class="rp-status">No connections found</div>
 			{:else}
+				{#if routingState.selectionInvalid}
+					<div class="rp-status rp-error">
+						The saved route is no longer valid. Pick one below.
+					</div>
+				{/if}
 				{#each routingState.results as it, i (i)}
 					<ResultCard itinerary={it} />
 				{/each}

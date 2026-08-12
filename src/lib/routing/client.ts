@@ -19,6 +19,16 @@ export interface PlanArgs {
 	time: string | null;
 	/** Coords of `current` endpoints, one per side (undefined if not `current`). */
 	currentCoord?: [number, number] | null;
+	/** Walking budget for the walk from FROM to first stop, and last stop
+	 * to TO, in SECONDS. Server hard-caps at 28800 (8 h). Cascade lifts
+	 * this from 7200 (2 h) to 28800 (8 h) on trigger. */
+	maxPreTransitTime?: number;
+	maxPostTransitTime?: number;
+	/** MOTIS's paging cursor from a previous PlanResponse. When set, MOTIS
+	 * returns the next window of transit departures (leave-at) or earlier
+	 * ones (arrive-by). searchWindow is ignored in favour of the cursor's
+	 * own window. */
+	pageCursor?: string;
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -35,16 +45,12 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	params.set('arriveBy', args.mode === 'arrive' ? 'true' : 'false');
 	if (args.time) params.set('time', args.time);
 	params.set('numItineraries', String(NUM_ITINERARIES));
-	// Walking caps at 8 h per leg (server-matched):
-	// street_routing_max_prepost_transit_seconds and _direct_seconds are
-	// 28800 in motis/config.yml. Pre/post transit are SECONDS.
-	//
+	params.set('maxPreTransitTime', String(args.maxPreTransitTime ?? 7200));
+	params.set('maxPostTransitTime', String(args.maxPostTransitTime ?? 7200));
 	// `maxTravelTime` is TOTAL itinerary duration (transit + all walking)
 	// in MINUTES — a low value here silently drops Bern↔Lötschental-style
 	// trips where the walking legs alone approach 8 h. 24 h leaves room
 	// for any real cross-CH trip; MOTIS's own limits still cap walking.
-	params.set('maxPreTransitTime', '28800');
-	params.set('maxPostTransitTime', '28800');
 	params.set('maxTravelTime', '1440');
 	// directModes controls the non-transit fallback that MOTIS returns in
 	// `direct[]`. WALK is the default but set it explicitly so a
@@ -52,18 +58,16 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	params.set('directModes', 'WALK');
 	// MOTIS caps direct (walk-only) itineraries at 30 min by default —
 	// past that, it falls back to weird walking-heavy transit hybrids
-	// (WALK 45m + BUS 0m + WALK 1m) instead of just admitting "walk it".
-	// Lift to the same 8 h server ceiling as pre/post transit walking.
+	// (WALK 45m + BUS 0m + WALK 1m). Lift to the 8 h server ceiling.
 	params.set('maxDirectTime', '28800');
-	// searchWindow is the time span MOTIS considers for transit
-	// departures starting from `time`. Default is 900 s (15 min) — far
-	// too tight for e.g. a 00:30 query where the first bus is at 06:00,
-	// or a Saturday-night query where nothing runs until Monday.
-	// 72 h covers weekend gaps; MOTIS still returns only `numItineraries`
-	// (5) results after sorting, so a busy midday window doesn't flood
-	// the panel. Server hard cap is 96 h (plan_max_search_window_minutes
-	// = 5760); staying at 72 h leaves headroom.
-	params.set('searchWindow', '259200');
+	if (args.pageCursor) {
+		params.set('pageCursor', args.pageCursor);
+	} else {
+		// Fresh query — start with the MOTIS default 15-min window. The
+		// caller cascades via `nextPageCursor`/`previousPageCursor` if
+		// fewer than NUM_ITINERARIES results come back.
+		params.set('searchWindow', '900');
+	}
 
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });

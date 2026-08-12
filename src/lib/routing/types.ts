@@ -28,14 +28,39 @@ export type LegMode =
 	| 'HIGHSPEED_RAIL' | 'LONG_DISTANCE' | 'NIGHT_RAIL' | 'REGIONAL_RAIL'
 	| 'REGIONAL_FAST_RAIL' | 'METRO';
 
+export interface LegPlace {
+	name?: string;
+	lat?: number;
+	lon?: number;
+	/** MOTIS-prefixed platform stop id — e.g. "ch_8500010:0:6". */
+	stopId?: string;
+	/** MOTIS-prefixed parent station id — e.g. "ch_Parent8500010". */
+	parentId?: string;
+	/** Platform label (e.g. "6", "12A"). */
+	track?: string;
+}
+
+export interface IntermediateStop extends LegPlace {
+	arrival?: string;
+	departure?: string;
+}
+
+export interface LegGeometry {
+	/** Google-encoded polyline. */
+	points: string;
+	/** Precision — typically 5 or 6. */
+	precision?: number;
+	length?: number;
+}
+
 export interface Leg {
 	mode: LegMode;
 	startTime: string;
 	endTime: string;
 	/** Seconds. Absent on some MOTIS responses; fall back to endTime - startTime. */
 	duration?: number;
-	from?: { name?: string; lat?: number; lon?: number };
-	to?: { name?: string; lat?: number; lon?: number };
+	from?: LegPlace;
+	to?: LegPlace;
 	routeShortName?: string;
 	routeColor?: string;
 	/** MOTIS-prefixed GTFS route id — e.g. "ch_92-12-j26-1". */
@@ -44,6 +69,14 @@ export interface Leg {
 	 * uses to bucket. */
 	routeType?: number;
 	tripHeadsign?: string;
+	agencyId?: string;
+	agencyName?: string;
+	tripId?: string;
+	headsign?: string;
+	/** Google-encoded polyline of the leg's geometry. */
+	legGeometry?: LegGeometry;
+	/** Present on transit legs — stops served between `from` and `to`. */
+	intermediateStops?: IntermediateStop[];
 }
 
 export interface Itinerary {
@@ -60,4 +93,9 @@ export interface Itinerary {
 export interface PlanResponse {
 	itineraries: Itinerary[];
 	direct?: Itinerary[];
+	/** Opaque cursor for fetching later transit departures on the same query
+	 * (leave-at mode). Pass back as `pageCursor` on the next /plan call. */
+	nextPageCursor?: string;
+	/** Same, but for arrive-by mode — earlier departures. */
+	previousPageCursor?: string;
 }

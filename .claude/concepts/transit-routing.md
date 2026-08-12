@@ -2,17 +2,19 @@
 
 ## Problem
 
-Kora Maps visualises the transit network but does not yet answer the question "how do I get from A to B?". A public-transit-first map without a trip planner is missing the core action. This concept defines the first step of adding routing: the panel UI, the backend integration, and the result display. Rendering the selected route on the map is deferred to a follow-up concept.
+Kora Maps visualises the transit network but does not yet answer the question "how do I get from A to B?". A public-transit-first map without a trip planner is missing the core action. This concept covers the routing engine and panel UI. Map rendering of the selected route is a separate concept — see `route-display.md`.
 
 ## Requirements
 
 ### Backend
 
 - A local MOTIS v2 instance answers multi-modal trip queries (transit + pedestrian) over Swiss data.
-- Data feed reuses artefacts already produced by the existing transit pipeline — the Swiss GTFS coming out of step 04 and the CH+neighbours pedestrian OSM coming out of step 03. No new download or extraction step is introduced.
-- Pedestrian routing is used for three purposes: **first mile** (start → boarding stop), **last mile** (alighting stop → end), and **inter-transit walks** (route-to-route transfers, and walks between distinct stops that unlock non-official connections).
+- Data feed reuses artefacts the existing transit pipeline already produces — the pfaedle-routed GTFS coming out of step 05 (so MOTIS's `with_shapes: true` picks up the shaped polylines and returns real route geometry per leg, not stop-to-stop straight lines) — plus a country-wide OSM PBF fed through a preprocessing pass that adds `foot=yes` to `access=agricultural` / `access=forestry` ways (MOTIS's default OSR pedestrian profile blacklists those, but Swiss convention treats them as walkable). `access=no` / `private` / `emergency` / `delivery` are left untouched — those genuinely block foot access.
+- Pedestrian routing is used for three purposes: **first mile** (start → boarding stop), **last mile** (alighting stop → end), and **inter-transit walks** (route-to-route transfers, and walks between distinct stops that unlock non-official connections). Transfer walks up to 2 h are permitted.
 - Query modes: `leave-at` (default, time = now) and `arrive-by`.
-- Each query returns up to 5 multi-criteria (duration, transfers, walking time) Pareto-optimal itineraries.
+- **Direct walking** is always attempted regardless of distance. A multi-hour walk still surfaces when it beats every transit option; MOTIS's `direct` walk-only itineraries are merged into the same list as transit itineraries.
+- **No artificial time-of-day cutoff.** A query at 00:30 must surface the first morning departures; a weekend query must surface the Monday-morning departures. The search expands progressively until either the target of 5 results is reached or the timetable is exhausted.
+- **Walking budget cascade.** First/last-mile walking budget starts narrow (2 h) for query speed and escalates to the server ceiling (8 h) when the initial search returns nothing OR when any returned itinerary contains a wait of more than 1 h at the start or between transit legs. The escalation is invisible to the user and adds latency only on the queries that need it.
 
 ### Routing panel
 
@@ -34,7 +36,7 @@ Each input accepts three endpoint types, distinguished by a `type` tag on the in
 
 - `station` — chosen via typed search using the existing `stop_search_index.json` (the same index the stop search uses), or set indirectly by a popup or context-menu entry point (see below).
 - `point` — a `lat,lng` pair set by the map context menu. Displayed in the input as **Point on map** for this first step. When reverse geocoding lands, a street-level label replaces this text.
-- `current` — the user's current GPS location. Offered as the first suggestion when either input receives focus. Location permission is requested on first use; if denied, the option remains selectable and re-prompts on next attempt. The From field is prefilled with `current` when the panel opens fresh (no serialised state to restore).
+- `current` — the user's current GPS location. Offered as the first dropdown suggestion when the input is focused **and empty** — once the user starts typing, only station matches show; the current-location shortcut hides. Location permission is requested on first use; if denied, the option remains selectable and re-prompts on next attempt. The From field is prefilled with `current` when the panel opens fresh (no serialised state to restore).
 
 Only these three types exist in this step. A fourth `address` type is added when forward geocoding ships.
 
@@ -49,10 +51,16 @@ Three ways to enter routing state:
 ### Results
 
 - Up to 5 alternatives per query.
-- Sort for MVP: fastest, weighted against transfer count and total walking time. Exact weighting is left to iteration once real results are visible.
-- Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs.
+- **Sort** — earliest arrival first for `leave-at`, latest departure first for `arrive-by`. Chronological, not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus.
+- The MOTIS response's `direct` walk-only options merge into the same list — walking is offered whenever it competes with transit.
+- Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index).
 - Before any query is issued for the current inputs: the results list is absent (not "no results shown").
 - No route found: a message row appears in place of cards.
+
+### Route color index
+
+- `route_color_index.json` (baked by step 07 of the transit pipeline alongside `line_index.json`) maps GTFS `route_id` → drawn color, so a routing result card's badge matches the map exactly.
+- Missing entries (route not in the index) fall back to a per-bucket mid-tone matching the MapMenu legend (train red, tram turquoise, metro green, bus blue, ferry blue, mountain purple).
 
 ### Deep link
 
@@ -62,14 +70,16 @@ Routing state is serialised into the URL query string, following the existing `?
 - Endpoint serialisation: `station` → UIC; `point` → `lat,lng`; `current` → `me`.
 - The URL is written on any input or time change, and on issuing a query, via SvelteKit's `replaceState`.
 - Opening a route URL on cold load reproduces the panel state and issues the query.
+- The `?route=<fingerprint>` param carrying a selected itinerary belongs to `route-display.md` and is added by that concept — it coexists with the panel params here.
 
 ## Constraints
 
-- Does not modify the transit pipeline, the generated map style, or the line-detail-view feature.
+- Does not modify the transit pipeline's line/stop/pmtile outputs. The pipeline gains one new sibling output (`route_color_index.json`) and one new preprocessor script that consumes the country OSM download; nothing in the map-drawing pipeline changes.
 - Does not introduce a page-level `<svelte:head>` title.
-- The routing URL parameters coexist with the existing `#zoom/lat/lng` position hash and `?line=` deep link — none of these clobber each other.
+- The routing URL parameters coexist with the existing `#zoom/lat/lng` position hash, `?line=` deep link, and `?route=` selection (from `route-display.md`) — none of these clobber each other.
 - `stop_search_index.json` is the single station index used by both the stop search and the routing From / To search — no parallel index is introduced.
 - The **Point on map** label for `point` endpoints is fixed for this step; reverse geocoding replaces it in a follow-up.
 - The `current` endpoint requires a runtime location-permission grant. First-time use triggers the browser prompt; if denied, the option stays selectable and re-prompts on next attempt.
-- Rendering the selected route on the map (polylines, station highlights, walk arcs) is out of scope and lands in a follow-up concept.
+- Rendering the selected route on the map (polylines, station highlights, walk arcs) is out of scope of this concept — that's `route-display.md`.
 - Production deployment of MOTIS (shared Hetzner container vs dedicated VPS) is deferred. Local Mac only for this step.
+- MOTIS's OSR pedestrian profile is used as-is; the CH walking-quality patch lives entirely in OSM preprocessing (adding `foot=yes` tags), not in a MOTIS fork.

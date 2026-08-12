@@ -14,6 +14,11 @@ declare global {
 				color: string;
 				route: string;
 			};
+			/** Present while a routing itinerary is selected for map
+			 * rendering (route-display.md § Lifecycle). Carries the
+			 * fingerprint so browser back closes the route overlay and
+			 * forward restores it. */
+			routeSelection?: string;
 		}
 	}
 }

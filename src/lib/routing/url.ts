@@ -10,6 +10,10 @@ export const URL_FROM = 'from';
 export const URL_TO = 'to';
 export const URL_MODE = 'mode';
 export const URL_TIME = 'time';
+/** Selected itinerary fingerprint (route-display.md § Lifecycle).
+ * Independent of the panel query params — presence means one specific
+ * itinerary from the current results is being rendered on the map. */
+export const URL_ROUTE = 'route';
 
 /** Endpoint serialisation: coord as `lat,lng` (7 fractional digits, ≈1 cm).
  * `station` needs the lookup callback so a UIC round-trips through the
@@ -78,12 +82,14 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	to: Endpoint | null;
 	mode: TimeMode;
 	time: string | null;
+	route: string | null;
 } {
 	return {
 		from: paramToEndpoint(url.searchParams.get(URL_FROM) ?? '', lookup),
 		to:   paramToEndpoint(url.searchParams.get(URL_TO) ?? '', lookup),
 		mode: paramToMode(url.searchParams.get(URL_MODE)),
-		time: paramToTime(url.searchParams.get(URL_TIME))
+		time: paramToTime(url.searchParams.get(URL_TIME)),
+		route: url.searchParams.get(URL_ROUTE)
 	};
 }
 
@@ -94,6 +100,7 @@ export function writeRoutingQuery(url: URL, q: {
 	to: Endpoint | null;
 	mode: TimeMode;
 	time: string | null;
+	route?: string | null;
 }) {
 	if (q.from) url.searchParams.set(URL_FROM, endpointToParam(q.from));
 	else url.searchParams.delete(URL_FROM);
@@ -104,6 +111,8 @@ export function writeRoutingQuery(url: URL, q: {
 	else url.searchParams.delete(URL_MODE);
 	if (q.time) url.searchParams.set(URL_TIME, q.time);
 	else url.searchParams.delete(URL_TIME);
+	if (q.route) url.searchParams.set(URL_ROUTE, q.route);
+	else url.searchParams.delete(URL_ROUTE);
 }
 
 export function clearRoutingQuery(url: URL) {
@@ -111,4 +120,5 @@ export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_TO);
 	url.searchParams.delete(URL_MODE);
 	url.searchParams.delete(URL_TIME);
+	url.searchParams.delete(URL_ROUTE);
 }
