@@ -3,6 +3,7 @@ import { page } from '$app/state';
 import { plan } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import { geolocationErrorMessage, resolveCurrent } from './geolocation';
+import { pruneDominated } from './ranking';
 import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
 
@@ -18,6 +19,9 @@ let time = $state<string | null>(null);
 
 let results = $state<Itinerary[]>([]);
 let loading = $state(false);
+// Non-null while a loadMoreEarlier / loadMoreLater is in flight; the
+// direction lets the panel disable / label the matching button.
+let loadingMore = $state<'earlier' | 'later' | null>(null);
 let error = $state<string | null>(null);
 let hasQueried = $state(false);
 
@@ -33,11 +37,27 @@ let selectionInvalid = $state(false);
 
 let pendingAbort: AbortController | null = null;
 
+// Whether the current history entry was pushed by `selectItinerary` for
+// the active selection. Only then does `dismissSelectedItinerary` consume
+// it via history.back() — an auto-selected or URL-restored selection
+// lives on an entry it never pushed, so × must clear in place instead
+// (back() on a single-entry history is a silent no-op and the selection
+// would survive). Replace-stamping doesn't change the flag: a replaced
+// entry is still the pushed one.
+let pushedEntry = false;
+
 // Cascade tuning — see performance discussion.
 const NARROW_PRE_POST_SEC = 7200;   // 2 h — narrow default per query
 const WIDE_PRE_POST_SEC   = 28800;  // 8 h — server hard cap, used on escalation
 const LONG_WAIT_THRESHOLD_SEC = 3600; // 1 h wait triggers pre/post escalation
 const TARGET_RESULT_COUNT = 5;
+// Sparse-service escalation — if the narrow cascade reveals a ≥4 h stretch
+// of daytime (06–21 local) with no service (either between two consecutive
+// results, or between the last result and how far the hop cascade has
+// searched), redo everything with the wide walking budget.
+const SPARSE_GAP_THRESHOLD_SEC = 4 * 3600;
+const DAY_START_HOUR = 6;
+const DAY_END_HOUR = 21;
 // Stage 3 time-advance cascade — MOTIS's nextPageCursor stalls on remote
 // destinations (returns 0 with the same cursor value), so instead of
 // paging via cursor we advance `time` past the last returned itinerary
@@ -46,6 +66,143 @@ const HOP_MS = 2 * 3600 * 1000;         // 2 h step when a hop returns empty
 const HOP_SEARCH_WINDOW_SEC = 7200;     // matches HOP_MS so windows don't gap
 const MAX_SPAN_MS = 5 * 24 * 3600 * 1000; // stop after 5 days of advance
 const MAX_EMPTY_STREAK = 3;             // stop after N consecutive empty hops
+
+// Cascade state — shared between runQuery and loadMoreEarlier / loadMoreLater.
+// Not reactive; every mutation of `combined` flows through publishResults()
+// which is the sole writer of the reactive `results` array. `resultTarget`
+// is the current `.slice()` cap and is bumped by TARGET_RESULT_COUNT on
+// every loadMore click.
+let combined: Itinerary[] = [];
+let seenFingerprints = new Set<string>();
+let resolvedCurrentCoord: [number, number] | null = null;
+let resultTarget = TARGET_RESULT_COUNT;
+
+function abortInFlight() {
+	if (!pendingAbort) return;
+	pendingAbort.abort();
+	pendingAbort = null;
+}
+
+function resetCascadeState() {
+	combined = [];
+	seenFingerprints = new Set();
+	resolvedCurrentCoord = null;
+	resultTarget = TARGET_RESULT_COUNT;
+}
+
+function currentSortFn() {
+	return mode === 'arrive'
+		? (a: Itinerary, b: Itinerary) => Date.parse(b.startTime) - Date.parse(a.startTime)
+		: (a: Itinerary, b: Itinerary) => Date.parse(a.endTime) - Date.parse(b.endTime);
+}
+
+function publishResults() {
+	results = pruneDominated(combined, mode).sort(currentSortFn()).slice(0, resultTarget);
+}
+
+/** Hop `time` in `dir` (+1 forward, −1 backward) starting at `startEpoch`
+ * and merge fresh itineraries into `combined` until `results.length`
+ * reaches `resultTarget`, MAX_EMPTY_STREAK consecutive empty hops fire,
+ * or MAX_SPAN_MS from `startEpoch` is exceeded. Publishes intermediate
+ * results after every fresh batch. Caller owns `pendingAbort`.
+ *
+ * `shouldEscalate` (when provided) is called with the current search
+ * frontier — the point up to which we've searched, either the last fresh
+ * result's anchor or the empty-hop query time — after every iteration.
+ * When it returns true the cascade returns `'escalate'` so the caller can
+ * redo the pipeline with a wider walking budget. Otherwise `'done'`. */
+async function runHopCascade(
+	dir: 1 | -1,
+	startEpoch: number,
+	pre: number,
+	post: number,
+	ac: AbortController,
+	shouldEscalate?: (frontierMs: number) => boolean
+): Promise<'done' | 'escalate'> {
+	let queryEpoch = startEpoch;
+	let emptyStreak = 0;
+	while (results.length < resultTarget && !ac.signal.aborted) {
+		if (Math.abs(queryEpoch - startEpoch) > MAX_SPAN_MS) break;
+		if (emptyStreak >= MAX_EMPTY_STREAK) break;
+		const hopTime = new Date(queryEpoch).toISOString();
+		const res = await plan({
+			from: from!, to: to!, mode, time: hopTime,
+			currentCoord: resolvedCurrentCoord,
+			maxPreTransitTime: pre,
+			maxPostTransitTime: post,
+			searchWindow: HOP_SEARCH_WINDOW_SEC
+		}, ac.signal);
+		if (ac.signal.aborted) return 'done';
+		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
+		const fresh = items.filter((it) => {
+			const fp = itineraryFingerprint(it);
+			if (seenFingerprints.has(fp)) return false;
+			seenFingerprints.add(fp);
+			return true;
+		});
+		if (fresh.length === 0) {
+			emptyStreak++;
+			queryEpoch += dir * HOP_MS;
+		} else {
+			emptyStreak = 0;
+			combined = [...combined, ...fresh];
+			publishResults();
+			const starts = fresh.map((i) => Date.parse(i.startTime));
+			queryEpoch = (dir === 1 ? Math.max(...starts) : Math.min(...starts))
+				+ dir * 60_000;
+		}
+		if (shouldEscalate?.(queryEpoch)) return 'escalate';
+	}
+	return 'done';
+}
+
+/** Length in seconds of the longest continuous slice of [startMs, endMs]
+ * that fits entirely inside a single day's 06–21 local-time window. Used
+ * to test whether a service gap contains ≥ SPARSE_GAP_THRESHOLD_SEC of
+ * "daytime hours when service should be available". */
+function maxDaytimeSliceSec(startMs: number, endMs: number): number {
+	if (endMs <= startMs) return 0;
+	const first = new Date(startMs);
+	first.setHours(0, 0, 0, 0);
+	let max = 0;
+	for (let d = first.getTime(); d < endMs; d += 24 * 3600 * 1000) {
+		const day = new Date(d);
+		const dtStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), DAY_START_HOUR).getTime();
+		const dtEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), DAY_END_HOUR).getTime();
+		const sliceStart = Math.max(startMs, dtStart);
+		const sliceEnd = Math.min(endMs, dtEnd);
+		if (sliceEnd > sliceStart) {
+			const secs = (sliceEnd - sliceStart) / 1000;
+			if (secs > max) max = secs;
+		}
+	}
+	return max;
+}
+
+/** True when the timeline (query time + itinerary anchor times + current
+ * cascade frontier) contains a consecutive gap whose daytime slice on any
+ * single day reaches SPARSE_GAP_THRESHOLD_SEC. Signals that the narrow
+ * walking radius reaches only sparse service and the wide radius should
+ * be tried — the trigger fires from both real inter-result gaps and from
+ * empty hops (the frontier advances past the last known result). */
+function hasSparseServiceGap(
+	its: Itinerary[],
+	queryTimeMs: number,
+	frontierMs: number,
+	m: TimeMode
+): boolean {
+	const key = m === 'arrive' ? 'endTime' : 'startTime';
+	const anchors = its.map((i) => Date.parse(i[key]));
+	const timeline = [...new Set([queryTimeMs, frontierMs, ...anchors])]
+		.sort((a, b) => a - b);
+	for (let i = 0; i < timeline.length - 1; i++) {
+		if (timeline[i + 1] - timeline[i] < SPARSE_GAP_THRESHOLD_SEC * 1000) continue;
+		if (maxDaytimeSliceSec(timeline[i], timeline[i + 1]) >= SPARSE_GAP_THRESHOLD_SEC) {
+			return true;
+		}
+	}
+	return false;
+}
 
 /** True when any transit leg in the itinerary is preceded by a wait
  * longer than `LONG_WAIT_THRESHOLD_SEC`. Signals that expanding the
@@ -90,6 +247,43 @@ function invalidateSelection() {
 	selectedFingerprint = null;
 	pendingFingerprint = null;
 	selectionInvalid = false;
+	pushedEntry = false;
+}
+
+/** Extend the result set in one chronological direction. Bumps
+ * `resultTarget` by TARGET_RESULT_COUNT and hops until that many more
+ * results survive pruning, empty-streak or MAX_SPAN fires. Called only
+ * when an initial query has completed with at least one result — the
+ * bumped target is naturally reset by resetCascadeState() when a fresh
+ * runQuery starts. */
+async function loadMoreInDirection(direction: 'earlier' | 'later') {
+	if (loading || loadingMore) return;
+	if (!from || !to || results.length === 0) return;
+	abortInFlight();
+	const ac = new AbortController();
+	pendingAbort = ac;
+	loadingMore = direction;
+	resultTarget += TARGET_RESULT_COUNT;
+	const dir: 1 | -1 = direction === 'later' ? 1 : -1;
+	const starts = combined.map((i) => Date.parse(i.startTime));
+	const extreme = dir === 1 ? Math.max(...starts) : Math.min(...starts);
+	// leave-at query time is a departure with a forward window, so backward
+	// hops need to shift a full window back to sit before the current range.
+	// arrive-by query time is an arrival with a backward window, so a 60 s
+	// nudge already moves into fresh territory.
+	const startEpoch = dir === 1
+		? extreme + 60_000
+		: (mode === 'leave' ? extreme - HOP_MS : extreme - 60_000);
+	try {
+		await runHopCascade(dir, startEpoch, WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
+	} catch (e) {
+		if ((e as Error).name !== 'AbortError') {
+			error = e instanceof Error ? e.message : String(e);
+		}
+	} finally {
+		if (pendingAbort === ac) pendingAbort = null;
+		loadingMore = null;
+	}
 }
 
 export const routingState = {
@@ -100,6 +294,7 @@ export const routingState = {
 	get time() { return time; },
 	get results() { return results; },
 	get loading() { return loading; },
+	get loadingMore() { return loadingMore; },
 	get error() { return error; },
 	get hasQueried() { return hasQueried; },
 	get selectedItinerary() { return selectedItinerary; },
@@ -124,13 +319,15 @@ export const routingState = {
 		selectedFingerprint = null;
 		pendingFingerprint = null;
 		selectionInvalid = false;
-		if (pendingAbort) { pendingAbort.abort(); pendingAbort = null; }
+		pushedEntry = false;
+		abortInFlight();
+		resetCascadeState();
 		const url = currentUrl();
 		writeRoutingQuery(url, {
 			from: null, to: null, mode: 'leave', time: null, route: null
 		});
 		if (url.href !== window.location.href) {
-			replaceState(url, page.state);
+			replaceState(url, { ...page.state, routeSelection: undefined });
 		}
 		from = null;
 		to = null;
@@ -139,6 +336,7 @@ export const routingState = {
 	},
 
 	setFrom(ep: Endpoint | null) {
+		abortInFlight();
 		from = ep;
 		results = [];
 		hasQueried = false;
@@ -148,6 +346,7 @@ export const routingState = {
 	},
 
 	setTo(ep: Endpoint | null) {
+		abortInFlight();
 		to = ep;
 		results = [];
 		hasQueried = false;
@@ -157,6 +356,7 @@ export const routingState = {
 	},
 
 	setMode(m: TimeMode) {
+		abortInFlight();
 		mode = m;
 		results = [];
 		hasQueried = false;
@@ -166,6 +366,7 @@ export const routingState = {
 	},
 
 	setTime(t: string | null) {
+		abortInFlight();
 		time = t;
 		results = [];
 		hasQueried = false;
@@ -175,6 +376,7 @@ export const routingState = {
 	},
 
 	swap() {
+		abortInFlight();
 		const tmp = from;
 		from = to;
 		to = tmp;
@@ -200,19 +402,21 @@ export const routingState = {
 		writeRoutingQuery(url, { from, to, mode, time, route: fp });
 		if (!wasSelected) {
 			pushState(url, { ...page.state, routeSelection: fp });
+			pushedEntry = true;
 		} else {
 			replaceState(url, { ...page.state, routeSelection: fp });
 		}
 	},
 
-	/** UI-driven close (× on the selected result card). When the pushed
-	 * history entry that carries the selection is current (page.state
-	 * has `routeSelection`), pop it via history.back() so back never
-	 * lands on a stale route-view entry — Map.svelte's back/forward
-	 * $effect then does the teardown. Otherwise clear in place. */
+	/** UI-driven close (× on the selected result card). When the current
+	 * history entry was pushed for this selection, pop it via
+	 * history.back() so back never lands on a stale route-view entry —
+	 * Map.svelte's back/forward $effect then does the teardown. Otherwise
+	 * (auto-select / URL restore) clear in place. */
 	dismissSelectedItinerary() {
 		if (!selectedItinerary && !selectedFingerprint) return;
-		if (page.state?.routeSelection) {
+		if (pushedEntry && page.state?.routeSelection) {
+			pushedEntry = false;
 			history.back();
 			return;
 		}
@@ -227,10 +431,15 @@ export const routingState = {
 		selectedFingerprint = null;
 		pendingFingerprint = null;
 		selectionInvalid = false;
+		pushedEntry = false;
 		const url = currentUrl();
 		writeRoutingQuery(url, { from, to, mode, time, route: null });
 		if (url.href !== window.location.href) {
-			replaceState(url, page.state);
+			// Strip routeSelection explicitly — reusing page.state verbatim
+			// would re-stamp the stale fingerprint, and Map.svelte's
+			// back/forward effect would read it as a forward-restore and
+			// silently re-select the just-dismissed itinerary.
+			replaceState(url, { ...page.state, routeSelection: undefined });
 		}
 	},
 
@@ -246,6 +455,7 @@ export const routingState = {
 		time = next.time;
 		pendingFingerprint = next.route;
 		selectedFingerprint = next.route;
+		pushedEntry = false;
 		panelOpen = true;
 	},
 
@@ -254,13 +464,13 @@ export const routingState = {
 		error = null;
 		loading = true;
 		hasQueried = true;
-		if (pendingAbort) pendingAbort.abort();
+		abortInFlight();
 		const ac = new AbortController();
 		pendingAbort = ac;
+		resetCascadeState();
 		try {
-			let currentCoord: [number, number] | null = null;
 			if (from.type === 'current' || to.type === 'current') {
-				try { currentCoord = await resolveCurrent(); }
+				try { resolvedCurrentCoord = await resolveCurrent(); }
 				catch (e) {
 					error = geolocationErrorMessage(e);
 					loading = false;
@@ -269,25 +479,13 @@ export const routingState = {
 				}
 			}
 
-			// Sort chronologically — earliest arrival first for leave-at,
-			// latest departure first for arrive-by. Applies after every
-			// cascade stage so partial results are ordered while more roll
-			// in.
-			const sortFn = mode === 'arrive'
-				? (a: Itinerary, b: Itinerary) => Date.parse(b.startTime) - Date.parse(a.startTime)
-				: (a: Itinerary, b: Itinerary) => Date.parse(a.endTime) - Date.parse(b.endTime);
-
 			let pre = NARROW_PRE_POST_SEC;
 			let post = NARROW_PRE_POST_SEC;
-			let combined: Itinerary[] = [];
-
-			const publish = () => {
-				results = [...combined].sort(sortFn).slice(0, TARGET_RESULT_COUNT);
-			};
 
 			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
 				return await plan({
-					from: from!, to: to!, mode, time: timeArg, currentCoord,
+					from: from!, to: to!, mode, time: timeArg,
+					currentCoord: resolvedCurrentCoord,
 					maxPreTransitTime: pre,
 					maxPostTransitTime: post,
 					searchWindow
@@ -303,6 +501,8 @@ export const routingState = {
 			//   (a) narrow query returned nothing, or
 			//   (b) any returned itinerary has a >1 h wait at start or
 			//       between transit legs.
+			//   (c) — stage 3 discovers a ≥4 h daytime service gap; handled
+			//        via the runHopCascade escalation return below.
 			// Escalation replaces `combined` (different candidate set with
 			// a wider walking radius, not comparable via merge).
 			const needsEscalation = combined.length === 0
@@ -314,7 +514,10 @@ export const routingState = {
 				if (ac.signal.aborted) return;
 				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 			}
-			publish();
+			// Seed the dedupe set now that `combined` has stabilised for stages
+			// 1 + 2 — stage 3 (and any later loadMore) then filters against it.
+			seenFingerprints = new Set(combined.map(itineraryFingerprint));
+			publishResults();
 
 			// Stage 3 — time-advance cascade. MOTIS's nextPageCursor stalls
 			// on remote destinations (returns 0 with an unchanged cursor
@@ -323,47 +526,40 @@ export const routingState = {
 			// result. Dedupe by fingerprint; stop at TARGET_RESULT_COUNT,
 			// MAX_SPAN_MS, or MAX_EMPTY_STREAK consecutive empty hops.
 			const initialEpoch = time ? Date.parse(time) : Date.now();
-			const advanceDir = mode === 'arrive' ? -1 : 1;
-			const seen = new Set(combined.map(itineraryFingerprint));
-			const startsOf = (its: Itinerary[]) => its.map(i => Date.parse(i.startTime));
-
-			let queryEpoch: number;
-			if (combined.length) {
-				const starts = startsOf(combined);
-				queryEpoch = (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
+			const advanceDir: 1 | -1 = mode === 'arrive' ? -1 : 1;
+			const startEpochFrom = (its: Itinerary[]): number => {
+				if (!its.length) return initialEpoch + advanceDir * HOP_MS;
+				const starts = its.map((i) => Date.parse(i.startTime));
+				return (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
 					+ advanceDir * 60_000;
-			} else {
-				queryEpoch = initialEpoch + advanceDir * HOP_MS;
-			}
-			let emptyStreak = 0;
+			};
+			// Only arm the sparse-gap escalation check while the narrow
+			// budget is still in effect. If (a)/(b) already escalated to
+			// wide above there is no wider budget to retry with.
+			const shouldEscalate = pre === NARROW_PRE_POST_SEC
+				? (frontier: number) => hasSparseServiceGap(combined, initialEpoch, frontier, mode)
+				: undefined;
+			const outcome = await runHopCascade(
+				advanceDir, startEpochFrom(combined), pre, post, ac, shouldEscalate
+			);
+			if (ac.signal.aborted) return;
 
-			while (results.length < TARGET_RESULT_COUNT && !ac.signal.aborted) {
-				if (Math.abs(queryEpoch - initialEpoch) > MAX_SPAN_MS) break;
-				if (emptyStreak >= MAX_EMPTY_STREAK) break;
-
-				const hopTime = new Date(queryEpoch).toISOString();
-				res = await doQuery(hopTime, HOP_SEARCH_WINDOW_SEC);
+			// Stage 2c — sparse-service gap discovered mid-cascade. Redo the
+			// full narrow flow (stage 1 + stage 3) with the wide walking
+			// budget; the wider candidate set is not merge-comparable with
+			// the narrow one.
+			if (outcome === 'escalate') {
+				pre = WIDE_PRE_POST_SEC;
+				post = WIDE_PRE_POST_SEC;
+				combined = [];
+				seenFingerprints = new Set();
+				const wideRes = await doQuery(time);
 				if (ac.signal.aborted) return;
-
-				const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-				const fresh = items.filter((it) => {
-					const fp = itineraryFingerprint(it);
-					if (seen.has(fp)) return false;
-					seen.add(fp);
-					return true;
-				});
-
-				if (fresh.length === 0) {
-					emptyStreak++;
-					queryEpoch += advanceDir * HOP_MS;
-				} else {
-					emptyStreak = 0;
-					combined = [...combined, ...fresh];
-					publish();
-					const starts = startsOf(fresh);
-					queryEpoch = (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
-						+ advanceDir * 60_000;
-				}
+				combined = [...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])];
+				seenFingerprints = new Set(combined.map(itineraryFingerprint));
+				publishResults();
+				await runHopCascade(advanceDir, startEpochFrom(combined), pre, post, ac);
+				if (ac.signal.aborted) return;
 			}
 
 			// Reconcile a pending fingerprint from a cold-load restore
@@ -417,6 +613,14 @@ export const routingState = {
 			if (pendingAbort === ac) pendingAbort = null;
 			loading = false;
 		}
+	},
+
+	async loadMoreEarlier() {
+		await loadMoreInDirection('earlier');
+	},
+
+	async loadMoreLater() {
+		await loadMoreInDirection('later');
 	}
 };
 

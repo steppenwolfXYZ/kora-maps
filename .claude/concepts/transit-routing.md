@@ -14,7 +14,7 @@ Kora Maps visualises the transit network but does not yet answer the question "h
 - Query modes: `leave-at` (default, time = now) and `arrive-by`.
 - **Direct walking** is always attempted regardless of distance. A multi-hour walk still surfaces when it beats every transit option; MOTIS's `direct` walk-only itineraries are merged into the same list as transit itineraries.
 - **No artificial time-of-day cutoff.** A query at 00:30 must surface the first morning departures; a weekend query must surface the Monday-morning departures. The search expands progressively until either the target of 5 results is reached or the timetable is exhausted.
-- **Walking budget cascade.** First/last-mile walking budget starts narrow (2 h) for query speed and escalates to the server ceiling (8 h) when the initial search returns nothing OR when any returned itinerary contains a wait of more than 1 h at the start or between transit legs. The escalation is invisible to the user and adds latency only on the queries that need it.
+- **Walking budget cascade.** First/last-mile walking budget starts narrow (2 h) for query speed and escalates to the server ceiling (8 h) when any of three signals fires: the initial search returns nothing; any returned itinerary contains a wait of more than 1 h at the start or between transit legs; or the narrow search — including empty hops during the time-advance cascade — reveals a ≥ 4 h stretch of local daytime (06–21) with no service (measured across query time, every result's anchor time, and the current search frontier). The escalation redoes the full narrow flow with the wide budget (the wider candidate set is not merge-comparable with the narrow one). Escalation is invisible to the user and adds latency only on the queries that need it.
 
 ### Routing panel
 
@@ -52,33 +52,103 @@ Three ways to enter routing state:
 
 - Up to 5 alternatives per query.
 - **Sort** — earliest arrival first for `leave-at`, latest departure first for `arrive-by`. Chronological, not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus.
-- **Quality filter** — after the cascade has merged windows, itineraries are pruned by a soft-Pareto rule against a quality score before slicing to 5. See § Ranking.
+- **Quality filter** — itineraries are pruned by a time-dominance rule against a quality score before slicing to 5. See § Ranking.
 - The MOTIS response's `direct` walk-only options merge into the same list — walking is offered whenever it competes with transit.
 - Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index).
+- Each card also carries **at most one quality badge** and **zero or more warning icons** — see § Badges and § Warnings.
 - Before any query is issued for the current inputs: the results list is absent (not "no results shown").
 - No route found: a message row appears in place of cards.
 
+### Badges
+
+Every card is assigned at most one quality badge. Thresholds are **absolute**: they only depend on how much *worse* an itinerary is than the fastest, not on how it compares to the rest of the surviving set. Removing or adding another itinerary must never change whether an unaffected card is Good / Bad / Best.
+
+- **Worseness** — a per-itinerary percentage of how much worse this option is than the fastest:
+
+  `worseness = SPEED_WEIGHT * (this_duration / min_duration − 1) + (1 − SPEED_WEIGHT) * (this_score / min_score − 1)`
+
+  - Both terms are ratios against the fastest, not against the range of the set. A 10% slower option contributes 0.10 on the speed side regardless of what other options exist.
+  - `SPEED_WEIGHT = 0.8` (default).
+  - `this_score` uses the existing quality score (transfers + walking). Degenerate case: if `min_score = 0` (theoretical), the comfort term is 0 for all itineraries with score 0 and treated as +∞ for the rest — they get the Bad badge as long as duration doesn't lift them into Best.
+  - Note: two earlier formulations were tried and rejected. Linear min-max normalisation stretches near-ties into wide gaps (a 79 vs 72 min pair became speed_rating = 0.5 → bad). Ratio-based *rating* (`min_duration / this_duration`) fixed the shape but was still a comparison against the surviving set, so removing one alternative could re-rank the rest. Worseness is invariant to that.
+
+- **Badge assignment** — three mutually exclusive states:
+
+  - **Best** → the itinerary with the lowest worseness (in practice the fastest; comfort tiebreak). Icon: crown.
+  - **Good** → `worseness ≤ GOOD_MAX_PCT` (default 7%). Icon: thumbs up.
+  - **Bad** → `worseness ≥ BAD_MIN_PCT` (default 25% — tunable, likely revised once real distributions are visible). Icon: thumbs down.
+  - Otherwise no badge.
+
+  When only one itinerary survives filtering: it still gets the crown. Ties on worseness (very rare): pick the earliest-arriving itinerary as the sole crown holder; the others become Good.
+
+- **Placement** — badge sits at the **top-right** of the card, overlapping the top border line (icon-only, tooltip on hover naming the state).
+
+### Warnings
+
+Warnings are independent flags — a single card can carry any number of them, rendered as small icons alongside the badge. Adding new warnings later must not require renumbering or reordering.
+
+**Severity levels.** Every warning has one of three severities; a warning fires at its standard threshold and escalates through severities as the value grows. Only one icon per warning is ever shown — the highest severity reached.
+
+- **standard** — plain red icon.
+- **medium** — white icon inside a yellow circle.
+- **strong** — white icon inside a red circle.
+
+Initial warning set and thresholds:
+
+- **Long walk** — any single WALK leg lasts **> 20 min** (standard), **> 40 min** (medium), **> 1 h** (strong). Icon: walking figure.
+- **Long wait at transfer** — the gap between two consecutive transit legs is **≥ 1 h** (standard), **≥ 2 h** (medium), **≥ 3 h** (strong). Icon: hourglass / wait glyph.
+- **Very slow** — total duration is **≥ 2 ×** (standard), **≥ 3 ×** (medium), **≥ 4 ×** (strong) the fastest surviving itinerary's duration. Icon: slow glyph.
+
+**Placement** — warnings sit at the **top-left** of the card, inside the border, on the title line, immediately left of the title. Each warning is icon-only with a tooltip on hover naming the condition. Multiple warnings stack horizontally in a fixed order (long/very-long walk → long wait → very slow).
+
+Thresholds are constants shared with the badge module. Warning definitions are additive — this list will grow.
+
 ### Ranking
 
-MOTIS returns itineraries that are Pareto-optimal within a single query, but the time-advance cascade merges multiple windows, so nonsensical results (huge walking, extra transfers) can accumulate. A post-processing quality filter runs on the merged list before it's sliced to 5.
+MOTIS returns itineraries that are Pareto-optimal within a single query, but the time-advance cascade merges multiple windows, so dominated results (same start but later arrival, no comfort advantage) can accumulate. A post-processing quality filter runs on the merged list before it's sliced to 5. It applies at every cascade publish (the result list updates live as hops roll in), and the cascade's 5-result target counts **post-filter survivors** — the time-advance loop keeps hopping while fewer than 5 itineraries pass the filter. Dedup by fingerprint stays pre-filter.
 
-- **Score** — a single number combining transfer count and walking time:
+The filter's axis is **(start, end) dominance**, not duration. An alternative that departs later *and* arrives later is a legitimate chronological option and survives tier 1 — the filter exists to remove options that are strictly worse in time with nothing to show for it, plus (tier 2) later alternatives whose comfort gap is absurd.
 
-  `score = TRANSFER_PENALTY_SEC * transfers + WALK_WEIGHT * sqrt(walk_seconds)`
+- **Score** — a single number combining transfer count and walking time, used only as the filters' escape hatch (never for sorting):
 
-  - Walking cost is **concave** (`sqrt`), so an extra 20 min of walking hurts far more when the baseline is 3 min than when it's 60 min. Matches the intuition that "20 more minutes on a long walk is a minor regression, 20 more minutes on a short walk is a major one".
-  - `TRANSFER_PENALTY_SEC` — cost of one transfer, tuned so ~1 transfer ≈ ~10 min of mid-range walking (600s baseline).
-  - `WALK_WEIGHT` — chosen so `WALK_WEIGHT * sqrt(600s)` ≈ one `TRANSFER_PENALTY_SEC` (i.e. `WALK_WEIGHT ≈ 25` when `TRANSFER_PENALTY_SEC = 600`).
+  `score = TRANSFER_PENALTY_SEC * transfers + WALK_PER_SEC * walk_seconds`
 
-- **Soft Pareto filter** — itinerary A is dropped when there exists another itinerary B such that:
+  - `transfers` = number of transit legs − 1 (same definition as the result card's transfer count); `walk_seconds` = sum of all WALK-leg durations including inter-station transfer walks (same as the card's walking total).
+  - Walking cost is **linear**: the calibration anchors are that one transfer ≈ the difference between 5 and 10 minutes of walking — and equally between 40 and 50 minutes — so equal absolute walking differences cost the same at any baseline. `TRANSFER_PENALTY_SEC = 600`, `WALK_PER_SEC = 2` (5 min walking = one transfer). Consequence: 43 vs 126 minutes of walking is a gap of ~17 transfers — huge comfort differences score as huge.
 
-  `B.duration ≤ A.duration + SLACK_SEC`  **AND**  `B.score < A.score - MARGIN`
+- **Gap-scaled comfort tolerance** — a single rule replaces the earlier two-tier filter. Itinerary A is dropped when there exists another itinerary B such that:
 
-  In words: a slower option only survives if it isn't clearly beaten on the score. `SLACK_SEC` (~120s) and `MARGIN` (~180s) leave near-ties intact so marginal differences don't force a prune.
+  - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**
+  - A's comfort penalty over B exceeds a gap-scaled allowance: `A.score − B.score > MARGIN + gap · PENALTY_PER_SEC`, where `gap = min(|A.start − B.start|, |A.end − B.end|)` in seconds.
+
+  In words: the closer two options are on their tighter time axis, the smaller the comfort penalty the worse one can afford before it's dropped. Options that are genuinely temporally distinct on *both* axes get a large allowance and survive even with big comfort differences.
+
+  `min(|Δstart|, |Δend|)` captures how chronologically distinct A really is: an option that leaves 1 h later but arrives only 2 min later than B isn't a "1 h later" alternative — a user picking on arrival time gets essentially the same trip, minus the hour they wasted; the 2 min counts.
+
+  Calibration (linear slope, no cap):
+
+  - `T_SLACK` (~60 s) keeps near-identical start/end jitter from tipping the comparison.
+  - `MARGIN` = 300 (≈ 2.5 min walking / 0.5 transfers) — the allowance at zero gap. Near-ties survive despite minor score differences.
+  - `PENALTY_PER_SEC` ≈ 0.375, giving:
+    - 2 min gap → ~345 (marginal)
+    - 30 min gap → ~975 (medium, ≈ 8 min walking / 1.6 transfers)
+    - 1 h gap → ~1650 (much worse, ≈ 14 min walking / 2.8 transfers)
+    - 2 h gap → ~3000 (dramatic — matches the old absurd-comfort boundary)
+    - beyond 2 h, the allowance keeps growing linearly so genuinely different time slots can absorb larger comfort penalties.
+
+  Consequences:
+
+  - same time (both axes within slack), worse comfort by more than `MARGIN` → dropped.
+  - later start + earlier arrival by seconds, no comfort edge → dropped (tight domination).
+  - later start + later arrival by 30 min each, ≈ 20 min extra walking → survives (comfort penalty within allowance).
+  - later start by 1 h with the same arrival within slack → dropped unless comfort is essentially equal (`gap ≈ 0`).
+  - a next-morning start + hours more walking, arriving no sooner → dropped once the comfort penalty passes the wide-but-finite 24 h allowance.
+
+  The rule is symmetric — for `arrive-by` swap "primary axis" from arrival to departure; the comfort-vs-gap arithmetic is identical.
 
 - **Chronological sort survives.** Ranking is applied only as a filter — surviving itineraries are still sorted earliest-arrival first (leave-at) or latest-departure first (arrive-by), so the "leave now" answer stays at the top.
 
-- **Direct walk-only options** are scored the same way (`transfers = 0`, `walk = duration`). A multi-hour walk is dropped when a transit option matches its arrival with a much better score, and surfaces on its own when it wins outright.
+- **Direct walk-only options** are scored the same way (`transfers = 0`, `walk = duration`). A multi-hour walk is dropped when a transit option time-dominates it or arrives no later with a hugely better score, and surfaces on its own when no transit option does — including walks that arrive sooner than any transit, which always survive.
 
 ### Route color index
 

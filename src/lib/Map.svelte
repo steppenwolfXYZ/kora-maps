@@ -13,14 +13,14 @@
 	import { routingState } from './routing/state.svelte';
 	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
 	import { loadStationIndex, type StationEntry } from './routing/stationIndex';
-	import { buildRouteGeoJSON } from './routing/routeGeoJSON';
+	import { buildRouteGeoJSON, legBounds } from './routing/routeGeoJSON';
 	import {
 		installRouteLayers, removeRouteLayers,
 		type RouteMarkerHandles
 	} from './routing/routeLayers';
 	import { loadRouteColorIndex } from './routing/legColor';
 	import { itineraryFingerprint } from './routing/fingerprint';
-	import type { Itinerary } from './routing/types';
+	import type { Itinerary, Leg } from './routing/types';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -939,6 +939,24 @@
 		void loadStationIndex().then((idx) => { routeStationIndex = idx; });
 	});
 
+	// Camera focus for a clicked leg row in the expanded result card.
+	// Frames the leg's bbox, keeping clear of the routing panel on
+	// desktop (same framing rule as the whole-route auto-frame).
+	function focusRouteLeg(leg: Leg) {
+		const bb = legBounds(leg);
+		const map = mapRef;
+		if (!bb || !map) return;
+		const isNarrow = window.innerWidth < 700;
+		map.fitBounds(
+			[[bb[0], bb[1]], [bb[2], bb[3]]],
+			{
+				padding: { top: 96, bottom: 48, left: isNarrow ? 32 : 380, right: 48 },
+				maxZoom: 17,
+				duration: 900
+			}
+		);
+	}
+
 	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
 		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
 
@@ -1672,12 +1690,12 @@
 					<button class="popup-route-btn" data-route-side="from" data-route-endpoint="${encodeURIComponent(JSON.stringify({
 						uic: stopUic || undefined, name: stopName, coord: stopCoord
 					}))}">
-						<span class="material-symbols-outlined" aria-hidden="true">trip_origin</span>Route from here
+						<span class="material-symbols-outlined" aria-hidden="true">play_arrow</span>Route from here
 					</button>
 					<button class="popup-route-btn" data-route-side="to" data-route-endpoint="${encodeURIComponent(JSON.stringify({
 						uic: stopUic || undefined, name: stopName, coord: stopCoord
 					}))}">
-						<span class="material-symbols-outlined" aria-hidden="true">place</span>Route to here
+						<span class="material-symbols-outlined" aria-hidden="true">sports_score</span>Route to here
 					</button>
 				</div>` : '';
 
@@ -2058,7 +2076,7 @@
 
 	{#if routingState.open}
 		<div class="top-controls">
-			<RoutingPanel />
+			<RoutingPanel onFocusLeg={focusRouteLeg} />
 		</div>
 	{:else if !lineDetail}
 		<div class="top-controls">

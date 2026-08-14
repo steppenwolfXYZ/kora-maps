@@ -1,4 +1,5 @@
 {
+  "$schema": "https://opencode.ai/config.json",
 	"model": "openrouter/moonshotai/kimi-k3",
 	"instructions": [
     ".claude/rules/*.md",

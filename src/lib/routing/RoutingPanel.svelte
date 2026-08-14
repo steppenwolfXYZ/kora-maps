@@ -2,7 +2,13 @@
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
+	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
+	import type { Leg } from './types';
+
+	let { onFocusLeg }: { onFocusLeg?: (leg: Leg) => void } = $props();
+
+	let cardStates = $derived(computeCardStates(routingState.results));
 
 	// Main routing shell. Replaces the map menu / stop search top-controls
 	// while open (Map.svelte decides visibility). Runs a query whenever
@@ -19,6 +25,24 @@
 		lastKey = key;
 		void routingState.runQuery();
 	});
+
+	// Local-calendar day key so day-boundary markers respect the viewer's TZ.
+	function dayKey(iso: string): string {
+		const d = new Date(iso);
+		return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+	}
+	const dayFmt = new Intl.DateTimeFormat(undefined, {
+		weekday: 'short', day: 'numeric', month: 'short'
+	});
+	function fmtDay(iso: string): string {
+		return dayFmt.format(new Date(iso));
+	}
+	// Reference day for the first result: the requested query time (arrive-by
+	// or leave-at), or now if none set. If the first itinerary already sits
+	// on a later day, it gets a marker too.
+	function baselineIso(): string {
+		return routingState.time ?? new Date().toISOString();
+	}
 </script>
 
 <div class="routing-panel" role="dialog" aria-label="Route planning">
@@ -35,12 +59,20 @@
 	</div>
 
 	<div class="rp-endpoints">
-		<EndpointInput
-			label="From"
-			endpoint={routingState.from}
-			placeholder="Start"
-			onChange={(ep) => routingState.setFrom(ep)}
-		/>
+		<div class="rp-inputs">
+			<EndpointInput
+				label="From"
+				endpoint={routingState.from}
+				placeholder="Start"
+				onChange={(ep) => routingState.setFrom(ep)}
+			/>
+			<EndpointInput
+				label="To"
+				endpoint={routingState.to}
+				placeholder="Destination"
+				onChange={(ep) => routingState.setTo(ep)}
+			/>
+		</div>
 		<button
 			class="rp-swap"
 			onclick={() => routingState.swap()}
@@ -48,12 +80,6 @@
 		>
 			<span class="material-symbols-outlined">swap_vert</span>
 		</button>
-		<EndpointInput
-			label="To"
-			endpoint={routingState.to}
-			placeholder="Destination"
-			onChange={(ep) => routingState.setTo(ep)}
-		/>
 	</div>
 
 	<div class="rp-when">
@@ -79,9 +105,36 @@
 						The saved route is no longer valid. Pick one below.
 					</div>
 				{/if}
+				<button
+					type="button"
+					class="rp-load-more rp-load-more-top"
+					onclick={() => routingState.loadMoreEarlier()}
+					disabled={!!routingState.loadingMore || routingState.loading}
+				>
+					<span class="rp-load-more-icon rp-load-more-icon-up material-symbols-outlined" aria-hidden="true">chevron_right</span>
+					<span>{routingState.loadingMore === 'earlier' ? 'Loading…' : 'Earlier connections'}</span>
+				</button>
 				{#each routingState.results as it, i (i)}
-					<ResultCard itinerary={it} />
+					{@const prevIso = i === 0 ? baselineIso() : routingState.results[i - 1].startTime}
+					{#if i === 0 || dayKey(it.startTime) !== dayKey(prevIso)}
+						<div class="rp-day-marker">{fmtDay(it.startTime)}</div>
+					{/if}
+					<ResultCard
+						itinerary={it}
+						badge={cardStates[i]?.badge ?? null}
+						warnings={cardStates[i]?.warnings ?? []}
+						{onFocusLeg}
+					/>
 				{/each}
+				<button
+					type="button"
+					class="rp-load-more rp-load-more-bottom"
+					onclick={() => routingState.loadMoreLater()}
+					disabled={!!routingState.loadingMore || routingState.loading}
+				>
+					<span class="rp-load-more-icon rp-load-more-icon-down material-symbols-outlined" aria-hidden="true">chevron_right</span>
+					<span>{routingState.loadingMore === 'later' ? 'Loading…' : 'Later connections'}</span>
+				</button>
 			{/if}
 		</div>
 	{/if}
@@ -89,7 +142,7 @@
 
 <style>
 	.routing-panel {
-		width: 20rem;
+		width: 22rem;
 		max-height: calc(100vh - 2rem);
 		max-height: calc(100dvh - 2rem);
 		background: #ffffff;
@@ -141,19 +194,26 @@
 
 	.rp-endpoints {
 		display: flex;
-		flex-direction: column;
+		flex-direction: row;
+		align-items: center;
 		gap: 0.35rem;
 		position: relative;
 	}
+	.rp-inputs {
+		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		flex: 1 1 auto;
+		min-width: 0;
+	}
 	.rp-swap {
-		align-self: flex-end;
+		flex: 0 0 auto;
 		border: none;
 		background: transparent;
 		color: #666;
-		padding: 0.1rem 0.35rem;
+		padding: 0.25rem 0.35rem;
 		border-radius: 999px;
 		cursor: pointer;
-		margin: -0.15rem 0.2rem;
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
 	.rp-swap:hover { background: #eee; color: #000; }
@@ -172,4 +232,58 @@
 		padding: 0.35rem 0.15rem;
 	}
 	.rp-error { color: #a11; }
+
+	.rp-day-marker {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: #888;
+		padding: 0.25rem 0.1rem 0.1rem;
+	}
+	.rp-day-marker::before,
+	.rp-day-marker::after {
+		content: '';
+		flex: 1 1 auto;
+		height: 1px;
+		background: #e5e5e5;
+	}
+
+	.rp-load-more {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.35rem;
+		border: 1px solid #ddd;
+		background: #f5f5f5;
+		color: #222;
+		font-family: inherit;
+		font-size: 0.8rem;
+		font-weight: 600;
+		letter-spacing: 0.01em;
+		padding: 0.45rem 0.6rem;
+		border-radius: 0.5rem;
+		cursor: pointer;
+		transition: border-color 0.12s, background 0.12s, color 0.12s;
+	}
+	.rp-load-more-icon {
+		font-size: 1.1rem;
+		line-height: 1;
+	}
+	.rp-load-more-icon-up { transform: rotate(-90deg); }
+	.rp-load-more-icon-down { transform: rotate(90deg); }
+	.rp-load-more:hover:not(:disabled) {
+		background: #ebebeb;
+		border-color: #bbb;
+	}
+	.rp-load-more:active:not(:disabled) {
+		background: #e0e0e0;
+	}
+	.rp-load-more:disabled {
+		opacity: 0.55;
+		cursor: default;
+	}
 </style>

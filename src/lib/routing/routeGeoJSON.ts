@@ -123,6 +123,19 @@ function isTransit(mode: string): boolean {
 	return mode !== 'WALK' && mode !== 'BIKE' && mode !== 'CAR';
 }
 
+/** Bbox of one leg — decoded polyline when present, plus the from/to
+ * place coords as fallback. Used by Map.svelte to focus a clicked leg
+ * from the expanded result card. */
+export function legBounds(leg: Leg): [number, number, number, number] | null {
+	let bb: [number, number, number, number] | null = null;
+	for (const c of legCoords(leg)) bb = updateBBox(bb, c);
+	for (const p of [leg.from, leg.to]) {
+		const c = placeCoord(p);
+		if (c) bb = updateBBox(bb, c);
+	}
+	return bb;
+}
+
 function updateBBox(
 	bb: [number, number, number, number] | null,
 	coord: [number, number]

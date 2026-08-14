@@ -27,11 +27,11 @@
 		role="menu"
 	>
 		<button role="menuitem" onclick={() => pickAsPoint('from')}>
-			<span class="mcm-icon material-symbols-outlined">trip_origin</span>
+			<span class="mcm-icon material-symbols-outlined">play_arrow</span>
 			Route from here
 		</button>
 		<button role="menuitem" onclick={() => pickAsPoint('to')}>
-			<span class="mcm-icon material-symbols-outlined">place</span>
+			<span class="mcm-icon material-symbols-outlined">sports_score</span>
 			Route to here
 		</button>
 	</div>
