@@ -222,9 +222,11 @@ export function buildRouteGeoJSON(
 	//   walk    → transit    → single disc (first boarding after walk)
 	//   transit → walk       → single disc (last alighting before walk)
 	//   walk    → walk       → nothing (shouldn't happen in practice)
-	// Journey start: if the first leg is transit → start icon (no disc).
-	// Journey start: if the first leg is walk → start icon at its start.
-	// Same for the journey end mirrored to `goal`.
+	// Every transit boarding / alighting gets a disc — including the first
+	// boarding and the last alighting even when no walk leg is adjacent
+	// (handled below the boundary loop). The start/goal icon is a separate
+	// DOM marker that either overlays the disc (journey starts/ends at the
+	// station) or sits at the walk's outer end.
 	for (let i = 0; i < itinerary.legs.length - 1; i++) {
 		const a = itinerary.legs[i];
 		const b = itinerary.legs[i + 1];
@@ -317,6 +319,49 @@ export function buildRouteGeoJSON(
 		}
 	}
 
+	// First-boarding and last-alighting discs when the terminal leg is
+	// transit — the boundary loop above only fires between adjacent legs,
+	// so a journey that starts/ends with transit (no adjacent walk) needs
+	// its terminal disc emitted here. Dedup below folds a same-UIC pair
+	// with an adjacent-walk disc into one, so this is safe even in cases
+	// where a walk is present.
+	const firstLeg = itinerary.legs[0];
+	const lastLeg = itinerary.legs[itinerary.legs.length - 1];
+	if (firstLeg && isTransit(firstLeg.mode)) {
+		const boardCoord = snapEndpoint(decoded[0], 'start', placeCoord(firstLeg.from));
+		if (boardCoord) {
+			features.push({
+				type: 'Feature',
+				id: featureId++,
+				geometry: { type: 'Point', coordinates: boardCoord } as Point,
+				properties: {
+					role: 'disc', kind: 'board',
+					stop_name: firstLeg.from?.name ?? '',
+					parent_uic: bareUicFrom(firstLeg.from?.parentId ?? firstLeg.from?.stopId ?? undefined) ?? '',
+					mode_rank: legRank(firstLeg),
+					disc_min_zoom: 0
+				}
+			});
+		}
+	}
+	if (lastLeg && isTransit(lastLeg.mode)) {
+		const alightCoord = snapEndpoint(decoded[decoded.length - 1], 'end', placeCoord(lastLeg.to));
+		if (alightCoord) {
+			features.push({
+				type: 'Feature',
+				id: featureId++,
+				geometry: { type: 'Point', coordinates: alightCoord } as Point,
+				properties: {
+					role: 'disc', kind: 'alight',
+					stop_name: lastLeg.to?.name ?? '',
+					parent_uic: bareUicFrom(lastLeg.to?.parentId ?? lastLeg.to?.stopId ?? undefined) ?? '',
+					mode_rank: legRank(lastLeg),
+					disc_min_zoom: 0
+				}
+			});
+		}
+	}
+
 	// Dedup discs by parent UIC + mode rank. Same-UIC discs (arrive +
 	// depart at one transfer station) always share a min_zoom — they're a
 	// pair, hiding one without the other would look broken. Across UICs,
@@ -382,25 +427,15 @@ export function buildRouteGeoJSON(
 
 	// Journey endpoints — the start / goal icons the concept describes.
 	// Rendered as DOM markers separately from the source; the icon logic
-	// picks them off the returned coords.
-	const firstLeg = itinerary.legs[0];
-	const lastLeg = itinerary.legs[itinerary.legs.length - 1];
+	// picks them off the returned coords. The icons overlay the terminal
+	// discs when the journey starts/ends at the station, and sit at the
+	// walk's outer end when a walk precedes/follows the transit legs.
 	const firstCoords = decoded[0];
 	const lastCoords = decoded[decoded.length - 1];
 	const startCoord = snapEndpoint(firstCoords, 'start', placeCoord(firstLeg?.from));
 	const goalCoord = snapEndpoint(lastCoords, 'end', placeCoord(lastLeg?.to));
 	if (startCoord) bbox = updateBBox(bbox, startCoord);
 	if (goalCoord) bbox = updateBBox(bbox, goalCoord);
-
-	// If the journey starts with a transit leg (no preceding walk), the
-	// concept swaps that first boarding disc for the start icon. Nothing
-	// extra to add here — the disc rule above only writes discs at
-	// walk↔transit boundaries and at transit↔transit transfers. Same
-	// mirror at the end.
-	//
-	// When the first leg IS a walk, we render both: the start icon at the
-	// walk's origin AND the disc at the walk→transit boundary. Symmetric
-	// at the end.
 
 	return {
 		features: { type: 'FeatureCollection', features },

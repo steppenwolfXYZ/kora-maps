@@ -155,8 +155,17 @@
 		gap: 0.6rem;
 		overflow: hidden;
 	}
-	@media (max-width: 600px) {
-		.routing-panel { width: auto; flex: 1 1 auto; min-width: 0; }
+	/* Narrow breakpoint: keep in sync with NARROW_BREAKPOINT in
+	   ./layout.ts — the routing panel becomes a full-bleed page. */
+	@media (max-width: 699px) {
+		.routing-panel {
+			width: 100%;
+			flex: 1 1 auto;
+			min-width: 0;
+			max-height: 100vh;
+			max-height: 100dvh;
+			border-radius: 0;
+		}
 	}
 
 	.rp-head {

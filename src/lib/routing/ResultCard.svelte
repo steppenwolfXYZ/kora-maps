@@ -1,9 +1,14 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
-	import type { Itinerary, Leg, LegMode } from './types';
+	import type { Itinerary, Leg } from './types';
 	import { legBadgeColor, loadRouteColorIndex } from './legColor';
 	import { legDuration, transferCount, walkSeconds } from './ranking';
 	import type { Badge, Warning, WarningKind, WarningSeverity } from './ranking';
+	import {
+		badgeTextColor, displayLegs, fmtDuration, fmtTime,
+		iconFor, isTransitMode
+	} from './itineraryFormat';
+	import { isNarrow } from './layout';
 	import { itineraryFingerprint } from './fingerprint';
 	import { routingState } from './state.svelte';
 
@@ -17,28 +22,38 @@
 
 	let { itinerary, badge = null, warnings = [], onFocusLeg }: Props = $props();
 
-	// Expanded leg detail (chevron at the card bottom). Per-card local
-	// state — every result card expands independently.
-	let expanded = $state(false);
-
-	function isTransitMode(mode: LegMode): boolean {
-		return mode !== 'WALK' && mode !== 'BIKE' && mode !== 'CAR';
-	}
-
 	function headsign(leg: Leg): string {
 		return leg.headsign ?? leg.tripHeadsign ?? '';
 	}
 
-	function toggleExpand(e: Event) {
+	// Primary click (card body or chevron): toggle details. On desktop,
+	// opening a card also puts it on the map (open implies select); on
+	// mobile the map is only reachable via the map icon. See
+	// routing-map-details-split.md.
+	function toggleCard() {
+		routingState.toggleExpanded(itinerary);
+		if (!isNarrow() && routingState.expandedFingerprint === fingerprint) {
+			routingState.selectItinerary(itinerary);
+		}
+	}
+
+	// Map icon: select on the map without opening/closing any card. On
+	// mobile this enters fullscreen map mode; on desktop it just re-aims
+	// the overlay at this connection (peek while another card stays open).
+	function showOnMap(e: Event) {
 		e.stopPropagation();
-		expanded = !expanded;
+		routingState.selectItinerary(itinerary);
+		if (isNarrow()) routingState.enterMapMode();
 	}
 
 	// Clicking a leg row focuses it on the map. If the card isn't on the
-	// map yet, select it first so the overlay is there to look at.
+	// map yet, select it first so the overlay is there to look at. On
+	// mobile also enter map mode — a camera move behind the full-width
+	// list would be invisible otherwise.
 	function focusLeg(e: Event, leg: Leg) {
 		e.stopPropagation();
 		if (!selected) routingState.selectItinerary(itinerary);
+		if (isNarrow()) routingState.enterMapMode();
 		onFocusLeg?.(leg);
 	}
 
@@ -78,6 +93,7 @@
 
 	let fingerprint = $derived(itineraryFingerprint(itinerary));
 	let selected = $derived(routingState.selectedFingerprint === fingerprint);
+	let expanded = $derived(routingState.expandedFingerprint === fingerprint);
 
 	let colorIndex = $state<Map<string, string> | null>(null);
 	$effect(() => {
@@ -85,72 +101,6 @@
 		loadRouteColorIndex().then((m) => { if (!cancelled) colorIndex = m; });
 		return () => { cancelled = true; };
 	});
-
-	function badgeTextColor(hex: string): string {
-		const h = hex.replace(/^#/, '');
-		const r = parseInt(h.slice(0, 2), 16);
-		const g = parseInt(h.slice(2, 4), 16);
-		const b = parseInt(h.slice(4, 6), 16);
-		const lum = r * 0.299 + g * 0.587 + b * 0.114;
-		return lum > 140 ? '#000' : '#fff';
-	}
-
-	// Map MOTIS mode strings to Material Symbols icon names — parallel to
-	// StopSearch's MODE_ICON.
-	const MODE_ICON: Record<string, string> = {
-		WALK:          'directions_walk',
-		BIKE:          'directions_bike',
-		CAR:           'directions_car',
-		TRANSIT:       'directions_transit',
-		TRAM:          'tram',
-		SUBWAY:        'subway',
-		METRO:         'subway',
-		RAIL:          'train',
-		HIGHSPEED_RAIL:'train',
-		LONG_DISTANCE: 'train',
-		NIGHT_RAIL:    'train',
-		REGIONAL_RAIL: 'train',
-		REGIONAL_FAST_RAIL: 'train',
-		BUS:           'directions_bus',
-		COACH:         'directions_bus',
-		FERRY:         'directions_boat',
-		CABLE_CAR:     'gondola_lift',
-		GONDOLA:       'gondola_lift',
-		FUNICULAR:     'gondola_lift',
-		AIRPLANE:      'flight'
-	};
-
-	function fmtTime(iso: string): string {
-		const d = new Date(iso);
-		return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-	}
-
-	function fmtDuration(secs: number): string {
-		const m = Math.round(secs / 60);
-		if (m < 60) return `${m} min`;
-		const h = Math.floor(m / 60);
-		const rem = m % 60;
-		return rem ? `${h} h ${rem} min` : `${h} h`;
-	}
-
-	// Legs to render in the strip: short inter-transit transfer walks (≤ 6 min
-	// between two transit rides) are dropped entirely; first/last-mile walks
-	// and longer inter-transit walks are kept, always with their minutes.
-	function displayLegs(it: Itinerary): { leg: Leg; dur: number; isWalk: boolean }[] {
-		const transitIdx = it.legs
-			.map((l, i) => (l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR' ? i : -1))
-			.filter((i) => i >= 0);
-		const firstT = transitIdx[0] ?? -1;
-		const lastT = transitIdx[transitIdx.length - 1] ?? -1;
-		const out: { leg: Leg; dur: number; isWalk: boolean }[] = [];
-		it.legs.forEach((leg, i) => {
-			const dur = legDuration(leg);
-			const isWalk = leg.mode === 'WALK';
-			if (isWalk && i > firstT && i < lastT && dur <= 6 * 60) return;
-			out.push({ leg, dur, isWalk });
-		});
-		return out;
-	}
 
 	// First/last transit station of the trip, with departure / arrival times.
 	// Null for walk-only itineraries (direct walking options).
@@ -166,10 +116,6 @@
 			toTime: last.endTime
 		};
 	}
-
-	function iconFor(mode: LegMode): string {
-		return MODE_ICON[mode] ?? 'directions_transit';
-	}
 </script>
 
 <div
@@ -177,12 +123,12 @@
 	class:selected
 	role="button"
 	tabindex="0"
-	aria-pressed={selected}
-	onclick={() => routingState.selectItinerary(itinerary)}
+	aria-expanded={expanded}
+	onclick={toggleCard}
 	onkeydown={(e) => {
 		if (e.key === 'Enter' || e.key === ' ') {
 			e.preventDefault();
-			routingState.selectItinerary(itinerary);
+			toggleCard();
 		}
 	}}
 >
@@ -214,7 +160,6 @@
 				aria-label="Clear route from map"
 				onclick={(e) => {
 					e.stopPropagation();
-					expanded = false;
 					routingState.dismissSelectedItinerary();
 				}}
 			>×</button>
@@ -246,9 +191,19 @@
 		{/each}
 	</div>
 	<div class="card-meta">
-		<span>{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}</span>
-		<span>·</span>
-		<span>{fmtDuration(walkSeconds(itinerary))} walking</span>
+		<span class="card-meta-text">
+			{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}
+			· {fmtDuration(walkSeconds(itinerary))} walking
+		</span>
+		<button
+			class="card-map"
+			type="button"
+			title="Show on map"
+			aria-label="Show on map"
+			onclick={showOnMap}
+		>
+			<span class="material-symbols-outlined" aria-hidden="true">map</span>
+		</button>
 	</div>
 	{#if expanded}
 		<div class="leg-list" transition:slide>
@@ -293,7 +248,7 @@
 		type="button"
 		aria-label={expanded ? 'Hide connection details' : 'Show connection details'}
 		aria-expanded={expanded}
-		onclick={toggleExpand}
+		onclick={(e) => { e.stopPropagation(); toggleCard(); }}
 	><span class="card-expand-chevron" class:flipped={expanded}>▾</span></button>
 </div>
 
@@ -313,6 +268,38 @@
 		cursor: pointer;
 		color: inherit;
 		transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+	}
+
+	.card-map {
+		flex: 0 0 auto;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.6rem;
+		height: 1.6rem;
+		margin: -0.3rem -0.15rem -0.3rem 0;
+		border: none;
+		border-radius: 999px;
+		background: transparent;
+		cursor: pointer;
+	}
+	/* Filled map glyph in the brand red — the one coloured accent on the
+	   otherwise monochrome card. */
+	.card-map :global(.material-symbols-outlined) {
+		font-size: 1.25rem;
+		line-height: 1;
+		color: #740013;
+		font-variation-settings: 'FILL' 1;
+	}
+	.card-map:hover { background: #f3e2e5; }
+	/* This card is the one on the map: invert to a red disc with a white
+	   glyph so the active state reads at a glance. Desktop only — on
+	   mobile the map is never visible while the list is, so the icon
+	   never shows the active state there. */
+	@media (min-width: 700px) {
+		.card.selected .card-map { background: #740013; }
+		.card.selected .card-map :global(.material-symbols-outlined) { color: #fff; }
+		.card.selected .card-map:hover { background: #8a0418; }
 	}
 
 	.card-badge {
@@ -436,6 +423,8 @@
 
 	.card-meta {
 		display: flex;
+		align-items: center;
+		justify-content: space-between;
 		gap: 0.3rem;
 		font-size: 0.75rem;
 		color: #777;
@@ -454,8 +443,9 @@
 		color: #888;
 		line-height: 1.2;
 	}
-	.card-expand:hover { background: #f0f0f0; color: #333; }
-	.card.selected .card-expand:hover { background: #e0e0e0; }
+	/* No hover background: the whole card is the toggle target now, so the
+	   chevron is purely an affordance/indicator — a second hover effect on
+	   top of the card's own hover read as redundant. */
 	.card-expand-chevron {
 		display: inline-block;
 		font-size: 0.8rem;

@@ -43,7 +43,7 @@ Map assets never exist inside the server build, so the app must not touch them d
 
 `static/fonts/` (committed): `saira-vf-latin.woff2` + `saira-vf-latin-ext.woff2` (variable, weights 100–900, covers UI + splash) and `material-symbols-subset.woff2` (icon font subsetted to the six mode icons used by StopSearch). `@font-face` rules live inline in `app.html`. These are separate from `map-assets/fonts/` (MapLibre SDF glyph PBFs for tile labels) — both are needed; MapLibre cannot use web fonts.
 
-If a new icon is added to `MODE_ICON` in StopSearch.svelte, regenerate the subset: fetch `https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0,0&icon_names=<comma-separated, alphabetical, incl. new icon>&display=block` with a browser user agent, download the woff2 URL it contains, replace `material-symbols-subset.woff2`.
+If a new icon is added to `MODE_ICON` in StopSearch.svelte, regenerate the subset: fetch `https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0..1,0&icon_names=<comma-separated, alphabetical, incl. new icon>&display=block` with a browser user agent, download the woff2 URL it contains, replace `material-symbols-subset.woff2`. The FILL axis is variable (0..1) — filled icons set `font-variation-settings: 'FILL' 1` on the element. The full icon list is documented in the `@font-face` comment in `app.html`.
 
 ## Ops notes
 

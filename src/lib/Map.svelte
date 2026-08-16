@@ -9,8 +9,10 @@
 	import StopSearch from './StopSearch.svelte';
 	import MapMenu from './MapMenu.svelte';
 	import RoutingPanel from './routing/RoutingPanel.svelte';
+	import RouteMapHeader from './routing/RouteMapHeader.svelte';
 	import MapContextMenu from './routing/MapContextMenu.svelte';
 	import { routingState } from './routing/state.svelte';
+	import { isNarrow } from './routing/layout';
 	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
 	import { loadStationIndex, type StationEntry } from './routing/stationIndex';
 	import { buildRouteGeoJSON, legBounds } from './routing/routeGeoJSON';
@@ -939,6 +941,17 @@
 		void loadStationIndex().then((idx) => { routeStationIndex = idx; });
 	});
 
+	// Camera padding for route framing (routing-map-details-split.md §
+	// Camera framing). Desktop keeps the left-heavy padding that clears
+	// the side panel; on narrow screens only the map-mode summary header
+	// overlays the map, so a modest top clearance is enough.
+	const ROUTE_HEADER_TOP_CLEARANCE = 96;
+	function routeFramePadding(): maplibregl.PaddingOptions {
+		return isNarrow()
+			? { top: ROUTE_HEADER_TOP_CLEARANCE, bottom: 48, left: 32, right: 48 }
+			: { top: 96, bottom: 48, left: 380, right: 48 };
+	}
+
 	// Camera focus for a clicked leg row in the expanded result card.
 	// Frames the leg's bbox, keeping clear of the routing panel on
 	// desktop (same framing rule as the whole-route auto-frame).
@@ -946,11 +959,10 @@
 		const bb = legBounds(leg);
 		const map = mapRef;
 		if (!bb || !map) return;
-		const isNarrow = window.innerWidth < 700;
 		map.fitBounds(
 			[[bb[0], bb[1]], [bb[2], bb[3]]],
 			{
-				padding: { top: 96, bottom: 48, left: isNarrow ? 32 : 380, right: 48 },
+				padding: routeFramePadding(),
 				maxZoom: 17,
 				duration: 900
 			}
@@ -960,20 +972,15 @@
 	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
 		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
 
-		// Auto-frame the route bbox. Left padding is heavier to keep the
-		// route clear of the panel on desktop; on mobile the panel spans
-		// the full width so a modest padding is fine either way.
-		if (geo.bbox) {
-			const isNarrow = window.innerWidth < 700;
+		// Auto-frame the route bbox. Desktop frames immediately; on narrow
+		// screens the full-width list hides the map anyway, so framing is
+		// deferred to the map-mode effect below (entering fullscreen map
+		// mode reframes against the summary-header padding).
+		if (geo.bbox && !isNarrow()) {
 			map.fitBounds(
 				[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
 				{
-					padding: {
-						top: 96,
-						bottom: 48,
-						left: isNarrow ? 32 : 380,
-						right: 48
-					},
+					padding: routeFramePadding(),
 					maxZoom: 15,
 					duration: 900
 				}
@@ -1106,6 +1113,22 @@
 		if (!map || !map.isStyleLoaded()) return;
 		if (it) enterRouteOverlay(map, it);
 		else exitRouteOverlay(map);
+	});
+
+	// Entering mobile fullscreen map mode: the route was framed under the
+	// full-width list (or not framed at all), so reframe against the
+	// summary-header clearance now that the map owns the viewport.
+	$effect(() => {
+		const on = routingState.mapMode;
+		const it = routingState.selectedItinerary;
+		const map = mapRef;
+		if (!on || !it || !map || !map.isStyleLoaded()) return;
+		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
+		if (!geo.bbox) return;
+		map.fitBounds(
+			[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
+			{ padding: routeFramePadding(), maxZoom: 15, duration: 600 }
+		);
 	});
 
 	// Browser back / forward ↔ route selection. The pushed history entry
@@ -2022,9 +2045,16 @@
 	});
 </script>
 
-<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && lineDetail) exitLineDetail(); }} />
+<svelte:window
+	onkeydown={(e) => {
+		if (e.key !== 'Escape') return;
+		if (routingState.mapMode) routingState.exitMapMode();
+		else if (lineDetail) exitLineDetail();
+	}}
+	onresize={() => { if (!isNarrow() && routingState.mapMode) routingState.exitMapMode(); }}
+/>
 
-<div class="map-wrap" class:routing-active={routingState.open}>
+<div class="map-wrap" class:routing-active={routingState.open} class:routing-map-mode={routingState.mapMode}>
 	<div bind:this={container} class="map"></div>
 
 	{#if lineDetail}
@@ -2074,7 +2104,11 @@
 		</div>
 	{/if}
 
-	{#if routingState.open}
+	{#if routingState.mapMode}
+		<!-- Mobile fullscreen map mode: the list/panel is hidden, the
+		     summary header owns the top of the map. -->
+		<RouteMapHeader />
+	{:else if routingState.open}
 		<div class="top-controls">
 			<RoutingPanel onFocusLeg={focusRouteLeg} />
 		</div>
@@ -2143,6 +2177,31 @@
 		display: none;
 	}
 
+	/* Keep the (i) credits out from under the routing panel on desktop:
+	   bound the bottom-right control strip to the space right of the
+	   panel (22 rem + margins) so expanded attribution text wraps
+	   instead of sliding underneath. */
+	@media (min-width: 700px) {
+		.map-wrap.routing-active .map :global(.maplibregl-ctrl-bottom-right) {
+			left: 23.5rem;
+		}
+	}
+
+	/* Narrow screens (keep in sync with NARROW_BREAKPOINT in
+	   routing/layout.ts): the full-width routing page owns the top
+	   strip, so the zoom / orientation / geolocate controls hide while
+	   the list is up. In fullscreen map mode they stay usable, pushed
+	   below the summary header. */
+	@media (max-width: 699px) {
+		.map-wrap.routing-active:not(.routing-map-mode)
+			.map :global(.maplibregl-ctrl-top-right) {
+			display: none;
+		}
+		.map-wrap.routing-map-mode .map :global(.maplibregl-ctrl-top-right) {
+			top: 5.2rem;
+		}
+	}
+
 	.top-controls {
 		position: absolute;
 		top: 1rem;
@@ -2161,6 +2220,17 @@
 	}
 	.top-controls > :global(*) {
 		pointer-events: auto;
+	}
+
+	/* Narrow screens (keep in sync with NARROW_BREAKPOINT in
+	   routing/layout.ts): the routing panel becomes a full-bleed page —
+	   no margins, no rounding (panel CSS handles the rounding). */
+	@media (max-width: 699px) {
+		.map-wrap.routing-active .top-controls {
+			top: 0;
+			left: 0;
+			right: 0;
+		}
 	}
 
 	.line-detail-bar {

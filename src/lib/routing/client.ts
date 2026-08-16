@@ -1,4 +1,4 @@
-import type { Endpoint, PlanResponse, TimeMode } from './types';
+import type { Endpoint, Itinerary, PlanResponse, TimeMode } from './types';
 
 // Local MOTIS instance (see motis/docker-compose.yml). Overridable via
 // VITE_MOTIS_URL so deployment can point elsewhere without a code change.
@@ -29,6 +29,50 @@ export interface PlanArgs {
 	 * to 7200 (2 h) once it's advancing `time` forward to accumulate more
 	 * results. */
 	searchWindow?: number;
+}
+
+/** Extract the bare UIC from a MOTIS-prefixed stop or parent id
+ * ("ch_Parent8500010" / "ch_8500010:0:5" → "8500010"). */
+function bareUic(id: string | undefined): string | null {
+	if (!id) return null;
+	const m = id.match(/(\d+)/);
+	return m ? m[1] : null;
+}
+
+/** When a From/To endpoint is a station, MOTIS still receives its coord and
+ * plans a first/last-mile walk from the coord to the platform — even when
+ * the itinerary boards/alights at that exact station. That spurious walk
+ * shifts the itinerary's start/end time off the transit schedule. Strip
+ * the leading WALK when its arrival stop shares the requested From
+ * station's parent UIC, and symmetrically the trailing WALK against To. */
+function stripStationWalks(it: Itinerary, fromUic: string | null, toUic: string | null): Itinerary {
+	let legs = it.legs;
+	if (fromUic && legs.length > 1 && legs[0].mode === 'WALK') {
+		const arrivalUic = bareUic(legs[0].to?.parentId ?? legs[0].to?.stopId);
+		if (arrivalUic === fromUic) legs = legs.slice(1);
+	}
+	if (toUic && legs.length > 1 && legs[legs.length - 1].mode === 'WALK') {
+		const departureUic = bareUic(legs[legs.length - 1].from?.parentId ?? legs[legs.length - 1].from?.stopId);
+		if (departureUic === toUic) legs = legs.slice(0, -1);
+	}
+	if (legs.length === it.legs.length) return it;
+	const startTime = legs[0].startTime;
+	const endTime = legs[legs.length - 1].endTime;
+	const duration = Math.max(0, (Date.parse(endTime) - Date.parse(startTime)) / 1000);
+	let walkTime = 0;
+	for (const l of legs) {
+		if (l.mode !== 'WALK') continue;
+		walkTime += l.duration ?? Math.max(0, (Date.parse(l.endTime) - Date.parse(l.startTime)) / 1000);
+	}
+	return { ...it, legs, startTime, endTime, duration, walkTime };
+}
+
+function stripStationWalksInResponse(res: PlanResponse, from: Endpoint, to: Endpoint): PlanResponse {
+	const fromUic = from.type === 'station' ? from.uic : null;
+	const toUic   = to.type   === 'station' ? to.uic   : null;
+	if (!fromUic && !toUic) return res;
+	const map = (its?: Itinerary[]) => its?.map((it) => stripStationWalks(it, fromUic, toUic));
+	return { ...res, itineraries: map(res.itineraries) ?? [], direct: map(res.direct) };
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -65,5 +109,6 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`MOTIS ${res.status}: ${await res.text().catch(() => res.statusText)}`);
-	return res.json() as Promise<PlanResponse>;
+	const json = (await res.json()) as PlanResponse;
+	return stripStationWalksInResponse(json, args.from, args.to);
 }

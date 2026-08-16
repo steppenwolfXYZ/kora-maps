@@ -21,6 +21,7 @@ Docker. Outputs:
     data/osm/rail_ways.geojson
     data/osm/tram_ways.geojson
     data/osm/street_ways.geojson
+    data/osm/platform_ways.geojson
     data/osm/buildings.geojson
     data/osm/builtup_grid_100m.json
 
@@ -42,6 +43,12 @@ polygons of the built-up classes rasterized onto a 100 m grid. It feeds the
 regional_bus → city_bus promotion in step 06 (citybus-landuse-promotion.md)
 and is shared with the v2 candidate diagnostic. Class list, grid convention,
 and rasterization live in gtfs/citybus_promotion.py.
+
+`platform_ways.geojson` carries OSM ways tagged `public_transport=platform`
+(covering both bus/tram `highway=platform` and train `railway=platform`
+mappings). Step 07 uses them to snap each station's search-index coord onto
+a walkable platform (transit-routing.md § Endpoint inputs) so MOTIS's OSR
+doesn't start walkers on `sidewalk=separate` road centerlines.
 
 Idempotent: skips if all outputs are newer than every input. Pass --force to rerun.
 """
@@ -81,6 +88,7 @@ OUT_RAIL_GEOJSON = OSM_DIR / "rail_ways.geojson"
 OUT_TRAM_GEOJSON = OSM_DIR / "tram_ways.geojson"
 OUT_STREET_GEOJSON = OSM_DIR / "street_ways.geojson"
 OUT_BUILDINGS_GEOJSON = OSM_DIR / "buildings.geojson"
+OUT_PLATFORM_GEOJSON = OSM_DIR / "platform_ways.geojson"
 GTFS_STOPS = ROOT / "data" / "gtfs" / "stops.txt"
 # Railway tags whose ways step 07 walks at terminal train stops. Subway/tram/
 # funicular are excluded — they aren't used by train-bucket lines. See
@@ -107,6 +115,11 @@ STREET_TAG_FILTER = "w/highway=" + ",".join(STREET_HIGHWAY_CLASSES)
 # add-centroid=force collapses them to a single representative Point each so
 # the output stays small (~50 MB for CH + neighbours within the bbox).
 BUILDING_TAG_FILTER = "wr/building"
+# Transit platforms: ways with public_transport=platform (catches both
+# highway=platform + public_transport=platform (bus/tram) and railway=platform
+# + public_transport=platform (train) mappings). Only ways — platform nodes
+# without a way are floating POIs that don't help the walk-graph snap.
+PLATFORM_TAG_FILTER = "w/public_transport=platform"
 
 
 def load_bbox() -> tuple:
@@ -423,15 +436,22 @@ def main() -> None:
         and newer_than(OUT_BUILTUP_GRID, [OUT_PBF])
         and is_valid_builtup_grid(OUT_BUILTUP_GRID)
     )
+    # Platforms across the whole bbox run into the tens of thousands; a
+    # min_lines floor of 5 000 catches crashed-mid-write files.
+    platform_fresh = (
+        (not force) and pbf_fresh
+        and newer_than(OUT_PLATFORM_GEOJSON, [OUT_PBF])
+        and is_valid_geojson(OUT_PLATFORM_GEOJSON, min_lines=5_000)
+    )
 
     if (pbf_fresh and rail_fresh and tram_fresh and street_fresh
-            and buildings_fresh and builtup_fresh):
+            and buildings_fresh and builtup_fresh and platform_fresh):
         size_mb = OUT_PBF.stat().st_size / 1_000_000
         gj_sizes = ", ".join(
             f"{p.name} ({p.stat().st_size / 1_000_000:.0f} MB)"
             for p in (OUT_RAIL_GEOJSON, OUT_TRAM_GEOJSON,
-                      OUT_STREET_GEOJSON, OUT_BUILDINGS_GEOJSON,
-                      OUT_BUILTUP_GRID))
+                      OUT_STREET_GEOJSON, OUT_PLATFORM_GEOJSON,
+                      OUT_BUILDINGS_GEOJSON, OUT_BUILTUP_GRID))
         print(f"Up-to-date: {OUT_PBF} ({size_mb:.0f} MB), {gj_sizes}. "
               "Pass --force to rebuild.")
         return
@@ -484,6 +504,9 @@ def main() -> None:
 
     if not builtup_fresh:
         extract_builtup_grid(image, cuts)
+
+    if not platform_fresh:
+        extract_platform_ways(image, cuts)
 
     for cut in cuts:
         cut.unlink(missing_ok=True)
@@ -547,6 +570,73 @@ def extract_rail_ways(image: str, cuts: list) -> None:
     rail_mb = OUT_RAIL_GEOJSON.stat().st_size / 1_000_000
     print(f"Done. Rail GeoJSON: {len(features):,} ways, "
           f"{rail_mb:.0f} MB → {OUT_RAIL_GEOJSON}")
+
+
+def extract_platform_ways(image: str, cuts: list) -> None:
+    """Extract public_transport=platform ways for step 07's search-index
+    coord snap (transit-routing.md § Endpoint inputs). Same per-country-slice
+    pattern as extract_rail_ways: tags-filter → osmium export → JSON concat
+    with way-id dedup. Only LineString geometries are kept; centroid
+    calculation lives in step 07."""
+    plat_pbfs: list = []
+    plat_geojsons: list = []
+    print(f"Extracting platform ways per country slice → "
+          f"{OUT_PLATFORM_GEOJSON.name}")
+    for cut in cuts:
+        stem = cut.stem.replace(".osm", "")
+        p_pbf = OSM_DIR / f"{stem}.platform.osm.pbf"
+        p_gj = OSM_DIR / f"{stem}.platform.geojson"
+        docker_run(
+            image, "osmium", "tags-filter",
+            "--overwrite",
+            "-o", f"/work/{relpath(p_pbf)}",
+            f"/work/{relpath(cut)}",
+            PLATFORM_TAG_FILTER,
+        )
+        docker_run(
+            image, "osmium", "export",
+            "--overwrite",
+            "-f", "geojson",
+            "-o", f"/work/{relpath(p_gj)}",
+            f"/work/{relpath(p_pbf)}",
+        )
+        plat_pbfs.append(p_pbf)
+        plat_geojsons.append(p_gj)
+
+    seen_ids: set = set()
+    features: list = []
+    for gj in plat_geojsons:
+        data = json.loads(gj.read_text())
+        for feat in data.get("features", []):
+            if (feat.get("geometry") or {}).get("type") != "LineString":
+                continue
+            fid = feat.get("id")
+            if fid is not None:
+                if fid in seen_ids:
+                    continue
+                seen_ids.add(fid)
+            # Strip all tags — step 07 only needs the geometry.
+            features.append({
+                "type": "Feature",
+                "id": fid,
+                "geometry": feat["geometry"],
+            })
+
+    tmp_path = OUT_PLATFORM_GEOJSON.with_suffix(
+        OUT_PLATFORM_GEOJSON.suffix + ".tmp"
+    )
+    tmp_path.write_text(json.dumps({
+        "type": "FeatureCollection",
+        "features": features,
+    }))
+    tmp_path.replace(OUT_PLATFORM_GEOJSON)
+
+    for p in plat_pbfs + plat_geojsons:
+        p.unlink(missing_ok=True)
+
+    mb = OUT_PLATFORM_GEOJSON.stat().st_size / 1_000_000
+    print(f"Done. Platform GeoJSON: {len(features):,} ways, "
+          f"{mb:.0f} MB → {OUT_PLATFORM_GEOJSON}")
 
 
 def extract_buildings(image: str, cuts: list) -> None:

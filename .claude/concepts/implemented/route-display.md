@@ -20,12 +20,8 @@ Transit routing (MOTIS) returns a sequence of legs describing a chosen journey. 
 ### Stops on the route
 
 - **Transfer stop** (change of vehicle) — two neutral discs, one for the arrival platform and one for the departure platform, connected by a neutral connector. Discs and connector all in the same neutral routing color; leg colors live only on the polylines that touch each disc.
-- **First boarding**
-  - If a walking segment precedes it → single neutral disc (same styling as a transfer disc, no connector).
-  - If the journey starts at that station itself with no preceding walk → replace the disc with the **start icon** (small filled circle).
-- **Final alighting** (mirror of first boarding)
-  - If a walking segment follows → single neutral disc.
-  - If the journey ends at that station itself → replace the disc with the **goal icon** (checkered flag).
+- **First boarding** — always a single neutral disc at the boarding stop (same styling as a transfer disc, no connector). The **start icon** (small filled circle) marks the walk's origin when a walk precedes the transit leg, and overlays the disc when the journey starts at the station itself.
+- **Final alighting** (mirror of first boarding) — always a single neutral disc at the alighting stop. The **goal icon** (checkered flag) marks the walk's endpoint when a walk follows the transit leg, and overlays the disc when the journey ends at the station itself.
 - **Pass-through stops** — stops the vehicle serves within a leg without the passenger transferring: small neutral dots along the polyline.
 - **Disc position** — every disc snaps to the leg polyline, preferably at the polyline endpoint (the arrival disc at the end of the arriving leg's polyline; the departure disc at the start of the departing leg's polyline). Same "snap to line" logic used in pill design.
 

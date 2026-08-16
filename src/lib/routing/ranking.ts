@@ -7,15 +7,26 @@ import type { Itinerary, Leg, TimeMode } from './types';
 // allowance that scales with the pair's temporal gap. The score's only
 // role is as this filter's escape hatch — it is never used for sorting.
 
-const TRANSFER_PENALTY_SEC = 600;  // one transfer ≈ 5 min of walking
-const WALK_PER_SEC = 2;            // linear: +5 min walking = +600 at any baseline
-const T_SLACK_MS = 60 * 1000;      // start/end jitter that still counts as "same time"
-const MARGIN = 300;                // allowed comfort penalty at zero gap (≈ 2.5 min walking)
-// Linear slope so the anchor calibration matches the previous two-tier
-// system's boundary: gap = 2 h → allowed = MARGIN + 7200·slope ≈ 3000
-// (the old BIG_MARGIN). Grows without cap beyond that so genuinely
-// temporally-distinct options can absorb larger comfort differences.
-const PENALTY_PER_SEC = 0.375;
+const TRANSFER_PENALTY_SEC = 600;    // one transfer ≈ 5 min of walking
+const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
+// Walking cost is soft-capped: small walking differences (0–30 min) stay
+// as sensitive as before, but each further second is worth a quarter as
+// much — a 30-min-vs-3-h walking difference no longer overwhelms every
+// realistic temporal-gap allowance.
+const WALK_SOFT_CAP_SEC = 30 * 60;   // linear knee-point (30 min)
+const WALK_TAIL_PER_SEC = 0.5;       // shallow slope past the knee
+const T_SLACK_MS = 60 * 1000;        // start/end jitter that still counts as "same time"
+// Comfort-edge requirement at zero temporal gap: A must be MORE
+// comfortable than B by more than MARGIN to survive when B time-beats
+// it — matches the old tier-1 semantics. Positive allowance kicks in as
+// the gap grows.
+const MARGIN = 300;
+// Cube-root curve for the allowance: rises fast at short gaps so a rare
+// fast option can't nuke its neighbours (2 min gap already needs ≥15 min
+// extra walking to prune), saturates gracefully at long gaps (2 h → ~8000
+// ≈ 65 min extra walking under the soft cap). Linear couldn't hit both
+// "steep at 2 min" and "sane at 2 h" simultaneously.
+const PENALTY_K = 430;
 
 export function legDuration(leg: Leg): number {
 	return leg.duration ?? Math.max(0, (Date.parse(leg.endTime) - Date.parse(leg.startTime)) / 1000);
@@ -37,10 +48,19 @@ export function transferCount(it: Itinerary): number {
 	return Math.max(0, transit - 1);
 }
 
+/** Walking cost with a soft cap at 30 min: full linear rate below the
+ * knee, quarter rate above. Keeps small walking differences meaningful
+ * while bounding the score inflation from multi-hour hikes. */
+function walkCost(walkSec: number): number {
+	const base = WALK_PER_SEC * Math.min(walkSec, WALK_SOFT_CAP_SEC);
+	const tail = WALK_TAIL_PER_SEC * Math.max(0, walkSec - WALK_SOFT_CAP_SEC);
+	return base + tail;
+}
+
 /** Comfort score — lower is better. Only used as the dominance escape
  * hatch, never for sorting. */
 export function itineraryScore(it: Itinerary): number {
-	return TRANSFER_PENALTY_SEC * transferCount(it) + WALK_PER_SEC * walkSeconds(it);
+	return TRANSFER_PENALTY_SEC * transferCount(it) + walkCost(walkSeconds(it));
 }
 
 interface Entry {
@@ -52,13 +72,16 @@ interface Entry {
 
 /** True when B time-beats A on the query's primary axis (arrival for
  * leave-at, departure for arrive-by, within T_SLACK) AND A's comfort
- * penalty over B exceeds the allowance scaled by the pair's temporal gap.
+ * penalty over B exceeds the allowance for the pair's temporal gap.
  *
  * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance. Two options
  * far apart on one axis but near-identical on the other are treated as
  * near-ties: the tight axis limits how much comfort penalty the worse
- * one can afford. Options genuinely temporally distinct on both axes get
- * a large allowance and survive even with big comfort differences. */
+ * one can afford. `allowed = −MARGIN + PENALTY_K · gap^(1/3)` — at zero
+ * gap A must be MORE comfy than B by MARGIN (old tier-1 semantics); the
+ * cube-root rises fast so even a 2 min gap already tolerates a fairly
+ * steep comfort difference, and saturates gracefully so a 2 h gap sits
+ * around a "dramatic" allowance rather than an absurd one. */
 function beatenBy(a: Entry, b: Entry, mode: TimeMode): boolean {
 	const primaryBeats = mode === 'arrive'
 		? b.start >= a.start - T_SLACK_MS
@@ -68,7 +91,7 @@ function beatenBy(a: Entry, b: Entry, mode: TimeMode): boolean {
 		Math.abs(a.start - b.start),
 		Math.abs(a.end - b.end)
 	) / 1000;
-	const allowed = MARGIN + gapSec * PENALTY_PER_SEC;
+	const allowed = -MARGIN + PENALTY_K * Math.cbrt(gapSec);
 	return a.score - b.score > allowed;
 }
 
@@ -106,7 +129,20 @@ export interface CardState {
 	warnings: Warning[];
 }
 
-const SPEED_WEIGHT = 0.8;
+// Comfort factor multiplies the trip's duration to produce an
+// "effective time". Each malus ∈ [0, 1]; they add and share a fixed cap,
+// so the factor lives in [1.0, 1.0 + 2·COMFORT_FACTOR_SLOPE] = [1.0, 1.2].
+// Worseness is then a single ratio (this_eff / min_eff − 1), and the 80/20
+// speed-vs-comfort intuition is baked into the factor's shape — no
+// separate weight to tune, no unbounded ratios.
+const COMFORT_FACTOR_SLOPE = 0.1;
+// Transfer malus: 1 − (1 − r)^n, r = 0.3. First transfer 30%, then
+// gently saturating: 0 / 30 / 51 / 66 / 76 / … % toward 100%.
+const TRANSFER_STEP_R = 0.3;
+// Walking malus: t² / (t² + T²) with t in minutes, T = 30.
+// 10 min → 10%, 20 → 31%, 30 → 50%, 40 → 64%, 60 → 80%.
+const WALK_HALF_MIN = 30;
+
 // Absolute worseness thresholds — no dependency on the surviving set's
 // spread. Adding or removing another itinerary never re-ranks the rest.
 const GOOD_MAX_PCT = 0.07;   // within 7% of fastest → thumbs up
@@ -121,6 +157,22 @@ const STRONG_WAIT_SEC      = 3 * 60 * 60;
 const VERY_SLOW_FACTOR     = 2;
 const MEDIUM_SLOW_FACTOR   = 3;
 const STRONG_SLOW_FACTOR   = 4;
+
+function transferMalus(transfers: number): number {
+	return 1 - Math.pow(1 - TRANSFER_STEP_R, transfers);
+}
+
+function walkMalus(walkSec: number): number {
+	const t = walkSec / 60;
+	return (t * t) / (t * t + WALK_HALF_MIN * WALK_HALF_MIN);
+}
+
+/** Multiplier applied to duration to get effective time. In [1.0, 1.2]. */
+export function comfortFactor(it: Itinerary): number {
+	const w = walkMalus(walkSeconds(it));
+	const x = transferMalus(transferCount(it));
+	return 1 + COMFORT_FACTOR_SLOPE * (w + x);
+}
 
 /** Longest single WALK leg in seconds. */
 function longestWalkLeg(it: Itinerary): number {
@@ -152,37 +204,19 @@ function longestTransferWait(it: Itinerary): number {
 	return maxWait;
 }
 
-/** Rate every itinerary against the fastest / most-comfortable in the set
- * and derive its badge + warnings. Returns one CardState per input in the
+/** Rate every itinerary against the best effective time in the set and
+ * derive its badge + warnings. Returns one CardState per input in the
  * same order. Thresholds are absolute — adding or removing an itinerary
  * never re-ranks the ones that remain. */
 export function computeCardStates(itins: Itinerary[]): CardState[] {
 	if (itins.length === 0) return [];
 
-	const durations = itins.map((i) => i.duration);
-	const scores = itins.map(itineraryScore);
-	const minDur = Math.min(...durations);
-	const minScore = Math.min(...scores);
+	const effTimes = itins.map((it) => it.duration * comfortFactor(it));
+	const minEff = Math.min(...effTimes);
+	const worseness = effTimes.map((e) => (minEff > 0 ? e / minEff - 1 : 0));
 
-	// Worseness = weighted sum of the two "how much worse than best" ratios.
-	// 0 for the fastest with the best comfort; grows with each axis.
-	const worseness = itins.map((_, i) => {
-		const speedPct = minDur > 0 ? durations[i] / minDur - 1 : 0;
-		let comfortPct: number;
-		if (minScore > 0) {
-			comfortPct = scores[i] / minScore - 1;
-		} else {
-			// Degenerate case: fastest itinerary has score 0. Anything with a
-			// non-zero score is treated as infinitely worse on that axis so it
-			// can never earn Good; effectively drops it to Bad unless duration
-			// lifts it into Best.
-			comfortPct = scores[i] === 0 ? 0 : Infinity;
-		}
-		return SPEED_WEIGHT * speedPct + (1 - SPEED_WEIGHT) * comfortPct;
-	});
-
-	// Best = lowest worseness. Tie-break by earliest arrival so only one
-	// itinerary ever wears the crown.
+	// Best = lowest worseness (i.e. lowest effective time). Tie-break by
+	// earliest arrival so only one itinerary ever wears the crown.
 	const bestWorseness = Math.min(...worseness);
 	let bestIdx = -1;
 	let bestArrival = Infinity;
@@ -194,6 +228,10 @@ export function computeCardStates(itins: Itinerary[]): CardState[] {
 			bestIdx = i;
 		}
 	});
+
+	// Only needed for the very-slow warnings, which compare raw duration
+	// against the raw fastest — not the comfort-adjusted one.
+	const minDur = Math.min(...itins.map((i) => i.duration));
 
 	return itins.map((it, i) => {
 		let badge: Badge | null = null;

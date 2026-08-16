@@ -35,6 +35,18 @@ let selectedFingerprint = $state<string | null>(null);
 let pendingFingerprint: string | null = null;
 let selectionInvalid = $state(false);
 
+// routing-map-details-split.md: expansion (details open in the list) and
+// selection (rendered on the map) are independent per-connection states.
+// Expansion is an accordion — at most one card open — keyed by the same
+// fingerprint so the map-mode header's details button can reopen the card
+// back in the list. Not serialised; not restored on cold load.
+let expandedFingerprint = $state<string | null>(null);
+// Mobile fullscreen map mode: list/panel hidden, route + summary header
+// own the viewport. Entered only via a card's map icon on narrow screens,
+// left via the header's back / details buttons or by the selection
+// clearing (browser back, ×, input change).
+let mapModeFlag = $state(false);
+
 let pendingAbort: AbortController | null = null;
 
 // Whether the current history entry was pushed by `selectItinerary` for
@@ -248,6 +260,8 @@ function invalidateSelection() {
 	pendingFingerprint = null;
 	selectionInvalid = false;
 	pushedEntry = false;
+	expandedFingerprint = null;
+	mapModeFlag = false;
 }
 
 /** Extend the result set in one chronological direction. Bumps
@@ -300,6 +314,10 @@ export const routingState = {
 	get selectedItinerary() { return selectedItinerary; },
 	get selectedFingerprint() { return selectedFingerprint; },
 	get selectionInvalid() { return selectionInvalid; },
+	get expandedFingerprint() { return expandedFingerprint; },
+	// Effective only while a selection exists — the flag alone never
+	// surfaces map mode on its own.
+	get mapMode() { return mapModeFlag && selectedItinerary !== null; },
 
 	openPanel() {
 		if (panelOpen) return;
@@ -320,6 +338,8 @@ export const routingState = {
 		pendingFingerprint = null;
 		selectionInvalid = false;
 		pushedEntry = false;
+		expandedFingerprint = null;
+		mapModeFlag = false;
 		abortInFlight();
 		resetCascadeState();
 		const url = currentUrl();
@@ -432,6 +452,7 @@ export const routingState = {
 		pendingFingerprint = null;
 		selectionInvalid = false;
 		pushedEntry = false;
+		mapModeFlag = false;
 		const url = currentUrl();
 		writeRoutingQuery(url, { from, to, mode, time, route: null });
 		if (url.href !== window.location.href) {
@@ -441,6 +462,23 @@ export const routingState = {
 			// silently re-select the just-dismissed itinerary.
 			replaceState(url, { ...page.state, routeSelection: undefined });
 		}
+	},
+
+	/** Toggle a card's details expansion (accordion: opening one closes any
+	 * other). Primary-click behavior per routing-map-details-split.md. */
+	toggleExpanded(it: Itinerary) {
+		const fp = itineraryFingerprint(it);
+		expandedFingerprint = expandedFingerprint === fp ? null : fp;
+	},
+
+	/** Mobile fullscreen map mode. No-op without a selection: the map icon
+	 * always selects first. Never armed by auto-select or URL restore. */
+	enterMapMode() {
+		if (selectedItinerary) mapModeFlag = true;
+	},
+
+	exitMapMode() {
+		mapModeFlag = false;
 	},
 
 	/** Direct-write initial state from a URL restore. Doesn't re-serialise. */
