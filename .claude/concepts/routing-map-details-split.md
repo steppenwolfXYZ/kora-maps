@@ -55,4 +55,4 @@ Neither state implies the other as a hard rule; the click behaviors below define
 - The route overlay rendering (polylines, discs, walk dashes, markers, dim veil, desaturation) is unchanged; only when/where it is framed and what chrome surrounds it.
 - The line-detail-view top-bar pattern is reused for the map-mode header; the two views never coexist (opening routing already closes line detail).
 - One breakpoint constant decides narrow vs wide layout, shared by the panel CSS, the map-icon behavior, and the camera framing (the current code uses two different values — 600 px in panel CSS, 700 px in `fitBounds`; unify).
-- Auto-select of the first result on a fresh query is unchanged on desktop. On mobile it must not enter map mode by itself; the selection may still be set so the map icon has something to show.
+- Auto-select on a fresh query picks the first result for `leave-at` and the last for `arrive-by` (the most relevant end — see `transit-routing.md` § Results Sort). On mobile it must not enter map mode by itself; the selection may still be set so the map icon has something to show.

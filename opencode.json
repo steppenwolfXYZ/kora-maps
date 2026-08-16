@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-	"model": "openrouter/moonshotai/kimi-k3",
+	"model": "openrouter/z-ai/glm-5.2",
 	"instructions": [
     ".claude/rules/*.md",
     ".claude/concepts/*.md"

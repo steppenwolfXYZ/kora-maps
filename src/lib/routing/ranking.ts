@@ -1,11 +1,15 @@
 import type { Itinerary, Leg, TimeMode } from './types';
 
 // Quality ranking for the merged cascade results — see transit-routing.md
-// § Ranking. A single rule drops an itinerary A in favour of some B when
-// B time-beats A on the query's primary axis (arrival for leave-at,
-// departure for arrive-by) AND A's comfort penalty over B exceeds an
-// allowance that scales with the pair's temporal gap. The score's only
-// role is as this filter's escape hatch — it is never used for sorting.
+// § Ranking. Each pair (A, B) falls into one of two shapes and is judged
+// by a case-specific rule:
+//   Case 1 (overlapping): B Pareto-time-dominates A — A takes strictly
+//     more of the user's day for no time benefit. A survives only when
+//     BOTH the time gap AND the comfort gap are marginal.
+//   Case 2 (non-overlapping): neither Pareto-dominates in time — legitimate
+//     different time slots. A survives unless it's meaningfully worse in
+//     comfort than the gap-scaled allowance permits. Score is Case 2's
+//     escape hatch and is never used for sorting.
 
 const TRANSFER_PENALTY_SEC = 600;    // one transfer ≈ 5 min of walking
 const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
@@ -16,10 +20,12 @@ const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
 const WALK_SOFT_CAP_SEC = 30 * 60;   // linear knee-point (30 min)
 const WALK_TAIL_PER_SEC = 0.5;       // shallow slope past the knee
 const T_SLACK_MS = 60 * 1000;        // start/end jitter that still counts as "same time"
-// Comfort-edge requirement at zero temporal gap: A must be MORE
-// comfortable than B by more than MARGIN to survive when B time-beats
-// it — matches the old tier-1 semantics. Positive allowance kicks in as
-// the gap grows.
+// Case 1 (overlapping) marginality thresholds.
+const OVERLAP_TIME_MAX_MS = 9 * 60 * 1000;   // both endpoints must be within 9 min
+const OVERLAP_COMFORT_MAX_PCT = 0.20;        // effective-time worseness ≤ 20%
+// Case 2 (non-overlapping) calibration.
+// MARGIN: A must be MORE comfortable than B by more than MARGIN to survive
+// at zero gap — matches the old tier-1 semantics.
 const MARGIN = 300;
 // Cube-root curve for the allowance: rises fast at short gaps so a rare
 // fast option can't nuke its neighbours (2 min gap already needs ≥15 min
@@ -68,11 +74,35 @@ interface Entry {
 	start: number;
 	end: number;
 	score: number;
+	effTime: number;
 }
 
-/** True when B time-beats A on the query's primary axis (arrival for
- * leave-at, departure for arrive-by, within T_SLACK) AND A's comfort
- * penalty over B exceeds the allowance for the pair's temporal gap.
+/** True when B Pareto-dominates A in time: B departs later-or-equal AND
+ * arrives earlier-or-equal (both within T_SLACK), with at least one
+ * endpoint strictly better beyond T_SLACK. In this case A takes strictly
+ * more of the user's day for no time benefit. */
+function paretoTimeDominates(b: Entry, a: Entry): boolean {
+	const laterOrEqualStart = b.start >= a.start - T_SLACK_MS;
+	const earlierOrEqualEnd = b.end <= a.end + T_SLACK_MS;
+	if (!laterOrEqualStart || !earlierOrEqualEnd) return false;
+	const strictStart = b.start > a.start + T_SLACK_MS;
+	const strictEnd = b.end < a.end - T_SLACK_MS;
+	return strictStart || strictEnd;
+}
+
+/** Case 1 (overlapping): B Pareto-time-dominates A. A survives only if
+ * BOTH the time gap and the comfort gap are marginal. Returns true when
+ * A fails either test (i.e. B causes A's drop). */
+function droppedByOverlap(a: Entry, b: Entry): boolean {
+	const timeGapMs = Math.max(Math.abs(a.start - b.start), Math.abs(a.end - b.end));
+	if (timeGapMs > OVERLAP_TIME_MAX_MS) return true;
+	if (b.effTime <= 0) return false;
+	return a.effTime / b.effTime - 1 > OVERLAP_COMFORT_MAX_PCT;
+}
+
+/** Case 2 (non-overlapping): B time-beats A on the query's primary axis
+ * (arrival for leave-at, departure for arrive-by, within T_SLACK) AND A's
+ * comfort penalty over B exceeds the gap-scaled allowance.
  *
  * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance. Two options
  * far apart on one axis but near-identical on the other are treated as
@@ -82,7 +112,7 @@ interface Entry {
  * cube-root rises fast so even a 2 min gap already tolerates a fairly
  * steep comfort difference, and saturates gracefully so a 2 h gap sits
  * around a "dramatic" allowance rather than an absurd one. */
-function beatenBy(a: Entry, b: Entry, mode: TimeMode): boolean {
+function droppedByNonOverlap(a: Entry, b: Entry, mode: TimeMode): boolean {
 	const primaryBeats = mode === 'arrive'
 		? b.start >= a.start - T_SLACK_MS
 		: b.end <= a.end + T_SLACK_MS;
@@ -95,18 +125,28 @@ function beatenBy(a: Entry, b: Entry, mode: TimeMode): boolean {
 	return a.score - b.score > allowed;
 }
 
-/** Drop each itinerary that some other beats under the temporal-gap-
- * scaled comfort rule. Input order is preserved; the caller sorts
- * chronologically afterwards. */
+/** Dispatches (a, b) to the case-specific rule. When B Pareto-time-
+ * dominates A the pair is overlapping (Case 1). When A dominates B the
+ * pair is B's problem, not A's — return false. Otherwise apply Case 2. */
+function droppedBy(a: Entry, b: Entry, mode: TimeMode): boolean {
+	if (paretoTimeDominates(b, a)) return droppedByOverlap(a, b);
+	if (paretoTimeDominates(a, b)) return false;
+	return droppedByNonOverlap(a, b, mode);
+}
+
+/** Drop each itinerary that some other beats under the two-case rule
+ * (Case 1 overlapping, Case 2 non-overlapping). Input order is preserved;
+ * the caller sorts chronologically afterwards. */
 export function pruneDominated(its: Itinerary[], mode: TimeMode): Itinerary[] {
 	const entries: Entry[] = its.map((it) => ({
 		it,
 		start: Date.parse(it.startTime),
 		end: Date.parse(it.endTime),
-		score: itineraryScore(it)
+		score: itineraryScore(it),
+		effTime: it.duration * comfortFactor(it)
 	}));
 	return entries
-		.filter((a) => !entries.some((b) => b !== a && beatenBy(a, b, mode)))
+		.filter((a) => !entries.some((b) => b !== a && droppedBy(a, b, mode)))
 		.map((e) => e.it);
 }
 
@@ -122,6 +162,12 @@ export type WarningSeverity = 'standard' | 'medium' | 'strong';
 export interface Warning {
 	kind: WarningKind;
 	severity: WarningSeverity;
+	// The actual measured value for this connection — surfaced in the
+	// tooltip so the user sees the real number, not just the threshold
+	// tier. All kinds carry seconds: long-walk = longest walk leg,
+	// long-wait = longest transfer wait, very-slow = duration gap to the
+	// fastest surviving itinerary.
+	value: number;
 }
 
 export interface CardState {
@@ -154,9 +200,14 @@ const STRONG_WALK_SEC      = 60 * 60;
 const LONG_WAIT_SEC        = 60 * 60;
 const MEDIUM_WAIT_SEC      = 2 * 60 * 60;
 const STRONG_WAIT_SEC      = 3 * 60 * 60;
-const VERY_SLOW_FACTOR     = 2;
-const MEDIUM_SLOW_FACTOR   = 3;
-const STRONG_SLOW_FACTOR   = 4;
+const VERY_SLOW_FACTOR     = 1.5;
+const MEDIUM_SLOW_FACTOR   = 2;
+const STRONG_SLOW_FACTOR   = 2.5;
+// Minimum absolute duration gap before any very-slow warning fires. A
+// 1.5× ratio on a 6-min trip is only 3 min — not worth flagging. The gate
+// keeps the warning off short connections where the ratio looks dramatic
+// but the absolute difference is trivial.
+const VERY_SLOW_MIN_DIFF_SEC = 10 * 60;
 
 function transferMalus(transfers: number): number {
 	return 1 - Math.pow(1 - TRANSFER_STEP_R, transfers);
@@ -215,19 +266,11 @@ export function computeCardStates(itins: Itinerary[]): CardState[] {
 	const minEff = Math.min(...effTimes);
 	const worseness = effTimes.map((e) => (minEff > 0 ? e / minEff - 1 : 0));
 
-	// Best = lowest worseness (i.e. lowest effective time). Tie-break by
-	// earliest arrival so only one itinerary ever wears the crown.
+	// Best = lowest worseness (i.e. lowest effective time). All itineraries
+	// tied on the minimum share the crown — an arbitrary tie-break would
+	// crown one and demote its identical siblings to Good.
 	const bestWorseness = Math.min(...worseness);
-	let bestIdx = -1;
-	let bestArrival = Infinity;
-	worseness.forEach((w, i) => {
-		if (w > bestWorseness) return;
-		const arrival = Date.parse(itins[i].endTime);
-		if (arrival < bestArrival) {
-			bestArrival = arrival;
-			bestIdx = i;
-		}
-	});
+	const isBest = worseness.map((w) => w === bestWorseness);
 
 	// Only needed for the very-slow warnings, which compare raw duration
 	// against the raw fastest — not the comfort-adjusted one.
@@ -235,22 +278,27 @@ export function computeCardStates(itins: Itinerary[]): CardState[] {
 
 	return itins.map((it, i) => {
 		let badge: Badge | null = null;
-		if (i === bestIdx) badge = 'best';
+		if (isBest[i]) badge = 'best';
 		else if (worseness[i] <= GOOD_MAX_PCT) badge = 'good';
 		else if (worseness[i] >= BAD_MIN_PCT) badge = 'bad';
 
 		const warnings: Warning[] = [];
 		const walk = longestWalkLeg(it);
-		if (walk > STRONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'strong' });
-		else if (walk > MEDIUM_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'medium' });
-		else if (walk > LONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'standard' });
+		if (walk > STRONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'strong', value: walk });
+		else if (walk > MEDIUM_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'medium', value: walk });
+		else if (walk > LONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'standard', value: walk });
 		const wait = longestTransferWait(it);
-		if (wait >= STRONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'strong' });
-		else if (wait >= MEDIUM_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'medium' });
-		else if (wait >= LONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'standard' });
-		if (it.duration >= STRONG_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'strong' });
-		else if (it.duration >= MEDIUM_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'medium' });
-		else if (it.duration >= VERY_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'standard' });
+		if (wait >= STRONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'strong', value: wait });
+		else if (wait >= MEDIUM_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'medium', value: wait });
+		else if (wait >= LONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'standard', value: wait });
+		const slowGap = it.duration - minDur;
+		// Gate the whole chain on the minimum absolute difference so the
+		// ratio thresholds don't fire on short trips with small gaps.
+		if (slowGap >= VERY_SLOW_MIN_DIFF_SEC) {
+			if (it.duration >= STRONG_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'strong', value: slowGap });
+			else if (it.duration >= MEDIUM_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'medium', value: slowGap });
+			else if (it.duration >= VERY_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'standard', value: slowGap });
+		}
 
 		return { badge, warnings };
 	});

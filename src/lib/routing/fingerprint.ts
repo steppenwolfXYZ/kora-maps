@@ -12,16 +12,23 @@ import type { Itinerary, Leg } from './types';
 // Walking legs contribute mode + times only (no stop ids).
 
 function legFingerprint(leg: Leg): string {
-	const parts: string[] = [leg.mode, leg.startTime, leg.endTime];
-	if (leg.mode !== 'WALK' && leg.mode !== 'BIKE' && leg.mode !== 'CAR') {
-		parts.push(
-			leg.routeId ?? '',
-			leg.tripId ?? '',
-			leg.from?.stopId ?? '',
-			leg.to?.stopId ?? ''
-		);
+	// Non-transit legs (WALK / BIKE / CAR) shift with the query anchor but
+	// the leg itself is identical across cascade hops — a direct walk is
+	// the same geometry whether we query for 08:00 or 14:00. Fingerprinting
+	// by time would fail to dedup the same walking-only direct returned by
+	// every hop-cascade iteration, and 5 near-identical walks would pile
+	// up in the results. Duration keeps distinct walks distinguishable in
+	// the (unlikely) case MOTIS returns more than one direct option.
+	if (leg.mode === 'WALK' || leg.mode === 'BIKE' || leg.mode === 'CAR') {
+		return [leg.mode, String(Math.round(leg.duration ?? 0))].join('|');
 	}
-	return parts.join('|');
+	return [
+		leg.mode, leg.startTime, leg.endTime,
+		leg.routeId ?? '',
+		leg.tripId ?? '',
+		leg.from?.stopId ?? '',
+		leg.to?.stopId ?? ''
+	].join('|');
 }
 
 function itineraryPayload(it: Itinerary): string {

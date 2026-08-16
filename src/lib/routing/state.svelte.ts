@@ -103,8 +103,13 @@ function resetCascadeState() {
 }
 
 function currentSortFn() {
+	// Sort ascending in both modes so the "Earlier connections" (top) /
+	// "Later connections" (bottom) buttons align with the direction they
+	// load — arrive-by used to sort descending, which put earlier-loaded
+	// results at the bottom and the earlier button at the top. Auto-
+	// select compensates by picking the relevant end (last for arrive-by).
 	return mode === 'arrive'
-		? (a: Itinerary, b: Itinerary) => Date.parse(b.startTime) - Date.parse(a.startTime)
+		? (a: Itinerary, b: Itinerary) => Date.parse(a.startTime) - Date.parse(b.startTime)
 		: (a: Itinerary, b: Itinerary) => Date.parse(a.endTime) - Date.parse(b.endTime);
 }
 
@@ -627,13 +632,16 @@ export const routingState = {
 					}
 				}
 			}
-			// Auto-select the first result on a fresh query, so the user
-			// sees a route on the map immediately without having to click.
-			// Skipped when the cold-load restore is pending (matched above)
-			// or invalid (concept: show the error, don't silently swap in
-			// a different route).
+			// Auto-select the most relevant result on a fresh query, so the
+			// user sees a route on the map immediately without having to
+			// click. For leave-at that's the first (earliest arrival); for
+			// arrive-by the list sorts by departure ascending, so the most
+			// relevant (latest departure) sits at the end. Skipped when the
+			// cold-load restore is pending (matched above) or invalid
+			// (concept: show the error, don't silently swap in a different
+			// route).
 			if (!selectedFingerprint && !selectionInvalid && results.length > 0) {
-				const it = results[0];
+				const it = mode === 'arrive' ? results[results.length - 1] : results[0];
 				const fp = itineraryFingerprint(it);
 				selectedItinerary = it;
 				selectedFingerprint = fp;

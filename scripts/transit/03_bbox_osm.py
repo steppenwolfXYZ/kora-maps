@@ -574,10 +574,16 @@ def extract_rail_ways(image: str, cuts: list) -> None:
 
 def extract_platform_ways(image: str, cuts: list) -> None:
     """Extract public_transport=platform ways for step 07's search-index
-    coord snap (transit-routing.md § Endpoint inputs). Same per-country-slice
-    pattern as extract_rail_ways: tags-filter → osmium export → JSON concat
-    with way-id dedup. Only LineString geometries are kept; centroid
-    calculation lives in step 07."""
+    coord snap AND for `scripts/preprocess_gtfs_for_motis.py`'s platform-code
+    snap (transit-routing.md § Endpoint inputs / § Backend). Same
+    per-country-slice pattern as extract_rail_ways: tags-filter → osmium
+    export → JSON concat with way-id dedup. LineString geometries only;
+    centroid calculation lives in the consumers. Keeps the tags the
+    consumers need — `local_ref` and `uic_ref` disambiguate which specific
+    OSM platform matches which GTFS `(parent_station, platform_code)` pair
+    (nearest-in-space isn't enough — at Eigerplatz platform :C sits 3 m
+    farther from the GTFS parent centroid than :D, so nearest-wins snaps
+    to the wrong direction)."""
     plat_pbfs: list = []
     plat_geojsons: list = []
     print(f"Extracting platform ways per country slice → "
@@ -605,6 +611,11 @@ def extract_platform_ways(image: str, cuts: list) -> None:
 
     seen_ids: set = set()
     features: list = []
+    # Consumer needs: local_ref + uic_ref for platform-code / station-UIC
+    # exact-match; public_transport / railway / highway for filtering; name
+    # for debugging. Everything else stripped to keep the file small.
+    KEEP_TAGS = ("local_ref", "uic_ref", "public_transport",
+                 "railway", "highway", "name")
     for gj in plat_geojsons:
         data = json.loads(gj.read_text())
         for feat in data.get("features", []):
@@ -615,10 +626,12 @@ def extract_platform_ways(image: str, cuts: list) -> None:
                 if fid in seen_ids:
                     continue
                 seen_ids.add(fid)
-            # Strip all tags — step 07 only needs the geometry.
+            props_in = feat.get("properties") or {}
+            props = {k: props_in[k] for k in KEEP_TAGS if props_in.get(k)}
             features.append({
                 "type": "Feature",
                 "id": fid,
+                "properties": props,
                 "geometry": feat["geometry"],
             })
 

@@ -5,8 +5,17 @@ server:
 osm: /data/osm.pbf
 
 timetable:
-  first_day: TODAY
-  num_days: 365
+  # Fixed start date, not TODAY — with TODAY, every re-import advances the
+  # window forward, and any bookmarked / shared URL with a past date falls
+  # outside the window and starts erroring `[VERIFY FAIL] query time … is
+  # outside of loaded timetable window`. Anchor at the start of the Swiss
+  # 2026 timetable cycle instead (opentransportdata calendar.txt runs
+  # 2025-12-14 → 2026-12-12; 2026-01-01 is a clean round anchor). Bump this
+  # forward when the feed rolls over to the next annual cycle.
+  first_day: 2026-01-01
+  # 400 days = through 2027-02-04, covering the full 2026 cycle plus buffer
+  # into the 2027 cycle if the pipeline pulls it before we bump first_day.
+  num_days: 400
   with_shapes: true
   # Allow up to 2 h walking transfers between transit legs — the default
   # (15 min) prevents non-official walking connections that route users

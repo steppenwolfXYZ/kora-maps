@@ -1,5 +1,11 @@
 # Local MOTIS routing backend (Switzerland).
 #
+# Prerequisite (once, then rerun whenever data/gtfs_routed/ is regenerated):
+#   python3 scripts/preprocess_gtfs_for_motis.py
+#   → builds data/gtfs_motis/ with a platform-snapped stops.txt +
+#     hardlinks of every other GTFS file from data/gtfs_routed/.
+#     See transit-routing.md § Backend.
+#
 # One-time import:
 #   docker compose --profile import up motis-import
 # Serve API on :8080:
@@ -15,7 +21,7 @@ services:
       - "8080:8080"
     volumes:
       - ./config.yml:/data/config.yml:ro
-      - ../data/gtfs_routed:/data/gtfs:ro
+      - ../data/gtfs_motis:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
     working_dir: /data
@@ -27,7 +33,7 @@ services:
     profiles: ["import"]
     volumes:
       - ./config.yml:/data/config.yml:ro
-      - ../data/gtfs_routed:/data/gtfs:ro
+      - ../data/gtfs_motis:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
     working_dir: /data

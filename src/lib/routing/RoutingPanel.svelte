@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
 	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
+	import { itineraryFingerprint } from './fingerprint';
 	import type { Itinerary, Leg } from './types';
 
 	let { onFocusLeg, onEnterMapMode }: {
@@ -12,6 +14,30 @@
 	} = $props();
 
 	let cardStates = $derived(computeCardStates(routingState.results));
+
+	let resultsEl: HTMLDivElement | null = $state(null);
+	// After a query finishes (loading false→true→false), scroll the
+	// selected card into view — arrive-by auto-selects the last result,
+	// which sits at the bottom and would otherwise be off-screen. No-op
+	// for leave-at (first card is already at the top) and for user-clicked
+	// selections (the card is already visible, block:'nearest' won't
+	// scroll). loadMore doesn't toggle `loading`, so it never fires here.
+	let wasLoading = false;
+	$effect(() => {
+		const isLoading = routingState.loading;
+		if (wasLoading && !isLoading && resultsEl) {
+			const fp = untrack(() => routingState.selectedFingerprint);
+			if (fp) {
+				const results = untrack(() => routingState.results);
+				const idx = results.findIndex((it) => itineraryFingerprint(it) === fp);
+				if (idx >= 0) {
+					const card = resultsEl.querySelectorAll('.card')[idx] as HTMLElement | undefined;
+					card?.scrollIntoView({ block: 'nearest' });
+				}
+			}
+		}
+		wasLoading = isLoading;
+	});
 
 	// Main routing shell. Replaces the map menu / stop search top-controls
 	// while open (Map.svelte decides visibility). Runs a query whenever
@@ -95,7 +121,8 @@
 	</div>
 
 	{#if routingState.hasQueried}
-		<div class="rp-results">
+	<div class="rp-results-sep" aria-hidden="true"></div>
+	<div class="rp-results" bind:this={resultsEl}>
 			{#if routingState.loading}
 				<div class="rp-status">Searching…</div>
 			{:else if routingState.error}
@@ -231,13 +258,31 @@
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
 	.rp-swap:hover { background: #eee; color: #000; }
 
+	.rp-results-sep {
+		/* Sits outside the scroll container so it never scrolls — the line
+		   stays pinned between the search criteria and the results. As a
+		   panel flex child it spans the panel content box, so its edges
+		   align with the cards (the scrollbar gutter is carved out only
+		   on .rp-results via its negative margin). */
+		border-top: 1px solid #eee;
+		height: 0;
+		/* Tighten the panel gap below so the first card sits where it did
+		   when the line was a border-top on .rp-results with padding-top. */
+		margin-bottom: -0.25rem;
+	}
 	.rp-results {
 		display: flex;
 		flex-direction: column;
 		gap: 0.4rem;
 		overflow-y: auto;
-		padding-top: 0.35rem;
-		border-top: 1px solid #eee;
+		/* Pull the scroll container into the panel's right padding so the
+		   overlay scrollbar paints there instead of over the cards, then
+		   inset the cards by the same amount so their right edge stays
+		   aligned with the panel content box (symmetric with the left).
+		   Negative margin + matching padding keeps the card width
+		   unchanged. */
+		margin-right: -0.75rem;
+		padding-right: 0.75rem;
 	}
 	.rp-status {
 		font-size: 0.85rem;

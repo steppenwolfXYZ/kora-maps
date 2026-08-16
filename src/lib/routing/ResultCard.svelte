@@ -3,7 +3,7 @@
 	import type { Itinerary, Leg } from './types';
 	import { legBadgeColor, loadRouteColorIndex } from './legColor';
 	import { legDuration, transferCount, walkSeconds } from './ranking';
-	import type { Badge, Warning, WarningKind, WarningSeverity } from './ranking';
+	import type { Badge, Warning, WarningKind } from './ranking';
 	import {
 		badgeTextColor, displayLegs, fmtDuration, fmtTime,
 		iconFor, isTransitMode
@@ -28,15 +28,33 @@
 		return leg.headsign ?? leg.tripHeadsign ?? '';
 	}
 
-	// Primary click (card body or chevron): toggle details. On desktop,
-	// opening a card also puts it on the map (open implies select); on
-	// mobile the map is only reachable via the map icon. See
-	// routing-map-details-split.md.
+	// Primary click (card body): toggle details and, on desktop, select
+	// the itinerary on the map (open implies select — see
+	// routing-map-details-split.md). On mobile the map is only reachable
+	// via the map icon. The chevron uses a separate handler below that
+	// only toggles expansion, so opening via the chevron does NOT select.
 	function toggleCard() {
+		const willExpand = !expanded;
 		routingState.toggleExpanded(itinerary);
 		if (!isNarrow() && routingState.expandedFingerprint === fingerprint) {
 			routingState.selectItinerary(itinerary);
 		}
+		if (willExpand) scrollIntoViewSoon();
+	}
+
+	// Chevron-only toggle: open/close details without selecting on the
+	// map. Lets users inspect a connection without activating it.
+	function toggleExpandOnly() {
+		const willExpand = !expanded;
+		routingState.toggleExpanded(itinerary);
+		if (willExpand) scrollIntoViewSoon();
+	}
+
+	// After the slide transition finishes (~400 ms default), smooth-
+	// scroll the card into view so the expanded leg list is fully
+	// visible. No-op when the card already fits.
+	function scrollIntoViewSoon() {
+		setTimeout(() => cardEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 400);
 	}
 
 	// Map icon: select on the map without opening/closing any card. On
@@ -76,29 +94,25 @@
 	const WARNING_ICON: Record<WarningKind, string> = {
 		'long-walk':       'directions_walk',
 		'long-wait':       'hourglass_top',
-		'very-slow':       'hourglass_bottom'
+		'very-slow':       'snail'
 	};
-	const WARNING_LABEL: Record<WarningKind, Record<WarningSeverity, string>> = {
-		'long-walk': {
-			standard: 'Includes a walk longer than 20 minutes',
-			medium:   'Includes a walk longer than 40 minutes',
-			strong:   'Includes a walk longer than an hour'
-		},
-		'long-wait': {
-			standard: 'Includes a transfer wait of an hour or more',
-			medium:   'Includes a transfer wait of two hours or more',
-			strong:   'Includes a transfer wait of three hours or more'
-		},
-		'very-slow': {
-			standard: 'Takes at least twice as long as the fastest option',
-			medium:   'Takes at least three times as long as the fastest option',
-			strong:   'Takes at least four times as long as the fastest option'
+	// Tooltip text incorporates the connection's actual measured value
+	// (carried on Warning.value) instead of just naming the threshold tier.
+	function warningLabel(w: Warning): string {
+		switch (w.kind) {
+			case 'long-walk': return `Includes a ${fmtDuration(w.value)} walk`;
+			case 'long-wait': return `Includes a ${fmtDuration(w.value)} transfer wait`;
+			case 'very-slow': return `${fmtDuration(w.value)} slower than the fastest route`;
 		}
-	};
+	}
 
 	let fingerprint = $derived(itineraryFingerprint(itinerary));
 	let selected = $derived(routingState.selectedFingerprint === fingerprint);
 	let expanded = $derived(routingState.expandedFingerprint === fingerprint);
+	let firstTransitIdx = $derived(itinerary.legs.findIndex((l) => isTransitMode(l.mode)));
+	let lastTransitIdx = $derived(itinerary.legs.findLastIndex((l) => isTransitMode(l.mode)));
+
+	let cardEl: HTMLElement | null = $state(null);
 
 	let colorIndex = $state<Map<string, string> | null>(null);
 	$effect(() => {
@@ -124,6 +138,7 @@
 </script>
 
 <div
+	bind:this={cardEl}
 	class="card"
 	class:selected
 	role="button"
@@ -147,9 +162,9 @@
 			<span class="card-warnings">
 				{#each warnings as w}
 					<span
-						class="card-warning card-warning-{w.severity}"
-						title={WARNING_LABEL[w.kind][w.severity]}
-						aria-label={WARNING_LABEL[w.kind][w.severity]}
+					class="card-warning card-warning-{w.severity}"
+					title={warningLabel(w)}
+					aria-label={warningLabel(w)}
 					>
 						<span class="material-symbols-outlined" aria-hidden="true">{WARNING_ICON[w.kind]}</span>
 					</span>
@@ -170,31 +185,35 @@
 			>×</button>
 		{/if}
 	</div>
-	{#if transitEndpoints(itinerary)}
-		{@const endpoints = transitEndpoints(itinerary)!}
-		<div class="card-route">
-			<strong>{endpoints.fromName}</strong> {fmtTime(endpoints.fromTime)} – <strong>{endpoints.toName}</strong> {fmtTime(endpoints.toTime)}
+	{#if !expanded}
+		<div class="card-summary" transition:slide>
+			{#if transitEndpoints(itinerary)}
+				{@const endpoints = transitEndpoints(itinerary)!}
+				<div class="card-route">
+					<strong>{endpoints.fromName}</strong> {fmtTime(endpoints.fromTime)} – <strong>{endpoints.toName}</strong> {fmtTime(endpoints.toTime)}
+				</div>
+			{/if}
+			<div class="card-legs">
+				{#each displayLegs(itinerary) as { leg, dur, isWalk }, i}
+					{#if i > 0}<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>{/if}
+					<span class="card-leg" class:walk={isWalk}>
+						{#if isWalk}
+							<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
+							<span class="card-leg-dur">{fmtDuration(dur)}</span>
+						{:else if leg.routeShortName}
+							{@const bg = legBadgeColor(colorIndex, leg)}
+							<span
+								class="card-ref"
+								style="background:{bg};color:{badgeTextColor(bg)}"
+							>{leg.routeShortName}</span>
+						{:else}
+							<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
+						{/if}
+					</span>
+				{/each}
+			</div>
 		</div>
 	{/if}
-	<div class="card-legs">
-		{#each displayLegs(itinerary) as { leg, dur, isWalk }, i}
-			{#if i > 0}<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>{/if}
-			<span class="card-leg" class:walk={isWalk}>
-				{#if isWalk}
-					<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-					<span class="card-leg-dur">{fmtDuration(dur)}</span>
-				{:else if leg.routeShortName}
-					{@const bg = legBadgeColor(colorIndex, leg)}
-					<span
-						class="card-ref"
-						style="background:{bg};color:{badgeTextColor(bg)}"
-					>{leg.routeShortName}</span>
-				{:else}
-					<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-				{/if}
-			</span>
-		{/each}
-	</div>
 	<div class="card-meta">
 		<span class="card-meta-text">
 			{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}
@@ -215,7 +234,7 @@
 			{#each itinerary.legs as leg, i}
 				{#if isTransitMode(leg.mode)}
 					<button class="leg-item" type="button" onclick={(e) => focusLeg(e, leg)}>
-						<span class="leg-stop-row">
+						<span class="leg-stop-row" class:leg-stop-end={i === firstTransitIdx}>
 							<span class="leg-time">{fmtTime(leg.startTime)}</span>
 							<span class="leg-stop-name">{leg.from?.name ?? ''}</span>
 							{#if leg.from?.track}<span class="leg-pf">Pl. {leg.from.track}</span>{/if}
@@ -233,7 +252,7 @@
 							{#if headsign(leg)}<span class="leg-dir">→ {headsign(leg)}</span>{/if}
 							<span class="leg-dur">{fmtDuration(legDuration(leg))}</span>
 						</span>
-						<span class="leg-stop-row">
+						<span class="leg-stop-row" class:leg-stop-end={i === lastTransitIdx}>
 							<span class="leg-time">{fmtTime(leg.endTime)}</span>
 							<span class="leg-stop-name">{leg.to?.name ?? ''}</span>
 							{#if leg.to?.track}<span class="leg-pf">Pl. {leg.to.track}</span>{/if}
@@ -253,7 +272,7 @@
 		type="button"
 		aria-label={expanded ? 'Hide connection details' : 'Show connection details'}
 		aria-expanded={expanded}
-		onclick={(e) => { e.stopPropagation(); toggleCard(); }}
+		onclick={(e) => { e.stopPropagation(); toggleExpandOnly(); }}
 	><span class="card-expand-chevron" class:flipped={expanded}>▾</span></button>
 </div>
 
@@ -340,7 +359,11 @@
 		align-items: center;
 		justify-content: center;
 	}
-	.card-warning :global(.material-symbols-outlined) { font-size: 1rem; line-height: 1; }
+	.card-warning :global(.material-symbols-outlined) {
+		font-size: 1rem;
+		line-height: 1;
+		font-variation-settings: 'FILL' 1;
+	}
 	/* standard: plain red icon */
 	.card-warning-standard { color: #b83232; }
 	/* medium / strong: white icon inside a coloured circle */
@@ -380,12 +403,16 @@
 	.card-head {
 		display: flex;
 		align-items: baseline;
-		justify-content: space-between;
 		gap: 0.5rem;
 	}
-	.card-time { font-weight: 700; font-size: 0.95rem; color: #222; }
-	.card-dur  { font-size: 0.85rem; color: #555; }
+	.card-time { font-weight: 700; font-size: 0.95rem; color: #222; flex: 0 0 auto; }
+	.card-dur  { font-size: 0.85rem; color: #555; flex: 0 0 auto; margin-left: auto; }
 
+	.card-summary {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
 	.card-route {
 		font-size: 0.8rem;
 		color: #444;
@@ -448,15 +475,19 @@
 		color: #888;
 		line-height: 1.2;
 	}
-	/* No hover background: the whole card is the toggle target now, so the
-	   chevron is purely an affordance/indicator — a second hover effect on
-	   top of the card's own hover read as redundant. */
 	.card-expand-chevron {
 		display: inline-block;
 		font-size: 0.8rem;
 		transition: transform 0.15s ease;
 	}
 	.card-expand-chevron.flipped { transform: rotate(180deg); }
+	/* Hover signals the chevron is a separate control: opening/closing
+	   the card without activating it on the map (click stops propagation,
+	   so the card's own click handler never fires). */
+	.card-expand:hover { background: #f0f0f0; color: #444; }
+	/* On a selected card (#f2f2f2) the default hover is nearly
+	   invisible — darken it there, matching the leg-item hover. */
+	.card.selected .card-expand:hover { background: #e0e0e0; }
 
 	.leg-list {
 		display: flex;
@@ -538,6 +569,8 @@
 		white-space: nowrap;
 		color: #333;
 	}
+	.leg-stop-end .leg-stop-name { font-weight: 700; color: #111; }
+	.leg-stop-end .leg-time { font-weight: 700; color: #111; }
 	.leg-pf {
 		flex: 0 0 auto;
 		font-size: 0.72rem;

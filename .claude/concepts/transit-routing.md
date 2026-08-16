@@ -10,6 +10,7 @@ Kora Maps visualises the transit network but does not yet answer the question "h
 
 - A local MOTIS v2 instance answers multi-modal trip queries (transit + pedestrian) over Swiss data.
 - Data feed reuses artefacts the existing transit pipeline already produces — the pfaedle-routed GTFS coming out of step 05 (so MOTIS's `with_shapes: true` picks up the shaped polylines and returns real route geometry per leg, not stop-to-stop straight lines) — plus a country-wide OSM PBF fed through a preprocessing pass that adds `foot=yes` to `access=agricultural` / `access=forestry` ways (MOTIS's default OSR pedestrian profile blacklists those, but Swiss convention treats them as walkable). `access=no` / `private` / `emergency` / `delivery` are left untouched — those genuinely block foot access.
+- **MOTIS reads a sidecar copy of the pipeline's GTFS** at `data/gtfs_motis/`, not `data/gtfs_routed/` directly. `scripts/preprocess_gtfs_for_motis.py` builds it: modified `stops.txt` where each stop whose `platform_code` matches an OSM `public_transport=platform` way's `local_ref` at the same station (via `uic_ref` equality with the parent station UIC) is snapped onto that platform's centroid; every other GTFS file is hardlinked from `data/gtfs_routed/`, no duplication, no re-pfaedle. This exists because GTFS parent-station centroids frequently sit on the road / tram track (canonical case: Bern Eigerplatz platform :C's GTFS coord is ~2 m from the tram track); MOTIS's OSR then computes the last-mile walk into that stop through short OSR edges carrying `sidewalk=separate` on the primary road, each costing +45 s in the foot profile — hundreds of seconds of penalty on a 15 m walk. Snapping the stop onto its OSM platform (a `public_transport=platform` way, which OSR whitelists) removes the road-side last-mile entirely. Scoped to the sidecar so map rendering (which reads `data/gtfs_routed/`) is untouched — pill-arrows and stop dots stay put. Route-drawing markers shift by 5–15 m on drawn routes (leg endpoints follow MOTIS's stop table); the polyline path itself is unchanged (drawn from pfaedle-generated `shapes.txt`, which the sidecar hardlinks unchanged). Stops without `platform_code`, or with no matching OSM platform, keep their raw GTFS coord — bounded fallback.
 - Pedestrian routing is used for three purposes: **first mile** (start → boarding stop), **last mile** (alighting stop → end), and **inter-transit walks** (route-to-route transfers, and walks between distinct stops that unlock non-official connections). Transfer walks up to 2 h are permitted.
 - Query modes: `leave-at` (default, time = now) and `arrive-by`.
 - **Direct walking** is always attempted regardless of distance. A multi-hour walk still surfaces when it beats every transit option; MOTIS's `direct` walk-only itineraries are merged into the same list as transit itineraries.
@@ -60,7 +61,7 @@ Three ways to enter routing state:
 ### Results
 
 - Up to 5 alternatives per query.
-- **Sort** — earliest arrival first for `leave-at`, latest departure first for `arrive-by`. Chronological, not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus.
+- **Sort** — chronological ascending in both modes: earliest arrival first for `leave-at`, earliest departure first for `arrive-by`. Not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus. Ascending order keeps the "Earlier connections" (top) / "Later connections" (bottom) load-more buttons aligned with the direction they load in both modes; the list is never inverted. Auto-select compensates by picking the most relevant end — the first for `leave-at`, the last for `arrive-by` (the latest departure).
 - **Quality filter** — itineraries are pruned by a time-dominance rule against a quality score before slicing to 5. See § Ranking.
 - The MOTIS response's `direct` walk-only options merge into the same list — walking is offered whenever it competes with transit.
 - Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index).
@@ -96,7 +97,7 @@ Every card is assigned at most one quality badge. Thresholds are **absolute**: t
   - **Bad** → `worseness ≥ BAD_MIN_PCT` (default 25% — tunable, likely revised once real distributions are visible). Icon: thumbs down.
   - Otherwise no badge.
 
-  When only one itinerary survives filtering: it still gets the crown. Ties on worseness (very rare): pick the earliest-arriving itinerary as the sole crown holder; the others become Good.
+  When only one itinerary survives filtering: it still gets the crown. Ties on worseness (very rare): all itineraries tied on the minimum share the crown — an arbitrary tie-break would crown one and demote its identical siblings to Good.
 
 - **Placement** — badge sits at the **top-right** of the card, overlapping the top border line (icon-only, tooltip on hover naming the state).
 
@@ -114,7 +115,7 @@ Initial warning set and thresholds:
 
 - **Long walk** — any single WALK leg lasts **> 20 min** (standard), **> 40 min** (medium), **> 1 h** (strong). Icon: walking figure.
 - **Long wait at transfer** — the gap between two consecutive transit legs is **≥ 1 h** (standard), **≥ 2 h** (medium), **≥ 3 h** (strong). Icon: hourglass / wait glyph.
-- **Very slow** — total duration is **≥ 2 ×** (standard), **≥ 3 ×** (medium), **≥ 4 ×** (strong) the fastest surviving itinerary's duration. Icon: slow glyph.
+- **Very slow** — total duration is **≥ 1.5 ×** (standard), **≥ 2 ×** (medium), **≥ 2.5 ×** (strong) the fastest surviving itinerary's duration, AND the absolute gap is **≥ 10 min** (so the ratio thresholds don't fire on short trips where a 1.5× ratio is only a few minutes). Icon: snail.
 
 **Placement** — warnings sit at the **top-left** of the card, inside the border, on the title line, immediately left of the title. Each warning is icon-only with a tooltip on hover naming the condition. Multiple warnings stack horizontally in a fixed order (long walk → long wait → very slow).
 
@@ -124,23 +125,35 @@ Thresholds are constants shared with the badge module. Warning definitions are a
 
 MOTIS returns itineraries that are Pareto-optimal within a single query, but the time-advance cascade merges multiple windows, so dominated results (same start but later arrival, no comfort advantage) can accumulate. A post-processing quality filter runs on the merged list before it's sliced to 5. It applies at every cascade publish (the result list updates live as hops roll in), and the cascade's 5-result target counts **post-filter survivors** — the time-advance loop keeps hopping while fewer than 5 itineraries pass the filter. Dedup by fingerprint stays pre-filter.
 
-The filter's axis is **(start, end) dominance**, not duration. An alternative that departs later *and* arrives later is a legitimate chronological option and survives tier 1 — the filter exists to remove options that are strictly worse in time with nothing to show for it, plus (tier 2) later alternatives whose comfort gap is absurd.
+The filter has **two cases**, decided per pair (A, B) by their time relationship:
 
-- **Score** — a single number combining transfer count and walking time, used only as the filter's escape hatch (never for sorting):
+- **Overlapping** — B Pareto-dominates A in time: B departs later-or-equal AND arrives earlier-or-equal, with at least one endpoint strictly better beyond `T_SLACK`. A takes strictly more of the user's day for no time benefit. Handled by Case 1 below.
+- **Non-overlapping** — neither Pareto-dominates: one leaves earlier and arrives earlier, the other leaves later and arrives later. Both are legitimate distinct time slots. Handled by Case 2 below.
+
+The two cases exist because they warrant fundamentally different treatment. An overlapping worse option is only worth showing if it's essentially the same trip (near-tie in time AND comfort); otherwise the user pays real time cost for no chronological reason to consider it. A non-overlapping option is a genuine alternative time slot; the further apart the slots, the more comfort penalty the user might tolerate for a distinct schedule choice.
+
+- **Score** — a single number combining transfer count and walking time, used only as Case 2's escape hatch (never for sorting):
 
   `score = TRANSFER_PENALTY_SEC * transfers + walk_cost(walk_seconds)`
 
   - `transfers` = number of transit legs − 1 (same definition as the result card's transfer count); `walk_seconds` = sum of all WALK-leg durations including inter-station transfer walks (same as the card's walking total).
   - Walking cost is **soft-capped**: full linear rate `WALK_PER_SEC = 2` for the first `WALK_SOFT_CAP_SEC = 30` min, then a much shallower `WALK_TAIL_PER_SEC = 0.5` beyond. `TRANSFER_PENALTY_SEC = 600`, so 5 min walking still costs about the same as one transfer at the short end. The knee bounds the score inflation from multi-hour hikes — a 30 min vs. 3 h walking difference no longer outweighs every realistic temporal-gap allowance — while keeping small walking differences (10 vs. 15 min) as sensitive as before.
 
-- **Gap-scaled comfort tolerance** — a single rule replaces the earlier two-tier filter. Itinerary A is dropped when there exists another itinerary B such that:
+- **Case 1 — overlapping: strict marginality.** When B Pareto-dominates A in time (per the overlapping definition above), A survives only if BOTH conditions hold:
+
+  - **Time gap is marginal**: `max(|A.start − B.start|, |A.end − B.end|) ≤ OVERLAP_TIME_MAX` (default 9 min — single-digit minutes on both endpoints).
+  - **Comfort gap is marginal**: A's effective time is at most `OVERLAP_COMFORT_MAX_PCT` worse than B's (default 20%), i.e. `A.effective_time / B.effective_time − 1 ≤ 0.20`. `effective_time` uses the same `duration · comfortFactor` definition as § Badges, so the two systems share their comfort semantics.
+
+  If either fails, A is dropped — no gap-scaled allowance applies here. Rationale: an overlapping worse option is only worth surfacing when it's essentially the same trip. "Leave 6 h earlier and walk 3 h more, arriving 40 min later" is not a near-tie; the user gains nothing chronologically by considering A and pays real time on both ends.
+
+- **Case 2 — non-overlapping: gap-scaled comfort tolerance.** When neither option Pareto-dominates the other in time, A is dropped when there exists another non-overlapping B such that:
 
   - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**
   - A's comfort penalty over B exceeds the gap-scaled allowance: `A.score − B.score > −MARGIN + PENALTY_K · gap^(1/3)`, where `gap = min(|A.start − B.start|, |A.end − B.end|)` in seconds.
 
-  In words: when B is time-competitive, A survives unless it's meaningfully worse in comfort than the allowance at that gap — a negative allowance at zero gap (A must have a comfort edge) rising to a large positive at multi-hour gaps (A can afford substantial comfort penalties for distinct time slots). The cube-root shape is chosen deliberately: it rises fast enough that even a 2 min gap already tolerates a fairly steep comfort difference (so a rare fast option can't nuke its neighbours), then saturates gracefully so the 2 h allowance is "dramatic" rather than absurd.
+  In words: A survives unless it's meaningfully worse in comfort than the allowance at that gap — a negative allowance at zero gap (A must have a comfort edge) rising to a large positive at multi-hour gaps (A can afford substantial comfort penalties for distinct time slots). The cube-root shape rises fast enough that even a 2 min gap already tolerates a fairly steep comfort difference (so a rare fast option can't nuke its neighbours), then saturates gracefully so the 2 h allowance is "dramatic" rather than absurd.
 
-  `min(|Δstart|, |Δend|)` captures how chronologically distinct A really is: an option that leaves 1 h later but arrives only 2 min later than B isn't a "1 h later" alternative — a user picking on arrival time gets essentially the same trip, minus the hour they wasted; the 2 min counts.
+  Across all pairs, this reduces to: for each candidate A, the tightest of the four axis-distances to any neighbor (|Δstart|, |Δend| to prev + next) sets the allowance ceiling — the closer A sits to a good neighbor on any single time axis, the less comfort penalty A is allowed.
 
   Calibration:
 
@@ -156,15 +169,16 @@ The filter's axis is **(start, end) dominance**, not duration. An alternative th
     - 2 h gap → ~8000 (dramatic — ≥ ~65 min extra walking or ~13 transfers under the soft cap)
     - beyond 2 h keeps rising slowly.
 
+  Both cases are symmetric — for `arrive-by` the Case 2 "primary axis" swaps from arrival to departure; the Pareto-dominance test in Case 1 and the comfort arithmetic in Case 2 are identical.
+
   Consequences:
 
-  - same time (both axes within slack), same or worse comfort → dropped (matches the old tier-1 strict-domination rule).
-  - later start + earlier arrival by seconds, no comfort edge → dropped (tight domination).
-  - a rare fast option surrounded by regular options with ~15 min more walking → the neighbours all survive from ~2 min gap onward.
-  - later start + later arrival by 30 min each, ≈ 30 min extra walking → survives (comfort penalty within allowance).
-  - later start by 1 h with the same arrival within slack → dropped unless comfort is meaningfully better (gap ≈ 0 → strict rule applies).
-
-  The rule is symmetric — for `arrive-by` swap "primary axis" from arrival to departure; the comfort-vs-gap arithmetic is identical.
+  - overlapping, leaves 6 h earlier + arrives 40 min later (much worse comfort) → dropped by Case 1 (time test: 40 min > 9 min, comfort irrelevant).
+  - overlapping, leaves 3 min earlier + arrives 5 min later, 30% worse effective time → dropped by Case 1 (comfort test: 30% > 20%).
+  - overlapping, leaves 3 min earlier + arrives 5 min later, 10% worse effective time → survives Case 1 (both marginal).
+  - non-overlapping, both endpoints within slack (essentially the same time), worse comfort → dropped by Case 2 (gap ≈ 0 → allowance = `−MARGIN`).
+  - non-overlapping, later start + later arrival by 30 min each, ≈ 30 min extra walking → survives Case 2 (comfort penalty within allowance).
+  - non-overlapping, a rare fast option surrounded by regular options with ~15 min more walking → the neighbours all survive Case 2 from ~2 min gap onward. (Neighbours that the rare fast Pareto-dominates in time — i.e. it leaves later AND arrives earlier than a specific neighbour — fall into Case 1 for that pair and are dropped there.)
 
 - **Chronological sort survives.** Ranking is applied only as a filter — surviving itineraries are still sorted earliest-arrival first (leave-at) or latest-departure first (arrive-by), so the "leave now" answer stays at the top.
 

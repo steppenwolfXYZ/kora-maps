@@ -43,7 +43,12 @@
 			onchange={(e) => onTime(fromLocalInput((e.currentTarget as HTMLInputElement).value))}
 		/>
 		{#if time !== null}
-			<button class="ts-now" onclick={() => onTime(null)} title="Reset to now">now</button>
+			<button
+				class="ts-now"
+				onclick={() => onTime(null)}
+				title="Reset to now"
+				aria-label="Reset to now"
+			><span class="material-symbols-outlined" aria-hidden="true">refresh</span></button>
 		{/if}
 	</div>
 </div>
@@ -87,11 +92,16 @@
 		color: #222;
 	}
 	.ts-now {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
 		border: none;
 		background: transparent;
 		color: #666;
-		font-size: 0.8rem;
 		cursor: pointer;
-		text-decoration: underline;
+		padding: 0.1rem;
+		border-radius: 0.3rem;
 	}
+	.ts-now :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
+	.ts-now:hover { background: #eee; color: #000; }
 </style>
