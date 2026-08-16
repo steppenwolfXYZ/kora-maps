@@ -1,6 +1,7 @@
 <script lang="ts">
 	import maplibregl from 'maplibre-gl';
 	import 'maplibre-gl/dist/maplibre-gl.css';
+	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { pushState, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
@@ -952,21 +953,37 @@
 			: { top: 96, bottom: 48, left: 380, right: 48 };
 	}
 
-	// Camera focus for a clicked leg row in the expanded result card.
-	// Frames the leg's bbox, keeping clear of the routing panel on
-	// desktop (same framing rule as the whole-route auto-frame).
-	function focusRouteLeg(leg: Leg) {
-		const bb = legBounds(leg);
+	// Shared route framing for the mobile map-mode entry points. Deferred
+	// past tick() so the camera math runs after the map-mode layout swap
+	// (panel hidden, summary header mounted) has been applied — calling
+	// fitBounds in the same tick as the state change frames against a
+	// not-yet-settled layout. Deliberately NOT gated on isStyleLoaded():
+	// fitBounds is pure camera math, and that flag is non-reactive and
+	// transiently false while tiles stream, which silently turned the old
+	// map-mode effect into a permanent no-op on mobile.
+	async function frameRouteBounds(bb: [number, number, number, number] | null, maxZoom: number) {
+		await tick();
 		const map = mapRef;
 		if (!bb || !map) return;
 		map.fitBounds(
 			[[bb[0], bb[1]], [bb[2], bb[3]]],
-			{
-				padding: routeFramePadding(),
-				maxZoom: 17,
-				duration: 900
-			}
+			{ padding: routeFramePadding(), maxZoom, duration: 600 }
 		);
+	}
+
+	// Camera focus for a clicked leg row in the expanded result card.
+	// Frames the leg's bbox, keeping clear of the routing panel on
+	// desktop (same framing rule as the whole-route auto-frame).
+	function focusRouteLeg(leg: Leg) {
+		void frameRouteBounds(legBounds(leg), 17);
+	}
+
+	// Map-icon entry into mobile fullscreen map mode: the route was never
+	// framed on narrow screens (the selection auto-frame is desktop-only),
+	// so frame it now that the map owns the viewport.
+	function enterRouteMapMode(it: Itinerary) {
+		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
+		void frameRouteBounds(geo.bbox, 15);
 	}
 
 	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
@@ -1113,22 +1130,6 @@
 		if (!map || !map.isStyleLoaded()) return;
 		if (it) enterRouteOverlay(map, it);
 		else exitRouteOverlay(map);
-	});
-
-	// Entering mobile fullscreen map mode: the route was framed under the
-	// full-width list (or not framed at all), so reframe against the
-	// summary-header clearance now that the map owns the viewport.
-	$effect(() => {
-		const on = routingState.mapMode;
-		const it = routingState.selectedItinerary;
-		const map = mapRef;
-		if (!on || !it || !map || !map.isStyleLoaded()) return;
-		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
-		if (!geo.bbox) return;
-		map.fitBounds(
-			[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
-			{ padding: routeFramePadding(), maxZoom: 15, duration: 600 }
-		);
 	});
 
 	// Browser back / forward ↔ route selection. The pushed history entry
@@ -2110,7 +2111,7 @@
 		<RouteMapHeader />
 	{:else if routingState.open}
 		<div class="top-controls">
-			<RoutingPanel onFocusLeg={focusRouteLeg} />
+			<RoutingPanel onFocusLeg={focusRouteLeg} onEnterMapMode={enterRouteMapMode} />
 		</div>
 	{:else if !lineDetail}
 		<div class="top-controls">
@@ -2123,9 +2124,11 @@
 
 	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
-	<div class="zoom-badge" aria-label="Current zoom level">
-		z&thinsp;{zoom}
-	</div>
+	{#if import.meta.env.DEV}
+		<div class="zoom-badge" aria-label="Current zoom level">
+			z&thinsp;{zoom}
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -2188,13 +2191,16 @@
 	}
 
 	/* Narrow screens (keep in sync with NARROW_BREAKPOINT in
-	   routing/layout.ts): the full-width routing page owns the top
-	   strip, so the zoom / orientation / geolocate controls hide while
-	   the list is up. In fullscreen map mode they stay usable, pushed
-	   below the summary header. */
+	   routing/layout.ts): the full-width routing page owns the viewport,
+	   so the zoom / orientation / geolocate controls and the (i) credits
+	   hide while the list is up. In fullscreen map mode they stay
+	   visible, the controls pushed below the summary header. */
 	@media (max-width: 699px) {
 		.map-wrap.routing-active:not(.routing-map-mode)
-			.map :global(.maplibregl-ctrl-top-right) {
+			.map :global(.maplibregl-ctrl-top-right),
+		.map-wrap.routing-active:not(.routing-map-mode)
+			.map :global(.maplibregl-ctrl-bottom-right),
+		.map-wrap.routing-active:not(.routing-map-mode) .zoom-badge {
 			display: none;
 		}
 		.map-wrap.routing-map-mode .map :global(.maplibregl-ctrl-top-right) {

@@ -4,9 +4,12 @@
 	import ResultCard from './ResultCard.svelte';
 	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
-	import type { Leg } from './types';
+	import type { Itinerary, Leg } from './types';
 
-	let { onFocusLeg }: { onFocusLeg?: (leg: Leg) => void } = $props();
+	let { onFocusLeg, onEnterMapMode }: {
+		onFocusLeg?: (leg: Leg) => void;
+		onEnterMapMode?: (it: Itinerary) => void;
+	} = $props();
 
 	let cardStates = $derived(computeCardStates(routingState.results));
 
@@ -124,6 +127,7 @@
 						badge={cardStates[i]?.badge ?? null}
 						warnings={cardStates[i]?.warnings ?? []}
 						{onFocusLeg}
+						{onEnterMapMode}
 					/>
 				{/each}
 				<button

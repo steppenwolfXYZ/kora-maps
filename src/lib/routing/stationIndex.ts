@@ -7,8 +7,15 @@ export interface StationEntry {
 	n: string;
 	/** Merged UIC */
 	u: string;
-	/** [lon, lat] */
+	/** [lon, lat] — GTFS-derived station coord. Stable; used for search
+	 *  distance-scoring and map fly-to on selection. */
 	c: [number, number];
+	/** [lon, lat] — walkable coord (nearest OSM platform centroid), only
+	 *  present when the pipeline snap found one. Routing endpoints should
+	 *  send `cw ?? c` to MOTIS so the pedestrian router doesn't start on
+	 *  a road with `sidewalk=separate`. See transit-routing.md
+	 *  § Endpoint inputs. */
+	cw?: [number, number];
 	/** Highest-ranked mode */
 	m?: string;
 	/** Stop tier */

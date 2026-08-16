@@ -18,9 +18,11 @@
 		warnings?: Warning[];
 		/** Camera-focus one leg on the map (Map.svelte wires this through). */
 		onFocusLeg?: (leg: Leg) => void;
+		/** Frame the whole route when entering mobile map mode. */
+		onEnterMapMode?: (it: Itinerary) => void;
 	}
 
-	let { itinerary, badge = null, warnings = [], onFocusLeg }: Props = $props();
+	let { itinerary, badge = null, warnings = [], onFocusLeg, onEnterMapMode }: Props = $props();
 
 	function headsign(leg: Leg): string {
 		return leg.headsign ?? leg.tripHeadsign ?? '';
@@ -43,7 +45,10 @@
 	function showOnMap(e: Event) {
 		e.stopPropagation();
 		routingState.selectItinerary(itinerary);
-		if (isNarrow()) routingState.enterMapMode();
+		if (isNarrow()) {
+			routingState.enterMapMode();
+			onEnterMapMode?.(itinerary);
+		}
 	}
 
 	// Clicking a leg row focuses it on the map. If the card isn't on the

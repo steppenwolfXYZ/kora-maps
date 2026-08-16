@@ -57,7 +57,11 @@
 	}
 
 	function pickStation(e: IndexedStation) {
-		commit({ type: 'station', uic: e.u, name: e.n, coord: e.c });
+		// Prefer the walkable-platform-snapped coord for routing (avoids
+		// MOTIS's OSR starting the walker on a `sidewalk=separate` road);
+		// fall back to the GTFS-derived coord when no snap was baked.
+		// See transit-routing.md § Endpoint inputs.
+		commit({ type: 'station', uic: e.u, name: e.n, coord: e.cw ?? e.c });
 	}
 
 	function pickCurrent() {

@@ -64,13 +64,15 @@ SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M = 150.0
 
 
 def _snap_search_index_to_platforms(search_seen: dict) -> None:
-    """Mutate each `search_seen` entry's `c` to the nearest OSM platform-way
-    centroid within `SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M`. Entries with no
-    platform nearby keep their original coord. Silently skips (with a warn)
-    when `platform_ways.geojson` isn't available."""
+    """Compute the nearest OSM platform-way centroid within
+    `SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M` for each `search_seen` entry and
+    stash it as `_cw`. Never mutates `c` (kept as the GTFS-derived coord for
+    any consumer that needs the traffic-engineering centroid). Entries with
+    no platform nearby get no `_cw`. Silently skips (with a warn) when
+    `platform_ways.geojson` isn't available."""
     if not PLATFORM_WAYS_GEOJSON.exists():
         print(f"  Platform snap: {PLATFORM_WAYS_GEOJSON.name} missing; "
-              f"search-index coords unchanged")
+              f"no `cw` written")
         return
     data = json.loads(PLATFORM_WAYS_GEOJSON.read_text())
     centroids: list = []
@@ -86,7 +88,7 @@ def _snap_search_index_to_platforms(search_seen: dict) -> None:
                           sum(c[1] for c in coords) / n))
     if not centroids:
         print(f"  Platform snap: 0 usable platforms in "
-              f"{PLATFORM_WAYS_GEOJSON.name}; coords unchanged")
+              f"{PLATFORM_WAYS_GEOJSON.name}; no `cw` written")
         return
 
     r = SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M
@@ -120,13 +122,13 @@ def _snap_search_index_to_platforms(search_seen: dict) -> None:
         if best_pt is None:
             n_unchanged += 1
             continue
-        entry["c"] = [round(best_pt[0], 6), round(best_pt[1], 6)]
+        entry["_cw"] = [round(best_pt[0], 6), round(best_pt[1], 6)]
         n_snapped += 1
         shift = sqrt(best_d)
         if shift > max_shift_m:
             max_shift_m = shift
     print(f"  Platform snap: {n_snapped}/{n_snapped + n_unchanged} stations "
-          f"snapped (max shift {max_shift_m:.0f} m, radius "
+          f"got `cw` (max shift {max_shift_m:.0f} m, radius "
           f"{SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M:.0f} m)")
 
 
@@ -1137,10 +1139,15 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "_rank": rank,
         }
     _snap_search_index_to_platforms(_search_seen)
-    _search_entries = [
-        {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"], "t": e["t"]}
-        for e in sorted(_search_seen.values(), key=lambda e: e["n"])
-    ]
+    _search_entries = []
+    for e in sorted(_search_seen.values(), key=lambda e: e["n"]):
+        row = {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"], "t": e["t"]}
+        # `cw` (walkable coord) is emitted only when the platform snap found
+        # a hit — client falls back to `c` otherwise (transit-routing.md
+        # § Endpoint inputs).
+        if "_cw" in e:
+            row["cw"] = e["_cw"]
+        _search_entries.append(row)
     OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
     OUT_STOP_SEARCH_INDEX.write_text(json.dumps(_search_entries, ensure_ascii=False))
     print(f"  Stop-search index: {len(_search_entries)} unique stations → {OUT_STOP_SEARCH_INDEX}")

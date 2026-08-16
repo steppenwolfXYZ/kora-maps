@@ -40,7 +40,14 @@ Each input accepts three endpoint types, distinguished by a `type` tag on the in
 
 Only these three types exist in this step. A fourth `address` type is added when forward geocoding ships.
 
-**Station coord = walkable-platform snap.** For `station` endpoints, `stop_search_index.json`'s `c` (which the client sends to MOTIS as `fromPlace` / `toPlace`) is not the raw GTFS parent-station centroid. Instead, step 07 snaps each station's coord onto the centroid of the nearest OSM `public_transport=platform` way within 150 m. GTFS parent centroids often land on the road right-of-way (canonical case: Bern Eigerplatz, whose centroid sits within 2 m of a `highway=primary, sidewalk=separate` way and a tram track); MOTIS's OSR foot profile then applies +45 s per edge for walking on a road with a mapped separate sidewalk, which pushes the actual station's platforms off the Pareto front and MOTIS boards the walker at a distant alternative stop instead. Snapping onto an OSM platform lands the coord on a way MOTIS's OSR explicitly whitelists (`is_platform_` → `Whitelist` in the foot profile), avoiding the road penalty. Stations with no OSM platform inside the radius keep the raw GTFS coord — a bounded fallback that doesn't make the situation worse.
+**Station coord = two fields.** Each `stop_search_index.json` entry carries two coord fields:
+
+- **`c`** — the GTFS-derived station coord. Stable across pipeline runs and stable for anything that needs the station's "official" location — search distance-ranking, map fly-to on selection, and any future consumer that expects the traffic-engineering centroid.
+- **`cw`** — the *walkable* coord: centroid of the nearest OSM `public_transport=platform` way within 150 m of the GTFS coord, computed at step 07. Present only when a platform was found in range; omitted otherwise.
+
+Routing sends `cw ?? c` as `fromPlace` / `toPlace` to MOTIS. GTFS parent centroids often land on the road right-of-way (canonical case: Bern Eigerplatz, whose centroid sits within 2 m of a `highway=primary, sidewalk=separate` way and a tram track); MOTIS's OSR foot profile then applies +45 s per edge for walking on a road with a mapped separate sidewalk, which pushes the actual station's platforms off the Pareto front and MOTIS boards the walker at a distant alternative stop instead. Sending `cw` instead lands the coord on a way MOTIS's OSR explicitly whitelists (`is_platform_` → `Whitelist` in the foot profile), avoiding the road penalty. Stations with no OSM platform inside the radius have no `cw` and the client falls through to `c` — a bounded fallback that doesn't make the situation worse.
+
+The `c` / `cw` split exists so `c` never has to change semantics; any consumer that already used `c` keeps its behavior, and the routing-only optimisation lives on its own key.
 
 ### Entry points
 

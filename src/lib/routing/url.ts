@@ -25,6 +25,11 @@ export function endpointToParam(ep: Endpoint): string {
 }
 
 export interface StationLookup {
+	/** Return the station data for a UIC, or null if unknown. `coord`
+	 *  should be the routing coord — i.e. the station entry's `cw ?? c`,
+	 *  the walkable-platform snap when present, GTFS centroid otherwise —
+	 *  since the returned Endpoint's coord is what the routing panel
+	 *  sends to MOTIS. See transit-routing.md § Endpoint inputs. */
 	(uic: string): { name: string; coord: [number, number] } | null;
 }
 
