@@ -36,10 +36,10 @@ The panel is available in both view modes (`standard` and `transit-focus`). Open
 Each input accepts three endpoint types, distinguished by a `type` tag on the internal endpoint value:
 
 - `station` — chosen via typed search using the existing `stop_search_index.json` (the same index the stop search uses), or set indirectly by a popup or context-menu entry point (see below).
-- `point` — a `lat,lng` pair set by the map context menu. Displayed in the input as **Point on map** for this first step. When reverse geocoding lands, a street-level label replaces this text.
-- `current` — the user's current GPS location. Offered as the first dropdown suggestion when the input is focused **and empty** — once the user starts typing, only station matches show; the current-location shortcut hides. Location permission is requested on first use; if denied, the option remains selectable and re-prompts on next attempt. The From field is prefilled with `current` when the panel opens fresh (no serialised state to restore).
+- `point` — a `lat,lng` pair, either set by the map context menu (reverse geocoding attaches an address label) or picked from the forward-search dropdown (address or POI, label from the picked feature). Displayed as `displayName` when present, otherwise as raw coordinates. See `geocoding-search.md`.
+- `current` — the user's current GPS location. Offered as the first dropdown suggestion when the input is focused **and empty** — once the user starts typing, only search matches show; the current-location shortcut hides. Location permission is requested on first use; if denied, the option remains selectable and re-prompts on next attempt. The From field is prefilled with `current` when the panel opens fresh (no serialised state to restore).
 
-Only these three types exist in this step. A fourth `address` type is added when forward geocoding ships.
+The From/To input dropdown merges three sources: `current` (when applicable), transit-station matches from `stop_search_index.json`, and Photon geocoding results (addresses + POIs) — see `geocoding-search.md` for the geocoding contract, rate-limit + coalescing scheduler, and reverse-geocoding rules.
 
 **Station coord = two fields.** Each `stop_search_index.json` entry carries two coord fields:
 
@@ -193,7 +193,7 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
 Routing state is serialised into the URL query string, following the existing `?line=` deep-link precedent from `line-detail-view.md`:
 
-- Query parameters: `from`, `to`, `mode` (`leave` or `arrive`), `time` (ISO 8601 or `now`).
+- Query parameters: `from`, `to`, `mode` (`leave` or `arrive`), `time` (ISO 8601 or `now`), and `fromName` / `toName` when the paired endpoint is a `point` with a display label (`geocoding-search.md` § URL persistence).
 - Endpoint serialisation: `station` → UIC; `point` → `lat,lng`; `current` → `me`.
 - The URL is written on any input or time change, and on issuing a query, via SvelteKit's `replaceState`.
 - Opening a route URL on cold load reproduces the panel state and issues the query.
@@ -205,7 +205,6 @@ Routing state is serialised into the URL query string, following the existing `?
 - Does not introduce a page-level `<svelte:head>` title.
 - The routing URL parameters coexist with the existing `#zoom/lat/lng` position hash, `?line=` deep link, and `?route=` selection (from `route-display.md`) — none of these clobber each other.
 - `stop_search_index.json` is the single station index used by both the stop search and the routing From / To search — no parallel index is introduced.
-- The **Point on map** label for `point` endpoints is fixed for this step; reverse geocoding replaces it in a follow-up.
 - The `current` endpoint requires a runtime location-permission grant. First-time use triggers the browser prompt; if denied, the option stays selectable and re-prompts on next attempt.
 - Rendering the selected route on the map (polylines, station highlights, walk arcs) is out of scope of this concept — that's `route-display.md`.
 - Production deployment of MOTIS (shared Hetzner container vs dedicated VPS) is deferred. Local Mac only for this step.

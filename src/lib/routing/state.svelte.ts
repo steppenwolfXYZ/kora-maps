@@ -4,7 +4,7 @@ import { plan } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import { geolocationErrorMessage, resolveCurrent } from './geolocation';
 import { pruneDominated } from './ranking';
-import type { Endpoint, Itinerary, TimeMode } from './types';
+import type { Endpoint, Itinerary, Leg, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
 
 // Reactive routing state (Svelte 5 runes). One instance shared across the
@@ -88,6 +88,15 @@ let combined: Itinerary[] = [];
 let seenFingerprints = new Set<string>();
 let resolvedCurrentCoord: [number, number] | null = null;
 let resultTarget = TARGET_RESULT_COUNT;
+// MOTIS's arriveBy=true direct-walk polyline is malformed: it traces a loop
+// back to the start coord instead of ending at `to`, so both start/goal
+// icons collapse onto the same point and the drawn walk is a nonsense
+// loop. On arrive-by queries we fire a parallel arriveBy=false plan for
+// the same OD pair, extract its (clean) direct walk leg, and swap that
+// leg's geometry into every arrive-by direct[] we receive. Cached across
+// the whole cascade — direct walks are time-invariant, so one fetch is
+// enough. Reset by resetCascadeState().
+let cleanDirectWalkLeg: Leg | null = null;
 
 function abortInFlight() {
 	if (!pendingAbort) return;
@@ -100,6 +109,53 @@ function resetCascadeState() {
 	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
 	resultTarget = TARGET_RESULT_COUNT;
+	cleanDirectWalkLeg = null;
+}
+
+/** Swap the clean walk geometry into any single-leg WALK itinerary. The
+ * itinerary's own start/end times are preserved — MOTIS anchored them to
+ * the arrive-by target, and the walk duration is invariant, so only the
+ * broken polyline (and its per-step polylines) needs replacing. No-op when
+ * `cleanDirectWalkLeg` is unset (leave-at, or the parallel fetch failed). */
+function patchDirectWalks(items: Itinerary[]): Itinerary[] {
+	const clean = cleanDirectWalkLeg;
+	if (!clean) return items;
+	return items.map((it) => {
+		if (it.legs.length !== 1) return it;
+		const leg = it.legs[0];
+		if (leg.mode !== 'WALK') return it;
+		return {
+			...it,
+			legs: [{ ...leg, legGeometry: clean.legGeometry }]
+		};
+	});
+}
+
+/** Parallel arriveBy=false plan whose only purpose is to yield a clean
+ * direct-walk polyline (MOTIS's arriveBy=true one loops). Fires alongside
+ * stage 1 so its cost overlaps the transit query; result is awaited before
+ * anything is added to `combined` so the patch is in effect from the first
+ * publish onward. Failure is non-fatal — we fall back to the broken
+ * MOTIS polyline. */
+async function fetchCleanDirectWalk(ac: AbortController): Promise<Leg | null> {
+	try {
+		const res = await plan({
+			from: from!, to: to!, mode: 'leave', time: null,
+			currentCoord: resolvedCurrentCoord,
+			maxPreTransitTime: NARROW_PRE_POST_SEC,
+			maxPostTransitTime: NARROW_PRE_POST_SEC,
+			searchWindow: 900
+		}, ac.signal);
+		const walkIt = res.direct?.find(
+			(it) => it.legs.length === 1 && it.legs[0].mode === 'WALK'
+		);
+		return walkIt?.legs[0] ?? null;
+	} catch {
+		// Failure (network, abort, missing walk) is non-fatal — the primary
+		// query and its own abort handling drive the flow; without a clean
+		// walk we just fall back to MOTIS's malformed one.
+		return null;
+	}
 }
 
 function currentSortFn() {
@@ -162,7 +218,7 @@ async function runHopCascade(
 			queryEpoch += dir * HOP_MS;
 		} else {
 			emptyStreak = 0;
-			combined = [...combined, ...fresh];
+			combined = [...combined, ...patchDirectWalks(fresh)];
 			publishResults();
 			const starts = fresh.map((i) => Date.parse(i.startTime));
 			queryEpoch = (dir === 1 ? Math.max(...starts) : Math.min(...starts))
@@ -412,6 +468,24 @@ export const routingState = {
 		syncUrl();
 	},
 
+	/** Late-arriving reverse-geocode label. Attaches `displayName` and tags
+	 * `kind: 'address'` on a `point` endpoint — reverse geocoding never
+	 * yields a POI name per concept, so the icon is always address-shaped.
+	 * Only applies if the endpoint is still the same coord we set earlier
+	 * (user hasn't overwritten From/To in the meantime). Does NOT invalidate
+	 * results, selection, or trigger a re-query — the coord (what MOTIS
+	 * routes on) is unchanged; only the display metadata is being filled in.
+	 * See geocoding-search.md § Reverse geocoding. */
+	attachPointName(side: 'from' | 'to', coord: [number, number], name: string) {
+		const current = side === 'from' ? from : to;
+		if (!current || current.type !== 'point') return;
+		if (current.coord[0] !== coord[0] || current.coord[1] !== coord[1]) return;
+		const updated: Endpoint = { ...current, displayName: name, kind: 'address' };
+		if (side === 'from') from = updated;
+		else to = updated;
+		syncUrl();
+	},
+
 	/** Select one of the current `results` for map rendering (route-display.md
 	 * § Lifecycle). Pushes a browser history entry so back closes the route
 	 * view; state carries the fingerprint so the back/forward $effect in
@@ -535,10 +609,22 @@ export const routingState = {
 				}, ac.signal);
 			};
 
+			// Kick off the clean-walk fetch in parallel with stage 1 — its
+			// cost overlaps the transit query so it typically resolves for
+			// free by the time we need to publish. Only relevant on arrive-by
+			// (leave-at direct walks are unaffected by the MOTIS bug).
+			const cleanWalkPromise = mode === 'arrive'
+				? fetchCleanDirectWalk(ac)
+				: null;
+
 			// Stage 1 — narrow initial query (fast for typical cases).
 			let res = await doQuery(time);
 			if (ac.signal.aborted) return;
-			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
+			if (cleanWalkPromise) {
+				cleanDirectWalkLeg = await cleanWalkPromise;
+				if (ac.signal.aborted) return;
+			}
+			combined = patchDirectWalks([...(res.itineraries ?? []), ...(res.direct ?? [])]);
 
 			// Stage 2 — escalate walking budget on trigger:
 			//   (a) narrow query returned nothing, or
@@ -555,7 +641,7 @@ export const routingState = {
 				post = WIDE_PRE_POST_SEC;
 				res = await doQuery(time);
 				if (ac.signal.aborted) return;
-				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
+				combined = patchDirectWalks([...(res.itineraries ?? []), ...(res.direct ?? [])]);
 			}
 			// Seed the dedupe set now that `combined` has stabilised for stages
 			// 1 + 2 — stage 3 (and any later loadMore) then filters against it.
@@ -598,7 +684,7 @@ export const routingState = {
 				seenFingerprints = new Set();
 				const wideRes = await doQuery(time);
 				if (ac.signal.aborted) return;
-				combined = [...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])];
+				combined = patchDirectWalks([...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])]);
 				seenFingerprints = new Set(combined.map(itineraryFingerprint));
 				publishResults();
 				await runHopCascade(advanceDir, startEpochFrom(combined), pre, post, ac);

@@ -1456,7 +1456,7 @@
 			void loadStationIndex().then((idx) => {
 				const parsed = readRoutingQuery(routingUrl, (uic) => {
 					const e = idx?.get(uic);
-					return e ? { name: e.n, coord: e.c } : null;
+					return e ? { name: e.n, coord: e.c, mode: e.m } : null;
 				});
 				routingState.hydrate(parsed);
 			});
@@ -2124,7 +2124,7 @@
 
 	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
-	{#if import.meta.env.DEV}
+	{#if import.meta.env.ENVIRONMENT !== 'production'}
 		<div class="zoom-badge" aria-label="Current zoom level">
 			z&thinsp;{zoom}
 		</div>

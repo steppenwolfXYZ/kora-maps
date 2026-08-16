@@ -1,9 +1,18 @@
 // Endpoint = one of three tagged variants (see transit-routing.md § Endpoint
 // inputs). `station` and `point` carry the coord MOTIS needs; `current` is
 // resolved to a coord at query time from the geolocation API.
+//
+// `station.mode` and `point.kind` are display-only hints used by the routing
+// panel to pick a per-type icon on the selected endpoint pill. Optional
+// because URL-restored endpoints won't always have them; the icon falls
+// back to a generic transit/pin glyph in that case.
+// `point.displayName` is the human-readable label attached by forward or
+// reverse geocoding (geocoding-search.md § Display format). Absent when the
+// point was set without a name available — the UI then falls back to raw
+// coordinates.
 export type Endpoint =
-	| { type: 'station'; uic: string; name: string; coord: [number, number] }
-	| { type: 'point'; coord: [number, number] }
+	| { type: 'station'; uic: string; name: string; coord: [number, number]; mode?: string }
+	| { type: 'point'; coord: [number, number]; displayName?: string; kind?: 'address' | 'poi' }
 	| { type: 'current' };
 
 export type TimeMode = 'leave' | 'arrive';

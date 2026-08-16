@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { routingState } from './state.svelte';
 	import type { Endpoint } from './types';
+	import { reverseAddress } from '$lib/geocoding/client';
 
 	interface Props {
 		/** Screen-space anchor (x, y) or null when hidden. */
@@ -12,11 +13,19 @@
 
 	function pickAsPoint(side: 'from' | 'to') {
 		if (!anchor) return;
-		const ep: Endpoint = { type: 'point', coord: [anchor.lng, anchor.lat] };
+		const coord: [number, number] = [anchor.lng, anchor.lat];
+		const ep: Endpoint = { type: 'point', coord };
 		if (side === 'from') routingState.setFrom(ep);
 		else routingState.setTo(ep);
 		if (!routingState.open) routingState.openPanel();
 		onClose();
+		// Fire reverse geocoding in the background. When (and if) it comes
+		// back, attachPointName no-ops if the user has since changed this
+		// endpoint. Concept: never a POI name — the client's reverseAddress
+		// enforces that. See geocoding-search.md § Reverse geocoding.
+		reverseAddress(coord[0], coord[1]).then((name) => {
+			if (name) routingState.attachPointName(side, coord, name);
+		});
 	}
 </script>
 

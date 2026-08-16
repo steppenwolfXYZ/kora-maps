@@ -1,9 +1,11 @@
 import type { StationEntry } from './stationIndex';
 
-// Compact station search shared by the routing endpoint inputs. Same input
-// index as StopSearch; the ranking here is deliberately simpler than
-// StopSearch's 8-tier cascade — good enough for the panel, easy to swap
-// later if needed.
+// Station search shared by the routing endpoint inputs. Mirrors the ranking
+// used by the map-wide StopSearch so the two search UIs order the same
+// stations the same way (stop-search.md § Ranking): weighted sum of a match
+// tier, a mode-rank score, and a stop-tier score. Distance-from-map-center
+// is skipped here — the routing panel doesn't currently receive the map
+// instance; adding it would just tack a `mapCenter` arg onto searchStations.
 
 export interface IndexedStation extends StationEntry {
 	fold: string;
@@ -23,6 +25,88 @@ export function indexStations(entries: Iterable<StationEntry>): IndexedStation[]
 	return out;
 }
 
+// Mirrors MODE_RANK in scripts/transit/_state.py.
+const MODE_RANK: Record<string, number> = {
+	train:        0,
+	metro:        1,
+	tram:         2,
+	bus:          3,
+	mountain:     4,
+	ferry:        5,
+	regional_bus: 6
+};
+const MODE_RANK_MAX = 6;
+
+// Mirrors LABEL_TIER_RANK in scripts/transit/stops/pipeline_render.py.
+const STOP_TIER_RANK: Record<string, number> = {
+	major_train:      0,
+	main_train:       1,
+	important_train:  2,
+	train_station:    3,
+	small_train:      4,
+	major_mountain:   5,
+	ferry_stop:       6,
+	mountain_stop:    7,
+	major_hub:        8,
+	big_station:      9,
+	normal_stop:     10,
+	small_bus:       11
+};
+const STOP_TIER_RANK_MAX = 11;
+
+const W_MATCH = 5;
+const W_MODE = 1;
+const W_TIER = 1;
+
+// 8-tier match cascade — first condition that holds wins. Multi-word
+// queries are token-based and order-insensitive; every token must match at
+// least as a substring for the stop to be a hit at all.
+function matchTierScore(name: string, words: string[], tokens: string[]): number {
+	let allFull = true;
+	let anyFull = false;
+	let allPrefix = true;
+	let anyPrefix = false;
+	const fullMatched = new Set<number>();
+	for (const t of tokens) {
+		let strength = 0;
+		for (let wi = 0; wi < words.length; wi++) {
+			const w = words[wi];
+			if (w === t) {
+				strength = 3;
+				fullMatched.add(wi);
+				break;
+			}
+			if (strength < 2 && w.startsWith(t)) strength = 2;
+		}
+		if (strength < 2 && name.includes(t)) strength = 1;
+		if (strength === 0) return 0;
+		if (strength === 3) anyFull = true;
+		else allFull = false;
+		if (strength >= 2) anyPrefix = true;
+		else allPrefix = false;
+	}
+	if (allFull && fullMatched.size === words.length) return 100;
+	if (allPrefix && fullMatched.has(0)) return 80;
+	if (words.length > 0 && tokens.some((t) => words[0].startsWith(t))) return 70;
+	if (allFull) return 50;
+	if (anyFull) return 40;
+	if (allPrefix) return 30;
+	if (anyPrefix) return 20;
+	return 10;
+}
+
+function modeScore(mode: string | undefined): number {
+	const r = MODE_RANK[mode ?? ''];
+	if (r === undefined) return 0;
+	return ((MODE_RANK_MAX - r) / MODE_RANK_MAX) * 100;
+}
+
+function tierScore(tier: string | undefined): number {
+	const r = STOP_TIER_RANK[tier ?? ''];
+	if (r === undefined) return 0;
+	return ((STOP_TIER_RANK_MAX - r) / STOP_TIER_RANK_MAX) * 100;
+}
+
 export function searchStations(index: IndexedStation[], query: string, limit = 8): IndexedStation[] {
 	const q = fold(query.trim());
 	if (!q) return [];
@@ -30,21 +114,10 @@ export function searchStations(index: IndexedStation[], query: string, limit = 8
 	if (!tokens.length) return [];
 	const scored: { e: IndexedStation; s: number }[] = [];
 	for (const e of index) {
-		let ok = true;
-		let score = 0;
-		for (const t of tokens) {
-			let ts = 0;
-			for (const w of e.words) {
-				if (w === t) { ts = 3; break; }
-				if (w.startsWith(t)) { ts = Math.max(ts, 2); }
-			}
-			if (ts === 0 && e.fold.includes(t)) ts = 1;
-			if (ts === 0) { ok = false; break; }
-			score += ts;
-		}
-		if (!ok) continue;
-		if (e.words[0]?.startsWith(tokens[0])) score += 5;
-		scored.push({ e, s: score });
+		const match = matchTierScore(e.fold, e.words, tokens);
+		if (match === 0) continue;
+		const s = W_MATCH * match + W_MODE * modeScore(e.m) + W_TIER * tierScore(e.t);
+		scored.push({ e, s });
 	}
 	scored.sort((a, b) => b.s - a.s);
 	return scored.slice(0, limit).map((x) => x.e);

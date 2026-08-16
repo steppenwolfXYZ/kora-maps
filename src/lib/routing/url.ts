@@ -1,13 +1,23 @@
 import type { Endpoint, RoutingQuery, TimeMode } from './types';
 
-// URL query params (transit-routing.md § Deep link):
-//   from, to  — endpoint tokens (uic | lat,lng | 'me')
-//   mode      — 'leave' | 'arrive'
-//   time      — ISO 8601 or 'now'
+// URL query params (transit-routing.md § Deep link, geocoding-search.md § URL persistence):
+//   from, to        — endpoint tokens (uic | lat,lng | 'me')
+//   fromName, toName — display label for a coord endpoint (address / POI /
+//                     reverse-fallback string). Only carried when the paired
+//                     from/to is a coord AND a display name is available.
+//   fromKind, toKind — 'address' | 'poi', display hint for the endpoint
+//                     pill's icon. Only carried when the paired from/to is
+//                     a coord AND a kind is known.
+//   mode            — 'leave' | 'arrive'
+//   time            — ISO 8601 or 'now'
 // A `?from=…&to=…` presence is enough to open the routing panel on cold load.
 
 export const URL_FROM = 'from';
 export const URL_TO = 'to';
+export const URL_FROM_NAME = 'fromName';
+export const URL_TO_NAME = 'toName';
+export const URL_FROM_KIND = 'fromKind';
+export const URL_TO_KIND = 'toKind';
 export const URL_MODE = 'mode';
 export const URL_TIME = 'time';
 /** Selected itinerary fingerprint (route-display.md § Lifecycle).
@@ -29,14 +39,22 @@ export interface StationLookup {
 	 *  should be the routing coord — i.e. the station entry's `cw ?? c`,
 	 *  the walkable-platform snap when present, GTFS centroid otherwise —
 	 *  since the returned Endpoint's coord is what the routing panel
-	 *  sends to MOTIS. See transit-routing.md § Endpoint inputs. */
-	(uic: string): { name: string; coord: [number, number] } | null;
+	 *  sends to MOTIS. See transit-routing.md § Endpoint inputs.
+	 *  `mode` is the station's highest-ranked mode (`train`, `tram`, …)
+	 *  passed through so the endpoint pill can render a mode-specific icon. */
+	(uic: string): { name: string; coord: [number, number]; mode?: string } | null;
 }
 
 /** Parse a from/to token back into an Endpoint. Unknown UIC → null (caller
  * treats as no endpoint on this side). `lookup` may be omitted if callers
- * only need to detect presence (see readQueryPresence). */
-export function paramToEndpoint(raw: string, lookup?: StationLookup): Endpoint | null {
+ * only need to detect presence (see readQueryPresence). `displayName` /
+ * `kind` are attached only when the parsed endpoint is a `point`. */
+export function paramToEndpoint(
+	raw: string,
+	lookup?: StationLookup,
+	displayName?: string | null,
+	kind?: string | null
+): Endpoint | null {
 	if (!raw) return null;
 	if (raw === 'me') return { type: 'current' };
 	// lat,lng — two floats, possibly negative.
@@ -45,7 +63,10 @@ export function paramToEndpoint(raw: string, lookup?: StationLookup): Endpoint |
 		const lat = Number(m[1]);
 		const lng = Number(m[2]);
 		if (Number.isFinite(lat) && Number.isFinite(lng)) {
-			return { type: 'point', coord: [lng, lat] };
+			const ep: Endpoint = { type: 'point', coord: [lng, lat] };
+			if (displayName) ep.displayName = displayName;
+			if (kind === 'address' || kind === 'poi') ep.kind = kind;
+			return ep;
 		}
 		return null;
 	}
@@ -54,7 +75,9 @@ export function paramToEndpoint(raw: string, lookup?: StationLookup): Endpoint |
 	if (lookup) {
 		const hit = lookup(raw);
 		if (!hit) return null;
-		return { type: 'station', uic: raw, name: hit.name, coord: hit.coord };
+		const ep: Endpoint = { type: 'station', uic: raw, name: hit.name, coord: hit.coord };
+		if (hit.mode) ep.mode = hit.mode;
+		return ep;
 	}
 	return { type: 'station', uic: raw, name: '', coord: [0, 0] };
 }
@@ -90,12 +113,32 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	route: string | null;
 } {
 	return {
-		from: paramToEndpoint(url.searchParams.get(URL_FROM) ?? '', lookup),
-		to:   paramToEndpoint(url.searchParams.get(URL_TO) ?? '', lookup),
+		from: paramToEndpoint(
+			url.searchParams.get(URL_FROM) ?? '',
+			lookup,
+			url.searchParams.get(URL_FROM_NAME),
+			url.searchParams.get(URL_FROM_KIND)
+		),
+		to: paramToEndpoint(
+			url.searchParams.get(URL_TO) ?? '',
+			lookup,
+			url.searchParams.get(URL_TO_NAME),
+			url.searchParams.get(URL_TO_KIND)
+		),
 		mode: paramToMode(url.searchParams.get(URL_MODE)),
 		time: paramToTime(url.searchParams.get(URL_TIME)),
 		route: url.searchParams.get(URL_ROUTE)
 	};
+}
+
+function pointName(ep: Endpoint | null): string | null {
+	if (!ep || ep.type !== 'point') return null;
+	return ep.displayName ?? null;
+}
+
+function pointKind(ep: Endpoint | null): string | null {
+	if (!ep || ep.type !== 'point') return null;
+	return ep.kind ?? null;
 }
 
 /** Write from/to/mode/time onto a URL — pass a URL to `writeRoutingQuery` so
@@ -111,6 +154,18 @@ export function writeRoutingQuery(url: URL, q: {
 	else url.searchParams.delete(URL_FROM);
 	if (q.to) url.searchParams.set(URL_TO, endpointToParam(q.to));
 	else url.searchParams.delete(URL_TO);
+	const fromName = pointName(q.from);
+	if (fromName) url.searchParams.set(URL_FROM_NAME, fromName);
+	else url.searchParams.delete(URL_FROM_NAME);
+	const toName = pointName(q.to);
+	if (toName) url.searchParams.set(URL_TO_NAME, toName);
+	else url.searchParams.delete(URL_TO_NAME);
+	const fromKind = pointKind(q.from);
+	if (fromKind) url.searchParams.set(URL_FROM_KIND, fromKind);
+	else url.searchParams.delete(URL_FROM_KIND);
+	const toKind = pointKind(q.to);
+	if (toKind) url.searchParams.set(URL_TO_KIND, toKind);
+	else url.searchParams.delete(URL_TO_KIND);
 	// mode/time only carried when non-default. `leave` + null time = empty.
 	if (q.mode === 'arrive') url.searchParams.set(URL_MODE, 'arrive');
 	else url.searchParams.delete(URL_MODE);
@@ -123,6 +178,10 @@ export function writeRoutingQuery(url: URL, q: {
 export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_FROM);
 	url.searchParams.delete(URL_TO);
+	url.searchParams.delete(URL_FROM_NAME);
+	url.searchParams.delete(URL_TO_NAME);
+	url.searchParams.delete(URL_FROM_KIND);
+	url.searchParams.delete(URL_TO_KIND);
 	url.searchParams.delete(URL_MODE);
 	url.searchParams.delete(URL_TIME);
 	url.searchParams.delete(URL_ROUTE);
