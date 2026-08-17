@@ -49,6 +49,7 @@
 		const to = routingState.to;
 		void routingState.mode;
 		void routingState.time;
+		void routingState.timeVersion;
 		if (!from || !to) return;
 		void routingState.runQuery();
 	});

@@ -2128,6 +2128,11 @@
 
 	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
+	<a class="brand-overlay" href="/about" aria-label="About Kora Maps">
+		<img src="/icon.svg" alt="" draggable="false" />
+		<span class="beta-pill">Beta</span>
+	</a>
+
 	{#if PUBLIC_ENVIRONMENT !== 'production'}
 		<div class="zoom-badge" aria-label="Current zoom level">
 			z&thinsp;{zoom}
@@ -2178,6 +2183,18 @@
 		height: 2.1rem;
 	}
 
+	/* Scale bar lives alone in the bottom-left corner container; shift
+	   the whole container to bottom-center so the brand overlay can
+	   claim the bottom-left corner. Reset MapLibre's default left margin
+	   on the ctrl wrapper so the translateX(-50%) centering is true. */
+	.map :global(.maplibregl-ctrl-bottom-left) {
+		left: 50%;
+		transform: translateX(-50%);
+	}
+	.map :global(.maplibregl-ctrl-bottom-left .maplibregl-ctrl) {
+		margin: 0 0 0.4rem;
+	}
+
 	/* Hide the scale bar while routing — the panel already dominates the
 	   left column and the ruler competes visually with the results. */
 	.map-wrap.routing-active :global(.maplibregl-ctrl-bottom-left .maplibregl-ctrl-scale) {
@@ -2219,6 +2236,7 @@
 		/* Keep the search bar clear of the top-right pill (~2.1rem wide
 		   + 1rem right margin, plus a bit of visual breathing room). */
 		right: 4rem;
+		z-index: 2;
 		display: flex;
 		gap: 0.5rem;
 		align-items: flex-start;
@@ -2379,7 +2397,7 @@
 
 	.zoom-badge {
 		position: absolute;
-		bottom: 2rem;
+		bottom: 2.2rem;
 		left: 50%;
 		transform: translateX(-50%);
 		background: rgba(0, 0, 0, 0.55);
@@ -2393,5 +2411,47 @@
 		backdrop-filter: blur(4px);
 		-webkit-backdrop-filter: blur(4px);
 		user-select: none;
+	}
+
+	.brand-overlay {
+		position: absolute;
+		bottom: 1rem;
+		left: 1rem;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4rem;
+		z-index: 1;
+		text-decoration: none;
+		pointer-events: auto;
+	}
+
+	.brand-overlay img {
+		height: 2.6rem;
+		width: 2.6rem;
+		filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+	}
+
+	.beta-pill {
+		background: #740013;
+		color: #fff;
+		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-weight: 700;
+		font-size: 0.68rem;
+		line-height: 1;
+		letter-spacing: 0.04em;
+		padding: 0.22rem 0.5rem;
+		border-radius: 999px;
+		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+	}
+
+	/* Narrow routing-active: the full-width routing page owns the
+	   viewport, so the brand overlay hides alongside the other controls
+	   (kept in sync with the zoom-badge / ctrl rules above). In
+	   fullscreen map mode it stays visible. */
+	@media (max-width: 699px) {
+		.map-wrap.routing-active:not(.routing-map-mode) .brand-overlay {
+			display: none;
+		}
 	}
 </style>

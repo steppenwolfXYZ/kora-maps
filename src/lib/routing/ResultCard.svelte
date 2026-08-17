@@ -307,13 +307,12 @@
 		background: transparent;
 		cursor: pointer;
 	}
-	/* Filled map glyph in the brand red — the one coloured accent on the
+	/* Map glyph in the brand red — the one coloured accent on the
 	   otherwise monochrome card. */
 	.card-map :global(.material-symbols-outlined) {
 		font-size: 1.25rem;
 		line-height: 1;
 		color: #740013;
-		font-variation-settings: 'FILL' 1;
 	}
 	.card-map:hover { background: #f3e2e5; }
 	/* This card is the one on the map: invert to a red disc with a white
@@ -362,7 +361,6 @@
 	.card-warning :global(.material-symbols-outlined) {
 		font-size: 1rem;
 		line-height: 1;
-		font-variation-settings: 'FILL' 1;
 	}
 	/* standard: plain red icon */
 	.card-warning-standard { color: #b83232; }

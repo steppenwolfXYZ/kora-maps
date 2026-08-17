@@ -41,9 +41,11 @@
 			}
 			@font-face {
 				/* Material Symbols subset — regeneration process in
-				   .claude/rules/deployment.md § UI fonts. Variable FILL
-				   axis (0..1): filled icons set
-				   font-variation-settings: 'FILL' 1. Icons in use
+				   .claude/rules/deployment.md § UI fonts. Filled icons
+				   are the app-wide default (`.material-symbols-outlined`
+				   sets `font-variation-settings: 'FILL' 1` below); do
+				   not opt back into the outline style — see
+				   .claude/rules/project.md § UI icons. Icons in use
 				   (sorted, keep alphabetical for the download URL):
 			   chevron_right, crown, directions,
 			   directions_bike, directions_boat, directions_boat_filled,
@@ -73,14 +75,11 @@
 				white-space: nowrap;
 				word-wrap: normal;
 				direction: ltr;
+				font-variation-settings: 'FILL' 1;
 				-webkit-font-feature-settings: 'liga';
 				-webkit-font-smoothing: antialiased;
 			}
 		</style>
-		<!-- style.json is fetched client-side in +page.svelte (the map is
-		     WebGL-only, so the page SSRs without it); preload so the download
-		     starts with the document instead of after hydration. -->
-		<link rel="preload" href="/map-assets/style.json" as="fetch" crossorigin="anonymous" />
 		<style>
 			/* Splash screen shown while the map loads and geolocation
 			   resolves. Hidden by Map.svelte on the map's `load` event.

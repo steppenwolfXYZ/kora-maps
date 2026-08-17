@@ -129,9 +129,9 @@
 				</div>
 			</div>
 
-			<div class="section about">
-				Contact: <a href="mailto:info@steppenwolfx.ch">info@steppenwolfx.ch</a>
-			</div>
+		<div class="section about">
+			<a href="/about">About Kora Maps</a>
+		</div>
 		</div>
 	{/if}
 </div>

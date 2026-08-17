@@ -10,6 +10,12 @@
 
 	let { mode, time, onMode, onTime }: Props = $props();
 
+	// Local tick so the displayed wall clock re-evaluates on every refresh
+	// click — including when `time` is already null and the prop doesn't
+	// change. Without it, `localValue` would stay frozen at the first null
+	// evaluation and the datetime field would drift stale as the clock moves.
+	let nowTick = $state(0);
+
 	// Local <input type="datetime-local"> value (needs local time without Z).
 	// If `time` is null → "now" and we render the current wall time; edits
 	// convert back to ISO before pushing to state.
@@ -28,7 +34,15 @@
 		return d.toISOString();
 	}
 
-	const localValue = $derived(toLocalInput(time));
+	const localValue = $derived.by(() => {
+		nowTick;
+		return toLocalInput(time);
+	});
+
+	function refresh() {
+		nowTick++;
+		onTime(null);
+	}
 </script>
 
 <div class="ts">
@@ -44,8 +58,7 @@
 		/>
 		<button
 			class="ts-now"
-			onclick={() => onTime(null)}
-			disabled={time === null}
+			onclick={refresh}
 			title="Reset to now"
 			aria-label="Reset to now"
 		><span class="material-symbols-outlined" aria-hidden="true">refresh</span></button>
@@ -102,6 +115,5 @@
 		border-radius: 0.3rem;
 	}
 	.ts-now :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.ts-now:hover:not(:disabled) { background: #eee; color: #000; }
-	.ts-now:disabled { color: #bbb; cursor: default; }
+	.ts-now:hover { background: #eee; color: #000; }
 </style>

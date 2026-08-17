@@ -46,6 +46,8 @@ const STOP_STROKE_WIDTH = 1.0;
 // Neutral routing color for the connector body + walking dashes.
 const NEUTRAL_DARK = '#1a1a1a';
 const NEUTRAL_LIGHT = '#ffffff';
+const PIN_FILL = '#1a1a1a';
+const ICON_FILL = '#ff6b7a';
 
 // Label font weights per tier, mirroring scripts/style/transit_stations.py.
 // The bold set grows with zoom so the ratio of bold-to-regular labels stays
@@ -459,51 +461,41 @@ export function removeRouteLayers(
 	if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
 }
 
-// Start icon: teardrop pin with a play triangle inside. Distinct from the
-// map's transit dots so it never reads as a stop. Anchored at bottom so
-// the pin's tip plants on the start coordinate.
+// Start icon: teardrop pin with a play triangle inside. Brand red with a
+// lighter-red glyph. Anchored at bottom so the pin's tip plants on the
+// start coordinate.
 function makeStartIconElement(): HTMLDivElement {
 	const wrap = document.createElement('div');
 	wrap.className = 'route-start-icon';
 	wrap.style.cssText = [
-		'width: 26px', 'height: 34px', 'pointer-events: none',
+		'width: 38px', 'height: 42px', 'pointer-events: none',
 		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
 	].join(';');
 	wrap.innerHTML = `
-		<svg viewBox="0 0 26 34" xmlns="http://www.w3.org/2000/svg" width="26" height="34">
-			<path d="M13 1 C 6.4 1, 1 6.4, 1 13 C 1 22, 13 33, 13 33 C 13 33, 25 22, 25 13 C 25 6.4, 19.6 1, 13 1 Z"
-			      fill="#ffffff" stroke="#000000" stroke-width="1.5"/>
-			<path d="M10 8 L18 13 L10 18 Z" fill="#000000"/>
+		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
+			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
+			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
+			<path d="M9.5 5 L16.5 9 L9.5 13 Z" fill="${ICON_FILL}"/>
 		</svg>
 	`;
 	return wrap;
 }
 
-// Goal icon: checkered flag on a stick. Inline SVG keeps us free of any
-// sprite / icon-image dependency. Anchor is bottom so the pole plants on
-// the goal coordinate.
+// Goal icon: teardrop pin with a stop square inside. Same pin shape and
+// palette as the start icon; the glyph distinguishes the two. Anchor is
+// bottom so the pin's tip plants on the goal coordinate.
 function makeGoalIconElement(): HTMLDivElement {
 	const wrap = document.createElement('div');
 	wrap.className = 'route-goal-icon';
 	wrap.style.cssText = [
-		'width: 22px', 'height: 28px', 'pointer-events: none',
+		'width: 38px', 'height: 42px', 'pointer-events: none',
 		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
 	].join(';');
 	wrap.innerHTML = `
-		<svg viewBox="0 0 22 28" xmlns="http://www.w3.org/2000/svg" width="22" height="28">
-			<rect x="9" y="4" width="2" height="24" fill="${NEUTRAL_DARK}"/>
-			<g transform="translate(11,4)">
-				<rect x="0" y="0" width="10" height="8" fill="${NEUTRAL_LIGHT}"/>
-				<rect x="0" y="0" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="5" y="0" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="2.5" y="2" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="7.5" y="2" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="0" y="4" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="5" y="4" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="2.5" y="6" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="7.5" y="6" width="2.5" height="2" fill="${NEUTRAL_DARK}"/>
-				<rect x="0" y="0" width="10" height="8" fill="none" stroke="${NEUTRAL_DARK}" stroke-width="0.7"/>
-			</g>
+		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
+			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
+			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
+			<rect x="8.5" y="5.5" width="7" height="7" fill="${ICON_FILL}"/>
 		</svg>
 	`;
 	return wrap;

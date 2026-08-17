@@ -16,6 +16,10 @@ let from = $state<Endpoint | null>(null);
 let to = $state<Endpoint | null>(null);
 let mode = $state<TimeMode>('leave');
 let time = $state<string | null>(null);
+// Bumped on every `setTime` call so consumers re-run even when `time`
+// itself is unchanged (refresh-to-now while already at null — the wall
+// clock has moved but the value hasn't).
+let timeVersion = $state(0);
 
 let results = $state<Itinerary[]>([]);
 let loading = $state(false);
@@ -373,6 +377,7 @@ export const routingState = {
 	get to() { return to; },
 	get mode() { return mode; },
 	get time() { return time; },
+	get timeVersion() { return timeVersion; },
 	get results() { return results; },
 	get loading() { return loading; },
 	get loadingMore() { return loadingMore; },
@@ -459,6 +464,7 @@ export const routingState = {
 	setTime(t: string | null) {
 		abortInFlight();
 		time = t;
+		timeVersion++;
 		results = [];
 		hasQueried = false;
 		error = null;

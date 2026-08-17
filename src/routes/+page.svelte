@@ -6,8 +6,8 @@
 	// style.json is a pipeline artifact served from /map-assets/ — it never
 	// exists inside the server build, so it must not be fetched in a load
 	// function (SSR would 404). Fetching client-side keeps the page fully
-	// server-renderable; app.html carries a matching <link rel="preload">
-	// so the download starts with the document, not after hydration.
+	// server-renderable; the <link rel="preload"> in <svelte:head> below
+	// starts the download with the document, not after hydration.
 	//
 	// $state.raw, NOT $state: Map.svelte's init effect reads style.layers
 	// and mutates layer.layout in place (visibility pre-bake). A deeply
@@ -29,6 +29,13 @@
 		}
 	});
 </script>
+
+<svelte:head>
+	<!-- Preload here (not in app.html) so it only fires on the map route —
+	     otherwise other routes trigger it and never consume it, warning in
+	     the console. -->
+	<link rel="preload" href="/map-assets/style.json" as="fetch" crossorigin="anonymous" />
+</svelte:head>
 
 {#if style}
 	<Map {style} />
