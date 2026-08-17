@@ -5,6 +5,7 @@
 	import { slide } from 'svelte/transition';
 	import { pushState, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
+	import { PUBLIC_ENVIRONMENT } from '$env/static/public';
 	import { Protocol } from 'pmtiles';
 	import mlcontour from 'maplibre-contour';
 	import StopSearch from './StopSearch.svelte';
@@ -2124,7 +2125,7 @@
 
 	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
-	{#if import.meta.env.ENVIRONMENT !== 'production'}
+	{#if PUBLIC_ENVIRONMENT !== 'production'}
 		<div class="zoom-badge" aria-label="Current zoom level">
 			z&thinsp;{zoom}
 		</div>

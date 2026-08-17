@@ -68,6 +68,8 @@ export interface Leg {
 	endTime: string;
 	/** Seconds. Absent on some MOTIS responses; fall back to endTime - startTime. */
 	duration?: number;
+	/** Metres. Present on non-transit legs (WALK/BIKE/CAR) from MOTIS. */
+	distance?: number;
 	from?: LegPlace;
 	to?: LegPlace;
 	routeShortName?: string;

@@ -5,7 +5,7 @@
 	import { legDuration, transferCount, walkSeconds } from './ranking';
 	import type { Badge, Warning, WarningKind } from './ranking';
 	import {
-		badgeTextColor, displayLegs, fmtDuration, fmtTime,
+		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtTime,
 		iconFor, isTransitMode
 	} from './itineraryFormat';
 	import { isNarrow } from './layout';
@@ -261,7 +261,7 @@
 				{:else}
 					<button class="leg-item walk" type="button" onclick={(e) => focusLeg(e, leg)}>
 						<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-						<span class="leg-walk-dur">{fmtDuration(legDuration(leg))}</span>
+						<span class="leg-walk-dur"><strong>{fmtDuration(legDuration(leg))}</strong>{#if leg.distance != null} · {fmtDistance(leg.distance)}{/if}</span>
 					</button>
 				{/if}
 			{/each}
@@ -525,6 +525,7 @@
 		color: #777;
 	}
 	.leg-walk-dur { font-size: 0.78rem; color: #666; }
+	.leg-walk-dur strong { font-weight: 600; color: #444; }
 
 	.leg-line-row {
 		display: flex;

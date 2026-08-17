@@ -22,6 +22,12 @@ export function fmtDuration(secs: number): string {
 	return rem ? `${h} h ${rem} min` : `${h} h`;
 }
 
+export function fmtDistance(metres: number): string {
+	if (metres < 1000) return `${Math.round(metres)} m`;
+	const km = metres / 1000;
+	return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
+}
+
 // Map MOTIS mode strings to Material Symbols icon names — parallel to
 // StopSearch's MODE_ICON.
 export const MODE_ICON: Record<string, string> = {
