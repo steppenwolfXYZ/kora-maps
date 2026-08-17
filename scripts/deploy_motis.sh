@@ -26,14 +26,15 @@ for a in "$@"; do
 done
 
 # MOTIS memory-maps its index files; replacing them under a running server
-# can fault mid-query. Stop the container first, sync, restart. The down is
-# tolerated to fail so a first-ever deploy (no compose file on the server
-# yet) still proceeds.
+# can fault mid-query. Stop the container first, sync, restart. Skipped
+# silently on the first-ever deploy (no compose file on the server yet).
 if [ "$DRY_RUN" -eq 0 ]; then
-	ssh "$REMOTE" "cd $REMOTE_PATH 2>/dev/null && docker compose -f docker-compose.prod.yml down" || true
+	ssh "$REMOTE" "[ -f ${REMOTE_PATH}docker-compose.prod.yml ] && cd $REMOTE_PATH && docker compose -f docker-compose.prod.yml down" || true
 fi
 
-rsync -avz --delete "$@" "$ROOT/motis/data/" "$REMOTE:${REMOTE_PATH}data/"
+# --partial keeps half-transferred files so a dropped connection resumes
+# mid-file on rerun instead of restarting the file from zero.
+rsync -avz --partial --delete "$@" "$ROOT/motis/data/" "$REMOTE:${REMOTE_PATH}data/"
 rsync -avz "$@" \
 	"$ROOT/motis/config.yml" \
 	"$ROOT/motis/docker-compose.prod.yml" \
