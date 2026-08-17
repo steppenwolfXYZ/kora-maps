@@ -58,5 +58,6 @@ If a new icon is used anywhere in the app (any `<span class="material-symbols-ou
 ## Ops notes
 
 - First-line diagnostics: `ssh koramaps`, then `pm2 list`, `pm2 logs koramaps`.
+- MOTIS diagnostics: `docker logs kora-motis --tail 50`, `docker stats kora-motis --no-stream`. External smoke test: `curl 'https://koramaps.app/routing/api/v1/plan?fromPlace=47.378,8.540&toPlace=47.424,8.508&arriveBy=false&numItineraries=1&directModes=WALK'` should return JSON.
 - After a first-ever pm2 start: `pm2 save` so the app survives server reboots.
 - Cert renewal is automatic (certbot timer). Never run bare `certbot --nginx` (interactive all-domains checklist) or `certbot delete` on this shared server; always scope with explicit `-d`.
