@@ -12,10 +12,6 @@ const mlcontourEsm = fileURLToPath(
 
 export default defineConfig({
 	plugins: [sveltekit()],
-	// Expose ENVIRONMENT (dev / production / test) to client code as
-	// import.meta.env.ENVIRONMENT — inlined at build time. Keep Vite's
-	// default VITE_ prefix alongside.
-	envPrefix: ['VITE_', 'ENVIRONMENT'],
 	resolve: {
 		alias: [{ find: /^maplibre-contour$/, replacement: mlcontourEsm }]
 	}

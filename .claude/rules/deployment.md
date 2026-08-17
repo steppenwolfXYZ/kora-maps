@@ -1,9 +1,10 @@
 # Deployment
 
-Two deliberately separate deploy channels:
+Three deliberately separate deploy channels:
 
 1. **App** (SvelteKit build) — automatic, GitHub Actions on every push to `main`.
 2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
+3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports.
 
 The split exists because map assets are large generated artifacts (~470 MB, gitignored) while the app is small committed code. It also maps cleanly onto the future setup where a dedicated pipeline server runs nightly rebuilds and pushes assets itself — the GitHub Actions side never changes.
 
@@ -16,6 +17,7 @@ The split exists because map assets are large generated artifacts (~470 MB, giti
   - `app/` — live app (build + node_modules + ecosystem.config.cjs + .env). Overwritten by every app deploy.
   - `build-environment/` — staging dir the workflow rsyncs into; removed after each finalize.
   - `map-assets/` — map data, written only by `deploy_map_assets.sh`.
+  - `motis/` — routing backend (config.yml + docker-compose.prod.yml + data/ with the prebuilt indexes), written only by `deploy_motis.sh`.
 - **Process manager:** pm2, app name `koramaps`, defined in `ecosystem.config.cjs` (repo root, deployed with the artifact). It runs `build/index.js` (adapter-node) with `node --env-file=.env` — requires node ≥ 20.6 on the server. All runtime config (`PORT=3012`) lives in `.env`, which the workflow writes from the `ENV_VARS` repo secret. No ORIGIN var: the planned login system is JSON/REST, which bypasses SvelteKit's form-action CSRF path.
 - **nginx:** site file `/etc/nginx/sites-available/koramaps.app`. `location /map-assets/` is an alias to the map-assets dir — nginx serves pmtiles directly (range requests, 1 h cache header); the node app never sees those requests. `location /` proxies to `localhost:3012`. TLS via certbot (`--nginx -d koramaps.app -d www.koramaps.app`); the port-80 server block is required (https redirect + ACME renewals) — do not "clean it up".
 
@@ -31,6 +33,16 @@ Rsyncs `static/map-assets/` → `map-assets/` on the server over the `koramaps` 
 
 Run it before the first app deploy on a fresh server — without assets the app serves but the map cannot load.
 
+## MOTIS deploy (`scripts/deploy_motis.sh`)
+
+Ships `motis/data/` (the prebuilt nigiri/OSR/shapes indexes, ~2.6 GB, imported locally), `motis/config.yml`, and `motis/docker-compose.prod.yml` → `motis/` on the server over the `koramaps` SSH alias, then restarts the container. The prod compose is serve-only: no `motis-import` service, no GTFS/OSM bind mounts (the server never imports — the Mac's aarch64 indexes run on the arm64 image), loopback-bound port (`127.0.0.1:8080`), `mem_limit: 2g` (CAX11 has 4 GB total). The script stops the container before rsync because MOTIS memory-maps its index files — replacing them under a running server can fault mid-query. `--delete` on `data/`; `--dry-run` passes through to rsync and skips the stop/start.
+
+The client reaches MOTIS same-origin at `/routing/` (env var `PUBLIC_MOTIS_URL`, `$env/static/public`, baked at build time: `http://localhost:8080` in `.env`, `/routing` in `.env.production` / the `ENV_VARS` secret). nginx proxies `location /routing/` → `http://127.0.0.1:8080/` (trailing slash strips the prefix, so MOTIS sees its native `/api/v1/…`); `/api/` stays free for a future koramaps API and is already partially used by the app's own geocode endpoints. Docker (not pm2) supervises the container (`restart: unless-stopped` + enabled `docker.service`).
+
+One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), `docker pull ghcr.io/motis-project/motis:latest` (multi-arch; arm64 manifest on the CAX11), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Re-import cycle (all local): `python3 scripts/preprocess_gtfs_for_motis.py` → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh`.
+
+If `/motis server` rejects `config.yml` at startup because the import-only paths (`osm:`, `timetable.datasets.path`) are not mounted, ship a trimmed `config.prod.yml` instead — verify at first deploy.
+
 ## SSR constraints (deployment-driven)
 
 Map assets never exist inside the server build, so the app must not touch them during SSR:
@@ -41,9 +53,9 @@ Map assets never exist inside the server build, so the app must not touch them d
 
 ## UI fonts (self-hosted, no Google CDN)
 
-`static/fonts/` (committed): `saira-vf-latin.woff2` + `saira-vf-latin-ext.woff2` (variable, weights 100–900, covers UI + splash) and `material-symbols-subset.woff2` (icon font subsetted to the six mode icons used by StopSearch). `@font-face` rules live inline in `app.html`. These are separate from `map-assets/fonts/` (MapLibre SDF glyph PBFs for tile labels) — both are needed; MapLibre cannot use web fonts.
+`static/fonts/` (committed): `saira-vf-latin.woff2` + `saira-vf-latin-ext.woff2` (variable, weights 100–900, covers UI + splash) and `material-symbols-subset.woff2` (icon font subsetted to every Material Symbols glyph used across the app — mode icons in StopSearch and EndpointInput plus the routing/endpoint pill icons, time selector, popups, etc.). `@font-face` rules live inline in `app.html`. These are separate from `map-assets/fonts/` (MapLibre SDF glyph PBFs for tile labels) — both are needed; MapLibre cannot use web fonts.
 
-If a new icon is added to `MODE_ICON` in StopSearch.svelte, regenerate the subset: fetch `https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0..1,0&icon_names=<comma-separated, alphabetical, incl. new icon>&display=block` with a browser user agent, download the woff2 URL it contains, replace `material-symbols-subset.woff2`. The FILL axis is variable (0..1) — filled icons set `font-variation-settings: 'FILL' 1` on the element. The full icon list is documented in the `@font-face` comment in `app.html`.
+If a new icon is used anywhere in the app (any `<span class="material-symbols-outlined">…</span>`), regenerate the subset: fetch `https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20,400,0..1,0&icon_names=<comma-separated, alphabetical, incl. new icon>&display=block` with a browser user agent, download the woff2 URL it contains, replace `material-symbols-subset.woff2`. The FILL axis is variable (0..1) — filled icons set `font-variation-settings: 'FILL' 1` on the element. The canonical icon list is the sorted comment inside the `@font-face` block in `app.html` — keep it in sync when you add or drop an icon.
 
 ## Ops notes
 

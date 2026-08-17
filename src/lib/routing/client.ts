@@ -1,8 +1,12 @@
+import { PUBLIC_MOTIS_URL } from '$env/static/public';
+
 import type { Endpoint, Itinerary, PlanResponse, TimeMode } from './types';
 
-// Local MOTIS instance (see motis/docker-compose.yml). Overridable via
-// VITE_MOTIS_URL so deployment can point elsewhere without a code change.
-const MOTIS_BASE = (import.meta.env.VITE_MOTIS_URL ?? 'http://localhost:8080').replace(/\/$/, '');
+// MOTIS base URL — local dev points at the local MOTIS instance
+// (motis/docker-compose.yml, http://localhost:8080), production at the
+// same-origin nginx proxy (/routing/). Set via PUBLIC_MOTIS_URL in
+// .env / .env.production; inlined at build time.
+const MOTIS_BASE = PUBLIC_MOTIS_URL.replace(/\/$/, '');
 
 const NUM_ITINERARIES = 5;
 

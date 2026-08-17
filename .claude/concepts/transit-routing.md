@@ -207,5 +207,5 @@ Routing state is serialised into the URL query string, following the existing `?
 - `stop_search_index.json` is the single station index used by both the stop search and the routing From / To search — no parallel index is introduced.
 - The `current` endpoint requires a runtime location-permission grant. First-time use triggers the browser prompt; if denied, the option stays selectable and re-prompts on next attempt.
 - Rendering the selected route on the map (polylines, station highlights, walk arcs) is out of scope of this concept — that's `route-display.md`.
-- Production deployment of MOTIS (shared Hetzner container vs dedicated VPS) is deferred. Local Mac only for this step.
+- Production deployment of MOTIS: same-origin nginx proxy at `/routing/` to a docker container on the shared Hetzner CAX11 (2 GB memory cap), serving prebuilt indexes imported on the local Mac and shipped via `scripts/deploy_motis.sh`. See `deployment.md` § MOTIS deploy.
 - MOTIS's OSR pedestrian profile is used as-is; the CH walking-quality patch lives entirely in OSM preprocessing (adding `foot=yes` tags), not in a MOTIS fork.

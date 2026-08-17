@@ -1,0 +1,25 @@
+# Production MOTIS server (Hetzner CAX11, /var/www/koramaps.app/motis/).
+# Serve-only: the GTFS/OSM import runs on the local Mac (see
+# docker-compose.yml + scripts/preprocess_gtfs_for_motis.py), the server
+# receives just the prebuilt indexes in ./data via scripts/deploy_motis.sh.
+#
+# If /motis server rejects config.yml because the import-only paths
+# (osm:, timetable.datasets.path) are not mounted, ship a trimmed
+# config.prod.yml here instead — verify at first deploy.
+services:
+  motis:
+    image: ghcr.io/motis-project/motis:latest
+    container_name: kora-motis
+    ports:
+      # Loopback only — nginx is the sole client (location /routing/).
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config.yml:/data/config.yml:ro
+      - ./data:/data/data
+    working_dir: /data
+    command: ["/motis", "server"]
+    restart: unless-stopped
+    # RAM budget on the shared CAX11 (4 GB total): 2 GB for MOTIS, the rest
+    # for nginx + the SvelteKit app + system. MOTIS memory-maps its indexes,
+    # so pressure mostly evicts clean page cache rather than OOM-killing.
+    mem_limit: 2g
