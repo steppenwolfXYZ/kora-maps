@@ -49,6 +49,12 @@ let mapModeFlag = $state(false);
 
 let pendingAbort: AbortController | null = null;
 
+// Dedup guard for runQuery — set on successful completion, cleared whenever
+// query inputs change or the panel closes. Prevents the RoutingPanel $effect
+// from re-running the cascade when the panel simply remounts (e.g. mobile
+// map-mode toggle) with unchanged inputs.
+let lastQueryKey: string | null = null;
+
 // Whether the current history entry was pushed by `selectItinerary` for
 // the active selection. Only then does `dismissSelectedItinerary` consume
 // it via history.back() — an auto-selected or URL-restored selection
@@ -401,6 +407,7 @@ export const routingState = {
 		pushedEntry = false;
 		expandedFingerprint = null;
 		mapModeFlag = false;
+		lastQueryKey = null;
 		abortInFlight();
 		resetCascadeState();
 		const url = currentUrl();
@@ -422,6 +429,7 @@ export const routingState = {
 		results = [];
 		hasQueried = false;
 		error = null;
+		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
 	},
@@ -432,6 +440,7 @@ export const routingState = {
 		results = [];
 		hasQueried = false;
 		error = null;
+		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
 	},
@@ -442,6 +451,7 @@ export const routingState = {
 		results = [];
 		hasQueried = false;
 		error = null;
+		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
 	},
@@ -452,6 +462,7 @@ export const routingState = {
 		results = [];
 		hasQueried = false;
 		error = null;
+		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
 	},
@@ -464,6 +475,7 @@ export const routingState = {
 		results = [];
 		hasQueried = false;
 		error = null;
+		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
 	},
@@ -578,6 +590,8 @@ export const routingState = {
 
 	async runQuery() {
 		if (!from || !to) return;
+		const key = JSON.stringify({ from, to, mode, time });
+		if (key === lastQueryKey && !error) return;
 		error = null;
 		loading = true;
 		hasQueried = true;
@@ -737,6 +751,7 @@ export const routingState = {
 					replaceState(url, { ...page.state, routeSelection: fp });
 				}
 			}
+			lastQueryKey = key;
 		} catch (e) {
 			if ((e as Error).name === 'AbortError') return;
 			error = e instanceof Error ? e.message : String(e);

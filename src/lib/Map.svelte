@@ -2107,11 +2107,14 @@
 	{/if}
 
 	{#if routingState.mapMode}
-		<!-- Mobile fullscreen map mode: the list/panel is hidden, the
-		     summary header owns the top of the map. -->
+		<!-- Mobile fullscreen map mode: the summary header owns the top of
+		     the map. The RoutingPanel below stays mounted (display:none) so
+		     the list's scroll position and any transient DOM state survive
+		     the toggle. -->
 		<RouteMapHeader />
-	{:else if routingState.open}
-		<div class="top-controls">
+	{/if}
+	{#if routingState.open}
+		<div class="top-controls" class:hidden-in-map-mode={routingState.mapMode}>
 			<RoutingPanel onFocusLeg={focusRouteLeg} onEnterMapMode={enterRouteMapMode} />
 		</div>
 	{:else if !lineDetail}
@@ -2227,6 +2230,9 @@
 	}
 	.top-controls > :global(*) {
 		pointer-events: auto;
+	}
+	.top-controls.hidden-in-map-mode {
+		display: none;
 	}
 
 	/* Narrow screens (keep in sync with NARROW_BREAKPOINT in

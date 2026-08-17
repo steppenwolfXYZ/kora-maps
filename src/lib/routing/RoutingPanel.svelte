@@ -41,17 +41,15 @@
 
 	// Main routing shell. Replaces the map menu / stop search top-controls
 	// while open (Map.svelte decides visibility). Runs a query whenever
-	// both endpoints are set and any input changes.
-	let lastKey = '';
+	// both endpoints are set and any input changes. Dedup lives in the
+	// store (see `lastQueryKey` in state.svelte.ts) so a bare remount —
+	// e.g. exiting mobile map mode — doesn't refetch.
 	$effect(() => {
 		const from = routingState.from;
 		const to = routingState.to;
-		const mode = routingState.mode;
-		const time = routingState.time;
+		void routingState.mode;
+		void routingState.time;
 		if (!from || !to) return;
-		const key = JSON.stringify({ from, to, mode, time });
-		if (key === lastKey) return;
-		lastKey = key;
 		void routingState.runQuery();
 	});
 
