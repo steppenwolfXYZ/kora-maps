@@ -1,0 +1,37 @@
+# Production Valhalla server (Hetzner CAX11, /var/www/koramaps.app/valhalla/).
+# Serve-only, mirroring the MOTIS split (see motis/docker-compose.prod.yml):
+# tiles and elevation are built locally on the Mac, the server receives
+# only the prebuilt data/ dir via scripts/deploy_valhalla.sh.
+services:
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: kora-valhalla
+    ports:
+      # Loopback only — nginx is the sole external client
+      # (location /valhalla/ + the MOTIS fork's stop-to-stop matrix
+      # build step, which runs locally).
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - ./data:/custom_files
+    environment:
+      - tile_urls=
+      # Serve prebuilt tiles — never build or download on the server.
+      - use_tiles_ignore_pbf=True
+      - force_rebuild=False
+      - force_rebuild_elevation=False
+      - build_elevation=False
+      - build_admins=False
+      - build_time_zones=False
+      - server_threads=2
+      - serve_tiles=True
+    restart: unless-stopped
+    # Valhalla memory-maps its tiles; give it enough headroom for
+    # elevation + tile cache but leave the CAX11's 4 GB total budget
+    # intact (2 GB MOTIS + 1 GB Valhalla + rest for nginx / app /
+    # system).
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

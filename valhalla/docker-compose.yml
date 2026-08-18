@@ -1,0 +1,61 @@
+# Local Valhalla pedestrian router (Switzerland + neighbours).
+#
+# Valhalla is the sole walking authority (see
+# .claude/concepts/valhalla-pedestrian-router.md). It powers:
+#   - direct walk-only itineraries surfaced to the user
+#   - pre/post-transit walk legs shown in transit results
+#   - the stop-to-stop footpath matrix that seeds MOTIS's RAPTOR
+#     transfer table (see scripts/build_valhalla_footpath_matrix.py
+#     and the MOTIS fork's `footpath_matrix` config key)
+#
+# The gis-ops docker-valhalla image bootstraps everything:
+#   - on first `up` with only the PBF present it downloads SRTM
+#     1-arcsec elevation for the PBF's bbox, builds admin polygons,
+#     then builds the routing tiles under ./data/valhalla_tiles/
+#   - on later `up` calls with unchanged inputs it skips straight to
+#     serving on :8002
+#
+# The same MOTIS-preprocessed PBF is reused so alp / forest roads
+# route for pedestrians on both engines (see
+# scripts/preprocess_osm_for_motis.py).
+services:
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: kora-valhalla
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./data:/custom_files
+      # Mount the pipeline-bboxed multi-country PBF with foot=yes
+      # patches (see scripts/preprocess_osm_for_motis.py --valhalla).
+      # CH-only would leave every cross-border GTFS stop (Basel Bad,
+      # Konstanz, Domodossola, Weil am Rhein, …) unroutable, poisoning
+      # the transfer matrix. The wider bbox covers CH + DE + FR + IT +
+      # AT + LI within the pipeline's routing area.
+      - ../data/osm/ch_pfaedle_walkable.osm.pbf:/custom_files/ch_pfaedle_walkable.osm.pbf:ro
+    environment:
+      # tile_urls is empty because we build from the PBF locally,
+      # not download prebuilt tiles from some CDN.
+      - tile_urls=
+      # After the first successful build, ignore the PBF and reuse
+      # the tiles under valhalla_tiles/ so restarts are instant.
+      - use_tiles_ignore_pbf=True
+      # Only rebuild tiles / elevation on explicit request — a
+      # rebuild is a 10-30 min operation.
+      - force_rebuild=False
+      - force_rebuild_elevation=False
+      # SRTM 1-arcsec elevation for slope-aware pedestrian cost.
+      - build_elevation=True
+      - build_admins=True
+      # Admin polygons are enough; time zones are not needed for
+      # pedestrian routing (Valhalla only uses them for transit).
+      - build_time_zones=False
+      # 8 threads on the local Mac; override to match core count on
+      # bigger machines (e.g. `server_threads=16` for the 24-core box
+      # used for one-off matrix precompute). Also bump MATRIX_WORKERS
+      # env when invoking the Python builder so both sides scale
+      # together.
+      - server_threads=8
+      # After build, serve on :8002.
+      - serve_tiles=True
+    restart: unless-stopped

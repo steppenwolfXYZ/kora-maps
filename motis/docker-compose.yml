@@ -1,10 +1,22 @@
 # Local MOTIS routing backend (Switzerland).
 #
-# Prerequisite (once, then rerun whenever data/gtfs_routed/ is regenerated):
+# Runs the Kora fork of MOTIS (see motis/fork/) — the only source change
+# swaps the OSR-based transfer-table generator for a Valhalla-precomputed
+# matrix loader. Build the image locally once:
+#   docker build -t koramaps/motis:footpath-matrix -f fork/Dockerfile fork
+#
+# Prerequisites (once, then rerun whenever data/gtfs_routed/ is regenerated):
 #   python3 scripts/preprocess_gtfs_for_motis.py
 #   → builds data/gtfs_motis/ with a platform-snapped stops.txt +
 #     hardlinks of every other GTFS file from data/gtfs_routed/.
 #     See transit-routing.md § Backend.
+#
+# Then, before importing MOTIS, rebuild the Valhalla footpath matrix:
+#   cd valhalla && docker compose up -d valhalla   # if not running yet
+#   python3 scripts/build_valhalla_footpath_matrix.py
+#   → writes motis/data/valhalla_footpath_matrix.csv, which the fork's
+#     compute_footpaths.cc loads at import time (see
+#     .claude/concepts/valhalla-pedestrian-router.md).
 #
 # One-time import:
 #   docker compose --profile import up motis-import
@@ -15,7 +27,7 @@
 # Nigiri and OSR indexes are memory-mapped from ./data on the host.
 services:
   motis:
-    image: ghcr.io/motis-project/motis:latest
+    image: koramaps/motis:footpath-matrix
     container_name: kora-motis
     ports:
       - "8080:8080"
@@ -24,17 +36,29 @@ services:
       - ../data/gtfs_motis:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
+    environment:
+      # Selects Valhalla as the footpath source (see
+      # .claude/concepts/valhalla-pedestrian-router.md, "MOTIS config
+      # key that selects Valhalla as the footpath source"). The fork's
+      # compute_footpaths.cc reads this at import time and aborts if
+      # the file is missing — no silent fallback to the OSR walker.
+      # Serve-time containers do not read the env var (import already
+      # baked the transfer table into tt_ext.bin), but setting it
+      # keeps dev/prod config identical.
+      KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
     working_dir: /data
     command: ["/motis", "server"]
     restart: unless-stopped
 
   motis-import:
-    image: ghcr.io/motis-project/motis:latest
+    image: koramaps/motis:footpath-matrix
     profiles: ["import"]
     volumes:
       - ./config.yml:/data/config.yml:ro
       - ../data/gtfs_motis:/data/gtfs:ro
       - ../data/osm/switzerland-motis.osm.pbf:/data/osm.pbf:ro
       - ./data:/data/data
+    environment:
+      KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
     working_dir: /data
     command: ["/motis", "import"]

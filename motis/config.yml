@@ -29,6 +29,16 @@ street_routing: true
 
 geocoding: false
 
+# osr_footpath enables MOTIS's per-profile transfer-table generator
+# task (src/import.cc:505). The upstream task computes footpaths via
+# OSR; the Kora fork short-circuits it to load a precomputed Valhalla
+# matrix instead (motis/fork/src/compute_footpaths.cc). The flag must
+# be on for the fork's code path to fire at all — without it the
+# transfer table falls back to nigiri's built-in geometric/transfers-
+# .txt generator, which is what the concept moved away from.
+# See .claude/concepts/valhalla-pedestrian-router.md.
+osr_footpath: true
+
 # Raise walking hard caps. Defaults are 60 min pre/post transit and
 # 6 h direct — both clipped short here. Lift to 8 h so remote clicks
 # can walk in and out of the transit graph on the real OSM network

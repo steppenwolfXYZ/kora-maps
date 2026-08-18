@@ -1,5 +1,6 @@
 import { PUBLIC_MOTIS_URL } from '$env/static/public';
 
+import { rewriteWithValhalla } from './rewriteWalks';
 import type { Endpoint, Itinerary, PlanResponse, TimeMode } from './types';
 
 // MOTIS base URL — local dev points at the local MOTIS instance
@@ -114,5 +115,10 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`MOTIS ${res.status}: ${await res.text().catch(() => res.statusText)}`);
 	const json = (await res.json()) as PlanResponse;
-	return stripStationWalksInResponse(json, args.from, args.to);
+	// Trim spurious station-endpoint walks first (MOTIS quirk, unrelated
+	// to Valhalla), then swap in Valhalla durations + geometries for
+	// every remaining WALK leg. All walk timings the user sees originate
+	// from Valhalla — see .claude/concepts/valhalla-pedestrian-router.md.
+	const stripped = stripStationWalksInResponse(json, args.from, args.to);
+	return rewriteWithValhalla(stripped, args.mode, signal);
 }

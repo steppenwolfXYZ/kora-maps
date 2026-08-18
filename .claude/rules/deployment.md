@@ -1,10 +1,11 @@
 # Deployment
 
-Three deliberately separate deploy channels:
+Four deliberately separate deploy channels:
 
 1. **App** (SvelteKit build) — automatic, GitHub Actions on every push to `main`.
 2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
-3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports.
+3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
+4. **Valhalla pedestrian router** — manual, `scripts/deploy_valhalla.sh`, run only when the tile set should be (re)published. Tile + elevation build runs locally; the server only serves prebuilt tiles.
 
 The split exists because map assets are large generated artifacts (~470 MB, gitignored) while the app is small committed code. It also maps cleanly onto the future setup where a dedicated pipeline server runs nightly rebuilds and pushes assets itself — the GitHub Actions side never changes.
 
@@ -18,8 +19,9 @@ The split exists because map assets are large generated artifacts (~470 MB, giti
   - `build-environment/` — staging dir the workflow rsyncs into; removed after each finalize.
   - `map-assets/` — map data, written only by `deploy_map_assets.sh`.
   - `motis/` — routing backend (config.yml + docker-compose.prod.yml + data/ with the prebuilt indexes), written only by `deploy_motis.sh`.
+  - `valhalla/` — pedestrian router (docker-compose.prod.yml + data/ with the prebuilt Valhalla tiles + elevation + admins), written only by `deploy_valhalla.sh`.
 - **Process manager:** pm2, app name `koramaps`, defined in `ecosystem.config.cjs` (repo root, deployed with the artifact). It runs `build/index.js` (adapter-node) with `node --env-file=.env` — requires node ≥ 20.6 on the server. All runtime config (`PORT=3012`) lives in `.env`, which the workflow writes from the `ENV_VARS` repo secret. No ORIGIN var: the planned login system is JSON/REST, which bypasses SvelteKit's form-action CSRF path.
-- **nginx:** site file `/etc/nginx/sites-available/koramaps.app`. `location /map-assets/` is an alias to the map-assets dir — nginx serves pmtiles directly (range requests, 1 h cache header); the node app never sees those requests. `location /` proxies to `localhost:3012`. TLS via certbot (`--nginx -d koramaps.app -d www.koramaps.app`); the port-80 server block is required (https redirect + ACME renewals) — do not "clean it up".
+- **nginx:** site file `/etc/nginx/sites-available/koramaps.app`. `location /map-assets/` is an alias to the map-assets dir — nginx serves pmtiles directly (range requests, 1 h cache header); the node app never sees those requests. `location /` proxies to `localhost:3012`. `location /valhalla/` proxies to `http://127.0.0.1:8002/` (trailing slash strips the prefix, so Valhalla sees its native `/route`, `/sources_to_targets`, …). TLS via certbot (`--nginx -d koramaps.app -d www.koramaps.app`); the port-80 server block is required (https redirect + ACME renewals) — do not "clean it up".
 
 ## App deploy (`.github/workflows/deploy.yml`)
 
@@ -35,11 +37,21 @@ Run it before the first app deploy on a fresh server — without assets the app 
 
 ## MOTIS deploy (`scripts/deploy_motis.sh`)
 
-Ships `motis/data/` (the prebuilt nigiri/OSR/shapes indexes, ~2.6 GB, imported locally), `motis/config.yml`, and `motis/docker-compose.prod.yml` → `motis/` on the server over the `koramaps` SSH alias, then restarts the container. The prod compose is serve-only: no `motis-import` service, no GTFS/OSM bind mounts (the server never imports — the Mac's aarch64 indexes run on the arm64 image; `/motis server` ignores the import-only config paths at serve time, verified locally), loopback-bound port (`127.0.0.1:8080`), `mem_limit: 2g` (CAX11 has 4 GB total), capped json-file logs (10 MB × 3). The script stops the container before rsync because MOTIS memory-maps its index files — replacing them under a running server can fault mid-query. `--delete` on `data/`; `--dry-run` passes through to rsync and skips the stop/start.
+Ships `motis/data/` (the prebuilt nigiri/OSR/shapes indexes, ~2.6 GB, imported locally), `motis/config.yml`, `motis/docker-compose.prod.yml`, **and the locally-built Kora fork image** → `motis/` on the server over the `koramaps` SSH alias, then restarts the container. The image transfer uses `docker save | ssh docker load` (no registry) — repeat deploys skip the transfer when layers are unchanged. The prod compose is serve-only: no `motis-import` service, no GTFS/OSM bind mounts (the server never imports — the Mac's aarch64 indexes run on the arm64 image; `/motis server` ignores the import-only config paths at serve time, verified locally), loopback-bound port (`127.0.0.1:8080`), `mem_limit: 2g` (CAX11 has 4 GB total), capped json-file logs (10 MB × 3). The script stops the container before rsync because MOTIS memory-maps its index files — replacing them under a running server can fault mid-query. `--delete` on `data/`; `--dry-run` passes through to rsync and skips the stop/start.
+
+The MOTIS binary is the Kora fork (`motis/fork/`, image tag `koramaps/motis:footpath-matrix`) — one file replaced, `src/compute_footpaths.cc`, so the import-time transfer table loads a precomputed Valhalla matrix instead of running MOTIS's OSR walker (see `valhalla-pedestrian-router.md`). Build the image locally once: `docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork`. The env var `KORA_FOOTPATH_MATRIX_PATH` (set in the compose files) points the fork at `/data/data/valhalla_footpath_matrix.csv`. If the file is missing the fork aborts import — no silent fallback to the OSR walker.
 
 The client reaches MOTIS same-origin at `/routing/` (env var `PUBLIC_MOTIS_URL`, `$env/static/public`, baked at build time: `http://localhost:8080` in `.env`, `/routing` in `.env.production` / the `ENV_VARS` secret). nginx proxies `location /routing/` → `http://127.0.0.1:8080/` (trailing slash strips the prefix, so MOTIS sees its native `/api/v1/…`); `/api/` stays free for a future koramaps API and is already partially used by the app's own geocode endpoints. Docker (not pm2) supervises the container (`restart: unless-stopped` + enabled `docker.service`).
 
-One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), `docker pull ghcr.io/motis-project/motis:latest` (multi-arch; arm64 manifest on the CAX11), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Re-import cycle (all local): `python3 scripts/preprocess_gtfs_for_motis.py` → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh`.
+One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Re-import cycle (all local): `python3 scripts/preprocess_gtfs_for_motis.py` → **`python3 scripts/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh`.
+
+## Valhalla deploy (`scripts/deploy_valhalla.sh`)
+
+Ships `valhalla/data/` (Valhalla tiles + SRTM elevation + admin polygons, ~500-800 MB depending on the OSM extract), `valhalla/docker-compose.prod.yml` → `valhalla/` on the server, then restarts the container. Prod compose is serve-only (`use_tiles_ignore_pbf=True`, no PBF mounted, no elevation download), loopback-bound (`127.0.0.1:8002`), `mem_limit: 1g`, capped json-file logs. The script stops the container before rsync because Valhalla memory-maps its tiles.
+
+The client reaches Valhalla same-origin at `/valhalla/` (env var `PUBLIC_VALHALLA_URL`, `$env/static/public`, baked at build time: `http://localhost:8002` in `.env`, `/valhalla` in `.env.production` / the `ENV_VARS` secret). nginx proxies `location /valhalla/` → `http://127.0.0.1:8002/`. The map's routing panel calls Valhalla directly for every WALK leg's duration + geometry (`src/lib/routing/valhalla.ts` + `rewriteWalks.ts`) — see the client architecture summary in `valhalla-pedestrian-router.md`.
+
+One-time server prep: create `/var/www/koramaps.app/valhalla/` (owned by `ga_koramaps`), add the nginx location, keep 8002 closed in the cloud firewall, confirm ~1 GB free disk. Local tile build (one-off, ~20-40 min): `cd valhalla && docker compose up -d valhalla` — the gis-ops image downloads SRTM elevation, builds admins, then routing tiles. First-time bring-up order: Valhalla tiles → matrix build → MOTIS import → deploy both.
 
 ## SSR constraints (deployment-driven)
 
@@ -59,5 +71,6 @@ If a new icon is used anywhere in the app (any `<span class="material-symbols-ou
 
 - First-line diagnostics: `ssh koramaps`, then `pm2 list`, `pm2 logs koramaps`.
 - MOTIS diagnostics: `docker logs kora-motis --tail 50`, `docker stats kora-motis --no-stream`. External smoke test: `curl 'https://koramaps.app/routing/api/v1/plan?fromPlace=47.378,8.540&toPlace=47.424,8.508&arriveBy=false&numItineraries=1&directModes=WALK'` should return JSON.
+- Valhalla diagnostics: `docker logs kora-valhalla --tail 50`, `docker stats kora-valhalla --no-stream`. External smoke test: `curl -X POST 'https://koramaps.app/valhalla/route' -H 'Content-Type: application/json' -d '{"costing":"pedestrian","locations":[{"lat":47.378,"lon":8.540},{"lat":47.380,"lon":8.542}]}'` should return a JSON trip with a `legs[0].shape` polyline.
 - After a first-ever pm2 start: `pm2 save` so the app survives server reboots.
 - Cert renewal is automatic (certbot timer). Never run bare `certbot --nginx` (interactive all-domains checklist) or `certbot delete` on this shared server; always scope with explicit `-d`.

@@ -5,9 +5,15 @@
 # Verified locally: /motis server starts and serves with only config.yml +
 # data/ mounted — the import-only paths in config.yml are ignored at
 # serve time, so no trimmed config.prod.yml is needed.
+#
+# Runs the Kora fork of MOTIS. The image tag must match what
+# scripts/deploy_motis.sh pushes — build locally with:
+#   docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
+#   docker save koramaps/motis:footpath-matrix | ssh koramaps 'docker load'
+# (see .claude/rules/deployment.md § MOTIS deploy).
 services:
   motis:
-    image: ghcr.io/motis-project/motis:latest
+    image: koramaps/motis:footpath-matrix
     container_name: kora-motis
     ports:
       # Loopback only — nginx is the sole client (location /routing/).
@@ -15,12 +21,19 @@ services:
     volumes:
       - ./config.yml:/data/config.yml:ro
       - ./data:/data/data
+    environment:
+      # Serve-time containers do not read this — the transfer table is
+      # already baked into tt_ext.bin by import. Kept for parity with
+      # docker-compose.yml so a manual `docker compose run motis-import`
+      # on the server (should we ever do that) would work.
+      KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
     working_dir: /data
     command: ["/motis", "server"]
     restart: unless-stopped
     # RAM budget on the shared CAX11 (4 GB total): 2 GB for MOTIS, the rest
-    # for nginx + the SvelteKit app + system. MOTIS memory-maps its indexes,
-    # so pressure mostly evicts clean page cache rather than OOM-killing.
+    # for nginx + the SvelteKit app + Valhalla + system. MOTIS memory-maps
+    # its indexes, so pressure mostly evicts clean page cache rather than
+    # OOM-killing.
     mem_limit: 2g
     # Cap container logs (json-file driver) — unbounded logs would slowly
     # eat the CAX11's disk.
