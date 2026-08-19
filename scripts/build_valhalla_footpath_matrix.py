@@ -97,6 +97,13 @@ COSTING_JSON = {
             "walking_speed": WALK_SPEED_KMH,
             "use_hills": 1.0,
             "use_lit": 0.0,
+            # Valhalla marks every OSM `service=driveway` way as
+            # destination-only and defaults to a 600 s entry penalty plus
+            # a 5x cost factor — tuned for cars. Swiss footway shortcuts
+            # routinely run through driveways, so neutralize both (kept
+            # in sync with COSTING_OPTIONS in src/lib/routing/valhalla.ts).
+            "destination_only_penalty": 0.0,
+            "driveway_factor": 1.0,
         },
     },
 }

@@ -35,6 +35,14 @@ const COSTING_OPTIONS = {
 			walking_speed: WALKING_SPEED_KMH,
 			use_hills: 1.0,
 			use_lit: 0.0,
+			// Valhalla marks every OSM `service=driveway` way as
+			// destination-only and defaults to a 600 s entry penalty plus a
+			// 5× cost factor — tuned for cars, where cutting through a
+			// driveway is wrong. Swiss footway shortcuts routinely run
+			// through driveways, so neutralize both (kept in sync with
+			// COSTING_JSON in scripts/build_valhalla_footpath_matrix.py).
+			destination_only_penalty: 0.0,
+			driveway_factor: 1.0,
 		},
 	},
 } as const;
