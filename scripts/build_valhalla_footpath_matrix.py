@@ -34,6 +34,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +45,7 @@ STOPS_TXT = ROOT / "data" / "gtfs_motis" / "stops.txt"
 OUT_CSV = ROOT / "motis" / "data" / "valhalla_footpath_matrix.csv"
 CHECKPOINT = ROOT / "motis" / "data" / "valhalla_footpath_matrix.checkpoint"
 UNROUTABLE_CSV = ROOT / "motis" / "data" / "valhalla_unroutable_stops.csv"
+FAILED_PAIRS_CSV = ROOT / "motis" / "data" / "valhalla_failed_pairs.csv"
 
 # Straight-line search radius for candidate targets. Any pair further
 # apart than this in metres is not queried at all. Must exceed the
@@ -69,6 +71,15 @@ WALK_SPEED_KMH = 5.1
 # ~1-2 h one-off build.
 BATCH_SOURCES = 50
 BATCH_TARGETS = 50
+
+# Smallest block bisection will try to rescue when Valhalla refuses a
+# request. Below this it skips the block instead of splitting further —
+# see _matrix_call_resilient for why isolating single pairs is not worth
+# the sequential round trips. Trades stall time against discarded pairs:
+# on a 50x50 chunk with scattered failures, 1 costs ~999 calls and loses
+# 3% of cells, 16 costs ~463 and loses 31%, 64 costs ~191 and loses the
+# lot (every block ends up holding a bad pair).
+BISECT_FLOOR_PAIRS = 16
 
 # Concurrent Valhalla requests. Each Python worker owns one in-flight
 # matrix call; Valhalla's own `server_threads` (see valhalla/docker-
@@ -241,6 +252,245 @@ def _matrix_call(
     return []
 
 
+_failed_pairs: list[tuple[str, str, str]] = []
+_failed_lock = threading.Lock()
+_bisect_notified = False
+
+
+def _record_failed(rows: list[tuple[str, str, str]]) -> None:
+    """Append skipped pairs to FAILED_PAIRS_CSV immediately.
+
+    Written as they happen, not at the end: the checkpoint marks a
+    source complete as soon as its batch lands, so a run killed later
+    would otherwise leave those pairs both absent from the matrix and
+    unrecorded — invisible data loss that `--repair` could never find.
+    """
+    if not rows:
+        return
+    with _failed_lock:
+        _failed_pairs.extend(rows)
+        new = not FAILED_PAIRS_CSV.exists()
+        FAILED_PAIRS_CSV.parent.mkdir(parents=True, exist_ok=True)
+        with open(FAILED_PAIRS_CSV, "a", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["from_stop_id", "to_stop_id", "error"])
+            w.writerows(rows)
+
+
+def _shape(
+    matrix: list[list[dict | None]],
+    n_rows: int,
+    n_cols: int,
+) -> list[list[dict | None]]:
+    """Force `matrix` to exactly n_rows x n_cols, padding with None.
+
+    Bisection concatenates sub-matrices, so a short row or a missing row
+    from Valhalla would silently shift every later column onto the wrong
+    target. Padding keeps the index-to-stop mapping honest.
+    """
+    out: list[list[dict | None]] = []
+    for r in range(n_rows):
+        row = list(matrix[r]) if r < len(matrix) else []
+        row = row[:n_cols] + [None] * max(0, n_cols - len(row))
+        out.append(row)
+    return out
+
+
+def _matrix_call_resilient(
+    sources: list[tuple[float, float]],
+    targets: list[tuple[float, float]],
+    src_labels: list[str],
+    tgt_labels: list[str],
+) -> list[list[dict | None]]:
+    """`_matrix_call` that isolates and skips pairs Valhalla refuses.
+
+    Valhalla occasionally fails a whole matrix request over a single bad
+    pair — error 499 ("Could not find candidate edge used for label") is
+    an internal thor failure, not a limit being exceeded, and it kills a
+    request that is 99.99% computable. Treating that as fatal throws away
+    the entire run.
+
+    On failure the request is halved along its longer axis and each half
+    retried, recursively, until either a half succeeds or the block is
+    down to BISECT_FLOOR_PAIRS. A still-failing block at the floor is
+    retried once (some Valhalla errors are races in its threaded matrix
+    code) and then skipped wholesale, every pair in it recorded in
+    FAILED_PAIRS_CSV, so the run continues.
+
+    The floor is what keeps this bounded. Drilling to single pairs costs
+    ~2N calls for an N-pair chunk — a fully poisoned 50x50 chunk is
+    ~7,500 sequential calls, and since the recursion runs inside one
+    pool worker (the other workers idle), that stalls a batch for the
+    better part of an hour. The floor caps the same chunk at ~770 calls.
+    The price is discarding up to BISECT_FLOOR_PAIRS computable pairs
+    alongside the bad ones; they are logged, and this only ever applies
+    to blocks Valhalla has already refused twice.
+
+    Parallelising the two halves would remove the stall outright and
+    allow a much lower floor, but recursive submission into the batch's
+    own thread pool deadlocks, so it needs a separate executor. Not done.
+
+    Bisection also rescues requests that trip a service limit, since the
+    halves are geographically narrower than the whole.
+    """
+    global _bisect_notified
+    n_pairs = len(sources) * len(targets)
+    try:
+        return _shape(_matrix_call(sources, targets), len(sources), len(targets))
+    except RuntimeError as exc:
+        # Bisection is sequential inside one pool worker, so it stalls
+        # the batch's progress line. Say so once, or it reads as a hang.
+        if not _bisect_notified:
+            with _failed_lock:
+                if not _bisect_notified:
+                    _bisect_notified = True
+                    print(
+                        f"  note: Valhalla refused a matrix request "
+                        f"({exc}) — bisecting to isolate; progress pauses "
+                        f"until the batch completes.",
+                        flush=True,
+                    )
+        if n_pairs <= BISECT_FLOOR_PAIRS:
+            try:
+                return _shape(
+                    _matrix_call(sources, targets), len(sources), len(targets)
+                )
+            except RuntimeError as exc2:
+                _record_failed(
+                    [
+                        (s_label, t_label, str(exc2))
+                        for s_label in src_labels
+                        for t_label in tgt_labels
+                    ]
+                )
+                return [[None] * len(targets) for _ in sources]
+
+        if len(sources) >= len(targets):
+            mid = len(sources) // 2
+            top = _matrix_call_resilient(
+                sources[:mid], targets, src_labels[:mid], tgt_labels
+            )
+            bottom = _matrix_call_resilient(
+                sources[mid:], targets, src_labels[mid:], tgt_labels
+            )
+            return top + bottom
+
+        mid = len(targets) // 2
+        left = _matrix_call_resilient(
+            sources, targets[:mid], src_labels, tgt_labels[:mid]
+        )
+        right = _matrix_call_resilient(
+            sources, targets[mid:], src_labels, tgt_labels[mid:]
+        )
+        return [lrow + rrow for lrow, rrow in zip(left, right)]
+
+
+def _repair(stops: list[tuple[str, float, float, str]]) -> None:
+    """Recover pairs the main run skipped, and rewrite the skip list.
+
+    The main run trades data for time: BISECT_FLOOR_PAIRS stops the
+    bisection early, so a block that fails gets discarded whole, taking
+    computable pairs down with the bad ones. This pass re-runs exactly
+    those pairs with the floor at 1, so only pairs Valhalla genuinely
+    refuses stay out of the matrix.
+
+    Cheap because it only revisits recorded failures, and it parallelises
+    across sources rather than bisecting one chunk in a single thread —
+    the reason the floor had to exist during the main run.
+    """
+    global BISECT_FLOOR_PAIRS
+
+    if not FAILED_PAIRS_CSV.exists():
+        print("No failed-pairs file — nothing to repair.")
+        return
+
+    with open(FAILED_PAIRS_CSV, encoding="utf-8", newline="") as f:
+        skipped = [(r["from_stop_id"], r["to_stop_id"]) for r in csv.DictReader(f)]
+    if not skipped:
+        print("Failed-pairs file is empty — nothing to repair.")
+        return
+
+    coords = {sid: (lat, lon) for sid, lat, lon, _name in stops}
+    by_source: dict[str, list[str]] = {}
+    for from_sid, to_sid in skipped:
+        if from_sid in coords and to_sid in coords:
+            by_source.setdefault(from_sid, []).append(to_sid)
+
+    print(
+        f"Repairing {len(skipped):,} skipped pair(s) across "
+        f"{len(by_source):,} source stop(s)."
+    )
+
+    # Full isolation this time — cost is bounded by the skip list, not
+    # by the whole matrix.
+    BISECT_FLOOR_PAIRS = 1
+    _failed_pairs.clear()
+
+    recovered = 0
+    still_bad: list[tuple[str, str, str]] = []
+    lock = threading.Lock()
+
+    def repair_source(from_sid: str, to_sids: list[str]) -> list[list[str | int]]:
+        rows: list[list[str | int]] = []
+        src = [coords[from_sid]]
+        for start in range(0, len(to_sids), BATCH_TARGETS):
+            chunk = to_sids[start : start + BATCH_TARGETS]
+            matrix = _matrix_call_resilient(
+                src, [coords[t] for t in chunk], [from_sid], chunk
+            )
+            for col_idx, cell in enumerate(matrix[0]):
+                if cell is None:
+                    continue
+                secs = cell.get("time")
+                if secs is None or secs > MAX_FOOTPATH_SEC:
+                    continue
+                if chunk[col_idx] == from_sid:
+                    continue
+                rows.append([from_sid, chunk[col_idx], int(round(secs))])
+        return rows
+
+    with open(OUT_CSV, "a", encoding="utf-8", newline="") as out_f:
+        writer = csv.writer(out_f)
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=MATRIX_WORKERS)
+        try:
+            futures = {
+                pool.submit(repair_source, sid, tgts): sid
+                for sid, tgts in by_source.items()
+            }
+            done_n = 0
+            for fut in concurrent.futures.as_completed(futures):
+                rows = fut.result()
+                with lock:
+                    writer.writerows(rows)
+                    recovered += len(rows)
+                    done_n += 1
+                    if done_n % 100 == 0:
+                        out_f.flush()
+                        print(
+                            f"  repaired {done_n:,}/{len(futures):,} sources  "
+                            f"recovered {recovered:,} pairs",
+                            flush=True,
+                        )
+        finally:
+            pool.shutdown(wait=True)
+
+    # _matrix_call_resilient appended this run's genuine failures to the
+    # same file; rewrite it so it holds only those, not the wide blocks
+    # the main run skipped.
+    still_bad = list(_failed_pairs)
+    with open(FAILED_PAIRS_CSV, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["from_stop_id", "to_stop_id", "error"])
+        w.writerows(still_bad)
+
+    print(
+        f"Repair done: recovered {recovered:,} pairs; "
+        f"{len(still_bad):,} pair(s) remain genuinely unroutable "
+        f"(see {FAILED_PAIRS_CSV})."
+    )
+
+
 def _prescan_routable(
     stops: list[tuple[str, float, float, str]],
     batch: int = 100,
@@ -320,6 +570,14 @@ def main() -> None:
              "stops diagnostic CSV, then exit. Useful for auditing which "
              "stops the OSM extract does not cover.",
     )
+    ap.add_argument(
+        "--repair",
+        action="store_true",
+        help="Re-run only the pairs listed in valhalla_failed_pairs.csv "
+             "with full isolation, appending whatever is recoverable to "
+             "the matrix. Run after a completed build to undo the "
+             "block-level skipping BISECT_FLOOR_PAIRS causes.",
+    )
     args = ap.parse_args()
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +616,10 @@ def main() -> None:
         print("prescan-only mode — skipping matrix build.")
         return
 
+    if args.repair:
+        _repair(stops)
+        return
+
     done = _load_checkpoint()
     if done:
         print(f"Resuming: {len(done):,} source stops already complete.")
@@ -370,6 +632,10 @@ def main() -> None:
 
     n_pairs = 0
     n_sources_done = len(done)
+    # Rate is measured over this run only. Counting resumed sources
+    # against this run's clock reports a nonsense rate on startup
+    # (15,800 sources "done" in 3 seconds) and an ETA to match.
+    n_sources_this_run = 0
     t0 = time.monotonic()
 
     print(f"Using {MATRIX_WORKERS} concurrent Valhalla workers.")
@@ -397,18 +663,27 @@ def main() -> None:
             # threads process them in parallel, chunk order preserved
             # via list index so we know which tgt_indices each result
             # maps to.
+            src_labels = [sid for _i, sid in batch_pending]
+
             chunk_specs = []
             for t_start in range(0, len(candidates), BATCH_TARGETS):
                 tgt_indices = candidates[t_start : t_start + BATCH_TARGETS]
                 tgt_coords = [(stops[i][1], stops[i][2]) for i in tgt_indices]
-                chunk_specs.append((tgt_indices, tgt_coords))
+                tgt_labels = [stops[i][0] for i in tgt_indices]
+                chunk_specs.append((tgt_indices, tgt_coords, tgt_labels))
 
             futures = [
-                pool.submit(_matrix_call, src_coords, tgt_coords)
-                for _tgt_indices, tgt_coords in chunk_specs
+                pool.submit(
+                    _matrix_call_resilient,
+                    src_coords,
+                    tgt_coords,
+                    src_labels,
+                    tgt_labels,
+                )
+                for _tgt_indices, tgt_coords, tgt_labels in chunk_specs
             ]
 
-            for (tgt_indices, _tgt_coords), fut in zip(chunk_specs, futures):
+            for (tgt_indices, _tgt_coords, _tgt_labels), fut in zip(chunk_specs, futures):
                 matrix = fut.result()
                 for row_idx, (global_idx, from_sid) in enumerate(batch_pending):
                     if row_idx >= len(matrix):
@@ -433,9 +708,10 @@ def main() -> None:
             for _global_idx, sid in batch_pending:
                 _append_checkpoint(sid)
                 n_sources_done += 1
+                n_sources_this_run += 1
 
             dt = time.monotonic() - t0
-            rate = n_sources_done / dt if dt > 0 else 0
+            rate = n_sources_this_run / dt if dt > 0 else 0
             eta = (len(stops) - n_sources_done) / rate if rate > 0 else float("inf")
             print(
                 f"  sources {n_sources_done:>6,}/{len(stops):,}  "
@@ -449,6 +725,16 @@ def main() -> None:
         out_f.close()
 
     print(f"Wrote {n_pairs:,} footpath pairs to {OUT_CSV}.")
+
+    # Skipped pairs were already appended to FAILED_PAIRS_CSV as they
+    # happened; this is just the closing summary. Run --repair to try to
+    # win them back before shipping the matrix.
+    if _failed_pairs:
+        print(
+            f"{len(_failed_pairs):,} pair(s) skipped — see "
+            f"{FAILED_PAIRS_CSV}. Run with --repair to recover the "
+            f"computable ones."
+        )
 
 
 if __name__ == "__main__":
