@@ -35,3 +35,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # Shared network with the MOTIS fork (query-time WALK routing —
+    # MOTIS resolves this container as `kora-valhalla`). One-time
+    # server prep: docker network create koramaps
+    networks: [koramaps]
+
+networks:
+  koramaps:
+    external: true

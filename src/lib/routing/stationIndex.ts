@@ -8,14 +8,12 @@ export interface StationEntry {
 	/** Merged UIC */
 	u: string;
 	/** [lon, lat] — GTFS-derived station coord. Stable; used for search
-	 *  distance-scoring and map fly-to on selection. */
+	 *  distance-scoring and map fly-to on selection. Routing does NOT
+	 *  send this coord — station endpoints go to MOTIS as stop IDs
+	 *  (`ch_Parent<uic>`, see client.ts formatPlace), so the obsolete
+	 *  `cw` walkable-coord workaround was removed. Older index files may
+	 *  still carry a `cw` key; it is ignored. */
 	c: [number, number];
-	/** [lon, lat] — walkable coord (nearest OSM platform centroid), only
-	 *  present when the pipeline snap found one. Routing endpoints should
-	 *  send `cw ?? c` to MOTIS so the pedestrian router doesn't start on
-	 *  a road with `sidewalk=separate`. See transit-routing.md
-	 *  § Endpoint inputs. */
-	cw?: [number, number];
 	/** Highest-ranked mode */
 	m?: string;
 	/** Stop tier */

@@ -1,7 +1,6 @@
 import { PUBLIC_MOTIS_URL } from '$env/static/public';
 
-import { rewriteWithValhalla } from './rewriteWalks';
-import type { Endpoint, Itinerary, PlanResponse, TimeMode } from './types';
+import type { Endpoint, PlanResponse, TimeMode } from './types';
 
 // MOTIS base URL — local dev points at the local MOTIS instance
 // (motis/docker-compose.yml, http://localhost:8080), production at the
@@ -11,8 +10,16 @@ const MOTIS_BASE = PUBLIC_MOTIS_URL.replace(/\/$/, '');
 
 const NUM_ITINERARIES = 5;
 
+// Station endpoints go to MOTIS as stop IDs ("ch_Parent<uic>"), not
+// coordinates. The forked MOTIS serves WALK offsets for stop-ID
+// endpoints straight from the imported Valhalla footpath matrix — zero
+// Valhalla HTTP calls for that side of the query — and MOTIS still
+// considers walking to nearby stations (the matrix rows include them).
+// Side effect: no spurious first/last WALK leg from the station coord
+// to its own platform, which the old stripStationWalks() workaround
+// existed to trim.
 function formatPlace(ep: Endpoint, resolved: [number, number]): string {
-	if (ep.type === 'station') return `${ep.coord[1]},${ep.coord[0]}`;
+	if (ep.type === 'station') return `ch_Parent${ep.uic}`;
 	if (ep.type === 'point')   return `${ep.coord[1]},${ep.coord[0]}`;
 	return `${resolved[1]},${resolved[0]}`;
 }
@@ -25,8 +32,11 @@ export interface PlanArgs {
 	/** Coords of `current` endpoints, one per side (undefined if not `current`). */
 	currentCoord?: [number, number] | null;
 	/** Walking budget for the walk from FROM to first stop, and last stop
-	 * to TO, in SECONDS. Server hard-caps at 28800 (8 h). Cascade lifts
-	 * this from 7200 (2 h) to 28800 (8 h) on trigger. */
+	 * to TO, in SECONDS. Server hard-caps at 28800 (8 h). Default is
+	 * narrow (1800 = 30 min) because every extra kilometre of walking
+	 * radius costs real Valhalla matrix time per query; the cascade in
+	 * state.svelte.ts escalates to 7200/28800 when the narrow search
+	 * comes up short. */
 	maxPreTransitTime?: number;
 	maxPostTransitTime?: number;
 	/** Time-window size passed to MOTIS in seconds. Defaults to 900 (15 min)
@@ -34,50 +44,6 @@ export interface PlanArgs {
 	 * to 7200 (2 h) once it's advancing `time` forward to accumulate more
 	 * results. */
 	searchWindow?: number;
-}
-
-/** Extract the bare UIC from a MOTIS-prefixed stop or parent id
- * ("ch_Parent8500010" / "ch_8500010:0:5" → "8500010"). */
-function bareUic(id: string | undefined): string | null {
-	if (!id) return null;
-	const m = id.match(/(\d+)/);
-	return m ? m[1] : null;
-}
-
-/** When a From/To endpoint is a station, MOTIS still receives its coord and
- * plans a first/last-mile walk from the coord to the platform — even when
- * the itinerary boards/alights at that exact station. That spurious walk
- * shifts the itinerary's start/end time off the transit schedule. Strip
- * the leading WALK when its arrival stop shares the requested From
- * station's parent UIC, and symmetrically the trailing WALK against To. */
-function stripStationWalks(it: Itinerary, fromUic: string | null, toUic: string | null): Itinerary {
-	let legs = it.legs;
-	if (fromUic && legs.length > 1 && legs[0].mode === 'WALK') {
-		const arrivalUic = bareUic(legs[0].to?.parentId ?? legs[0].to?.stopId);
-		if (arrivalUic === fromUic) legs = legs.slice(1);
-	}
-	if (toUic && legs.length > 1 && legs[legs.length - 1].mode === 'WALK') {
-		const departureUic = bareUic(legs[legs.length - 1].from?.parentId ?? legs[legs.length - 1].from?.stopId);
-		if (departureUic === toUic) legs = legs.slice(0, -1);
-	}
-	if (legs.length === it.legs.length) return it;
-	const startTime = legs[0].startTime;
-	const endTime = legs[legs.length - 1].endTime;
-	const duration = Math.max(0, (Date.parse(endTime) - Date.parse(startTime)) / 1000);
-	let walkTime = 0;
-	for (const l of legs) {
-		if (l.mode !== 'WALK') continue;
-		walkTime += l.duration ?? Math.max(0, (Date.parse(l.endTime) - Date.parse(l.startTime)) / 1000);
-	}
-	return { ...it, legs, startTime, endTime, duration, walkTime };
-}
-
-function stripStationWalksInResponse(res: PlanResponse, from: Endpoint, to: Endpoint): PlanResponse {
-	const fromUic = from.type === 'station' ? from.uic : null;
-	const toUic   = to.type   === 'station' ? to.uic   : null;
-	if (!fromUic && !toUic) return res;
-	const map = (its?: Itinerary[]) => its?.map((it) => stripStationWalks(it, fromUic, toUic));
-	return { ...res, itineraries: map(res.itineraries) ?? [], direct: map(res.direct) };
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -94,8 +60,8 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	params.set('arriveBy', args.mode === 'arrive' ? 'true' : 'false');
 	if (args.time) params.set('time', args.time);
 	params.set('numItineraries', String(NUM_ITINERARIES));
-	params.set('maxPreTransitTime', String(args.maxPreTransitTime ?? 7200));
-	params.set('maxPostTransitTime', String(args.maxPostTransitTime ?? 7200));
+	params.set('maxPreTransitTime', String(args.maxPreTransitTime ?? 1800));
+	params.set('maxPostTransitTime', String(args.maxPostTransitTime ?? 1800));
 	// `maxTravelTime` is TOTAL itinerary duration (transit + all walking)
 	// in MINUTES — a low value here silently drops Bern↔Lötschental-style
 	// trips where the walking legs alone approach 8 h. 24 h leaves room
@@ -114,11 +80,8 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new Error(`MOTIS ${res.status}: ${await res.text().catch(() => res.statusText)}`);
-	const json = (await res.json()) as PlanResponse;
-	// Trim spurious station-endpoint walks first (MOTIS quirk, unrelated
-	// to Valhalla), then swap in Valhalla durations + geometries for
-	// every remaining WALK leg. All walk timings the user sees originate
-	// from Valhalla — see .claude/concepts/valhalla-pedestrian-router.md.
-	const stripped = stripStationWalksInResponse(json, args.from, args.to);
-	return rewriteWithValhalla(stripped, args.mode, signal);
+	// Every walking duration/geometry in the response is already
+	// Valhalla-computed server-side by the MOTIS fork (see
+	// valhalla-pedestrian-router.md) — no client-side rewriting.
+	return (await res.json()) as PlanResponse;
 }

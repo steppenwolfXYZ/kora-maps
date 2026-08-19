@@ -1,0 +1,435 @@
+#include "motis/osr/street_routing.h"
+
+#include "geo/polyline_format.h"
+
+#include "utl/concat.h"
+#include "utl/get_or_create.h"
+
+#include "osr/routing/algorithms.h"
+#include "osr/routing/parameters.h"
+#include "osr/routing/route.h"
+#include "osr/routing/sharing_data.h"
+
+#include "motis/constants.h"
+#include "motis/kora_valhalla.h"
+#include "motis/osr/mode_to_profile.h"
+#include "motis/place.h"
+#include "motis/polyline.h"
+#include "motis/transport_mode_ids.h"
+#include "motis/update_rtt_td_footpaths.h"
+#include "utl/verify.h"
+
+namespace n = nigiri;
+
+namespace motis {
+
+default_output::default_output(osr::ways const& w,
+                               osr::search_profile const profile)
+    : w_{w},
+      profile_{profile},
+      id_{static_cast<std::underlying_type_t<osr::search_profile>>(profile)} {}
+
+default_output::default_output(osr::ways const& w,
+                               nigiri::transport_mode_id_t const id)
+    : w_{w},
+      profile_{id == kOdmTransportModeId || id == kRideSharingTransportModeId
+                   ? osr::search_profile::kCar
+                   : osr::search_profile{static_cast<
+                         std::underlying_type_t<osr::search_profile>>(id)}},
+      id_{id} {
+  utl::verify(id <= kRideSharingTransportModeId, "invalid mode id={}", id);
+}
+
+default_output::~default_output() = default;
+
+api::ModeEnum default_output::get_mode() const {
+  if (id_ == kOdmTransportModeId) {
+    return api::ModeEnum::ODM;
+  }
+  if (id_ == kRideSharingTransportModeId) {
+    return api::ModeEnum::RIDE_SHARING;
+  }
+
+  switch (profile_) {
+    case osr::search_profile::kFoot: [[fallthrough]];
+    case osr::search_profile::kWheelchair: return api::ModeEnum::WALK;
+    case osr::search_profile::kBike: [[fallthrough]];
+    case osr::search_profile::kBikeFast: [[fallthrough]];
+    case osr::search_profile::kBikeElevationLow: [[fallthrough]];
+    case osr::search_profile::kBikeElevationHigh: return api::ModeEnum::BIKE;
+    case osr::search_profile::kCar: return api::ModeEnum::CAR;
+    case osr::search_profile::kHgv: return api::ModeEnum::HGV;
+    case osr::search_profile::kCarParking: [[fallthrough]];
+    case osr::search_profile::kCarParkingWheelchair:
+      return api::ModeEnum::CAR_PARKING;
+    case osr::search_profile::kCarDropOff: [[fallthrough]];
+    case osr::search_profile::kCarDropOffWheelchair:
+      return api::ModeEnum::CAR_DROPOFF;
+    case osr::search_profile::kBikeSharing: [[fallthrough]];
+    case osr::search_profile::kCarSharing: return api::ModeEnum::RENTAL;
+    case osr::search_profile::kBus: return api::ModeEnum::DEBUG_BUS_ROUTE;
+    case osr::search_profile::kRailway:
+      return api::ModeEnum::DEBUG_RAILWAY_ROUTE;
+    case osr::search_profile::kFerry: return api::ModeEnum::DEBUG_FERRY_ROUTE;
+  }
+
+  return api::ModeEnum::OTHER;
+}
+
+osr::search_profile default_output::get_profile() const { return profile_; }
+
+api::Place default_output::get_place(
+    nigiri::lang_t const&,
+    osr::node_idx_t const n,
+    std::optional<std::string> const& tz) const {
+  auto const pos = w_.get_node_pos(n).as_latlng();
+  return api::Place{.lat_ = pos.lat_,
+                    .lon_ = pos.lng_,
+                    .tz_ = tz,
+                    .vertexType_ = api::VertexTypeEnum::NORMAL};
+}
+
+bool default_output::is_time_dependent() const {
+  return profile_ == osr::search_profile::kWheelchair ||
+         profile_ == osr::search_profile::kHgv ||
+         profile_ == osr::search_profile::kCarParkingWheelchair ||
+         profile_ == osr::search_profile::kCarDropOffWheelchair;
+}
+
+transport_mode_t default_output::get_cache_key() const {
+  return static_cast<transport_mode_t>(profile_);
+}
+
+osr::sharing_data const* default_output::get_sharing_data() const {
+  return nullptr;
+}
+
+void default_output::annotate_leg(n::lang_t const&,
+                                  osr::node_idx_t,
+                                  osr::node_idx_t,
+                                  api::Leg&) const {}
+
+std::vector<api::StepInstruction> get_step_instructions(
+    osr::ways const& w,
+    osr::elevation_storage const* elevations,
+    osr::location const& from,
+    osr::location const& to,
+    std::span<osr::path::segment const> segments,
+    unsigned const api_version) {
+  auto steps = std::vector<api::StepInstruction>{};
+  auto pred_lvl = from.lvl_.to_float();
+  for (auto const& s : segments) {
+    if (s.from_ != osr::node_idx_t::invalid() && s.from_ < w.n_nodes() &&
+        w.r_->node_properties_[s.from_].is_elevator()) {
+      steps.push_back(api::StepInstruction{
+          .relativeDirection_ = api::DirectionEnum::ELEVATOR,
+          .fromLevel_ = pred_lvl,
+          .toLevel_ = s.from_level_.to_float()});
+    }
+
+    auto const way_name = s.way_ == osr::way_idx_t::invalid()
+                              ? osr::string_idx_t::invalid()
+                              : w.way_names_[s.way_];
+    auto const props = s.way_ != osr::way_idx_t::invalid()
+                           ? w.r_->way_properties_[s.way_]
+                           : osr::way_properties{};
+    steps.push_back(api::StepInstruction{
+        .relativeDirection_ =
+            s.way_ != osr::way_idx_t::invalid()
+                ? (props.is_elevator() ? api::DirectionEnum::ELEVATOR
+                   : props.is_steps()  ? api::DirectionEnum::STAIRS
+                                       : api::DirectionEnum::CONTINUE)
+                : api::DirectionEnum::CONTINUE,  // TODO entry/exit/u-turn
+        .distance_ = static_cast<double>(s.dist_),
+        .fromLevel_ = s.from_level_.to_float(),
+        .toLevel_ = s.to_level_.to_float(),
+        .osmWay_ = w.get_osm_way(s.way_),
+        .fromOsmNode_ = w.get_osm_node(s.from_),
+        .toOsmNode_ = w.get_osm_node(s.to_),
+        .polyline_ = api_version == 1 ? to_polyline<7>(s.polyline_)
+                                      : to_polyline<6>(s.polyline_),
+        .streetName_ = way_name == osr::string_idx_t::invalid()
+                           ? ""
+                           : std::string{w.strings_[way_name].view()},
+        .exit_ = {},  // TODO
+        .stayOn_ = false,  // TODO
+        .area_ = false,  // TODO
+        .toll_ = props.has_toll(),
+        .accessRestriction_ = w.get_access_restriction(s.way_).and_then(
+            [](std::string_view s) { return std::optional{std::string{s}}; }),
+        .elevationUp_ =
+            elevations ? std::optional{to_idx(s.elevation_.up_)} : std::nullopt,
+        .elevationDown_ = elevations ? std::optional{to_idx(s.elevation_.down_)}
+                                     : std::nullopt});
+  }
+
+  if (!segments.empty()) {
+    auto& last = segments.back();
+    if (last.to_ != osr::node_idx_t::invalid() && last.to_ < w.n_nodes() &&
+        w.r_->node_properties_[last.to_].is_elevator()) {
+      steps.push_back(api::StepInstruction{
+          .relativeDirection_ = api::DirectionEnum::ELEVATOR,
+          .fromLevel_ = pred_lvl,
+          .toLevel_ = to.lvl_.to_float()});
+    }
+  }
+
+  return steps;
+}
+
+api::Itinerary dummy_itinerary(api::Place const& from,
+                               api::Place const& to,
+                               api::ModeEnum const mode,
+                               n::unixtime_t const start_time,
+                               n::unixtime_t const end_time,
+                               unsigned const api_version,
+                               bool const cancelled) {
+  auto itinerary = api::Itinerary{
+      .duration_ = std::chrono::duration_cast<std::chrono::seconds>(end_time -
+                                                                    start_time)
+                       .count(),
+      .startTime_ = start_time,
+      .endTime_ = end_time};
+  auto& leg = itinerary.legs_.emplace_back(api::Leg{
+      .mode_ = mode,
+      .from_ = bwd_compat_lvl_adjust(from, api_version),
+      .to_ = bwd_compat_lvl_adjust(to, api_version),
+      .duration_ = std::chrono::duration_cast<std::chrono::seconds>(end_time -
+                                                                    start_time)
+                       .count(),
+      .startTime_ = start_time,
+      .endTime_ = end_time,
+      .scheduledStartTime_ = start_time,
+      .scheduledEndTime_ = end_time,
+      .cancelled_ = cancelled,
+      .legGeometry_ = empty_polyline()});
+  leg.from_.pickupType_ = std::nullopt;
+  leg.from_.dropoffType_ = std::nullopt;
+  leg.to_.pickupType_ = std::nullopt;
+  leg.to_.dropoffType_ = std::nullopt;
+  leg.from_.departure_ = leg.from_.scheduledDeparture_ = leg.startTime_;
+  leg.to_.arrival_ = leg.to_.scheduledArrival_ = leg.endTime_;
+  if (cancelled) {
+    leg.from_.cancelled_ = true;
+    leg.to_.cancelled_ = true;
+  }
+  return itinerary;
+}
+
+api::Itinerary street_routing(osr::ways const& w,
+                              osr::lookup const& l,
+                              elevators const* e,
+                              osr::elevation_storage const* elevations,
+                              n::lang_t const& lang,
+                              api::Place const& from_place,
+                              api::Place const& to_place,
+                              output const& out,
+                              std::optional<n::unixtime_t> const start_time,
+                              std::optional<n::unixtime_t> const end_time,
+                              double const max_matching_distance,
+                              osr_parameters const& osr_params,
+                              street_routing_cache_t& cache,
+                              osr::bitvec<osr::node_idx_t>& blocked_mem,
+                              unsigned const api_version,
+                              bool const detailed_leg,
+                              std::chrono::seconds const max) {
+  utl::verify(start_time.has_value() || end_time.has_value(),
+              "either start_time or end_time must be set");
+  auto const bound_time =
+      start_time.or_else([&]() { return end_time; }).value();
+  auto const osr_dir = end_time.has_value() && !start_time.has_value()
+                           ? osr::direction::kBackward
+                           : osr::direction::kForward;
+  auto const to_osr_time = [](n::unixtime_t const t) {
+    return osr::routing_time_t{
+        std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch())};
+  };
+  auto const osr_start_time =
+      start_time.has_value() != end_time.has_value()
+          ? std::optional<osr::routing_time_t>{to_osr_time(bound_time)}
+          : std::optional<osr::routing_time_t>{};
+  auto const from = get_location(from_place);
+  auto const to = get_location(to_place);
+
+  if (out.get_profile() == osr::search_profile::kFoot) {
+    // kora fork: Valhalla is the sole walking authority — every WALK
+    // leg's duration, distance, and geometry comes from Valhalla, never
+    // OSR (see valhalla-pedestrian-router.md). This intercept covers
+    // direct walk itineraries (route_direct), pre/post-transit legs and
+    // transfer legs (journey_to_response) alike. When both start and
+    // end time are fixed by the journey, they stay authoritative — they
+    // were derived from Valhalla numbers already (offsets at query
+    // time, the footpath matrix at import time); Valhalla here supplies
+    // the geometry.
+    auto const walk = kora_valhalla::route(from.pos_, to.pos_, max);
+    if (!walk.has_value()) {
+      if (!start_time.has_value() || !end_time.has_value()) {
+        return {};
+      }
+      return dummy_itinerary(from_place, to_place, api::ModeEnum::WALK,
+                             *start_time, *end_time, api_version,
+                             /*cancelled=*/true);
+    }
+
+    auto const deduced_start_time =
+        start_time ? *start_time : *end_time - walk->duration_;
+    auto const deduced_end_time =
+        end_time ? *end_time : *start_time + walk->duration_;
+
+    auto itinerary = api::Itinerary{
+        .duration_ = std::chrono::duration_cast<std::chrono::seconds>(
+                         deduced_end_time - deduced_start_time)
+                         .count(),
+        .startTime_ = deduced_start_time,
+        .endTime_ = deduced_end_time,
+        .transfers_ = 0};
+
+    auto& leg = itinerary.legs_.emplace_back(api::Leg{
+        .mode_ = api::ModeEnum::WALK,
+        .from_ = bwd_compat_lvl_adjust(from_place, api_version),
+        .to_ = bwd_compat_lvl_adjust(to_place, api_version),
+        .duration_ = itinerary.duration_,
+        .startTime_ = deduced_start_time,
+        .endTime_ = deduced_end_time,
+        .distance_ = walk->distance_m_,
+        // steps_ stays empty: Valhalla maneuvers are not mapped to
+        // MOTIS step instructions; the app does not render steps.
+        .legGeometry_ = detailed_leg
+                            ? (api_version == 1 ? to_polyline<7>(walk->shape_)
+                                                : to_polyline<6>(walk->shape_))
+                            : empty_polyline()});
+
+    leg.from_.departure_ = leg.from_.scheduledDeparture_ =
+        leg.scheduledStartTime_ = leg.startTime_;
+    leg.to_.arrival_ = leg.to_.scheduledArrival_ = leg.scheduledEndTime_ =
+        leg.endTime_;
+    leg.from_.pickupType_ = std::nullopt;
+    leg.from_.dropoffType_ = std::nullopt;
+    leg.to_.pickupType_ = std::nullopt;
+    leg.to_.dropoffType_ = std::nullopt;
+
+    return itinerary;
+  }
+
+  auto const s = e ? get_states_at(w, l, *e, bound_time, from.pos_)
+                   : std::optional{std::pair<nodes_t, states_t>{}};
+  auto const cache_key = street_routing_cache_key_t{
+      from, to, out.get_cache_key(),
+      out.is_time_dependent() ? bound_time : n::unixtime_t{n::i32_minutes{0}},
+      out.is_time_dependent() ? osr_dir : osr::direction::kForward};
+  auto const path = utl::get_or_create(cache, cache_key, [&]() {
+    auto const& [e_nodes, e_states] = *s;
+    auto const profile = out.get_profile();
+    return osr::route(
+        to_profile_parameters(profile, osr_params), w, l, profile, from, to,
+        static_cast<osr::cost_t>(max.count()), osr_dir, max_matching_distance,
+        s ? &set_blocked(e_nodes, e_states, blocked_mem) : nullptr,
+        out.get_sharing_data(), elevations, osr::routing_algorithm::kAStarBi,
+        osr_start_time);
+  });
+
+  if (!path.has_value()) {
+    if (!start_time.has_value() || !end_time.has_value()) {
+      return {};
+    }
+    // No street path between the endpoints (e.g. the only wheelchair
+    // connection is an out-of-service elevator) -> emit a cancelled leg so the
+    // broken access/transfer is visible in the journey.
+    return dummy_itinerary(from_place, to_place, out.get_mode(), *start_time,
+                           *end_time, api_version, /*cancelled=*/true);
+  }
+
+  auto const deduced_start_time =
+      start_time ? *start_time
+                 : *end_time - std::chrono::seconds{path->duration_.count()};
+  auto itinerary = api::Itinerary{
+      .duration_ = start_time && end_time
+                       ? std::chrono::duration_cast<std::chrono::seconds>(
+                             *end_time - *start_time)
+                             .count()
+                       : path->duration_.count(),
+      .startTime_ = deduced_start_time,
+      .endTime_ = end_time ? *end_time
+                           : *start_time +
+                                 std::chrono::seconds{path->duration_.count()},
+      .transfers_ = 0};
+
+  auto t =
+      std::chrono::time_point_cast<std::chrono::seconds>(deduced_start_time);
+  auto pred_place = bwd_compat_lvl_adjust(from_place, api_version);
+  auto pred_end_time = t;
+  utl::equal_ranges_linear(
+      path->segments_,
+      [](osr::path::segment const& a, osr::path::segment const& b) {
+        return a.mode_ == b.mode_;
+      },
+      [&](std::vector<osr::path::segment>::const_iterator const& lb,
+          std::vector<osr::path::segment>::const_iterator const& ub) {
+        auto const range = std::span{lb, ub};
+        auto const is_last_leg = ub == end(path->segments_);
+        auto const from_node = range.front().from_;
+        auto const to_node = range.back().to_;
+
+        auto concat = geo::polyline{};
+        auto dist = 0.0;
+        for (auto const& p : range) {
+          utl::concat(concat, p.polyline_);
+          if (p.cost_ != osr::kInfeasible) {
+            t += std::chrono::seconds{p.duration_.count()};
+            dist += p.dist_;
+          }
+        }
+
+        auto& leg = itinerary.legs_.emplace_back(api::Leg{
+            .mode_ = out.get_mode() == api::ModeEnum::ODM
+                         ? api::ModeEnum::ODM
+                         : (out.get_mode() == api::ModeEnum::RIDE_SHARING
+                                ? api::ModeEnum::RIDE_SHARING
+                                : to_mode(lb->mode_)),
+            .from_ = pred_place,
+            .to_ = is_last_leg ? bwd_compat_lvl_adjust(to_place, api_version)
+                               : out.get_place(lang, to_node, pred_place.tz_),
+            .duration_ = std::chrono::duration_cast<std::chrono::seconds>(
+                             t - pred_end_time)
+                             .count(),
+            .startTime_ = pred_end_time,
+            .endTime_ = is_last_leg && end_time ? *end_time : t,
+            .distance_ = dist,
+            .legGeometry_ = detailed_leg
+                                ? (api_version == 1 ? to_polyline<7>(concat)
+                                                    : to_polyline<6>(concat))
+                                : empty_polyline()});
+
+        leg.from_.departure_ = leg.from_.scheduledDeparture_ =
+            leg.scheduledStartTime_ = leg.startTime_;
+        leg.to_.arrival_ = leg.to_.scheduledArrival_ = leg.scheduledEndTime_ =
+            leg.endTime_;
+        leg.from_.pickupType_ = std::nullopt;
+        leg.from_.dropoffType_ = std::nullopt;
+        leg.to_.pickupType_ = std::nullopt;
+        leg.to_.dropoffType_ = std::nullopt;
+
+        if (detailed_leg) {
+          leg.steps_ = get_step_instructions(w, elevations, from, to, range,
+                                             api_version);
+        }
+
+        out.annotate_leg(lang, from_node, to_node, leg);
+
+        pred_place = bwd_compat_lvl_adjust(leg.to_, api_version);
+        pred_end_time = t;
+      });
+
+  if (end_time && !itinerary.legs_.empty()) {
+    auto& last = itinerary.legs_.back();
+    last.to_.arrival_ = last.to_.scheduledArrival_ = last.endTime_ =
+        last.scheduledEndTime_ = *end_time;
+    for (auto& leg : itinerary.legs_) {
+      leg.duration_ = (leg.endTime_.time_ - leg.startTime_.time_).count();
+    }
+  }
+
+  return itinerary;
+}
+
+}  // namespace motis

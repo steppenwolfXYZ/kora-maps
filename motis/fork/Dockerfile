@@ -1,7 +1,15 @@
-# Kora Maps fork of MOTIS: rebuilds the upstream binary with a single
-# file replaced (src/compute_footpaths.cc — reads a Valhalla-precomputed
-# footpath matrix instead of computing footpaths from OSR at import
-# time; see .claude/concepts/valhalla-pedestrian-router.md).
+# Kora Maps fork of MOTIS: Valhalla is the sole walking authority (see
+# .claude/concepts/valhalla-pedestrian-router.md). The fork overlays:
+#   src/compute_footpaths.cc       — import-time transfer table from the
+#                                    precomputed Valhalla matrix CSV
+#   src/kora_valhalla.cc
+#   include/motis/kora_valhalla.h  — query-time Valhalla HTTP client
+#   src/endpoints/routing.cc       — WALK offsets (RAPTOR boarding-stop
+#                                    selection) via Valhalla one-to-many
+#   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
+#                                    transfer) via Valhalla /route
+#   src/server.cc                  — startup probe: no Valhalla, no serve
+# No OSR walking fallback anywhere; OSR remains for non-foot profiles.
 #
 # Build:
 #   docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
@@ -16,17 +24,20 @@
 # Two-stage build pattern for fast fork iterations:
 #   1. Layer A compiles the UNMODIFIED upstream MOTIS (60-90 min once,
 #      Docker caches it — invalidated only when MOTIS_REF changes).
-#   2. COPY fork/src/compute_footpaths.cc, then re-run cmake --build.
-#      Ninja detects only that one .cc changed and rebuilds just it +
-#      the link (~2-5 min per iteration on the fork).
+#   2. COPY the fork's src/ + include/ overlays, re-run cmake --build.
+#      Ninja recompiles only the overlaid files + the link
+#      (~5-10 min per iteration on the fork).
 #
 # Docker Desktop needs ≥6 GB memory allocated or the link step OOMs.
 #
-# Pin MOTIS to a known-good ref by overriding MOTIS_REF. When bumping
-# it, verify the upstream compute_footpaths.cc signature still matches
-# motis/fork/src/compute_footpaths.cc — if the parameter list changed
-# upstream, the fork's function definition must follow.
-ARG MOTIS_REF=master
+# MOTIS_REF is PINNED to the commit the fork's full-file overlays are
+# based on (src/endpoints/routing.cc, src/osr/street_routing.cc,
+# src/server.cc are patched COPIES of upstream files — building against
+# a moved master would silently revert upstream changes in those files).
+# To bump: diff upstream's versions of every overlaid file against the
+# pin, re-apply the kora patches (marked "kora fork:" comments), update
+# this ARG. See README.md for the checklist.
+ARG MOTIS_REF=061857d38a375248ae62b4ce722753368a75e474
 
 FROM ubuntu:24.04 AS build
 ARG MOTIS_REF
@@ -63,21 +74,43 @@ WORKDIR /src
 # (~60-90 min) but only invalidates when MOTIS_REF or the base toolchain
 # changes. The intermediate .o files stay in /src/build/ so the next
 # layer's ninja incremental logic reuses them.
+# -j4: ninja's default (-j nproc) OOM-kills cc1plus — several of the
+# template-heavy TUs (osr route.cc, routing.cc) peak at 2-3 GB each,
+# and 6 in parallel exceed Docker Desktop's memory allowance.
 RUN cmake -G Ninja -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=gcc \
         -DCMAKE_CXX_COMPILER=g++ \
         -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=mold" \
         -DMOTIS_MIMALLOC=ON && \
-    cmake --build build --target motis
+    cmake --build build --target motis -- -j4
 
 # --- Fork overlay (fast per iteration) ---------------------------------
-# Replace the single file, touch its mtime forward so ninja definitely
-# sees it as newer than the cached .o, then re-run the build. Ninja
-# compiles just compute_footpaths.cc and re-links motis (~2-5 min).
-COPY src/compute_footpaths.cc /src/src/compute_footpaths.cc
-RUN touch -c /src/src/compute_footpaths.cc && \
-    cmake --build build --target motis
+# Overlay the fork's files (new ones land next to upstream's; patched
+# ones replace their upstream copies), bump mtimes so ninja definitely
+# sees them as newer than the cached .o files, then re-run the build.
+# The CMake file glob (src/*.cc) picks up new sources automatically;
+# `Re-checking globbed directories` in the log confirms it.
+COPY include/ /src/include/
+COPY src/ /src/src/
+# Touch exactly the overlaid files (a blanket find-touch would mark every
+# upstream source dirty and re-trigger the full 90-min build). ADD NEW
+# OVERLAY FILES HERE when the fork grows.
+# The explicit `cmake -S . -B build` re-configure is REQUIRED: upstream's
+# `file(GLOB_RECURSE motislib-files src/*.cc)` has no CONFIGURE_DEPENDS,
+# so the source list is frozen at configure time — without the re-run,
+# NEW fork files (kora_valhalla.cc) never enter the build and the link
+# fails with undefined kora_valhalla symbols. Cached CMake vars make the
+# re-configure fast (~1-2 min).
+RUN touch -c \
+        /src/include/motis/kora_valhalla.h \
+        /src/src/compute_footpaths.cc \
+        /src/src/kora_valhalla.cc \
+        /src/src/server.cc \
+        /src/src/endpoints/routing.cc \
+        /src/src/osr/street_routing.cc && \
+    cmake -S . -B build && \
+    cmake --build build --target motis -- -j4
 
 # Runtime image — Ubuntu 24.04 arm64 so the glibc-linked binary works.
 # (Upstream MOTIS ships alpine + musl; that requires the musl cross-

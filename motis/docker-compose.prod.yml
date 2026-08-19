@@ -27,9 +27,16 @@ services:
       # docker-compose.yml so a manual `docker compose run motis-import`
       # on the server (should we ever do that) would work.
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # Query-time Valhalla endpoint (WALK offsets + WALK legs). Shared
+      # `koramaps` docker network — one-time server prep:
+      #   docker network create koramaps
+      # The fork's server aborts at startup while Valhalla is down;
+      # `restart: unless-stopped` retries until it is up.
+      KORA_VALHALLA_URL: http://kora-valhalla:8002
     working_dir: /data
     command: ["/motis", "server"]
     restart: unless-stopped
+    networks: [koramaps]
     # RAM budget on the shared CAX11 (4 GB total): 2 GB for MOTIS, the rest
     # for nginx + the SvelteKit app + Valhalla + system. MOTIS memory-maps
     # its indexes, so pressure mostly evicts clean page cache rather than
@@ -42,3 +49,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  koramaps:
+    external: true

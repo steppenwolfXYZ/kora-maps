@@ -41,7 +41,7 @@ Each input accepts three endpoint types, distinguished by a `type` tag on the in
 
 The From/To input dropdown merges three sources: `current` (when applicable), transit-station matches from `stop_search_index.json`, and Photon geocoding results (addresses + POIs) — see `geocoding-search.md` for the geocoding contract, rate-limit + coalescing scheduler, and reverse-geocoding rules.
 
-**Station coord = two fields.** Each `stop_search_index.json` entry carries two coord fields:
+**Station coord = two fields.** *(Superseded by `valhalla-pedestrian-router.md`: station endpoints now go to MOTIS as stop IDs (`ch_Parent<uic>`), not coordinates — the forked MOTIS serves their WALK offsets from the imported Valhalla matrix, and Valhalla has no OSR sidewalk penalty, so the `cw` walkable-coord workaround below is obsolete. Step 07 no longer emits `cw`; the client ignores it; `c` remains for search ranking and fly-to.)* Each `stop_search_index.json` entry carries two coord fields:
 
 - **`c`** — the GTFS-derived station coord. Stable across pipeline runs and stable for anything that needs the station's "official" location — search distance-ranking, map fly-to on selection, and any future consumer that expects the traffic-engineering centroid.
 - **`cw`** — the *walkable* coord: centroid of the nearest OSM `public_transport=platform` way within 150 m of the GTFS coord, computed at step 07. Present only when a platform was found in range; omitted otherwise.
@@ -77,7 +77,7 @@ Every card is assigned at most one quality badge. Thresholds are **absolute**: t
 
   `effective_time = duration · (1 + 0.1 · (walk_malus + transfer_malus))`
 
-  - `transfer_malus = 1 − (1 − 0.3)^transfers` → 0 / 30 / 51 / 66 / 76 / 83 / … % (saturates toward 100% as transfers pile up).
+  - `transfer_malus = 1 − (1 − 0.3)^boardings`, where `boardings` = number of transit legs (walk-only = 0, direct bus = 1, one transfer = 2, …) → 0 / 30 / 51 / 66 / 76 / … % (saturates toward 100% as boardings pile up). Counting boardings rather than transfers prices in schedule-dependence: a walk-only itinerary needs no vehicle at all, so a pure walk rates better than walking nearly as far plus a one-stop hop. The card display still shows transfers (legs − 1).
   - `walk_malus = t² / (t² + 30²)` with `t = walk_minutes` → 10 min ≈ 10%, 20 ≈ 31%, 30 ≈ 50%, 40 ≈ 64%, 1 h ≈ 80%, 2 h ≈ 94% (saturates toward 100%).
   - Both maluses live in [0, 1]; they add, so the comfort factor lives in [1.0, 1.2]. Max 20% inflation on top of duration, regardless of how bad the trip's comfort is.
   - Rationale for the multiplicative shape: expressing comfort in absolute seconds would tie its weight to trip length (2 transfers on a 15-min trip vs a 3 h trip would score identically). A factor scales naturally with duration and needs no clamps.
@@ -134,9 +134,9 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
 - **Score** — a single number combining transfer count and walking time, used only as Case 2's escape hatch (never for sorting):
 
-  `score = TRANSFER_PENALTY_SEC * transfers + walk_cost(walk_seconds)`
+  `score = TRANSFER_PENALTY_SEC * boardings + walk_cost(walk_seconds)`
 
-  - `transfers` = number of transit legs − 1 (same definition as the result card's transfer count); `walk_seconds` = sum of all WALK-leg durations including inter-station transfer walks (same as the card's walking total).
+  - `boardings` = number of transit legs (same definition as the badge comfort factor's `transfer_malus` — walk-only = 0, so a pure walk carries no vehicle penalty at all); `walk_seconds` = sum of all WALK-leg durations including inter-station transfer walks (same as the card's walking total).
   - Walking cost is **soft-capped**: full linear rate `WALK_PER_SEC = 2` for the first `WALK_SOFT_CAP_SEC = 30` min, then a much shallower `WALK_TAIL_PER_SEC = 0.5` beyond. `TRANSFER_PENALTY_SEC = 600`, so 5 min walking still costs about the same as one transfer at the short end. The knee bounds the score inflation from multi-hour hikes — a 30 min vs. 3 h walking difference no longer outweighs every realistic temporal-gap allowance — while keeping small walking differences (10 vs. 15 min) as sensitive as before.
 
 - **Case 1 — overlapping: strict marginality.** When B Pareto-dominates A in time (per the overlapping definition above), A survives only if BOTH conditions hold:
@@ -149,19 +149,17 @@ The two cases exist because they warrant fundamentally different treatment. An o
 - **Case 2 — non-overlapping: gap-scaled comfort tolerance.** When neither option Pareto-dominates the other in time, A is dropped when there exists another non-overlapping B such that:
 
   - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**
-  - A's comfort penalty over B exceeds the gap-scaled allowance: `A.score − B.score > −MARGIN + PENALTY_K · gap^(1/3)`, where `gap = min(|A.start − B.start|, |A.end − B.end|)` in seconds.
+  - A's comfort penalty over B exceeds the gap-scaled allowance: `A.score − B.score > −MARGIN + PENALTY_K · max(gap, GAP_FLOOR)^(1/3)`, where `gap = min(|A.start − B.start|, |A.end − B.end|)` in seconds and `GAP_FLOOR` = 120 s.
 
-  In words: A survives unless it's meaningfully worse in comfort than the allowance at that gap — a negative allowance at zero gap (A must have a comfort edge) rising to a large positive at multi-hour gaps (A can afford substantial comfort penalties for distinct time slots). The cube-root shape rises fast enough that even a 2 min gap already tolerates a fairly steep comfort difference (so a rare fast option can't nuke its neighbours), then saturates gracefully so the 2 h allowance is "dramatic" rather than absurd.
+  In words: A survives unless it's meaningfully worse in comfort than the allowance at that gap — never less than the 2-min allowance (Case 2 removes only clearly worse connections; a similar non-overlapping connection is never removed), rising to a large positive at multi-hour gaps (A can afford substantial comfort penalties for distinct time slots). The cube-root shape rises fast enough that even a 2 min gap already tolerates a fairly steep comfort difference (so a rare fast option can't nuke its neighbours), then saturates gracefully so the 2 h allowance is "dramatic" rather than absurd. The floor exists because the raw curve went negative below ~0.3 s gap, so two identical-time near-ties (e.g. a direct walk vs. a walk + one-stop bus hybrid) each dropped the other, leaving neither.
 
   Across all pairs, this reduces to: for each candidate A, the tightest of the four axis-distances to any neighbor (|Δstart|, |Δend| to prev + next) sets the allowance ceiling — the closer A sits to a good neighbor on any single time axis, the less comfort penalty A is allowed.
 
   Calibration:
 
   - `T_SLACK` (~60 s) keeps near-identical start/end jitter from tipping the comparison.
-  - `MARGIN` = 300 (≈ 2.5 min walking / 0.5 transfers) — at zero gap, allowance = `−MARGIN` so A must be more comfortable than B by more than `MARGIN` to survive.
-  - `PENALTY_K` = 430, giving:
-    - 0 gap → −300 (A must be more comfy by > 300)
-    - 2 min gap → ~1820 (drops only if ≥ ~15 min extra walking / ≥ 3 transfers)
+  - `MARGIN` = 300, `PENALTY_K` = 430, `GAP_FLOOR` = 120 s, giving:
+    - 0 gap up to 2 min → ~1820, the floor (drops only if ≥ ~15 min extra walking / ≥ 3 transfers)
     - 5 min gap → ~2570
     - 10 min gap → ~3230
     - 30 min gap → ~4920
@@ -208,4 +206,4 @@ Routing state is serialised into the URL query string, following the existing `?
 - The `current` endpoint requires a runtime location-permission grant. First-time use triggers the browser prompt; if denied, the option stays selectable and re-prompts on next attempt.
 - Rendering the selected route on the map (polylines, station highlights, walk arcs) is out of scope of this concept — that's `route-display.md`.
 - Production deployment of MOTIS: same-origin nginx proxy at `/routing/` to a docker container on the shared Hetzner CAX11 (2 GB memory cap), serving prebuilt indexes imported on the local Mac and shipped via `scripts/deploy_motis.sh`. See `deployment.md` § MOTIS deploy.
-- MOTIS's OSR pedestrian profile is used as-is; the CH walking-quality patch lives entirely in OSM preprocessing (adding `foot=yes` tags), not in a MOTIS fork. *(Later superseded by `valhalla-pedestrian-router.md`: MOTIS's transfer table is now populated from a Valhalla-precomputed matrix via a single-file fork, and the app rewrites every WALK leg's duration/geometry via Valhalla before showing it. OSR still runs at import time for the street-router indexes MOTIS needs elsewhere; only its walking output is replaced.)*
+- MOTIS's OSR pedestrian profile is used as-is; the CH walking-quality patch lives entirely in OSM preprocessing (adding `foot=yes` tags), not in a MOTIS fork. *(Later superseded by `valhalla-pedestrian-router.md`: the Kora MOTIS fork makes Valhalla the sole walking authority server-side — import-time transfer table from a precomputed Valhalla matrix, query-time WALK offsets (RAPTOR boarding-stop selection) and WALK legs via live Valhalla calls, no OSR walking fallback. The app makes one request to MOTIS and does no walk rewriting. OSR remains in the build for non-foot profiles and platform matching. See `motis/fork/README.md`.)*

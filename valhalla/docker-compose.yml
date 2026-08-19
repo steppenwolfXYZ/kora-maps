@@ -67,3 +67,11 @@ services:
         soft: 65536
         hard: 1048576
     restart: unless-stopped
+    # Shared network with the MOTIS fork (query-time WALK routing —
+    # MOTIS resolves this container as `kora-valhalla`). One-time:
+    #   docker network create koramaps
+    networks: [koramaps]
+
+networks:
+  koramaps:
+    external: true

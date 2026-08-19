@@ -46,9 +46,17 @@ services:
       # baked the transfer table into tt_ext.bin), but setting it
       # keeps dev/prod config identical.
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # Query-time Valhalla endpoint for WALK offsets + WALK legs
+      # (fork's kora_valhalla client). Resolves over the shared
+      # `koramaps` docker network — create it once with:
+      #   docker network create koramaps
+      # The fork's server aborts at startup while Valhalla is down;
+      # `restart: unless-stopped` retries until it is up.
+      KORA_VALHALLA_URL: http://kora-valhalla:8002
     working_dir: /data
     command: ["/motis", "server"]
     restart: unless-stopped
+    networks: [koramaps]
 
   motis-import:
     image: koramaps/motis:footpath-matrix
@@ -62,3 +70,7 @@ services:
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
     working_dir: /data
     command: ["/motis", "import"]
+
+networks:
+  koramaps:
+    external: true
