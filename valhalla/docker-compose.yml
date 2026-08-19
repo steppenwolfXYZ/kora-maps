@@ -55,7 +55,15 @@ services:
       # used for one-off matrix precompute). Also bump MATRIX_WORKERS
       # env when invoking the Python builder so both sides scale
       # together.
-      - server_threads=8
+      - server_threads=16
       # After build, serve on :8002.
       - serve_tiles=True
+    # The image's default soft nofile limit is 1024, which each worker
+    # thread eats into via tile fds + IPC sockets. Above ~16 threads
+    # Valhalla dies at startup with "Too many open files"
+    # (ipc_listener.cpp) and the restart policy turns that into a loop.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 1048576
     restart: unless-stopped

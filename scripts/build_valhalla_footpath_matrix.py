@@ -124,6 +124,70 @@ def _load_stops() -> list[tuple[str, float, float, str]]:
     return stops
 
 
+def _hilbert_d(x: int, y: int, order: int) -> int:
+    """Distance along a Hilbert curve of 2**order cells per axis.
+
+    Standard xy2d walk: at each halving of the square, work out which
+    quadrant (rx, ry) the point sits in, add that quadrant's share of
+    the curve, then rotate the frame so the next level is expressed in
+    the sub-square's own orientation.
+    """
+    d = 0
+    s = 1 << (order - 1)
+    while s > 0:
+        rx = 1 if (x & s) > 0 else 0
+        ry = 1 if (y & s) > 0 else 0
+        d += s * s * ((3 * rx) ^ ry)
+        if ry == 0:
+            if rx == 1:
+                x = s - 1 - x
+                y = s - 1 - y
+            x, y = y, x
+        s >>= 1
+    return d
+
+
+def _sort_spatially(
+    stops: list[tuple[str, float, float, str]],
+) -> list[tuple[str, float, float, str]]:
+    """Order stops along a Hilbert curve so that consecutive stops are
+    geographic neighbours.
+
+    `stops.txt` arrives in feed order, which is effectively random in
+    space — a 50-stop window out of it can span the whole feed area.
+    That matters because a source batch sends Valhalla the union of its
+    sources' candidate targets, and Valhalla validates *every*
+    source-target pair in the request against `max_matrix_distance`
+    (200 km): one wide batch aborts the run with error 154. The wasted
+    work is just as bad — pairs hundreds of km apart get routed only to
+    be discarded by the MAX_FOOTPATH_SEC filter afterwards.
+
+    A Hilbert ordering keeps both axes local (unlike sorting by lat then
+    lon, which leaves batches stretched along a whole latitude band), so
+    a batch's candidate union collapses to the surrounding
+    neighbourhood.
+    """
+    if not stops:
+        return stops
+    lats = [lat for _sid, lat, _lon, _name in stops]
+    lons = [lon for _sid, _lat, lon, _name in stops]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    span_lat = (max_lat - min_lat) or 1.0
+    span_lon = (max_lon - min_lon) or 1.0
+
+    order = 16
+    scale = (1 << order) - 1
+
+    def key(stop: tuple[str, float, float, str]) -> int:
+        _sid, lat, lon, _name = stop
+        x = int((lon - min_lon) / span_lon * scale)
+        y = int((lat - min_lat) / span_lat * scale)
+        return _hilbert_d(x, y, order)
+
+    return sorted(stops, key=key)
+
+
 def _candidates(
     src_lat: float,
     src_lon: float,
@@ -265,6 +329,11 @@ def main() -> None:
 
     stops = _load_stops()
     print(f"Loaded {len(stops):,} platform-level stops from {STOPS_TXT.name}.")
+
+    # Batching is positional, so the input order decides how wide each
+    # source batch reaches. See _sort_spatially for why feed order is
+    # unusable here.
+    stops = _sort_spatially(stops)
 
     # Filter out stops Valhalla cannot snap to a walkable edge. One bad
     # coord (cross-border stop outside the OSM extract, unreachable
