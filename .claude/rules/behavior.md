@@ -77,6 +77,9 @@ Always use the full word "pill-arrow" for the z17+ rendering. Never shorten to "
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
+## Never run npm run build
+The user keeps an always-running `npm run dev` process; `npm run build` kills it. Never run `npm run build` (or `vite build`). For verification use `npx svelte-check`, or a throwaway `npx vite dev` on a non-default port (kill it by port afterwards).
+
 ## Python invocation
 This machine's Python 3 binary is `python3` (Homebrew-managed, currently 3.12). `python` is not on PATH and will fail with `command not found`. Use `python3` for any one-off invocation (parse-checks, ad-hoc scripts, REPL). PEP 604 union syntax (`X | None`), `match/case`, walrus, and other 3.10+ features are available.
 
