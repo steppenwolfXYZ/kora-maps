@@ -1,6 +1,6 @@
 # Building the Valhalla footpath matrix on a remote machine
 
-The [Valhalla footpath matrix](build_valhalla_footpath_matrix.py) is the
+The [Valhalla footpath matrix](../../scripts/build_valhalla_footpath_matrix.py) is the
 one-off input MOTIS's fork loads at import time (see
 `.claude/concepts/valhalla-pedestrian-router.md`). On the Mac it takes
 ~10+ hours; a beefier CPU cuts that to 2-4 h. Everything else (MOTIS
@@ -87,7 +87,9 @@ A `note: Valhalla refused a matrix request … bisecting` line means
 progress has paused while a chunk is split down to isolate what failed.
 Expect up to ~8 min. It is not a hang — see troubleshooting.
 
-Finally, recover whatever the bisection floor discarded:
+Finally, recover whatever the bisection floor discarded (with the
+batch span cap in place, error 154 is gone and the skip list should be
+empty or near-empty — this pass is a backstop for the rare error 499):
 
     MATRIX_WORKERS=20 python3 scripts/build_valhalla_footpath_matrix.py --repair
 
@@ -98,18 +100,13 @@ time-for-data trade-off temporary rather than permanent. On the CH feed
 it recovered 0, because every skipped pair turned out to be a
 cross-batch artifact (see error 154 below) rather than a real footpath.
 
-### Deduplicate before shipping
+### No dedupe needed
 
-Rows are written before the checkpoint is updated, so a run killed
-mid-batch re-does those sources on resume and duplicates their rows.
-After any run that was interrupted:
-
-    awk '!seen[$0]++' motis/data/valhalla_footpath_matrix.csv > matrix.dedup.csv
-    mv matrix.dedup.csv motis/data/valhalla_footpath_matrix.csv
-
-Duplicates are byte-identical (same pair, same duration — 8,675 of
-34.8M on the CH build), so this cannot change a value. Costs ~5 GB of
-RAM for the seen-set.
+Rows are written before the checkpoint is updated, so a killed run
+leaves rows from sources the checkpoint never confirmed. The builder
+prunes those orphan rows itself at startup (one streaming pass over
+the CSV before resuming), so a resumed run produces no duplicates —
+the old `awk`-dedupe step is gone.
 
 Sanity-check the result: no self-pairs, no duration above
 `MAX_FOOTPATH_SEC`, three columns throughout.
@@ -125,7 +122,10 @@ All under `motis/data/`:
   importer uses.
 - **`valhalla_footpath_matrix.checkpoint`** — completed source stop IDs.
   The run resumes from here, so killing it costs only the current batch.
-  Delete both this and the CSV (or pass `--restart`) to force a rebuild.
+  Deleted automatically when the build completes, so a lingering
+  checkpoint always marks an unfinished build — `setup_routing.sh` uses
+  "CSV present, no checkpoint" as its matrix-complete signal. Delete
+  both this and the CSV (or pass `--restart`) to force a rebuild.
 - **`valhalla_unroutable_stops.csv`** — stops with no walkable OSM edge
   nearby, excluded from the matrix. Dominated by stops outside the OSM
   extract's bbox.
@@ -187,18 +187,19 @@ trade-off moot. Parallelising the halves would remove the stall
 entirely, but needs a separate executor — recursing into the batch's
 own pool deadlocks. Not done.
 
-**Error 154, "Path distance exceeds the max distance limit".** The one
-that actually bites, and the cause of nearly every skipped pair on the
-CH feed. Valhalla validates every source-target pair in a request
-against `max_matrix_distance` (200 km). Batches send the *union* of
-their sources' candidate targets, so a stop 11 km from source A travels
-in the same request as source B 200 km away, and the whole request is
-rejected on that widest pair. The Hilbert ordering keeps batches local
-enough that this is rare, but the curve's longest jumps still exceed the
-limit — expect it near the end of a run. Bisection resolves it: the
-halves are geographically narrower, so the real pairs get computed and
-only the cross-batch artifacts are dropped. Confirm that is all you lost
-by checking the skipped pairs' distances.
+**Error 154, "Path distance exceeds the max distance limit".**
+Historically the one that actually bit, and the cause of nearly every
+skipped pair on the CH feed. Valhalla validates every source-target
+pair in a request against `max_matrix_distance` (200 km); batches send
+the *union* of their sources' candidate targets, so a batch spanning
+one of the Hilbert curve's long jumps carried a cross pair wide enough
+to get the whole request rejected. Source batches are now capped at
+`BATCH_MAX_SPAN_M` (50 km bounding-box diagonal) as well as 50 stops —
+a batch splits at the jump instead of spanning it, so the widest
+possible pair stays near 61 km and this error should no longer occur.
+If it ever reappears (say, after raising the cap), bisection still
+handles it: the halves are geographically narrower, so the real pairs
+get computed and only the cross-batch artifacts are dropped.
 
 **Error 499, "Could not find candidate edge used for label".** An
 internal thor failure on a pair, deterministic — resuming hits the same
@@ -215,6 +216,10 @@ batch again. Handled by the same bisection path.
   Valhalla's default `max_matrix_locations` is 2500 = 50×50. Raising
   either would need editing `valhalla.json` to lift that limit + a
   container restart — usually not worth it for a one-off build.
+- **`BATCH_MAX_SPAN_M`** in the Python script (50000 m): cap on a
+  source batch's bounding-box diagonal. Together with `RADIUS_M` it
+  bounds a request's widest source-target pair, which must stay under
+  Valhalla's `max_matrix_distance` (200 km) — see error 154 above.
 - **`RADIUS_M`** in the Python script (11000 m): straight-line radius
   around each source for candidate target selection. Should stay above
   `MAX_FOOTPATH_SEC` × `WALK_SPEED_KMH` / 3.6 (currently ~10.2 km).

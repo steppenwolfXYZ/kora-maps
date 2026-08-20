@@ -21,8 +21,13 @@ Prerequisite:
   * `data/gtfs_motis/` up to date (`scripts/preprocess_gtfs_for_motis.py`).
 
 Idempotent: the run is resumable if killed — completed source stops are
-recorded in a checkpoint file and skipped on restart. Delete the CSV +
-checkpoint to force a full rebuild.
+recorded in a checkpoint file and skipped on restart, and rows from
+sources the checkpoint never confirmed are pruned at startup, so a
+resumed run produces no duplicate rows. The checkpoint is deleted when
+a build completes, so a lingering checkpoint always marks an unfinished
+build ("CSV present, no checkpoint" = complete — the signal
+scripts/setup_routing.sh skips on). Delete the CSV + checkpoint
+(or pass --restart) to force a full rebuild.
 """
 
 from __future__ import annotations
@@ -71,6 +76,18 @@ WALK_SPEED_KMH = 5.1
 # ~1-2 h one-off build.
 BATCH_SOURCES = 50
 BATCH_TARGETS = 50
+
+# Geographic cap on a source batch's spread (bounding-box diagonal).
+# Valhalla validates every source x target pair of a request against
+# its `max_matrix_distance` service limit (200 km for pedestrian), and
+# a batch's widest possible pair is its own spread plus RADIUS_M. The
+# Hilbert ordering keeps consecutive stops close, but the curve's rare
+# long jumps (lake crossings, sparse alpine valleys) used to put two
+# far-apart clusters into one 50-stop window and get the whole request
+# rejected with error 154 — the cause of nearly every skipped pair.
+# 50 km caps the worst pair near 61 km, far under the limit, at the
+# cost of a handful of extra (smaller) requests per run.
+BATCH_MAX_SPAN_M = 50_000.0
 
 # Smallest block bisection will try to rescue when Valhalla refuses a
 # request. Below this it skips the block instead of splitting further —
@@ -206,6 +223,49 @@ def _sort_spatially(
         return _hilbert_d(x, y, order)
 
     return sorted(stops, key=key)
+
+
+def _batch_spatially(stops: list[tuple[str, float, float, str]]) -> list[list[int]]:
+    """Split the Hilbert-ordered stops into source batches of at most
+    BATCH_SOURCES stops and at most BATCH_MAX_SPAN_M geographic spread.
+
+    The stop-count cap alone is not enough — see BATCH_MAX_SPAN_M for
+    why a batch spanning a Hilbert jump gets its whole request refused.
+    Splitting at the jump makes those refusals structurally impossible
+    instead of relying on bisection to clean up after them.
+
+    Spread is measured as the batch bounding box's diagonal — an
+    overestimate of the true widest pair, so it errs on the side of
+    splitting early.
+    """
+    batches: list[list[int]] = []
+    cur: list[int] = []
+    min_lat = max_lat = min_lon = max_lon = 0.0
+    for i, (_sid, lat, lon, _name) in enumerate(stops):
+        if cur:
+            n_min_lat = min(min_lat, lat)
+            n_max_lat = max(max_lat, lat)
+            n_min_lon = min(min_lon, lon)
+            n_max_lon = max(max_lon, lon)
+            too_wide = (
+                _haversine_m(n_min_lat, n_min_lon, n_max_lat, n_max_lon)
+                > BATCH_MAX_SPAN_M
+            )
+            if too_wide or len(cur) >= BATCH_SOURCES:
+                batches.append(cur)
+                cur = []
+        if cur:
+            min_lat = min(min_lat, lat)
+            max_lat = max(max_lat, lat)
+            min_lon = min(min_lon, lon)
+            max_lon = max(max_lon, lon)
+        else:
+            min_lat = max_lat = lat
+            min_lon = max_lon = lon
+        cur.append(i)
+    if cur:
+        batches.append(cur)
+    return batches
 
 
 def _candidates(
@@ -560,6 +620,35 @@ def _load_checkpoint() -> set[str]:
     return set(CHECKPOINT.read_text().splitlines())
 
 
+def _prune_orphan_rows(done: set[str]) -> None:
+    """Drop CSV rows whose source stop is not in the checkpoint.
+
+    Rows are written before their source lands in the checkpoint, so a
+    run killed mid-batch leaves rows the resumed run will write again.
+    Pruning those orphans at startup makes resume duplicate-free — no
+    post-run dedupe pass needed. One streaming pass, atomic replace.
+    Safe for rows appended by --repair: those sources are always
+    checkpointed already (repair runs after a completed build)."""
+    if not OUT_CSV.exists():
+        return
+    tmp = OUT_CSV.with_name(OUT_CSV.name + ".tmp")
+    dropped = 0
+    with open(OUT_CSV, encoding="utf-8", newline="") as src_f, open(
+        tmp, "w", encoding="utf-8", newline=""
+    ) as dst_f:
+        header = src_f.readline()
+        if header:
+            dst_f.write(header)
+        for line in src_f:
+            if line.split(",", 1)[0] in done:
+                dst_f.write(line)
+            else:
+                dropped += 1
+    tmp.replace(OUT_CSV)
+    if dropped:
+        print(f"Pruned {dropped:,} orphan row(s) left by an interrupted batch.")
+
+
 def _append_checkpoint(stop_id: str) -> None:
     with open(CHECKPOINT, "a", encoding="utf-8") as f:
         f.write(stop_id + "\n")
@@ -632,6 +721,7 @@ def main() -> None:
     done = _load_checkpoint()
     if done:
         print(f"Resuming: {len(done):,} source stops already complete.")
+    _prune_orphan_rows(done)
 
     write_header = not OUT_CSV.exists()
     out_f = open(OUT_CSV, "a", encoding="utf-8", newline="")
@@ -651,9 +741,8 @@ def main() -> None:
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=MATRIX_WORKERS)
 
     try:
-        for s_start in range(0, len(stops), BATCH_SOURCES):
-            batch = stops[s_start : s_start + BATCH_SOURCES]
-            batch_pending = [(i, sid) for i, (sid, _, _, _) in enumerate(batch, start=s_start) if sid not in done]
+        for batch_indices in _batch_spatially(stops):
+            batch_pending = [(i, stops[i][0]) for i in batch_indices if stops[i][0] not in done]
             if not batch_pending:
                 continue
 
@@ -734,6 +823,12 @@ def main() -> None:
         out_f.close()
 
     print(f"Wrote {n_pairs:,} footpath pairs to {OUT_CSV}.")
+
+    # A finished build needs no resume state: delete the checkpoint so
+    # "CSV present, no checkpoint" unambiguously means complete. A later
+    # bare run therefore starts a fresh build instead of fast-skipping
+    # every source (use --restart semantics implicitly).
+    CHECKPOINT.unlink(missing_ok=True)
 
     # Skipped pairs were already appended to FAILED_PAIRS_CSV as they
     # happened; this is just the closing summary. Run --repair to try to
