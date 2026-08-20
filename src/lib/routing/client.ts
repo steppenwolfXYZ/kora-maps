@@ -57,6 +57,13 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	const params = new URLSearchParams();
 	params.set('fromPlace', formatPlace(args.from, fromResolved));
 	params.set('toPlace', formatPlace(args.to, toResolved));
+	// fromName/toName: display labels of geocoded point endpoints. MOTIS
+	// ignores unknown params — carried purely so the nginx access log
+	// (and thus the /stats page) sees the human-readable place names.
+	if (args.from.type === 'point' && args.from.displayName)
+		params.set('fromName', args.from.displayName);
+	if (args.to.type === 'point' && args.to.displayName)
+		params.set('toName', args.to.displayName);
 	params.set('arriveBy', args.mode === 'arrive' ? 'true' : 'false');
 	if (args.time) params.set('time', args.time);
 	params.set('numItineraries', String(NUM_ITINERARIES));

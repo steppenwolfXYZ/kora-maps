@@ -39,12 +39,14 @@
 		return best && bestD <= maxM * maxM ? best : null;
 	}
 
-	/** "u:<uic>" | "c:<lat>,<lon>" | "?:<raw>" → display name */
-	function resolveToken(token: string): string {
+	/** "u:<uic>" | "c:<lat>,<lon>" | "?:<raw>" → display name. A label
+	 *  logged with the request (fromName/toName) wins over any guess. */
+	function resolveToken(token: string, loggedName?: string): string {
 		if (token.startsWith('u:')) {
 			const uic = token.slice(2);
 			return stationIndex?.get(uic)?.n ?? `UIC ${uic}`;
 		}
+		if (loggedName) return loggedName;
 		if (token.startsWith('c:')) {
 			const [lat, lon] = token.slice(2).split(',').map(Number);
 			const near = nearestStation(lat, lon, 300);
@@ -127,14 +129,20 @@
 							<th>From</th>
 							<th>To</th>
 							<th class="num">Count</th>
+							<th></th>
 						</tr>
 					</thead>
 					<tbody>
 						{#each stats.topRoutes as r (r.from + '|' + r.to)}
 							<tr>
-								<td>{resolveToken(r.from)}</td>
-								<td>{resolveToken(r.to)}</td>
+								<td>{resolveToken(r.from, r.fromName)}</td>
+								<td>{resolveToken(r.to, r.toName)}</td>
 								<td class="num">{fmt.format(r.count)}</td>
+								<td class="num">
+									{#if r.link}
+										<a class="route-link" href={r.link} target="_blank" rel="noopener">open ↗</a>
+									{/if}
+								</td>
 							</tr>
 						{/each}
 					</tbody>
@@ -254,5 +262,15 @@
 		margin-top: 0.6rem;
 		font-size: 0.8rem;
 		color: #a3988a;
+	}
+	.route-link {
+		font-size: 0.85em;
+		font-weight: 600;
+		color: #740013;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.route-link:hover {
+		text-decoration: underline;
 	}
 </style>

@@ -39,6 +39,14 @@ export interface RoutePair {
 	from: string;
 	to: string;
 	count: number;
+	/** Display labels logged with the request (geocoded point endpoints
+	 *  send fromName/toName along, see client.ts) — first seen wins. */
+	fromName?: string;
+	toName?: string;
+	/** App deep link ("/?from=…&to=…") built from the first logged
+	 *  request of the group — exact coords, not the rounded group key.
+	 *  Absent when a place token has an unknown format. */
+	link?: string;
 }
 
 export interface Stats {
@@ -67,6 +75,15 @@ function placeToken(raw: string): string {
 	return `?:${raw.slice(0, 60)}`;
 }
 
+/** fromPlace/toPlace value → app URL from/to token (url.ts format), or
+ *  null when the format is unknown. Coords pass through unrounded. */
+function placeUrlToken(raw: string): string | null {
+	const station = raw.match(/^ch_Parent(\d+)$/);
+	if (station) return station[1];
+	if (/^-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$/.test(raw)) return raw;
+	return null;
+}
+
 function readLogFiles(logPath: string): string[] {
 	const dir = dirname(logPath);
 	const base = basename(logPath);
@@ -91,7 +108,10 @@ export function buildStats(): Stats {
 	const texts = readLogFiles(logPath);
 
 	const days = new Map<string, { hits: number; plans: number; ips: Set<string>; bots: number }>();
-	const routeCounts = new Map<string, number>();
+	const routeCounts = new Map<
+		string,
+		{ count: number; fromName?: string; toName?: string; link?: string }
+	>();
 	const allIps = new Set<string>();
 	let totalHits = 0;
 	let totalPlans = 0;
@@ -128,7 +148,19 @@ export function buildStats(): Stats {
 				const to = params.get('toPlace');
 				if (!from || !to) continue;
 				const key = `${placeToken(from)}|${placeToken(to)}`;
-				routeCounts.set(key, (routeCounts.get(key) ?? 0) + 1);
+				let r = routeCounts.get(key);
+				if (!r) routeCounts.set(key, (r = { count: 0 }));
+				r.count++;
+				r.fromName ??= params.get('fromName') ?? undefined;
+				r.toName ??= params.get('toName') ?? undefined;
+				if (!r.link) {
+					const fromTok = placeUrlToken(from);
+					const toTok = placeUrlToken(to);
+					if (fromTok && toTok) {
+						const link = new URLSearchParams({ from: fromTok, to: toTok });
+						r.link = `/?${link.toString()}`;
+					}
+				}
 			} catch {
 				// malformed query string — skip
 			}
@@ -136,11 +168,11 @@ export function buildStats(): Stats {
 	}
 
 	const topRoutes: RoutePair[] = [...routeCounts.entries()]
-		.sort((a, b) => b[1] - a[1])
+		.sort((a, b) => b[1].count - a[1].count)
 		.slice(0, 30)
-		.map(([key, count]) => {
+		.map(([key, r]) => {
 			const [from, to] = key.split('|');
-			return { from, to, count };
+			return { from, to, ...r };
 		});
 
 	return {
