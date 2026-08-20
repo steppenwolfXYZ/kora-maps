@@ -11,7 +11,7 @@ import type { Itinerary, Leg, TimeMode } from './types';
 //     comfort than the gap-scaled allowance permits. Score is Case 2's
 //     escape hatch and is never used for sorting.
 
-const TRANSFER_PENALTY_SEC = 600;    // one transfer ≈ 5 min of walking
+const TRANSFER_PENALTY_SEC = 600;    // one boarding ≈ 5 min of walking
 const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
 // Walking cost is soft-capped: small walking differences (0–30 min) stay
 // as sensitive as before, but each further second is worth a quarter as
@@ -24,8 +24,6 @@ const T_SLACK_MS = 60 * 1000;        // start/end jitter that still counts as "s
 const OVERLAP_TIME_MAX_MS = 9 * 60 * 1000;   // both endpoints must be within 9 min
 const OVERLAP_COMFORT_MAX_PCT = 0.20;        // effective-time worseness ≤ 20%
 // Case 2 (non-overlapping) calibration.
-// MARGIN: A must be MORE comfortable than B by more than MARGIN to survive
-// at zero gap — matches the old tier-1 semantics.
 const MARGIN = 300;
 // Cube-root curve for the allowance: rises fast at short gaps so a rare
 // fast option can't nuke its neighbours (2 min gap already needs ≥15 min
@@ -33,6 +31,13 @@ const MARGIN = 300;
 // ≈ 65 min extra walking under the soft cap). Linear couldn't hit both
 // "steep at 2 min" and "sane at 2 h" simultaneously.
 const PENALTY_K = 430;
+// The gap is floored at 2 min: Case 2 removes only clearly worse
+// connections, so the allowance never drops below the 2-min value
+// (~1820 ≈ 15 min extra walking). Without the floor the curve went
+// negative at near-zero gaps, and two identical-time near-ties (e.g. a
+// direct walk vs. a walk + one-stop bus hybrid) mutually dropped each
+// other, leaving neither.
+const GAP_FLOOR_SEC = 120;
 
 export function legDuration(leg: Leg): number {
 	return leg.duration ?? Math.max(0, (Date.parse(leg.endTime) - Date.parse(leg.startTime)) / 1000);
@@ -49,9 +54,18 @@ export function walkSeconds(it: Itinerary): number {
 /** Number of transit legs − 1 (same count the result card shows). */
 export function transferCount(it: Itinerary): number {
 	if (typeof it.transfers === 'number') return it.transfers;
+	return Math.max(0, boardingCount(it) - 1);
+}
+
+/** Number of transit legs — one boarding per vehicle, walk-only = 0.
+ * Unlike transferCount (display-facing), this is what the score and
+ * comfort factor penalise: the first vehicle you must catch costs like
+ * any later transfer, pricing in schedule-dependence so a pure walk
+ * outranks a walk + one-stop hop at similar walking time. */
+export function boardingCount(it: Itinerary): number {
 	let transit = 0;
 	for (const l of it.legs) if (l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR') transit++;
-	return Math.max(0, transit - 1);
+	return transit;
 }
 
 /** Walking cost with a soft cap at 30 min: full linear rate below the
@@ -66,7 +80,7 @@ function walkCost(walkSec: number): number {
 /** Comfort score — lower is better. Only used as the dominance escape
  * hatch, never for sorting. */
 export function itineraryScore(it: Itinerary): number {
-	return TRANSFER_PENALTY_SEC * transferCount(it) + walkCost(walkSeconds(it));
+	return TRANSFER_PENALTY_SEC * boardingCount(it) + walkCost(walkSeconds(it));
 }
 
 interface Entry {
@@ -104,23 +118,23 @@ function droppedByOverlap(a: Entry, b: Entry): boolean {
  * (arrival for leave-at, departure for arrive-by, within T_SLACK) AND A's
  * comfort penalty over B exceeds the gap-scaled allowance.
  *
- * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance. Two options
- * far apart on one axis but near-identical on the other are treated as
- * near-ties: the tight axis limits how much comfort penalty the worse
- * one can afford. `allowed = −MARGIN + PENALTY_K · gap^(1/3)` — at zero
- * gap A must be MORE comfy than B by MARGIN (old tier-1 semantics); the
- * cube-root rises fast so even a 2 min gap already tolerates a fairly
- * steep comfort difference, and saturates gracefully so a 2 h gap sits
- * around a "dramatic" allowance rather than an absurd one. */
+ * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance, floored at
+ * GAP_FLOOR_SEC. Two options far apart on one axis but near-identical on
+ * the other are treated as near-ties: the tight axis limits how much
+ * comfort penalty the worse one can afford. `allowed = −MARGIN +
+ * PENALTY_K · max(gap, floor)^(1/3)` — the cube-root rises fast so even
+ * a small gap only tolerates a fairly steep comfort difference, and
+ * saturates gracefully so a 2 h gap sits around a "dramatic" allowance
+ * rather than an absurd one. */
 function droppedByNonOverlap(a: Entry, b: Entry, mode: TimeMode): boolean {
 	const primaryBeats = mode === 'arrive'
 		? b.start >= a.start - T_SLACK_MS
 		: b.end <= a.end + T_SLACK_MS;
 	if (!primaryBeats) return false;
-	const gapSec = Math.min(
+	const gapSec = Math.max(GAP_FLOOR_SEC, Math.min(
 		Math.abs(a.start - b.start),
 		Math.abs(a.end - b.end)
-	) / 1000;
+	) / 1000);
 	const allowed = -MARGIN + PENALTY_K * Math.cbrt(gapSec);
 	return a.score - b.score > allowed;
 }
@@ -182,8 +196,10 @@ export interface CardState {
 // speed-vs-comfort intuition is baked into the factor's shape — no
 // separate weight to tune, no unbounded ratios.
 const COMFORT_FACTOR_SLOPE = 0.1;
-// Transfer malus: 1 − (1 − r)^n, r = 0.3. First transfer 30%, then
-// gently saturating: 0 / 30 / 51 / 66 / 76 / … % toward 100%.
+// Boarding malus: 1 − (1 − r)^n over transit legs, r = 0.3. Walk-only
+// 0%, first boarding 30%, then gently saturating: 51 / 66 / 76 / … %
+// toward 100%. Counting boardings (not transfers) prices in schedule-
+// dependence — a walk-only trip needs no vehicle at all.
 const TRANSFER_STEP_R = 0.3;
 // Walking malus: t² / (t² + T²) with t in minutes, T = 30.
 // 10 min → 10%, 20 → 31%, 30 → 50%, 40 → 64%, 60 → 80%.
@@ -209,8 +225,8 @@ const STRONG_SLOW_FACTOR   = 2.5;
 // but the absolute difference is trivial.
 const VERY_SLOW_MIN_DIFF_SEC = 10 * 60;
 
-function transferMalus(transfers: number): number {
-	return 1 - Math.pow(1 - TRANSFER_STEP_R, transfers);
+function transferMalus(boardings: number): number {
+	return 1 - Math.pow(1 - TRANSFER_STEP_R, boardings);
 }
 
 function walkMalus(walkSec: number): number {
@@ -221,7 +237,7 @@ function walkMalus(walkSec: number): number {
 /** Multiplier applied to duration to get effective time. In [1.0, 1.2]. */
 export function comfortFactor(it: Itinerary): number {
 	const w = walkMalus(walkSeconds(it));
-	const x = transferMalus(transferCount(it));
+	const x = transferMalus(boardingCount(it));
 	return 1 + COMFORT_FACTOR_SLOPE * (w + x);
 }
 

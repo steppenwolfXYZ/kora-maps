@@ -150,7 +150,7 @@
 		// MOTIS's OSR starting the walker on a `sidewalk=separate` road);
 		// fall back to the GTFS-derived coord when no snap was baked.
 		// See transit-routing.md § Endpoint inputs.
-		commit({ type: 'station', uic: e.u, name: e.n, coord: e.cw ?? e.c, mode: e.m });
+		commit({ type: 'station', uic: e.u, name: e.n, coord: e.c, mode: e.m });
 	}
 
 	function pickGeo(r: GeocodeResult) {

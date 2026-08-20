@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Deploy the Valhalla pedestrian router to the VPS. Ships the prebuilt
+# tiles + elevation + admin polygons under valhalla/data/, the config,
+# and the production compose file, then restarts the container.
+#
+# Deliberately separate from the app deploy and from scripts/deploy_motis.sh,
+# same model as scripts/deploy_map_assets.sh: tile rebuilds happen locally
+# and are only worth publishing when the OSM extract changed.
+#
+# One-time server prep (see .claude/rules/deployment.md § Valhalla):
+#   docker installed and enabled, ga_koramaps in the docker group,
+#   /var/www/koramaps.app/valhalla/ owned by ga_koramaps, nginx
+#   location /valhalla/ proxying to 127.0.0.1:8002.
+#
+# Extra arguments are passed through to rsync, e.g.:
+#   ./scripts/deploy_valhalla.sh --dry-run
+set -euo pipefail
+
+# SSH alias from ~/.ssh/config (ga_koramaps@91.99.74.183 + key).
+REMOTE="koramaps"
+REMOTE_PATH="/var/www/koramaps.app/valhalla/"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+DRY_RUN=0
+for a in "$@"; do
+	{ [ "$a" = "--dry-run" ] || [ "$a" = "-n" ]; } && DRY_RUN=1 || true
+done
+
+# Valhalla memory-maps its tiles; replacing them under a running server
+# can fault mid-query. Stop the container first, sync, restart. Skipped
+# silently on the first-ever deploy (no compose file on the server yet).
+if [ "$DRY_RUN" -eq 0 ]; then
+	ssh "$REMOTE" "[ -f ${REMOTE_PATH}docker-compose.prod.yml ] && cd $REMOTE_PATH && docker compose -f docker-compose.prod.yml down" || true
+fi
+
+# --partial keeps half-transferred files so a dropped connection resumes
+# mid-file on rerun instead of restarting the file from zero. --exclude
+# keeps the local PBF (used only for tile building) off the server.
+rsync -avz --partial --delete --exclude='*.pbf' "$@" \
+	"$ROOT/valhalla/data/" "$REMOTE:${REMOTE_PATH}data/"
+rsync -avz "$@" \
+	"$ROOT/valhalla/docker-compose.prod.yml" \
+	"$REMOTE:$REMOTE_PATH"
+
+if [ "$DRY_RUN" -eq 0 ]; then
+	ssh "$REMOTE" "cd $REMOTE_PATH && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d"
+fi

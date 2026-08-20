@@ -8,6 +8,7 @@ build/
 data/
 static/map-assets/
 motis/data/
+valhalla/data/
 __pycache__/
 *.pyc
 

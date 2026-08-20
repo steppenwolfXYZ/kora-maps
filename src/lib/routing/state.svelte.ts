@@ -4,7 +4,7 @@ import { plan } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import { geolocationErrorMessage, resolveCurrent } from './geolocation';
 import { pruneDominated } from './ranking';
-import type { Endpoint, Itinerary, Leg, TimeMode } from './types';
+import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
 
 // Reactive routing state (Svelte 5 runes). One instance shared across the
@@ -69,7 +69,12 @@ let lastQueryKey: string | null = null;
 let pushedEntry = false;
 
 // Cascade tuning — see performance discussion.
-const NARROW_PRE_POST_SEC = 7200;   // 2 h — narrow default per query
+// Narrow default is 30 min walking: every extra kilometre of walking
+// radius costs real Valhalla matrix time per query in the MOTIS fork
+// (the pre/post offsets are a live one-to-many call for coordinate
+// endpoints). 30 min covers the normal case; the escalation below
+// lifts to the 8 h server cap when the narrow search comes up short.
+const NARROW_PRE_POST_SEC = 1800;   // 30 min — narrow default per query
 const WIDE_PRE_POST_SEC   = 28800;  // 8 h — server hard cap, used on escalation
 const LONG_WAIT_THRESHOLD_SEC = 3600; // 1 h wait triggers pre/post escalation
 const TARGET_RESULT_COUNT = 5;
@@ -98,15 +103,6 @@ let combined: Itinerary[] = [];
 let seenFingerprints = new Set<string>();
 let resolvedCurrentCoord: [number, number] | null = null;
 let resultTarget = TARGET_RESULT_COUNT;
-// MOTIS's arriveBy=true direct-walk polyline is malformed: it traces a loop
-// back to the start coord instead of ending at `to`, so both start/goal
-// icons collapse onto the same point and the drawn walk is a nonsense
-// loop. On arrive-by queries we fire a parallel arriveBy=false plan for
-// the same OD pair, extract its (clean) direct walk leg, and swap that
-// leg's geometry into every arrive-by direct[] we receive. Cached across
-// the whole cascade — direct walks are time-invariant, so one fetch is
-// enough. Reset by resetCascadeState().
-let cleanDirectWalkLeg: Leg | null = null;
 
 function abortInFlight() {
 	if (!pendingAbort) return;
@@ -119,53 +115,6 @@ function resetCascadeState() {
 	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
 	resultTarget = TARGET_RESULT_COUNT;
-	cleanDirectWalkLeg = null;
-}
-
-/** Swap the clean walk geometry into any single-leg WALK itinerary. The
- * itinerary's own start/end times are preserved — MOTIS anchored them to
- * the arrive-by target, and the walk duration is invariant, so only the
- * broken polyline (and its per-step polylines) needs replacing. No-op when
- * `cleanDirectWalkLeg` is unset (leave-at, or the parallel fetch failed). */
-function patchDirectWalks(items: Itinerary[]): Itinerary[] {
-	const clean = cleanDirectWalkLeg;
-	if (!clean) return items;
-	return items.map((it) => {
-		if (it.legs.length !== 1) return it;
-		const leg = it.legs[0];
-		if (leg.mode !== 'WALK') return it;
-		return {
-			...it,
-			legs: [{ ...leg, legGeometry: clean.legGeometry }]
-		};
-	});
-}
-
-/** Parallel arriveBy=false plan whose only purpose is to yield a clean
- * direct-walk polyline (MOTIS's arriveBy=true one loops). Fires alongside
- * stage 1 so its cost overlaps the transit query; result is awaited before
- * anything is added to `combined` so the patch is in effect from the first
- * publish onward. Failure is non-fatal — we fall back to the broken
- * MOTIS polyline. */
-async function fetchCleanDirectWalk(ac: AbortController): Promise<Leg | null> {
-	try {
-		const res = await plan({
-			from: from!, to: to!, mode: 'leave', time: null,
-			currentCoord: resolvedCurrentCoord,
-			maxPreTransitTime: NARROW_PRE_POST_SEC,
-			maxPostTransitTime: NARROW_PRE_POST_SEC,
-			searchWindow: 900
-		}, ac.signal);
-		const walkIt = res.direct?.find(
-			(it) => it.legs.length === 1 && it.legs[0].mode === 'WALK'
-		);
-		return walkIt?.legs[0] ?? null;
-	} catch {
-		// Failure (network, abort, missing walk) is non-fatal — the primary
-		// query and its own abort handling drive the flow; without a clean
-		// walk we just fall back to MOTIS's malformed one.
-		return null;
-	}
 }
 
 function currentSortFn() {
@@ -180,7 +129,16 @@ function currentSortFn() {
 }
 
 function publishResults() {
-	results = pruneDominated(combined, mode).sort(currentSortFn()).slice(0, resultTarget);
+	const pruned = pruneDominated(combined, mode).sort(currentSortFn());
+	// The cap must keep the end nearest the query time: leave-at sorts by
+	// arrival ascending and keeps the head (earliest arrivals after the
+	// departure time); arrive-by sorts by departure ascending and must keep
+	// the tail (latest departures before the arrival time) — slice(0, N)
+	// there would surface the cascade's earlier hops and drop every
+	// connection near the requested arrival.
+	results = mode === 'arrive'
+		? pruned.slice(-resultTarget)
+		: pruned.slice(0, resultTarget);
 }
 
 /** Hop `time` in `dir` (+1 forward, −1 backward) starting at `startEpoch`
@@ -188,6 +146,15 @@ function publishResults() {
  * reaches `resultTarget`, MAX_EMPTY_STREAK consecutive empty hops fire,
  * or MAX_SPAN_MS from `startEpoch` is exceeded. Publishes intermediate
  * results after every fresh batch. Caller owns `pendingAbort`.
+ *
+ * Hops are direction-native point queries, independent of the panel's
+ * mode (which keeps governing pruning / sorting / display): MOTIS
+ * effectively treats arrive-by as "the N connections arriving closest
+ * before `time`" — its arrive-by searchWindow handling is unreliable, so
+ * window-coverage hops would leave gaps. Forward hops therefore always
+ * query leave-at anchored just past the latest known departure; backward
+ * hops always query arrive-by anchored just before the earliest known
+ * arrival. Each hop nets the N connections adjacent to its anchor.
  *
  * `shouldEscalate` (when provided) is called with the current search
  * frontier — the point up to which we've searched, either the last fresh
@@ -202,6 +169,7 @@ async function runHopCascade(
 	ac: AbortController,
 	shouldEscalate?: (frontierMs: number) => boolean
 ): Promise<'done' | 'escalate'> {
+	const hopMode: TimeMode = dir === 1 ? 'leave' : 'arrive';
 	let queryEpoch = startEpoch;
 	let emptyStreak = 0;
 	while (results.length < resultTarget && !ac.signal.aborted) {
@@ -209,7 +177,7 @@ async function runHopCascade(
 		if (emptyStreak >= MAX_EMPTY_STREAK) break;
 		const hopTime = new Date(queryEpoch).toISOString();
 		const res = await plan({
-			from: from!, to: to!, mode, time: hopTime,
+			from: from!, to: to!, mode: hopMode, time: hopTime,
 			currentCoord: resolvedCurrentCoord,
 			maxPreTransitTime: pre,
 			maxPostTransitTime: post,
@@ -217,21 +185,35 @@ async function runHopCascade(
 		}, ac.signal);
 		if (ac.signal.aborted) return 'done';
 		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-		const fresh = items.filter((it) => {
-			const fp = itineraryFingerprint(it);
-			if (seenFingerprints.has(fp)) return false;
-			seenFingerprints.add(fp);
-			return true;
-		});
+		const unseen = items.filter((it) => !seenFingerprints.has(itineraryFingerprint(it)));
+		// Merge only the adjacent-most items still needed to reach the
+		// target: leave-at hops honor the search window and can return the
+		// full 2 h of connections at once — merging all of them would let
+		// the display slice (head for leave-at, tail for arrive-by) jump to
+		// the batch's far end and replace the visible list instead of
+		// extending it. Items beyond the cap stay unmarked in
+		// seenFingerprints, so a later hop re-fetches them as fresh.
+		const needed = Math.max(1, resultTarget - results.length);
+		const fresh = unseen
+			.sort((a, b) => dir === 1
+				? Date.parse(a.startTime) - Date.parse(b.startTime)
+				: Date.parse(b.endTime) - Date.parse(a.endTime))
+			.slice(0, needed);
+		for (const it of fresh) seenFingerprints.add(itineraryFingerprint(it));
 		if (fresh.length === 0) {
 			emptyStreak++;
 			queryEpoch += dir * HOP_MS;
 		} else {
 			emptyStreak = 0;
-			combined = [...combined, ...patchDirectWalks(fresh)];
+			combined = [...combined, ...fresh];
 			publishResults();
-			const starts = fresh.map((i) => Date.parse(i.startTime));
-			queryEpoch = (dir === 1 ? Math.max(...starts) : Math.min(...starts))
+			// Advance along the axis the hop mode bounds: leave-at queries
+			// bound departures (startTime), arrive-by queries bound
+			// arrivals (endTime). Anchoring backward hops on startTime
+			// would skip ~a trip duration of connections per hop.
+			const anchors = fresh.map((i) =>
+				Date.parse(dir === 1 ? i.startTime : i.endTime));
+			queryEpoch = (dir === 1 ? Math.max(...anchors) : Math.min(...anchors))
 				+ dir * 60_000;
 		}
 		if (shouldEscalate?.(queryEpoch)) return 'escalate';
@@ -350,15 +332,14 @@ async function loadMoreInDirection(direction: 'earlier' | 'later') {
 	loadingMore = direction;
 	resultTarget += TARGET_RESULT_COUNT;
 	const dir: 1 | -1 = direction === 'later' ? 1 : -1;
-	const starts = combined.map((i) => Date.parse(i.startTime));
-	const extreme = dir === 1 ? Math.max(...starts) : Math.min(...starts);
-	// leave-at query time is a departure with a forward window, so backward
-	// hops need to shift a full window back to sit before the current range.
-	// arrive-by query time is an arrival with a backward window, so a 60 s
-	// nudge already moves into fresh territory.
+	// Direction-native seed (see runHopCascade): forward hops are leave-at
+	// queries anchored just past the latest known departure, backward hops
+	// are arrive-by queries anchored just before the earliest known arrival.
+	const anchors = combined.map((i) =>
+		Date.parse(dir === 1 ? i.startTime : i.endTime));
 	const startEpoch = dir === 1
-		? extreme + 60_000
-		: (mode === 'leave' ? extreme - HOP_MS : extreme - 60_000);
+		? Math.max(...anchors) + 60_000
+		: Math.min(...anchors) - 60_000;
 	try {
 		await runHopCascade(dir, startEpoch, WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
 	} catch (e) {
@@ -629,22 +610,13 @@ export const routingState = {
 				}, ac.signal);
 			};
 
-			// Kick off the clean-walk fetch in parallel with stage 1 — its
-			// cost overlaps the transit query so it typically resolves for
-			// free by the time we need to publish. Only relevant on arrive-by
-			// (leave-at direct walks are unaffected by the MOTIS bug).
-			const cleanWalkPromise = mode === 'arrive'
-				? fetchCleanDirectWalk(ac)
-				: null;
-
 			// Stage 1 — narrow initial query (fast for typical cases).
+			// (The old parallel "clean direct walk" fetch is gone: the MOTIS
+			// fork returns Valhalla geometry, whose arrive-by direct-walk
+			// polylines are correct — the loop-back bug was OSR's.)
 			let res = await doQuery(time);
 			if (ac.signal.aborted) return;
-			if (cleanWalkPromise) {
-				cleanDirectWalkLeg = await cleanWalkPromise;
-				if (ac.signal.aborted) return;
-			}
-			combined = patchDirectWalks([...(res.itineraries ?? []), ...(res.direct ?? [])]);
+			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 
 			// Stage 2 — escalate walking budget on trigger:
 			//   (a) narrow query returned nothing, or
@@ -661,7 +633,7 @@ export const routingState = {
 				post = WIDE_PRE_POST_SEC;
 				res = await doQuery(time);
 				if (ac.signal.aborted) return;
-				combined = patchDirectWalks([...(res.itineraries ?? []), ...(res.direct ?? [])]);
+				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 			}
 			// Seed the dedupe set now that `combined` has stabilised for stages
 			// 1 + 2 — stage 3 (and any later loadMore) then filters against it.
@@ -676,10 +648,14 @@ export const routingState = {
 			// MAX_SPAN_MS, or MAX_EMPTY_STREAK consecutive empty hops.
 			const initialEpoch = time ? Date.parse(time) : Date.now();
 			const advanceDir: 1 | -1 = mode === 'arrive' ? -1 : 1;
+			// Anchor on the axis the hop mode bounds (see runHopCascade):
+			// departures for forward/leave-at hops, arrivals for
+			// backward/arrive-by hops.
 			const startEpochFrom = (its: Itinerary[]): number => {
 				if (!its.length) return initialEpoch + advanceDir * HOP_MS;
-				const starts = its.map((i) => Date.parse(i.startTime));
-				return (mode === 'arrive' ? Math.min(...starts) : Math.max(...starts))
+				const anchors = its.map((i) =>
+					Date.parse(advanceDir === 1 ? i.startTime : i.endTime));
+				return (advanceDir === 1 ? Math.max(...anchors) : Math.min(...anchors))
 					+ advanceDir * 60_000;
 			};
 			// Only arm the sparse-gap escalation check while the narrow
@@ -704,7 +680,7 @@ export const routingState = {
 				seenFingerprints = new Set();
 				const wideRes = await doQuery(time);
 				if (ac.signal.aborted) return;
-				combined = patchDirectWalks([...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])]);
+				combined = [...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])];
 				seenFingerprints = new Set(combined.map(itineraryFingerprint));
 				publishResults();
 				await runHopCascade(advanceDir, startEpochFrom(combined), pre, post, ac);

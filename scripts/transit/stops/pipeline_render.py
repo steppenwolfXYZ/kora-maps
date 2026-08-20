@@ -48,90 +48,6 @@ from stops.pill_zoom.nn_path import nearest_neighbor_path
 from stops.pill_zoom.place import coordinate_dots_global_stab
 
 
-# ── Stop-search coord snap to OSM platforms ─────────────────────────────────
-# See transit-routing.md § Endpoint inputs. GTFS parent-station centroids
-# often sit on the road centerline (Bern Eigerplatz is the canonical case:
-# GTFS coord lands within 2 m of a `highway=primary, sidewalk=separate`
-# way and a tram track). MOTIS's OSR foot profile then snaps the FROM/TO
-# to the road and applies +45 s per edge for `sidewalk=separate` — the
-# walker never boards at the station's own platforms and MOTIS falls back
-# to boarding at a distant stop. Snapping each search-index coord onto
-# the nearest OSM `public_transport=platform` centroid (via the
-# `platform_ways.geojson` extract from step 03) puts the FROM/TO on a
-# walkable feature that MOTIS's OSR explicitly whitelists.
-
-SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M = 150.0
-
-
-def _snap_search_index_to_platforms(search_seen: dict) -> None:
-    """Compute the nearest OSM platform-way centroid within
-    `SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M` for each `search_seen` entry and
-    stash it as `_cw`. Never mutates `c` (kept as the GTFS-derived coord for
-    any consumer that needs the traffic-engineering centroid). Entries with
-    no platform nearby get no `_cw`. Silently skips (with a warn) when
-    `platform_ways.geojson` isn't available."""
-    if not PLATFORM_WAYS_GEOJSON.exists():
-        print(f"  Platform snap: {PLATFORM_WAYS_GEOJSON.name} missing; "
-              f"no `cw` written")
-        return
-    data = json.loads(PLATFORM_WAYS_GEOJSON.read_text())
-    centroids: list = []
-    for feat in data.get("features", []):
-        geom = feat.get("geometry") or {}
-        if geom.get("type") != "LineString":
-            continue
-        coords = geom.get("coordinates") or []
-        if len(coords) < 2:
-            continue
-        n = len(coords)
-        centroids.append((sum(c[0] for c in coords) / n,
-                          sum(c[1] for c in coords) / n))
-    if not centroids:
-        print(f"  Platform snap: 0 usable platforms in "
-              f"{PLATFORM_WAYS_GEOJSON.name}; no `cw` written")
-        return
-
-    r = SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M
-    cell_y = r / 111320.0
-    # cos(47°) ≈ 0.68 near the CH bbox centre — a fixed factor keeps cells
-    # square-ish enough that a 3×3 neighborhood always covers the radius.
-    cell_x = r / (111320.0 * 0.68)
-    grid: dict = defaultdict(list)
-    for lon, lat in centroids:
-        grid[(int(lon / cell_x), int(lat / cell_y))].append((lon, lat))
-
-    r_sq = r * r
-    n_snapped = n_unchanged = 0
-    max_shift_m = 0.0
-    for entry in search_seen.values():
-        lon, lat = entry["c"]
-        cos_lat = cos(radians(lat))
-        cx0 = int(lon / cell_x)
-        cy0 = int(lat / cell_y)
-        best_d = r_sq
-        best_pt = None
-        for gx in (cx0 - 1, cx0, cx0 + 1):
-            for gy in (cy0 - 1, cy0, cy0 + 1):
-                for plon, plat in grid.get((gx, gy), ()):
-                    dx = (lon - plon) * 111320.0 * cos_lat
-                    dy = (lat - plat) * 111320.0
-                    d = dx * dx + dy * dy
-                    if d < best_d:
-                        best_d = d
-                        best_pt = (plon, plat)
-        if best_pt is None:
-            n_unchanged += 1
-            continue
-        entry["_cw"] = [round(best_pt[0], 6), round(best_pt[1], 6)]
-        n_snapped += 1
-        shift = sqrt(best_d)
-        if shift > max_shift_m:
-            max_shift_m = shift
-    print(f"  Platform snap: {n_snapped}/{n_snapped + n_unchanged} stations "
-          f"got `cw` (max shift {max_shift_m:.0f} m, radius "
-          f"{SEARCH_INDEX_PLATFORM_SNAP_RADIUS_M:.0f} m)")
-
-
 # ── Non-rail pill bake worker ────────────────────────────────────────────────
 # The non-rail 3-band bake is the single biggest chunk of step 07 wall-clock
 # (~240 s over 26k clusters). Each cluster's bake is independent (all shared
@@ -1138,15 +1054,13 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "t": props.get("stop_tier") or "",
             "_rank": rank,
         }
-    _snap_search_index_to_platforms(_search_seen)
+    # `cw` (walkable coord) is no longer emitted: routing sends station
+    # endpoints to MOTIS as stop IDs, and Valhalla does the walking — the
+    # OSR sidewalk-penalty workaround the snap existed for is obsolete
+    # (see valhalla-pedestrian-router.md).
     _search_entries = []
     for e in sorted(_search_seen.values(), key=lambda e: e["n"]):
         row = {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"], "t": e["t"]}
-        # `cw` (walkable coord) is emitted only when the platform snap found
-        # a hit — client falls back to `c` otherwise (transit-routing.md
-        # § Endpoint inputs).
-        if "_cw" in e:
-            row["cw"] = e["_cw"]
         _search_entries.append(row)
     OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
     OUT_STOP_SEARCH_INDEX.write_text(json.dumps(_search_entries, ensure_ascii=False))
