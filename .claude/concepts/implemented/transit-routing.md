@@ -159,12 +159,12 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
   - `T_SLACK` (~60 s) keeps near-identical start/end jitter from tipping the comparison.
   - `MARGIN` = 300, `PENALTY_K` = 430, `GAP_FLOOR` = 120 s, giving:
-    - 0 gap up to 2 min → ~1820, the floor (drops only if ≥ ~15 min extra walking / ≥ 3 transfers)
+    - 0 gap up to 2 min → ~1820, the floor (drops only if ≥ ~15 min extra walking / ≥ 3 boardings)
     - 5 min gap → ~2570
     - 10 min gap → ~3230
     - 30 min gap → ~4920
     - 1 h gap → ~6290
-    - 2 h gap → ~8000 (dramatic — ≥ ~65 min extra walking or ~13 transfers under the soft cap)
+    - 2 h gap → ~8000 (dramatic — ≥ ~65 min extra walking or ~13 boardings under the soft cap)
     - beyond 2 h keeps rising slowly.
 
   Both cases are symmetric — for `arrive-by` the Case 2 "primary axis" swaps from arrival to departure; the Pareto-dominance test in Case 1 and the comfort arithmetic in Case 2 are identical.
@@ -174,13 +174,13 @@ The two cases exist because they warrant fundamentally different treatment. An o
   - overlapping, leaves 6 h earlier + arrives 40 min later (much worse comfort) → dropped by Case 1 (time test: 40 min > 9 min, comfort irrelevant).
   - overlapping, leaves 3 min earlier + arrives 5 min later, 30% worse effective time → dropped by Case 1 (comfort test: 30% > 20%).
   - overlapping, leaves 3 min earlier + arrives 5 min later, 10% worse effective time → survives Case 1 (both marginal).
-  - non-overlapping, both endpoints within slack (essentially the same time), worse comfort → dropped by Case 2 (gap ≈ 0 → allowance = `−MARGIN`).
+  - non-overlapping, both endpoints within slack (essentially the same time), somewhat worse comfort → both survive Case 2 (the floor keeps the allowance at the 2-min value; dropped only if ≥ ~15 min extra walking / ≥ 3 boardings worse).
   - non-overlapping, later start + later arrival by 30 min each, ≈ 30 min extra walking → survives Case 2 (comfort penalty within allowance).
   - non-overlapping, a rare fast option surrounded by regular options with ~15 min more walking → the neighbours all survive Case 2 from ~2 min gap onward. (Neighbours that the rare fast Pareto-dominates in time — i.e. it leaves later AND arrives earlier than a specific neighbour — fall into Case 1 for that pair and are dropped there.)
 
 - **Chronological sort survives.** Ranking is applied only as a filter — surviving itineraries are still sorted earliest-arrival first (leave-at) or latest-departure first (arrive-by), so the "leave now" answer stays at the top.
 
-- **Direct walk-only options** are scored the same way (`transfers = 0`, `walk = duration`). A multi-hour walk is dropped when a transit option time-dominates it or arrives no later with a hugely better score, and surfaces on its own when no transit option does — including walks that arrive sooner than any transit, which always survive.
+- **Direct walk-only options** are scored the same way (`boardings = 0`, `walk = duration`), which gives them an inherent comfort edge: every transit itinerary pays at least one boarding penalty (score + badge malus), so a pure walk rates better than walking nearly as far plus a short hop. A multi-hour walk is still dropped when a transit option time-dominates it or arrives no later with a hugely better score, and surfaces on its own when no transit option does — including walks that arrive sooner than any transit, which always survive.
 
 ### Route color index
 
