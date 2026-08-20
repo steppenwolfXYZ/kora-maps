@@ -22,7 +22,24 @@ Later:
 ./scripts/rebuild_transit.sh --force     # re-download GTFS, atlas, OSM
 ```
 
-Routing backend (MOTIS + Valhalla): `./scripts/setup_routing.sh --help`.
+## Routing backend (MOTIS + Valhalla)
+
+Transit routing runs on a local fork of MOTIS; all walking (transfers,
+first/last mile, direct walks) comes from a Valhalla pedestrian router.
+Once the map pipeline has run at least once:
+
+```bash
+./scripts/setup_routing.sh
+```
+
+Idempotent — every step skips when its output is already in place, so
+re-run it after any pipeline rebuild. The first run is heavy: it
+compiles the MOTIS fork image (~30–60 min), builds Valhalla tiles with
+elevation (~20–40 min), and computes the stop-to-stop footpath matrix
+(hours on a laptop; `.claude/runbooks/matrix_build_remote.md` covers
+running that part on a bigger machine). It then imports MOTIS and
+serves routing on `:8080` (Valhalla on `:8002`). Per-step `--force-*`
+flags: `./scripts/setup_routing.sh --help`.
 
 ## Run the dev server
 
