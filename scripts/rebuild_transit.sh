@@ -13,11 +13,14 @@
 #   7  Build stop dots & pills + regenerate style.json    (~15-20 min; per-section timings printed)
 #   8  Build all tl_*.pmtiles                             (~1 min)
 #
-# Use --start N to start from step N (default 3). Steps before N are skipped
-# and their existing outputs reused. Steps cannot be skipped individually —
-# each step's output is the next step's input. Step 0 (glyph build) runs only
-# when NO --start is passed — it's a fresh-clone bootstrap, not something you
-# want to redo mid-iteration.
+# Use --start N to start from step N. Steps before N are skipped and their
+# existing outputs reused. Steps cannot be skipped individually — each step's
+# output is the next step's input.
+#
+# Passing NO --start is the fresh-clone bootstrap: it runs step 0 (glyph
+# build) and then everything from step 1, so a bare machine gets a complete
+# run. Step 0 is skipped whenever --start is passed — not something you want
+# to redo mid-iteration.
 #
 # Download steps (1 and 2) skip when the target file is already present. Use
 # one of the force flags below to re-download:
@@ -28,7 +31,7 @@
 #   --force-osm     re-download OSM only
 #
 # Examples:
-#   ./scripts/rebuild_transit.sh                  # default: --start 3
+#   ./scripts/rebuild_transit.sh                  # fresh clone: glyphs + steps 1-8
 #   ./scripts/rebuild_transit.sh --start 4        # bbox cut up-to-date, re-route only
 #   ./scripts/rebuild_transit.sh --start 6        # iterate on emission + style + tiles
 #   ./scripts/rebuild_transit.sh --start 1 --force-gtfs   # refresh GTFS, leave atlas+OSM alone
@@ -37,7 +40,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-START=3
+# No --start means a bare-machine bootstrap: glyphs, then every step
+# from the downloads on. Steps 1 and 2 skip when their target files are
+# already present, so this stays cheap on an existing checkout. During
+# normal iteration you always pass --start N explicitly.
+START=1
 START_EXPLICIT=0
 FORCE_GTFS=0
 FORCE_ATLAS=0

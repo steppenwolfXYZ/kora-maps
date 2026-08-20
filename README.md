@@ -4,15 +4,25 @@ A MapLibre GL map focused on walkability and car-free travel (Switzerland).
 
 ## First-time setup
 
+Needs `docker`, `node`/`npm`, `osmium-tool`, `tippecanoe`, and Python 3.10+
+with `PyYAML` and `osmium`.
+
 ```bash
 npm install
 ./scripts/rebuild_transit.sh
 ```
 
-The rebuild script builds the map's glyph PBFs (Saira + Noto Sans Regular for
-the color-dot indicator) as its step 0, then runs the transit pipeline (GTFS
-download → pfaedle routing → stop extraction → pmtiles). Step 0 is skipped on
-any subsequent `--start N` invocation.
+No arguments = full build from scratch. Takes a few hours (~12 GB OSM
+download).
+
+Later:
+
+```bash
+./scripts/rebuild_transit.sh --start 6   # re-enter partway (--help lists steps)
+./scripts/rebuild_transit.sh --force     # re-download GTFS, atlas, OSM
+```
+
+Routing backend (MOTIS + Valhalla): `./scripts/setup_routing.sh --help`.
 
 ## Run the dev server
 
