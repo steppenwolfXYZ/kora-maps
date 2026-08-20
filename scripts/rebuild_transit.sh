@@ -89,6 +89,15 @@ if [[ $START_EXPLICIT -eq 0 ]]; then
   time python3 scripts/build_glyphs.py
 fi
 
+# Steps 3 and 5 run osmium / pfaedle inside the carfree-pfaedle image.
+# It only exists locally (never on a registry), so on a fresh machine
+# `docker run` would die trying to pull it — build it here instead.
+if [[ $START -le 5 ]] && ! docker image inspect carfree-pfaedle:latest >/dev/null 2>&1; then
+  echo ""
+  echo "▶ Building carfree-pfaedle image (missing on this machine)"
+  time ./scripts/transit/pfaedle/build.sh
+fi
+
 if [[ $START -le 1 ]]; then
   echo ""
   echo "▶ Step 1 — Download GTFS"

@@ -60,7 +60,13 @@ NOTO_DOWNLOAD_WORKERS = 8
 
 
 def _fetch(url: str) -> bytes:
-    with urllib.request.urlopen(url) as r:
+    # OpenFreeMap's CDN rejects the default "Python-urllib/x.y" user
+    # agent with 403; any browser-ish UA passes. Sent for all hosts —
+    # GitHub does not care either way.
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (kora-maps glyph build)"}
+    )
+    with urllib.request.urlopen(req) as r:
         return r.read()
 
 
