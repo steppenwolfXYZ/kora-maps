@@ -27,6 +27,7 @@ The routing endpoint inputs currently offer "point on map" as their only non-tra
 ### Reverse geocoding (map click)
 
 - Triggered by clicking on the map while a routing endpoint is being set via pin.
+- The endpoint is set only once the reverse lookup has returned (name attached in the same write), so routing fires a single query. A 2 s timeout falls back to a nameless coordinate endpoint.
 - Queries Photon's reverse endpoint with `lon`/`lat` only. No `lang`.
 - **Never resolves to a POI name**, even if the top result is a POI (`osm_key` = `amenity`, `shop`, `tourism`, `leisure`, …). "Rather no POI than the wrong POI." If the top result is a POI but carries a street, use only its street/city context (drop the POI name). If it carries no street either, treat it like the no-address fallback.
 - **Fallback when no address is available at the click point** (e.g. middle of a lake, forest, rural coordinate with no addressed feature nearby): use the nearest named feature Photon returns, prefixed with a "near" descriptor and **without** any house number. Format: `Nähe [feature name], [city]`. The prefix is in the app's UI language (currently German: "Nähe"); when app-wide i18n is introduced, the prefix follows the UI locale.

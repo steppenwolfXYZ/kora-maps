@@ -11,21 +11,36 @@
 
 	let { anchor, onClose }: Props = $props();
 
-	function pickAsPoint(side: 'from' | 'to') {
+	// Upper bound on the reverse-geocode wait before the endpoint is set
+	// nameless. Keeps a slow / down geocoder from blocking routing.
+	const REVERSE_GEOCODE_TIMEOUT_MS = 2000;
+	// Monotonic pick counter — a later pick supersedes an earlier one whose
+	// geocode is still pending, so two quick right-clicks can't land out of
+	// order.
+	let pickSeq = 0;
+
+	async function pickAsPoint(side: 'from' | 'to') {
 		if (!anchor) return;
 		const coord: [number, number] = [anchor.lng, anchor.lat];
-		const ep: Endpoint = { type: 'point', coord };
-		if (side === 'from') routingState.setFrom(ep);
-		else routingState.setTo(ep);
+		const seq = ++pickSeq;
 		if (!routingState.open) routingState.openPanel();
 		onClose();
-		// Fire reverse geocoding in the background. When (and if) it comes
-		// back, attachPointName no-ops if the user has since changed this
-		// endpoint. Concept: never a POI name — the client's reverseAddress
-		// enforces that. See geocoding-search.md § Reverse geocoding.
-		reverseAddress(coord[0], coord[1]).then((name) => {
-			if (name) routingState.attachPointName(side, coord, name);
-		});
+		// Resolve the address first, then set the endpoint once — setting it
+		// nameless and attaching the name later would rewrite the endpoint
+		// and trigger a second routing query. Concept: never a POI name —
+		// the client's reverseAddress enforces that. See geocoding-search.md
+		// § Reverse geocoding.
+		const ac = new AbortController();
+		const timer = setTimeout(() => ac.abort(), REVERSE_GEOCODE_TIMEOUT_MS);
+		let name: string | null = null;
+		try { name = await reverseAddress(coord[0], coord[1], ac.signal); }
+		finally { clearTimeout(timer); }
+		if (seq !== pickSeq) return;
+		const ep: Endpoint = name
+			? { type: 'point', coord, displayName: name, kind: 'address' }
+			: { type: 'point', coord };
+		if (side === 'from') routingState.setFrom(ep);
+		else routingState.setTo(ep);
 	}
 </script>
 

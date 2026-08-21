@@ -87,12 +87,41 @@ export interface RouteGeoJSONResult {
 	memberUics: string[];
 }
 
-/** Strip MOTIS's dataset prefix ("ch_Parent"…, "ch_"…) to get the bare
- * UIC that the map's stop features carry as `parent_station`. */
-function bareUicFrom(id: string | undefined): string | null {
-	if (!id) return null;
-	const m = id.match(/(\d+)/);
-	return m ? m[1] : null;
+// Reverse lookup parent-stop-id ("Parentch:1:sloid:7000") → merged UIC,
+// built once per station-index Map (sloid-stop-identity.md: since the
+// SLOID migration the UIC is no longer derivable from the ids themselves;
+// the index's `p` field is the bridge).
+const parentIdIndexCache = new WeakMap<Map<string, StationEntry>, Map<string, string>>();
+function uicByParentId(stationIndex: Map<string, StationEntry> | null): Map<string, string> | null {
+	if (!stationIndex) return null;
+	let rev = parentIdIndexCache.get(stationIndex);
+	if (!rev) {
+		rev = new Map();
+		for (const e of stationIndex.values()) if (e.p) rev.set(e.p, e.u);
+		parentIdIndexCache.set(stationIndex, rev);
+	}
+	return rev;
+}
+
+/** Resolve a MOTIS place (parentId preferred, stopId as fallback) to the
+ * station key the map's stop features carry as `parent_station` — the
+ * merged UIC. Handles the dataset prefix ("ch_"), the legacy numeric
+ * scheme ("Parent8507000" / "8507000:0:1", still used for foreign stops)
+ * and the SLOID scheme ("Parentch:1:sloid:7000" / "ch:1:sloid:7000:0:19",
+ * resolved through the station index). Unknown SLOID stations fall back to
+ * their station-SLOID so same-station discs still group together. */
+function stationKeyFrom(
+	p: LegPlace | undefined,
+	byParentId: Map<string, string> | null
+): string | null {
+	const raw = p?.parentId ?? p?.stopId;
+	if (!raw) return null;
+	const id = raw.replace(/^ch_/, '');
+	const legacy = id.match(/^(?:Parent)?(\d+)(?::|$)/);
+	if (legacy) return legacy[1];
+	const sloid = id.match(/^(?:Parent)?(ch:1:sloid:\d+)/);
+	if (sloid) return byParentId?.get(`Parent${sloid[1]}`) ?? sloid[1];
+	return id;
 }
 
 function legCoords(leg: Leg): [number, number][] {
@@ -159,6 +188,7 @@ export function buildRouteGeoJSON(
 	const features: Feature[] = [];
 	let bbox: [number, number, number, number] | null = null;
 	const memberUicSet = new Set<string>();
+	const byParentId = uicByParentId(stationIndex);
 	let featureId = 0;
 
 	// Decode every leg's polyline up-front — the disc / connector logic
@@ -188,7 +218,7 @@ export function buildRouteGeoJSON(
 				const c = placeCoord(st);
 				if (!c) continue;
 				bbox = updateBBox(bbox, c);
-				const uic = bareUicFrom(st.parentId ?? st.stopId ?? undefined);
+				const uic = stationKeyFrom(st, byParentId);
 				if (uic) memberUicSet.add(uic);
 				const tier = uic ? stationIndex?.get(uic)?.t : undefined;
 				// Fallback tier so unknown-tier stops still get a size + Regular
@@ -210,7 +240,7 @@ export function buildRouteGeoJSON(
 			}
 			// Also add the leg's own endpoints as member UICs.
 			for (const p of [leg.from, leg.to]) {
-				const uic = bareUicFrom(p?.parentId ?? p?.stopId ?? undefined);
+				const uic = stationKeyFrom(p, byParentId);
 				if (uic) memberUicSet.add(uic);
 			}
 		}
@@ -241,7 +271,7 @@ export function buildRouteGeoJSON(
 		// bumped by the dedup pass below when a higher-ranked station sits
 		// too close.
 		const discName = a.to?.name || b.from?.name || '';
-		const discUic = bareUicFrom(a.to?.parentId ?? a.to?.stopId ?? b.from?.parentId ?? b.from?.stopId ?? undefined) ?? '';
+		const discUic = stationKeyFrom(a.to, byParentId) ?? stationKeyFrom(b.from, byParentId) ?? '';
 		if (isTransit(a.mode) && isTransit(b.mode)) {
 			if (aEnd) {
 				features.push({
@@ -251,7 +281,7 @@ export function buildRouteGeoJSON(
 					properties: {
 						role: 'disc', kind: 'arrive',
 						stop_name: a.to?.name ?? discName,
-						parent_uic: bareUicFrom(a.to?.parentId ?? a.to?.stopId ?? undefined) ?? discUic,
+						parent_uic: stationKeyFrom(a.to, byParentId) ?? discUic,
 						mode_rank: legRank(a),
 						disc_min_zoom: 0
 					}
@@ -265,7 +295,7 @@ export function buildRouteGeoJSON(
 					properties: {
 						role: 'disc', kind: 'depart',
 						stop_name: '',
-						parent_uic: bareUicFrom(b.from?.parentId ?? b.from?.stopId ?? undefined) ?? discUic,
+						parent_uic: stationKeyFrom(b.from, byParentId) ?? discUic,
 						mode_rank: legRank(b),
 						disc_min_zoom: 0
 					}
@@ -295,7 +325,7 @@ export function buildRouteGeoJSON(
 					properties: {
 						role: 'disc', kind: 'board',
 						stop_name: b.from?.name ?? '',
-						parent_uic: bareUicFrom(b.from?.parentId ?? b.from?.stopId ?? undefined) ?? '',
+						parent_uic: stationKeyFrom(b.from, byParentId) ?? '',
 						mode_rank: legRank(b),
 						disc_min_zoom: 0
 					}
@@ -310,7 +340,7 @@ export function buildRouteGeoJSON(
 					properties: {
 						role: 'disc', kind: 'alight',
 						stop_name: a.to?.name ?? '',
-						parent_uic: bareUicFrom(a.to?.parentId ?? a.to?.stopId ?? undefined) ?? '',
+						parent_uic: stationKeyFrom(a.to, byParentId) ?? '',
 						mode_rank: legRank(a),
 						disc_min_zoom: 0
 					}
@@ -337,7 +367,7 @@ export function buildRouteGeoJSON(
 				properties: {
 					role: 'disc', kind: 'board',
 					stop_name: firstLeg.from?.name ?? '',
-					parent_uic: bareUicFrom(firstLeg.from?.parentId ?? firstLeg.from?.stopId ?? undefined) ?? '',
+					parent_uic: stationKeyFrom(firstLeg.from, byParentId) ?? '',
 					mode_rank: legRank(firstLeg),
 					disc_min_zoom: 0
 				}
@@ -354,7 +384,7 @@ export function buildRouteGeoJSON(
 				properties: {
 					role: 'disc', kind: 'alight',
 					stop_name: lastLeg.to?.name ?? '',
-					parent_uic: bareUicFrom(lastLeg.to?.parentId ?? lastLeg.to?.stopId ?? undefined) ?? '',
+					parent_uic: stationKeyFrom(lastLeg.to, byParentId) ?? '',
 					mode_rank: legRank(lastLeg),
 					disc_min_zoom: 0
 				}

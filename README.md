@@ -41,6 +41,15 @@ running that part on a bigger machine). It then imports MOTIS and
 serves routing on `:8080` (Valhalla on `:8002`). Per-step `--force-*`
 flags: `./scripts/setup_routing.sh --help`.
 
+## Routine data refresh
+
+New timetable → pipeline → routing → deploy, in one go (data only; app
+code ships via git push):
+
+```bash
+./scripts/update_map.sh          # --osm to refresh OpenStreetMap as well
+```
+
 ## Run the dev server
 
 ```bash

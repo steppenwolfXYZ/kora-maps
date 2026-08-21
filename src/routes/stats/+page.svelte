@@ -39,12 +39,25 @@
 		return best && bestD <= maxM * maxM ? best : null;
 	}
 
-	/** "u:<uic>" | "c:<lat>,<lon>" | "?:<raw>" → display name. A label
-	 *  logged with the request (fromName/toName) wins over any guess. */
+	/** Reverse lookup parent stop id ("Parentch:1:sloid:7000") → index
+	 *  entry, for the SLOID-scheme "p:" tokens (sloid-stop-identity.md). */
+	const byParentId = $derived.by(() => {
+		const m = new Map<string, StationEntry>();
+		if (stationIndex) for (const e of stationIndex.values()) if (e.p) m.set(e.p, e);
+		return m;
+	});
+
+	/** "u:<uic>" | "p:<parent stop id>" | "c:<lat>,<lon>" | "?:<raw>" →
+	 *  display name. A label logged with the request (fromName/toName)
+	 *  wins over any guess. */
 	function resolveToken(token: string, loggedName?: string): string {
 		if (token.startsWith('u:')) {
 			const uic = token.slice(2);
 			return stationIndex?.get(uic)?.n ?? `UIC ${uic}`;
+		}
+		if (token.startsWith('p:')) {
+			const pid = token.slice(2);
+			return byParentId.get(pid)?.n ?? pid.replace(/^Parent/, '');
 		}
 		if (loggedName) return loggedName;
 		if (token.startsWith('c:')) {
@@ -53,6 +66,17 @@
 			return near ? `≈ ${near.n}` : `${lat.toFixed(3)}, ${lon.toFixed(3)}`;
 		}
 		return token.slice(2);
+	}
+
+	/** App deep link for a route pair, or null when a "p:" token cannot be
+	 *  resolved to its UIC (index not loaded / unknown station). */
+	function routeLink(r: { linkFrom?: string; linkTo?: string }): string | null {
+		if (!r.linkFrom || !r.linkTo) return null;
+		const tok = (t: string) => (t.startsWith('p:') ? byParentId.get(t.slice(2))?.u ?? null : t);
+		const from = tok(r.linkFrom);
+		const to = tok(r.linkTo);
+		if (!from || !to) return null;
+		return `/?${new URLSearchParams({ from, to }).toString()}`;
 	}
 
 	const fmt = new Intl.NumberFormat('de-CH');
@@ -134,13 +158,14 @@
 					</thead>
 					<tbody>
 						{#each stats.topRoutes as r (r.from + '|' + r.to)}
+							{@const link = routeLink(r)}
 							<tr>
 								<td>{resolveToken(r.from, r.fromName)}</td>
 								<td>{resolveToken(r.to, r.toName)}</td>
 								<td class="num">{fmt.format(r.count)}</td>
 								<td class="num">
-									{#if r.link}
-										<a class="route-link" href={r.link} target="_blank" rel="noopener">open ↗</a>
+									{#if link}
+										<a class="route-link" href={link} target="_blank" rel="noopener">open ↗</a>
 									{/if}
 								</td>
 							</tr>

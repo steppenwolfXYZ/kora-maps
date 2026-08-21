@@ -2,9 +2,13 @@
 // combined-format log plus its rotated siblings (.1, .2.gz, …) and
 // aggregates per-day hits, routing plan requests, unique client IPs,
 // and the most-requested route pairs. Place tokens stay unresolved
-// here ("u:<uic>" / "c:<lat>,<lon>") — the page resolves them to
-// station names client-side via stop_search_index.json, which never
-// exists inside the server build (deployment.md § SSR constraints).
+// here ("u:<uic>" / "p:<parent stop id>" / "c:<lat>,<lon>") — the page
+// resolves them to station names client-side via stop_search_index.json,
+// which never exists inside the server build (deployment.md § SSR
+// constraints). Since the SLOID migration (sloid-stop-identity.md) a
+// station place is "ch_Parentch:1:sloid:<n>"; its UIC is not derivable
+// here, so those stay "p:" tokens and the page maps them via the
+// index's `p` field.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -35,7 +39,7 @@ export interface DayStats {
 }
 
 export interface RoutePair {
-	/** "u:<uic>" | "c:<lat>,<lon>" (3 decimals) | "?:<raw>" */
+	/** "u:<uic>" | "p:<parent stop id>" | "c:<lat>,<lon>" (3 decimals) | "?:<raw>" */
 	from: string;
 	to: string;
 	count: number;
@@ -43,10 +47,13 @@ export interface RoutePair {
 	 *  send fromName/toName along, see client.ts) — first seen wins. */
 	fromName?: string;
 	toName?: string;
-	/** App deep link ("/?from=…&to=…") built from the first logged
-	 *  request of the group — exact coords, not the rounded group key.
-	 *  Absent when a place token has an unknown format. */
-	link?: string;
+	/** App deep-link from/to tokens (url.ts format: bare UIC or
+	 *  "lat,lon") built from the first logged request of the group —
+	 *  exact coords, not the rounded group key. A SLOID station place
+	 *  arrives as "p:<parent stop id>" for the page to resolve to its UIC
+	 *  client-side. Absent when a place token has an unknown format. */
+	linkFrom?: string;
+	linkTo?: string;
 }
 
 export interface Stats {
@@ -70,16 +77,21 @@ function logTimeToDay(t: string): string | null {
 function placeToken(raw: string): string {
 	const station = raw.match(/^ch_Parent(\d+)$/);
 	if (station) return `u:${station[1]}`;
+	const sloid = raw.match(/^ch_(Parentch:1:sloid:\d+)$/);
+	if (sloid) return `p:${sloid[1]}`;
 	const coord = raw.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
 	if (coord) return `c:${(+coord[1]).toFixed(3)},${(+coord[2]).toFixed(3)}`;
 	return `?:${raw.slice(0, 60)}`;
 }
 
 /** fromPlace/toPlace value → app URL from/to token (url.ts format), or
+ *  "p:<parent stop id>" for a SLOID station (resolved client-side), or
  *  null when the format is unknown. Coords pass through unrounded. */
 function placeUrlToken(raw: string): string | null {
 	const station = raw.match(/^ch_Parent(\d+)$/);
 	if (station) return station[1];
+	const sloid = raw.match(/^ch_(Parentch:1:sloid:\d+)$/);
+	if (sloid) return `p:${sloid[1]}`;
 	if (/^-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$/.test(raw)) return raw;
 	return null;
 }
@@ -110,7 +122,7 @@ export function buildStats(): Stats {
 	const days = new Map<string, { hits: number; plans: number; ips: Set<string>; bots: number }>();
 	const routeCounts = new Map<
 		string,
-		{ count: number; fromName?: string; toName?: string; link?: string }
+		{ count: number; fromName?: string; toName?: string; linkFrom?: string; linkTo?: string }
 	>();
 	const allIps = new Set<string>();
 	let totalHits = 0;
@@ -153,12 +165,12 @@ export function buildStats(): Stats {
 				r.count++;
 				r.fromName ??= params.get('fromName') ?? undefined;
 				r.toName ??= params.get('toName') ?? undefined;
-				if (!r.link) {
+				if (!r.linkFrom) {
 					const fromTok = placeUrlToken(from);
 					const toTok = placeUrlToken(to);
 					if (fromTok && toTok) {
-						const link = new URLSearchParams({ from: fromTok, to: toTok });
-						r.link = `/?${link.toString()}`;
+						r.linkFrom = fromTok;
+						r.linkTo = toTok;
 					}
 				}
 			} catch {

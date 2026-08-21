@@ -471,24 +471,6 @@ export const routingState = {
 		syncUrl();
 	},
 
-	/** Late-arriving reverse-geocode label. Attaches `displayName` and tags
-	 * `kind: 'address'` on a `point` endpoint — reverse geocoding never
-	 * yields a POI name per concept, so the icon is always address-shaped.
-	 * Only applies if the endpoint is still the same coord we set earlier
-	 * (user hasn't overwritten From/To in the meantime). Does NOT invalidate
-	 * results, selection, or trigger a re-query — the coord (what MOTIS
-	 * routes on) is unchanged; only the display metadata is being filled in.
-	 * See geocoding-search.md § Reverse geocoding. */
-	attachPointName(side: 'from' | 'to', coord: [number, number], name: string) {
-		const current = side === 'from' ? from : to;
-		if (!current || current.type !== 'point') return;
-		if (current.coord[0] !== coord[0] || current.coord[1] !== coord[1]) return;
-		const updated: Endpoint = { ...current, displayName: name, kind: 'address' };
-		if (side === 'from') from = updated;
-		else to = updated;
-		syncUrl();
-	},
-
 	/** Select one of the current `results` for map rendering (route-display.md
 	 * § Lifecycle). Pushes a browser history entry so back closes the route
 	 * view; state carries the fingerprint so the back/forward $effect in
@@ -594,8 +576,8 @@ export const routingState = {
 			if (from.type === 'current' || to.type === 'current') {
 				try { resolvedCurrentCoord = await resolveCurrent(); }
 				catch (e) {
+					if (ac.signal.aborted) return;
 					error = geolocationErrorMessage(e);
-					loading = false;
 					results = [];
 					return;
 				}
@@ -743,8 +725,14 @@ export const routingState = {
 			error = e instanceof Error ? e.message : String(e);
 			results = [];
 		} finally {
-			if (pendingAbort === ac) pendingAbort = null;
-			loading = false;
+			// Only the run that still owns `pendingAbort` may clear `loading`.
+			// A superseded run (aborted by a newer runQuery) reaching here
+			// must not flip the flag while its successor is still in flight
+			// — the panel would flash "No connections found".
+			if (pendingAbort === ac) {
+				pendingAbort = null;
+				loading = false;
+			}
 		}
 	},
 
