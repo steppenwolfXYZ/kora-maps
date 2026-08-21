@@ -2,7 +2,7 @@
 	import type { Endpoint } from './types';
 	import { indexStations, searchStations, type IndexedStation } from './stationSearch';
 	import { loadStationIndex } from './stationIndex';
-	import { hasGeolocation } from './geolocation';
+	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
 	import { searchPlaces, type GeocodeResult } from '$lib/geocoding/client';
 	import { AutocompleteScheduler } from '$lib/geocoding/scheduler';
 
@@ -38,9 +38,13 @@
 		endpoint: Endpoint | null;
 		placeholder: string;
 		onChange: (ep: Endpoint | null) => void;
+		/** True when the opposite endpoint is already "Current location" —
+		 * suppresses the suggestion on this side (a current→current route is
+		 * pointless). */
+		otherIsCurrent?: boolean;
 	}
 
-	let { label, endpoint, placeholder, onChange }: Props = $props();
+	let { label, endpoint, placeholder, onChange, otherIsCurrent = false }: Props = $props();
 
 	let index = $state<IndexedStation[]>([]);
 	let query = $state('');
@@ -177,8 +181,12 @@
 
 	// "Current location" is only offered when the user hasn't started
 	// typing — once there's a query, only search matches belong in the
-	// dropdown.
-	const showCurrent = $derived(geoAvailable && endpoint?.type !== 'current' && !query.trim());
+	// dropdown. Hidden once the permission has been denied, and when the
+	// other side already uses it.
+	const showCurrent = $derived(
+		geoAvailable && !geolocationDenied() && !otherIsCurrent
+		&& endpoint?.type !== 'current' && !query.trim()
+	);
 
 	type Row =
 		| { kind: 'current' }

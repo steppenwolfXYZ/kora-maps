@@ -2,7 +2,9 @@ import { pushState, replaceState } from '$app/navigation';
 import { page } from '$app/state';
 import { plan } from './client';
 import { itineraryFingerprint } from './fingerprint';
-import { geolocationErrorMessage, resolveCurrent } from './geolocation';
+import {
+	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
+} from './geolocation.svelte';
 import { pruneDominated } from './ranking';
 import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
@@ -377,7 +379,9 @@ export const routingState = {
 		panelOpen = true;
 		// Fresh open with no state: prefill From with current location (concept
 		// § Endpoint inputs). If URL restoration filled `from` first, skip.
-		if (!from && !to) from = { type: 'current' };
+		// Skipped when geolocation is unavailable or already denied — the
+		// prefill would only produce a dead endpoint that errors on query.
+		if (!from && !to && hasGeolocation() && !geolocationDenied()) from = { type: 'current' };
 		syncUrl();
 	},
 

@@ -14,6 +14,7 @@
 	import RouteMapHeader from './routing/RouteMapHeader.svelte';
 	import MapContextMenu from './routing/MapContextMenu.svelte';
 	import { routingState } from './routing/state.svelte';
+	import { markGeolocationDenied } from './routing/geolocation.svelte';
 	import { isNarrow } from './routing/layout';
 	import { readRoutingQuery, urlHasRoutingQuery } from './routing/url';
 	import { loadStationIndex, type StationEntry } from './routing/stationIndex';
@@ -1314,11 +1315,14 @@
 		setTimeout(() => s.remove(), 400);
 	}
 
-	function setSplashStatus(text: string) {
-		const el = typeof document !== 'undefined'
-			? document.getElementById('kora-splash-status')
-			: null;
-		if (el) el.textContent = text;
+	// Transient error toast (currently only fed by the locate button's
+	// geolocation errors). Re-showing resets the timer.
+	let toast = $state<string | null>(null);
+	let toastTimer: ReturnType<typeof setTimeout> | null = null;
+	function showToast(message: string) {
+		toast = message;
+		if (toastTimer) clearTimeout(toastTimer);
+		toastTimer = setTimeout(() => { toast = null; toastTimer = null; }, 4000);
 	}
 
 	$effect(() => {
@@ -1347,17 +1351,16 @@
 		}
 
 		// A position hash in the URL (shared link / reload) overrides the
-		// style default and suppresses geolocation below.
+		// style default.
 		const initialPos = readPositionHash();
-		const hasUrlHash = initialPos !== null;
 		const deepLinkKeys = readLineDeepLinkFromUrl();
 
 		const map = new maplibregl.Map({
 			container,
 			style,
 			// Style default center (Swiss overview) unless the URL carries a
-			// position; a geolocation fix arriving below re-centers behind
-			// the splash.
+			// position. No startup geolocation — location is only requested
+			// on explicit user action (locate button, routing).
 			center: initialPos?.center ?? (style.center as [number, number]) ?? [0, 0],
 			zoom: initialPos?.zoom ?? style.zoom ?? 2,
 			bearing: initialPos?.bearing ?? 0,
@@ -1463,42 +1466,6 @@
 			});
 		}
 
-		// Geolocation runs in PARALLEL with map/tile loading — the map loads
-		// at the style default underneath the splash, and a fix arriving
-		// re-centers via jumpTo while still hidden. The splash lifts only
-		// when both the map has loaded and geolocation has settled (fix,
-		// error, or timeout), so the jump is never visible. Skipped when the
-		// URL carries an explicit view (#zoom/lat/lng hash or ?line= deep
-		// link). maybeHideSplash waits for map.loaded() so a late jump's
-		// freshly requested tiles render before the reveal.
-		const wantsGeolocation = !hasUrlHash && !deepLinkKeys
-			&& typeof navigator !== 'undefined' && !!navigator.geolocation;
-		let mapLoaded = false;
-		let geoSettled = !wantsGeolocation;
-		const maybeHideSplash = () => {
-			if (!mapLoaded || !geoSettled) return;
-			if (map.loaded()) hideSplash();
-			else map.once('idle', hideSplash);
-		};
-		if (wantsGeolocation) {
-			const settleGeo = () => {
-				geoSettled = true;
-				setSplashStatus('loading map...');
-				maybeHideSplash();
-			};
-			navigator.geolocation.getCurrentPosition(
-				(pos) => {
-					map.jumpTo({
-						center: [pos.coords.longitude, pos.coords.latitude],
-						zoom: 13
-					});
-					settleGeo();
-				},
-				settleGeo,
-				{ timeout: 4000, maximumAge: 5 * 60_000 }
-			);
-		}
-
 		// Navigation controls (zoom +/-, compass)
 		map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -1509,13 +1476,24 @@
 		// plus a translucent accuracy circle when the fix is imprecise.
 		// trackUserLocation keeps following until the user pans away.
 		// Added after NavigationControl so it stacks directly below it in
-		// the top-right column.
-		map.addControl(new maplibregl.GeolocateControl({
+		// the top-right column. This button is the only place (besides a
+		// routing query with a "Current location" endpoint) that triggers
+		// the browser's location permission prompt.
+		const geolocateControl = new maplibregl.GeolocateControl({
 			positionOptions: { enableHighAccuracy: true },
 			trackUserLocation: true,
 			showAccuracyCircle: true,
 			fitBoundsOptions: { maxZoom: 15 }
-		}), 'top-right');
+		});
+		geolocateControl.on('error', (err: GeolocationPositionError) => {
+			if (err.code === 1) markGeolocationDenied();
+			showToast(
+				err.code === 1 ? 'Location permission denied.'
+				: err.code === 3 ? 'Location request timed out.'
+				: 'Location unavailable.'
+			);
+		});
+		map.addControl(geolocateControl, 'top-right');
 
 		// Scale bar (metric) — shows real-world distance for the current zoom
 		map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
@@ -1531,11 +1509,9 @@
 		let popup: maplibregl.Popup | null = null;
 
 		map.on('load', () => {
-			// Splash screen (see app.html) — lift once geolocation has also
-			// settled; until then the status shows what we're waiting for.
-			mapLoaded = true;
-			if (!geoSettled) setSplashStatus('waiting for location...');
-			maybeHideSplash();
+			// Splash screen (see app.html) — lift once the first tiles for
+			// the initial view have rendered.
+			hideSplash();
 
 			// Sync the view in case the user toggled before the style
 			// finished loading (the baked default only covers 'standard').
@@ -2128,6 +2104,10 @@
 
 	<MapContextMenu anchor={contextAnchor} onClose={() => (contextAnchor = null)} />
 
+	{#if toast}
+		<div class="map-toast" role="alert">{toast}</div>
+	{/if}
+
 	<a class="brand-overlay" href="/about" aria-label="About Kora Maps">
 		<img src="/icon.svg" alt="" draggable="false" />
 		<span class="beta-pill">Beta</span>
@@ -2393,6 +2373,25 @@
 	.line-detail-close:hover {
 		background: #eee;
 		color: #000;
+	}
+
+	.map-toast {
+		position: absolute;
+		bottom: 4rem;
+		left: 50%;
+		transform: translateX(-50%);
+		background: rgba(0, 0, 0, 0.75);
+		color: #fff;
+		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-size: 0.85rem;
+		padding: 0.45rem 0.9rem;
+		border-radius: 999px;
+		pointer-events: none;
+		backdrop-filter: blur(4px);
+		-webkit-backdrop-filter: blur(4px);
+		max-width: min(85vw, 24rem);
+		text-align: center;
+		z-index: 40;
 	}
 
 	.zoom-badge {

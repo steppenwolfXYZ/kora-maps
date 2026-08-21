@@ -93,12 +93,14 @@
 				endpoint={routingState.from}
 				placeholder="Start"
 				onChange={(ep) => routingState.setFrom(ep)}
+				otherIsCurrent={routingState.to?.type === 'current'}
 			/>
 			<EndpointInput
 				label="To"
 				endpoint={routingState.to}
 				placeholder="Destination"
 				onChange={(ep) => routingState.setTo(ep)}
+				otherIsCurrent={routingState.from?.type === 'current'}
 			/>
 		</div>
 		<button

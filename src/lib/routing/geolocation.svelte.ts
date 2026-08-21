@@ -1,12 +1,38 @@
 // One shared geolocation cache — the first `resolveCurrent` triggers the
 // browser permission prompt; subsequent calls reuse the fix while it's fresh.
-// If the user denied the prompt, the option stays selectable (transit-routing.md
-// § Endpoint inputs / § Constraints) and the next call re-triggers the prompt.
+// Location is only ever requested on an explicit user action (locate button,
+// running a query with a "Current location" endpoint) — never on startup.
 
 const MAX_AGE_MS = 60_000;
 const TIMEOUT_MS = 8_000;
 
 let cache: { coord: [number, number]; at: number } | null = null;
+
+// Reactive denied flag: once the user rejects the permission prompt, the
+// "Current location" suggestion disappears from the routing dropdowns.
+// Synced from the Permissions API where available (covers a pre-denied
+// permission on load, and a re-grant via browser settings un-denies it);
+// markGeolocationDenied() covers rejections on browsers without it.
+let denied = $state(false);
+
+export function geolocationDenied(): boolean {
+	return denied;
+}
+
+export function markGeolocationDenied(): void {
+	denied = true;
+}
+
+if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+	navigator.permissions
+		.query({ name: 'geolocation' })
+		.then((status) => {
+			const sync = () => { denied = status.state === 'denied'; };
+			sync();
+			status.onchange = sync;
+		})
+		.catch(() => {});
+}
 
 export function hasGeolocation(): boolean {
 	return typeof navigator !== 'undefined' && !!navigator.geolocation;
@@ -36,18 +62,22 @@ export function resolveCurrent(): Promise<[number, number]> {
 		return Promise.resolve(cache.coord);
 	}
 	return new Promise((resolve, reject) => {
-		// enableHighAccuracy: false — GPS-precise fixes fail more often on
-		// desktops (CoreLocation returns kCLErrorLocationUnknown when a
-		// fresh fix isn't available), and city-block accuracy is fine for
-		// routing to the nearest street/stop.
+		// enableHighAccuracy: true — matches the map's GeolocateControl.
+		// Counter-intuitively the low-accuracy request is the flaky one on
+		// desktop: without an existing recent fix it can sit on CoreLocation
+		// waiting until the timeout, while a high-accuracy request triggers
+		// an actual lookup and resolves.
 		navigator.geolocation.getCurrentPosition(
 			(pos) => {
 				const coord: [number, number] = [pos.coords.longitude, pos.coords.latitude];
 				cache = { coord, at: Date.now() };
 				resolve(coord);
 			},
-			(err) => reject(err),
-			{ enableHighAccuracy: false, timeout: TIMEOUT_MS, maximumAge: MAX_AGE_MS }
+			(err) => {
+				if (err.code === 1) denied = true;
+				reject(err);
+			},
+			{ enableHighAccuracy: true, timeout: TIMEOUT_MS, maximumAge: MAX_AGE_MS }
 		);
 	});
 }
