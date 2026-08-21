@@ -296,11 +296,12 @@ function userFacingError(e: unknown): string {
 	if (e instanceof PlanRequestError) {
 		// A 4xx from MOTIS almost always means an endpoint the current
 		// timetable doesn't know (e.g. a stale stop id in a bookmarked URL).
-		if (e.status >= 400 && e.status < 500) return 'Could not find a location for this route.';
-		return 'Route search is temporarily unavailable. Please try again later.';
+		if (e.status >= 400 && e.status < 500)
+			return 'Sorry — an error on our side prevented finding the locations for this route.';
+		return 'Sorry — the route search is temporarily unavailable on our side. Please try again later.';
 	}
-	if (e instanceof TypeError) return 'Route search is unreachable. Please check your connection.';
-	return 'Route search failed. Please try again.';
+	if (e instanceof TypeError) return 'Could not reach the route search. Please check your connection.';
+	return 'Sorry — the route search failed due to an error on our side. Please try again.';
 }
 
 function currentUrl(): URL {

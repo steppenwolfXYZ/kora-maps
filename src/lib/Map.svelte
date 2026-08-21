@@ -1466,7 +1466,9 @@
 			void loadStationIndex().then((idx) => {
 				const parsed = readRoutingQuery(routingUrl, (uic) => {
 					const e = idx?.get(uic);
-					return e ? { name: e.n, coord: e.c, mode: e.m } : null;
+					// pid is required — without it formatPlace falls back to the
+					// legacy ch_Parent<uic> id, which 404s post-SLOID-migration.
+					return e ? { name: e.n, coord: e.c, mode: e.m, pid: e.p } : null;
 				});
 				routingState.hydrate(parsed);
 			});
