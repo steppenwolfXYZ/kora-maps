@@ -45,10 +45,11 @@ Valhalla ingests.
 Copy **only `stops.txt`**, not all of `gtfs_motis/` — the builder reads
 nothing else from `data/`, and the rest is ~4.4 GB of timetable bulk.
 
-Set Valhalla's serving thread count (`valhalla/docker-compose.yml`, env
-`server_threads`). **16 is the ceiling** — see troubleshooting.
-
-    sed -i 's/server_threads=8/server_threads=16/' valhalla/docker-compose.yml
+Valhalla's serving thread count follows `VALHALLA_THREADS` (env; the
+compose file defaults to 8, `setup_routing.sh` exports `nproc` on Linux).
+The old 16-thread ceiling is gone: `valhalla/nofile.conf` is mounted as a
+pam limits override, which is what the container's entrypoint `sudo`
+needed — see troubleshooting.
 
 Bring Valhalla up and wait for the tile build (~7 min on a 13700K; the
 OSM parse stages are single-threaded and look like a hung process):
@@ -171,10 +172,13 @@ To recover, delete `valhalla_tiles/` and `valhalla_tiles.tar` and start
 again — keep `elevation_data/` and `admin_data/`.
 
 **Valhalla crash-loops at startup with `Too many open files`
-(`ipc_listener.cpp`).** `server_threads` is above 16. The entrypoint
-drops privileges via `sudo`, which resets the file-descriptor soft limit
-to 1024 whatever Docker was told, so a `ulimits:` block does not help.
-The restart policy hides this as plain "connection refused".
+(`ipc_listener.cpp`).** The entrypoint drops privileges via `sudo`, which
+re-applies pam limits and resets the fd soft limit to 1024 whatever
+Docker's `--ulimit` said — a `ulimits:` block alone does not help. The
+fix is a limits file mounted into `/etc/security/limits.d/`
+(`valhalla/nofile.conf`, wired in the compose file); with it, 24
+threads start fine. The restart policy hides the failure as plain
+"connection refused".
 
 **Progress stops for minutes at a time, Valhalla pinned at ~100% CPU
 (one core) instead of ~1500%.** A chunk is being bisected: the
@@ -209,9 +213,10 @@ batch again. Handled by the same bisection path.
 
 - **`MATRIX_WORKERS=N`** (env var): Python-side concurrent HTTP
   requests. Default 8. On a 24-thread box, 16-20 fits comfortably.
-- **`server_threads=N`** in `valhalla/docker-compose.yml`: Valhalla's
-  own worker pool, and the actual ceiling on throughput. Capped at 16
-  by the container's file-descriptor limit.
+- **`VALHALLA_THREADS=N`** (env → `server_threads` in the compose
+  file): Valhalla's own worker pool, and the actual ceiling on
+  throughput. Follows the core count; the fd limit that used to cap it
+  at 16 is lifted by `valhalla/nofile.conf`.
 - **`BATCH_SOURCES` / `BATCH_TARGETS`** in the Python script (both 50):
   Valhalla's default `max_matrix_locations` is 2500 = 50×50. Raising
   either would need editing `valhalla.json` to lift that limit + a

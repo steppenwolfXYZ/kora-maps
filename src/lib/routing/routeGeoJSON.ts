@@ -392,67 +392,75 @@ export function buildRouteGeoJSON(
 		}
 	}
 
-	// Dedup discs by parent UIC + mode rank. Same-UIC discs (arrive +
-	// depart at one transfer station) always share a min_zoom — they're a
-	// pair, hiding one without the other would look broken. Across UICs,
-	// a lower-ranked station hides whenever a higher-ranked one sits
-	// within visual overlap distance at the current zoom.
-	const discFeatures = features.filter((f) =>
-		(f.properties?.role === 'disc' || f.properties?.role === 'connector')
-		&& f.properties?.parent_uic
-	);
-	// Group by UIC.
-	interface DiscGroup {
-		uic: string;
+	// Dedup discs by proximity. Every disc is its own candidate — station
+	// identity plays no role (a transfer's two platform discs at one station
+	// collapse like any other close pair). Discs are ranked by mode
+	// (train first), ties keep itinerary order; a lower-ranked disc hides
+	// whenever a kept disc sits within visual overlap distance at the
+	// current zoom. Connectors follow their endpoint discs (hidden while
+	// either end is).
+	interface DiscCand {
 		rank: number;
 		coord: [number, number];
-		features: Feature[];
+		feature: Feature;
 	}
-	const groups = new Map<string, DiscGroup>();
-	for (const f of discFeatures) {
-		const uic = f.properties!.parent_uic as string;
-		const rank = (f.properties!.mode_rank as number | undefined) ?? 99;
-		const geom = f.geometry;
-		let c: [number, number] | null = null;
-		if (geom.type === 'Point') c = geom.coordinates as [number, number];
-		else if (geom.type === 'LineString' && geom.coordinates.length)
-			c = geom.coordinates[0] as [number, number];
-		if (!c) continue;
-		const g = groups.get(uic);
-		if (g) {
-			g.rank = Math.min(g.rank, rank);
-			g.features.push(f);
-		} else {
-			groups.set(uic, { uic, rank, coord: c, features: [f] });
-		}
+	const cands: DiscCand[] = [];
+	for (const f of features) {
+		if (f.properties?.role !== 'disc' || f.geometry.type !== 'Point') continue;
+		cands.push({
+			rank: (f.properties.mode_rank as number | undefined) ?? 99,
+			coord: f.geometry.coordinates as [number, number],
+			feature: f
+		});
 	}
-	// Sort groups by rank (best first), then process in order.
-	const sortedGroups = [...groups.values()].sort((a, b) => a.rank - b.rank);
+	// Stable sort: best rank first, itinerary order within a rank.
+	const sortedCands = cands.map((c, i) => [c, i] as const)
+		.sort((a, b) => a[0].rank - b[0].rank || a[1] - b[1])
+		.map(([c]) => c);
 	// Effective disc radius (px) used for overlap detection. Chosen below
 	// the actual disc radius (~9-10 px at pill zoom) so a slight visual
-	// collision between two nearby stations is allowed before dedup kicks
+	// collision between two nearby discs is allowed before dedup kicks
 	// in — the user prefers this over dedup firing too eagerly.
 	const DEDUP_RADIUS_PX = 6;
-	const MERCATOR_SCALE = 156543.03392;
-	const kept: DiscGroup[] = [];
-	for (const g of sortedGroups) {
+	// Metres per pixel at zoom 0 on the equator under MapLibre's 512-px
+	// tile convention (40075016.686 / 512). The 256-px value (156543) is
+	// one zoom level off and made dedup fire a level too early.
+	const MPP_Z0 = 78271.517;
+	const kept: DiscCand[] = [];
+	for (const c of sortedCands) {
 		let minZoom = 0;
 		for (const higher of kept) {
-			const d = haversineMeters(g.coord, higher.coord);
+			const d = haversineMeters(c.coord, higher.coord);
 			if (d <= 0) { minZoom = Math.max(minZoom, 22); continue; }
-			const latRad = (g.coord[1] + higher.coord[1]) * Math.PI / 360;
+			const latRad = (c.coord[1] + higher.coord[1]) * Math.PI / 360;
 			// Min zoom at which the two are far enough apart in pixels:
-			//   2 * R_px < d / mpp(z, lat)
-			//   z > log2(2 * R_px * MERCATOR_SCALE * cos(lat) / d)
-			const z = Math.log2(
-				2 * DEDUP_RADIUS_PX * MERCATOR_SCALE * Math.cos(latRad) / d
-			);
-			minZoom = Math.max(minZoom, Math.ceil(z));
+			//   2 * R_px < d / mpp(z, lat),  mpp(z, lat) = MPP_Z0 * cos(lat) / 2^z
+			//   z > log2(2 * R_px * MPP_Z0 * cos(lat) / d)
+			// The layer expression tests `disc_min_zoom <= z` at integer
+			// zoom steps; round to the nearest step (ceil made dedup fire
+			// up to a full level too early, floor would let discs reappear
+			// at half the threshold distance).
+			const z = Math.log2(2 * DEDUP_RADIUS_PX * MPP_Z0 * Math.cos(latRad) / d);
+			minZoom = Math.max(minZoom, Math.round(z));
 		}
-		for (const f of g.features) {
-			f.properties!.disc_min_zoom = Math.max(0, minZoom);
+		c.feature.properties!.disc_min_zoom = Math.max(0, minZoom);
+		kept.push(c);
+	}
+	// Connectors: visible only while both endpoint discs are. Endpoint
+	// coords are the very disc coords (aEnd / bStart), so an exact match
+	// finds the owning discs.
+	const discMinZoomAt = (pt: [number, number]): number => {
+		let m = 0;
+		for (const c of cands) {
+			if (c.coord[0] === pt[0] && c.coord[1] === pt[1])
+				m = Math.max(m, c.feature.properties!.disc_min_zoom as number);
 		}
-		kept.push(g);
+		return m;
+	};
+	for (const f of features) {
+		if (f.properties?.role !== 'connector' || f.geometry.type !== 'LineString') continue;
+		const [p0, p1] = f.geometry.coordinates as [number, number][];
+		f.properties.disc_min_zoom = Math.max(discMinZoomAt(p0), discMinZoomAt(p1));
 	}
 
 	// Journey endpoints — the start / goal icons the concept describes.

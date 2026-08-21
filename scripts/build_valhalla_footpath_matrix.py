@@ -740,46 +740,58 @@ def main() -> None:
     print(f"Using {MATRIX_WORKERS} concurrent Valhalla workers.")
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=MATRIX_WORKERS)
 
+    def _prepare(batch_indices):
+        """Candidate scan + request submission for one source batch.
+        Returns None when every source is already checkpointed."""
+        batch_pending = [(i, stops[i][0]) for i in batch_indices if stops[i][0] not in done]
+        if not batch_pending:
+            return None
+        # Union of candidates across the batch's sources — one matrix
+        # call per target chunk covers all their neighbours.
+        cand_set: set[int] = set()
+        for global_idx, _sid in batch_pending:
+            _sid2, slat, slon, _name = stops[global_idx]
+            for j in _candidates(slat, slon, stops, global_idx):
+                cand_set.add(j)
+        candidates = sorted(cand_set)
+        src_coords = [(stops[i][1], stops[i][2]) for i, _ in batch_pending]
+        src_labels = [sid for _i, sid in batch_pending]
+        chunk_specs = []
+        for t_start in range(0, len(candidates), BATCH_TARGETS):
+            tgt_indices = candidates[t_start : t_start + BATCH_TARGETS]
+            tgt_coords = [(stops[i][1], stops[i][2]) for i in tgt_indices]
+            tgt_labels = [stops[i][0] for i in tgt_indices]
+            chunk_specs.append((tgt_indices, tgt_coords, tgt_labels))
+        # Fire all target chunks concurrently — Valhalla's server threads
+        # process them in parallel, chunk order preserved via list index
+        # so we know which tgt_indices each result maps to.
+        futures = [
+            pool.submit(_matrix_call_resilient, src_coords, tgt_coords,
+                        src_labels, tgt_labels)
+            for _tgt_indices, tgt_coords, tgt_labels in chunk_specs
+        ]
+        return batch_pending, chunk_specs, futures
+
+    # Two batches in flight: batch k+1's candidate scan and request
+    # submission happen while batch k's responses are still being
+    # consumed, so Valhalla's queue never drains between batches.
+    # Without this the run alternates between a burst (all chunks fired)
+    # and an idle trough (serial result digestion + next candidate scan)
+    # — 15-25 % of wall time with Valhalla doing nothing.
+    batch_iter = iter(_batch_spatially(stops))
+
+    def _next_prepared():
+        for batch_indices in batch_iter:
+            prepared = _prepare(batch_indices)
+            if prepared is not None:
+                return prepared
+        return None
+
     try:
-        for batch_indices in _batch_spatially(stops):
-            batch_pending = [(i, stops[i][0]) for i in batch_indices if stops[i][0] not in done]
-            if not batch_pending:
-                continue
-
-            # Union of candidates across the batch's sources — one
-            # matrix call per target chunk covers all their neighbours.
-            cand_set: set[int] = set()
-            for global_idx, _sid in batch_pending:
-                _sid2, slat, slon, _name = stops[global_idx]
-                for j in _candidates(slat, slon, stops, global_idx):
-                    cand_set.add(j)
-            candidates = sorted(cand_set)
-
-            src_coords = [(stops[i][1], stops[i][2]) for i, _ in batch_pending]
-
-            # Fire all target chunks concurrently — Valhalla's server
-            # threads process them in parallel, chunk order preserved
-            # via list index so we know which tgt_indices each result
-            # maps to.
-            src_labels = [sid for _i, sid in batch_pending]
-
-            chunk_specs = []
-            for t_start in range(0, len(candidates), BATCH_TARGETS):
-                tgt_indices = candidates[t_start : t_start + BATCH_TARGETS]
-                tgt_coords = [(stops[i][1], stops[i][2]) for i in tgt_indices]
-                tgt_labels = [stops[i][0] for i in tgt_indices]
-                chunk_specs.append((tgt_indices, tgt_coords, tgt_labels))
-
-            futures = [
-                pool.submit(
-                    _matrix_call_resilient,
-                    src_coords,
-                    tgt_coords,
-                    src_labels,
-                    tgt_labels,
-                )
-                for _tgt_indices, tgt_coords, tgt_labels in chunk_specs
-            ]
+        current = _next_prepared()
+        while current is not None:
+            batch_pending, chunk_specs, futures = current
+            upcoming = _next_prepared()
 
             for (tgt_indices, _tgt_coords, _tgt_labels), fut in zip(chunk_specs, futures):
                 matrix = fut.result()
@@ -818,6 +830,7 @@ def main() -> None:
                 f"eta {eta / 60:5.1f} min",
                 flush=True,
             )
+            current = upcoming
     finally:
         pool.shutdown(wait=True)
         out_f.close()

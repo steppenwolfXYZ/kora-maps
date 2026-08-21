@@ -25,6 +25,16 @@
 #   --force-matrix    delete matrix CSV + checkpoint, recompute from scratch
 #   --force-import    re-run the MOTIS import
 #
+# Step selection (for orchestrators that overlap this script's phases
+# with the map pipeline — see scripts/update_map.sh):
+#
+#   --steps 1,2,3,4   run only the listed steps, in order, skip the rest.
+#                     Prerequisite checks still run. Default: all 1-8.
+#
+# Sizing knobs (env): VALHALLA_THREADS (Valhalla serving pool; Linux
+# defaults to nproc, elsewhere 8) and MATRIX_WORKERS (builder-side
+# concurrency; defaults to VALHALLA_THREADS + 4 when unset).
+#
 # Prerequisites: ./scripts/rebuild_transit.sh has run at least once
 # (needs data/gtfs_routed/ and the step-02 OSM downloads), docker is
 # running, and the pyosmium package is installed
@@ -37,21 +47,38 @@ FORCE_IMAGE=0
 FORCE_OSM=0
 FORCE_MATRIX=0
 FORCE_IMPORT=0
+STEPS="1,2,3,4,5,6,7,8"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force-image)  FORCE_IMAGE=1 ;;
     --force-osm)    FORCE_OSM=1 ;;
     --force-matrix) FORCE_MATRIX=1 ;;
     --force-import) FORCE_IMPORT=1 ;;
+    --steps)        shift; STEPS="$1" ;;
+    --steps=*)      STEPS="${1#--steps=}" ;;
     -h|--help)
       sed -n '2,31p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2
-      echo "usage: $0 [--force-image] [--force-osm] [--force-matrix] [--force-import]" >&2
+      echo "usage: $0 [--force-image] [--force-osm] [--force-matrix] [--force-import] [--steps LIST]" >&2
       exit 2 ;;
   esac
   shift
 done
+
+# want N — true when step N is selected.
+want() { [[ ",$STEPS," == *",$1,"* ]]; }
+
+# Sizing: Valhalla's serving pool follows the core count on Linux (the
+# fd-limit that used to cap it at 16 is lifted by valhalla/nofile.conf);
+# the matrix builder runs a few more client threads than that so the
+# server queue never idles. Both are plain env overrides.
+if [[ -z "${VALHALLA_THREADS:-}" && "$(uname -s)" == "Linux" ]]; then
+  export VALHALLA_THREADS="$(nproc)"
+fi
+if [[ -z "${MATRIX_WORKERS:-}" ]]; then
+  export MATRIX_WORKERS="$(( ${VALHALLA_THREADS:-8} + 4 ))"
+fi
 
 echo "══════════════════════════════════════════"
 echo "  Routing Backend Setup (Valhalla + MOTIS)"
@@ -62,9 +89,14 @@ if ! docker info >/dev/null 2>&1; then
   echo "docker is not running — start Docker and retry" >&2
   exit 1
 fi
-for f in data/gtfs_routed/stops.txt \
-         data/osm/ch_pfaedle.osm.pbf \
-         data/osm/switzerland-latest.osm.pbf; do
+# Steps 1-4 (network, image, OSM patch, Valhalla) need only the OSM
+# extracts; the routed GTFS is required from step 5 on. Orchestrators
+# start steps 1-4 while pfaedle is still running.
+PREREQS=(data/osm/ch_pfaedle.osm.pbf data/osm/switzerland-latest.osm.pbf)
+for n in 5 6 7 8; do
+  if want "$n"; then PREREQS+=(data/gtfs_routed/stops.txt); break; fi
+done
+for f in "${PREREQS[@]}"; do
   if [[ ! -f "$f" ]]; then
     echo "missing $f — run ./scripts/rebuild_transit.sh first" >&2
     exit 1
@@ -81,6 +113,7 @@ if [[ ! -f .env ]]; then
 fi
 mkdir -p motis/data valhalla/data
 
+if want 1; then
 # ── Step 1: docker network ──────────────────────────────────────────
 echo ""
 echo "▶ Step 1 — Docker network 'koramaps'"
@@ -89,7 +122,9 @@ if docker network inspect koramaps >/dev/null 2>&1; then
 else
   docker network create koramaps
 fi
+fi
 
+if want 2; then
 # ── Step 2: MOTIS fork image ────────────────────────────────────────
 echo ""
 echo "▶ Step 2 — MOTIS fork image (koramaps/motis:footpath-matrix)"
@@ -98,7 +133,9 @@ if [[ $FORCE_IMAGE -eq 0 ]] && docker image inspect koramaps/motis:footpath-matr
 else
   time docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
 fi
+fi
 
+if want 3; then
 # ── Step 3: preprocessed OSM PBFs ───────────────────────────────────
 # foot=yes patch on access=agricultural/forestry ways so alp / forest
 # roads route for pedestrians (see scripts/preprocess_osm_for_motis.py).
@@ -114,7 +151,9 @@ if [[ $FORCE_OSM -eq 0 && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_p
 else
   time python3 scripts/preprocess_osm_for_motis.py --valhalla
 fi
+fi
 
+if want 4; then
 # ── Step 4: Valhalla ────────────────────────────────────────────────
 echo ""
 echo "▶ Step 4 — Start Valhalla"
@@ -136,12 +175,16 @@ if [[ $VALHALLA_UP -eq 0 ]]; then
   exit 1
 fi
 echo "  Valhalla is serving"
+fi
 
+if want 5; then
 # ── Step 5: GTFS sidecar for MOTIS ──────────────────────────────────
 echo ""
 echo "▶ Step 5 — Preprocess GTFS for MOTIS (platform-snapped stops.txt)"
 time python3 scripts/preprocess_gtfs_for_motis.py
+fi
 
+if want 6; then
 # ── Step 6: footpath matrix ─────────────────────────────────────────
 # Complete = CSV present with no checkpoint (the builder deletes its
 # checkpoint on successful completion; a lingering checkpoint marks a
@@ -167,7 +210,9 @@ else
   fi
   time python3 scripts/build_valhalla_footpath_matrix.py
 fi
+fi
 
+if want 7; then
 # ── Step 7: MOTIS import ────────────────────────────────────────────
 echo ""
 echo "▶ Step 7 — MOTIS import"
@@ -184,7 +229,9 @@ else
   fi
   (cd motis && time docker compose --profile import run --rm motis-import)
 fi
+fi
 
+if want 8; then
 # ── Step 8: MOTIS server + smoke test ───────────────────────────────
 echo ""
 echo "▶ Step 8 — Start MOTIS server"
@@ -209,3 +256,4 @@ echo "════════════════════════�
 echo "  Done. MOTIS on :8080, Valhalla on :8002."
 echo "  Start the app with: npm run dev"
 echo "══════════════════════════════════════════"
+fi

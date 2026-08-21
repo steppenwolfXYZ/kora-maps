@@ -22,6 +22,11 @@
 # run. Step 0 is skipped whenever --start is passed — not something you want
 # to redo mid-iteration.
 #
+# --only LIST runs exactly the listed steps (e.g. --only 3 or --only 6,7,8),
+# no contiguity, no glyph step. For orchestrators that schedule steps
+# themselves (scripts/update_map.sh overlaps independent steps); for hand
+# use, --start N is the tool. Force flags apply as usual.
+#
 # Download steps (1 and 2) skip when the target file is already present. Use
 # one of the force flags below to re-download:
 #
@@ -46,6 +51,7 @@ cd "$(dirname "$0")/.."
 # normal iteration you always pass --start N explicitly.
 START=1
 START_EXPLICIT=0
+ONLY=""
 FORCE_GTFS=0
 FORCE_ATLAS=0
 FORCE_OSM=0
@@ -53,6 +59,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --start)        shift; START="$1"; START_EXPLICIT=1 ;;
     --start=*)      START="${1#--start=}"; START_EXPLICIT=1 ;;
+    --only)         shift; ONLY="$1"; START_EXPLICIT=1 ;;
+    --only=*)       ONLY="${1#--only=}"; START_EXPLICIT=1 ;;
     --force)        FORCE_GTFS=1; FORCE_ATLAS=1; FORCE_OSM=1 ;;
     --force-gtfs)   FORCE_GTFS=1 ;;
     --force-atlas)  FORCE_ATLAS=1 ;;
@@ -61,7 +69,7 @@ while [[ $# -gt 0 ]]; do
       sed -n '2,32p' "$0"; exit 0 ;;
     *)
       echo "unknown arg: $1" >&2
-      echo "usage: $0 [--start N] [--force | --force-gtfs | --force-atlas | --force-osm]" >&2
+      echo "usage: $0 [--start N | --only LIST] [--force | --force-gtfs | --force-atlas | --force-osm]" >&2
       exit 2 ;;
   esac
   shift
@@ -71,6 +79,16 @@ if ! [[ "$START" =~ ^[1-8]$ ]]; then
   echo "--start must be between 1 and 8 (got '$START')" >&2
   exit 2
 fi
+if [[ -n "$ONLY" && ! "$ONLY" =~ ^[1-8](,[1-8])*$ ]]; then
+  echo "--only must be a comma-separated list of steps 1-8 (got '$ONLY')" >&2
+  exit 2
+fi
+
+# run_step N — true when step N is due: in --only mode exactly the listed
+# steps, otherwise every step from --start on.
+run_step() {
+  if [[ -n "$ONLY" ]]; then [[ ",$ONLY," == *",$1,"* ]]; else [[ $START -le $1 ]]; fi
+}
 
 GTFS_ARGS=()
 OSM_ARGS=()
@@ -80,7 +98,7 @@ if [[ $FORCE_OSM   -eq 1 ]]; then OSM_ARGS+=(--force);        fi
 
 echo "══════════════════════════════════════════"
 echo "  Transit Rebuild Pipeline (pfaedle)"
-echo "  Starting at step $START"
+if [[ -n "$ONLY" ]]; then echo "  Running steps: $ONLY"; else echo "  Starting at step $START"; fi
 echo "══════════════════════════════════════════"
 
 if [[ $START_EXPLICIT -eq 0 ]]; then
@@ -92,49 +110,49 @@ fi
 # Steps 3 and 5 run osmium / pfaedle inside the carfree-pfaedle image.
 # It only exists locally (never on a registry), so on a fresh machine
 # `docker run` would die trying to pull it — build it here instead.
-if [[ $START -le 5 ]] && ! docker image inspect carfree-pfaedle:latest >/dev/null 2>&1; then
+if { run_step 3 || run_step 4 || run_step 5; } && ! docker image inspect carfree-pfaedle:latest >/dev/null 2>&1; then
   echo ""
   echo "▶ Building carfree-pfaedle image (missing on this machine)"
   time ./scripts/transit/pfaedle/build.sh
 fi
 
-if [[ $START -le 1 ]]; then
+if run_step 1; then
   echo ""
   echo "▶ Step 1 — Download GTFS"
   time python3 scripts/transit/01_download_gtfs.py ${GTFS_ARGS[@]+"${GTFS_ARGS[@]}"}
 fi
 
-if [[ $START -le 2 ]]; then
+if run_step 2; then
   echo ""
   echo "▶ Step 2 — Download OSM (CH + LI + DE + FR + IT + AT)"
   time python3 scripts/transit/02_download_osm.py ${OSM_ARGS[@]+"${OSM_ARGS[@]}"}
 fi
 
-if [[ $START -le 3 ]]; then
+if run_step 3; then
   echo ""
   echo "▶ Step 3 — Cut bbox slice from country PBFs"
   time python3 scripts/transit/03_bbox_osm.py
 fi
 
-if [[ $START -le 4 ]]; then
+if run_step 4; then
   echo ""
   echo "▶ Step 4 — Preprocess GTFS"
   time python3 scripts/transit/04_preprocess_gtfs.py
 fi
 
-if [[ $START -le 5 ]]; then
+if run_step 5; then
   echo ""
   echo "▶ Step 5 — Run pfaedle"
   time python3 scripts/transit/05_run_pfaedle.py
 fi
 
-if [[ $START -le 6 ]]; then
+if run_step 6; then
   echo ""
   echo "▶ Step 6 — Emit transit_lines.geojson"
   time python3 scripts/transit/06_score_and_match.py
 fi
 
-if [[ $START -le 7 ]]; then
+if run_step 7; then
   echo ""
   echo "▶ Step 7 — Build stop dots & pills"
   time python3 scripts/transit/07_extract_stops.py
@@ -144,7 +162,7 @@ if [[ $START -le 7 ]]; then
   time python3 scripts/generate_style.py
 fi
 
-if [[ $START -le 8 ]]; then
+if run_step 8; then
   echo ""
   echo "▶ Step 8 — Build pmtiles"
   time bash scripts/transit/08_build_pmtiles.sh

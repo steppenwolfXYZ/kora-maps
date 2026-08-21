@@ -33,6 +33,9 @@ services:
       # the transfer matrix. The wider bbox covers CH + DE + FR + IT +
       # AT + LI within the pipeline's routing area.
       - ../data/osm/ch_pfaedle_walkable.osm.pbf:/custom_files/ch_pfaedle_walkable.osm.pbf:ro
+      # pam limits override — see nofile.conf for why --ulimit alone is
+      # not enough in this image.
+      - ./nofile.conf:/etc/security/limits.d/99-nofile.conf:ro
     environment:
       # tile_urls is empty because we build from the PBF locally,
       # not download prebuilt tiles from some CDN.
@@ -50,18 +53,17 @@ services:
       # Admin polygons are enough; time zones are not needed for
       # pedestrian routing (Valhalla only uses them for transit).
       - build_time_zones=False
-      # 8 threads on the local Mac; override to match core count on
-      # bigger machines (e.g. `server_threads=16` for the 24-core box
-      # used for one-off matrix precompute). Also bump MATRIX_WORKERS
-      # env when invoking the Python builder so both sides scale
-      # together.
-      - server_threads=16
+      # Serving pool. VALHALLA_THREADS (env) sets it per machine — the
+      # footpath-matrix builder saturates every thread here, so it should
+      # follow the core count (setup_routing.sh exports nproc on Linux;
+      # the 8 default fits the dev Mac). Bump MATRIX_WORKERS alongside
+      # so both sides scale together. Going past ~16 needs the fd-limit
+      # fix below (nofile.conf) or valhalla_service dies at startup.
+      - server_threads=${VALHALLA_THREADS:-8}
       # After build, serve on :8002.
       - serve_tiles=True
-    # The image's default soft nofile limit is 1024, which each worker
-    # thread eats into via tile fds + IPC sockets. Above ~16 threads
-    # Valhalla dies at startup with "Too many open files"
-    # (ipc_listener.cpp) and the restart policy turns that into a loop.
+    # Raises the container's hard/soft fd limits; nofile.conf (mounted
+    # above) is what makes the soft limit survive the entrypoint's sudo.
     ulimits:
       nofile:
         soft: 65536
