@@ -142,8 +142,8 @@ def run():
             parent_uics: list = []
             for entry in stops_seq:
                 sid = entry[2] if len(entry) >= 3 else ""
-                meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0], {})
-                uic = meta.get("parent") or (sid.split(":")[0] if sid else "")
+                meta = stop_meta.get(sid, {})
+                uic = meta.get("uic") or meta.get("parent") or sid
                 parent_uics.append(uic)
             info["parent_uics"] = parent_uics
             first_name = ""
@@ -157,11 +157,11 @@ def run():
                 last_name  = last_meta.get("name", "")
                 if not first_name and stops_seq:
                     first_sid = stops_seq[0][2] if len(stops_seq[0]) >= 3 else ""
-                    m = stop_meta.get(first_sid) or stop_meta.get(first_sid.split(":")[0], {})
+                    m = stop_meta.get(first_sid, {})
                     first_name = m.get("name", "")
                 if not last_name and stops_seq:
                     last_sid = stops_seq[-1][2] if len(stops_seq[-1]) >= 3 else ""
-                    m = stop_meta.get(last_sid) or stop_meta.get(last_sid.split(":")[0], {})
+                    m = stop_meta.get(last_sid, {})
                     last_name = m.get("name", "")
             info["first_terminus_name"] = first_name
             info["last_terminus_name"]  = last_name

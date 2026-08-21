@@ -446,7 +446,7 @@ for tg_key, vmap in groups.items():
     # Pre-resolve this group's kept UIC coordinates once.
     group_kept_coords: list = []
     for uic in group_kept_uics:
-        c = stop_coords.get(uic) or stop_coords.get(uic.split(":")[0])
+        c = stop_coords.get(uic)
         if c:
             group_kept_coords.append(c)
 
@@ -458,8 +458,7 @@ for tg_key, vmap in groups.items():
             continue
         qualifying = False
         for uic in candidate_uics:
-            uic_coord = stop_coords.get(uic) \
-                or stop_coords.get(uic.split(":")[0])
+            uic_coord = stop_coords.get(uic)
             if uic_coord is None:
                 continue
             far_enough = True

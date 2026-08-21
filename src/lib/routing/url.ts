@@ -41,7 +41,7 @@ export interface StationLookup {
 	 *  (client.ts formatPlace). `mode` is the station's highest-ranked
 	 *  mode (`train`, `tram`, …) passed through so the endpoint pill can
 	 *  render a mode-specific icon. */
-	(uic: string): { name: string; coord: [number, number]; mode?: string } | null;
+	(uic: string): { name: string; coord: [number, number]; mode?: string; pid?: string } | null;
 }
 
 /** Parse a from/to token back into an Endpoint. Unknown UIC → null (caller
@@ -76,6 +76,7 @@ export function paramToEndpoint(
 		if (!hit) return null;
 		const ep: Endpoint = { type: 'station', uic: raw, name: hit.name, coord: hit.coord };
 		if (hit.mode) ep.mode = hit.mode;
+		if (hit.pid) ep.pid = hit.pid;
 		return ep;
 	}
 	return { type: 'station', uic: raw, name: '', coord: [0, 0] };

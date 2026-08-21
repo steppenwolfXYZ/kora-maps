@@ -25,6 +25,7 @@ from geometry import (
     snap_to_line,
 )
 from stops.extent import _funicular_snap_override, _platform_extent, _resolve_length
+from gtfs.stop_identity import uic_of
 from stop_attributes import STOP_SCORES, compute_terminus_skip_oids, load_stop_scores
 from stops.close_zoom import (
     _collect_close_zoom_visits, _stack_need_by_stop,
@@ -245,7 +246,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 stop_name  = meta.get("name", "")
-                parent_sta = meta.get("parent", "")
+                parent_sta = meta.get("uic") or meta.get("parent", "")
                 slon, slat = snap_to_line(lon, lat, flat)
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
                 is_eop = (str(osm_id), sid) in end_of_platform_pairs
@@ -283,7 +284,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                     "gtfs_lat":       lat,
                     "stop_id":        sid,
                     "stop_name":      meta.get("name", ""),
-                    "parent_station": meta.get("parent", ""),
+                    "parent_station": meta.get("uic") or meta.get("parent", ""),
                     "color":          color,
                     "osm_id":         osm_id,
                     "line":           line,
@@ -301,7 +302,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                 sid        = entry[2] if len(entry) > 2 else ""
                 meta       = stop_meta.get(sid, {})
                 stop_name  = meta.get("name", "")
-                parent_sta = meta.get("parent", "")
+                parent_sta = meta.get("uic") or meta.get("parent", "")
                 atlas_len = (stop_attrs.get(sid, {}) or {}).get("length")
                 # Funicular: pin the snap to the polyline endpoint when the
                 # extent reaches it (mountain-line-pills concept). Otherwise
@@ -342,7 +343,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                     "osm_id":         str(osm_id),
                     "mode":           mode,
                     "stop_id":        sid,
-                    "parent_station": meta.get("parent", ""),
+                    "parent_station": meta.get("uic") or meta.get("parent", ""),
                 }]
                 mini_line_keys = cluster_line_keys(mini_cluster, line_lookup, oids_by_uic)
                 other_features.append({
@@ -355,7 +356,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
                         "width_base":     _stop_wb(width_base, mode),
                         "stop_id":        sid,
                         "stop_name":      meta.get("name", ""),
-                        "parent_station": meta.get("parent", ""),
+                        "parent_station": meta.get("uic") or meta.get("parent", ""),
                         "lines_json":     json.dumps(cluster_lines(mini_cluster, line_lookup, oids_by_uic)),
                         "dep_hr":         round(cluster_departures_per_hour(mini_cluster, line_lookup, oids_by_uic), 3),
                         "line_keys":      mini_line_keys,
@@ -872,8 +873,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         n_scored = 0
         for feat in dot_features:
             p = feat["properties"]
-            uic = p.get("parent_station") or (
-                (p.get("stop_id") or "").split(":")[0])
+            uic = p.get("parent_station") or uic_of(p.get("stop_id") or "")
             record = stop_scores_lookup.get(uic) if uic else None
             if record:
                 p["stop_score"] = round(record["score"], 4)
@@ -960,8 +960,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         n_applied = 0
         for feat in dot_features:
             p = feat["properties"]
-            uic = p.get("parent_station") or (
-                (p.get("stop_id") or "").split(":")[0])
+            uic = p.get("parent_station") or uic_of(p.get("stop_id") or "")
             if not uic:
                 continue
             sal = stop_salience.get(uic)
@@ -1046,9 +1045,18 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         existing = _search_seen.get(uic)
         if existing is not None and existing["_rank"] <= rank:
             continue
+        # "p": the feed's parent stop_id ("Parentch:1:sloid:7000") —
+        # what MOTIS knows the station as (client.ts formatPlace
+        # prefixes the dataset tag: "ch_" + p). The UIC in "u" stays the
+        # stable client-facing station key; since the SLOID migration it
+        # is no longer derivable from the stop ids themselves.
+        from gtfs.stop_identity import load_identity
+        ident = load_identity().get(props.get("stop_id") or "") or {}
+        parent_sid = ident.get("parent") or ""
         _search_seen[uic] = {
             "n": name,
             "u": uic,
+            "p": f"Parent{parent_sid}" if parent_sid else "",
             "c": [round(coords[0], 6), round(coords[1], 6)],
             "m": mode,
             "t": props.get("stop_tier") or "",
@@ -1060,7 +1068,8 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # (see valhalla-pedestrian-router.md).
     _search_entries = []
     for e in sorted(_search_seen.values(), key=lambda e: e["n"]):
-        row = {"n": e["n"], "u": e["u"], "c": e["c"], "m": e["m"], "t": e["t"]}
+        row = {"n": e["n"], "u": e["u"], "p": e["p"], "c": e["c"],
+               "m": e["m"], "t": e["t"]}
         _search_entries.append(row)
     OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
     OUT_STOP_SEARCH_INDEX.write_text(json.dumps(_search_entries, ensure_ascii=False))
@@ -1110,7 +1119,9 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     RELEVANT_PILL_TYPES = {"pill", "connector", "endpoint"}
 
     def _bucket_key(props):
-        return props.get("parent_station") or (props.get("stop_id") or "").split(":")[0]
+        return (props.get("parent_station")
+                or uic_of(props.get("stop_id") or "")
+                or (props.get("stop_id") or ""))
 
     # Group pill features by (station_key, design_band). Different bands
     # (A: z14, B: z15, C: z16+) can produce different pill layouts and even

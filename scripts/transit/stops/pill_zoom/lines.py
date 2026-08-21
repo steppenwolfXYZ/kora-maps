@@ -84,7 +84,8 @@ def _cluster_station_uics(cluster_stops):
             uics.add(parent)
         sid = s.get("stop_id", "")
         if sid:
-            uics.add(sid.split(":")[0])
+            from gtfs.stop_identity import merge_key_of
+            uics.add(merge_key_of(sid))
     return uics
 
 

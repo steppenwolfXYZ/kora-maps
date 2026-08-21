@@ -159,8 +159,9 @@ def stops_to_polyline(stop_ids: list, stop_coords: dict) -> list:
     """Build a polyline from a stop_id sequence, dropping unresolved stops."""
     out: list = []
     last = None
+    from .stop_identity import uic_of
     for sid in stop_ids:
-        c = stop_coords.get(sid) or stop_coords.get(sid.split(":")[0])
+        c = stop_coords.get(sid) or stop_coords.get(uic_of(sid))
         if not c:
             continue
         if last is not None and c == last:

@@ -60,6 +60,35 @@ def in_bbox(lon: float, lat: float, bbox: dict) -> bool:
             and bbox["min_lat"] <= lat <= bbox["max_lat"])
 
 
+# stop_id → UIC (didok column), filled by _load_sid_uic() in main().
+# Since the 2026-06 SLOID migration the UIC is a column, not the stop_id
+# prefix, so every config override that names a UIC must match through
+# this map (see sloid-stop-identity.md).
+_SID_UIC: dict = {}
+
+
+def _load_sid_uic() -> None:
+    with open(GTFS_IN / "stops.txt", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            uic = (row.get("didok") or "").strip()
+            if uic:
+                _SID_UIC[row["stop_id"]] = uic
+
+
+def _override_for(overrides: dict, row: dict):
+    """Override lookup for a stops.txt row: exact stop_id, or the row's
+    UIC (didok). UIC-keyed overrides move every row of the station —
+    platforms and parent alike — which matches the legacy semantics
+    where the bare-UIC row was the one trips referenced."""
+    ov = overrides.get(row["stop_id"])
+    if ov is not None:
+        return ov
+    uic = (row.get("didok") or "").strip()
+    if uic:
+        return overrides.get(uic)
+    return None
+
+
 def load_stop_overrides(cfg: dict) -> dict:
     """{stop_id: (lon, lat)} from config.gtfs_stop_overrides.
 
@@ -87,8 +116,9 @@ def load_stop_coords(overrides: dict) -> dict:
     with open(GTFS_IN / "stops.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             sid = row["stop_id"]
-            if sid in overrides:
-                out[sid] = overrides[sid]
+            ov = _override_for(overrides, row)
+            if ov is not None:
+                out[sid] = ov
                 continue
             try:
                 lon = float(row["stop_lon"])
@@ -115,7 +145,7 @@ def write_filtered_stops(overrides: dict, waypoint_overrides: list) -> int:
                                 quoting=csv.QUOTE_ALL)
         writer.writeheader()
         for row in reader:
-            ov = overrides.get(row["stop_id"])
+            ov = _override_for(overrides, row)
             if ov is not None:
                 row["stop_lon"] = f"{ov[0]:.8f}"
                 row["stop_lat"] = f"{ov[1]:.8f}"
@@ -177,9 +207,12 @@ def identify_split_routes(split_overrides: list) -> dict:
 
 
 def _stop_matches_transfer(row_sid: str, transfer_sid: str) -> bool:
-    """Stop_id match: exact, or — when the override names a parent (no `:`
-    suffix) — the row's stop_id resolves to that parent."""
+    """Stop_id match: exact; the row's UIC (didok, post-SLOID scheme);
+    or — legacy scheme, when the override names a parent (no `:`
+    suffix) — the row's stop_id prefix."""
     if row_sid == transfer_sid:
+        return True
+    if _SID_UIC.get(row_sid) == transfer_sid:
         return True
     if ":" not in transfer_sid and ":" in row_sid:
         return row_sid.split(":")[0] == transfer_sid
@@ -751,8 +784,10 @@ def main() -> None:
         print(f"  matched {len(waypoint_routes):,} route_id(s) in routes.txt")
 
     print(f"Loading stops…")
+    _load_sid_uic()
     stop_coords = load_stop_coords(stop_overrides)
-    print(f"  {len(stop_coords):,} stops with coords")
+    print(f"  {len(stop_coords):,} stops with coords "
+          f"({len(_SID_UIC):,} with a UIC)")
 
     print(f"Identifying excluded agencies (tokens: {excluded_tokens})…")
     excluded_agencies = identify_excluded_agencies(excluded_tokens)
@@ -822,6 +857,16 @@ def main() -> None:
     print(f"  {n_overridden:,} stop rows overridden"
           + (f", {len(waypoint_overrides)} waypoint stop(s) appended"
              if waypoint_overrides else ""))
+
+    print(f"Writing stop identity table…")
+    from gtfs.stop_identity import build_identity, write_identity, IDENTITY_PATH
+    with open(GTFS_OUT / "stops.txt", encoding="utf-8-sig", newline="") as f:
+        identity = build_identity(csv.DictReader(f))
+    write_identity(identity)
+    n_uic = sum(1 for e in identity.values() if e["uic"])
+    n_sector = sum(1 for e in identity.values() if e["sector"])
+    print(f"  {len(identity):,} stops ({n_uic:,} with UIC, "
+          f"{n_sector:,} sector variants) → {IDENTITY_PATH.name}")
 
     print(f"Copying remaining GTFS files…")
     for name in ("calendar.txt", "calendar_dates.txt", "feed_info.txt"):

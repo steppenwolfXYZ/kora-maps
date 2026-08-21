@@ -11,7 +11,7 @@
 // point was set without a name available — the UI then falls back to raw
 // coordinates.
 export type Endpoint =
-	| { type: 'station'; uic: string; name: string; coord: [number, number]; mode?: string }
+	| { type: 'station'; uic: string; name: string; coord: [number, number]; mode?: string; pid?: string }
 	| { type: 'point'; coord: [number, number]; displayName?: string; kind?: 'address' | 'poi' }
 	| { type: 'current' };
 

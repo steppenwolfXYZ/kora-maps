@@ -64,12 +64,13 @@ def _zoom_rules_cfg() -> dict:
 
 
 def _uic_of(sid: str, stop_meta: dict) -> str:
-    """Canonical UIC for a stop_id — parent_station if present, else the
-    `:`-prefix base of the stop_id (which is the SBB-style UIC)."""
+    """Canonical station UIC for a stop_id — from the step-04 identity
+    table (see sloid-stop-identity.md); parent / self as fallback for
+    stops the table doesn't know."""
     if not sid:
         return ""
-    meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
-    return meta.get("parent") or sid.split(":")[0]
+    from gtfs.stop_identity import merge_key_of
+    return merge_key_of(sid)
 
 
 def load_buildings():

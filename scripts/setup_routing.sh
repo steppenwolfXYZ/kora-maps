@@ -175,7 +175,13 @@ if [[ $FORCE_IMPORT -eq 0 && -f motis/data/tt.bin ]]; then
   echo "  index present — skipped (--force-import to re-import)"
 else
   # `run --rm` instead of `up` so the import's exit code propagates
-  # and no stopped container lingers.
+  # and no stopped container lingers. On native Linux the container's
+  # `motis` user (uid 999) cannot write the bind-mounted ./data, so map
+  # it onto the invoking user (see the compose file's KORA_UID note);
+  # macOS Docker Desktop remaps ownership itself and keeps the default.
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    export KORA_UID="$(id -u)" KORA_GID="$(id -g)"
+  fi
   (cd motis && time docker compose --profile import run --rm motis-import)
 fi
 

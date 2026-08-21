@@ -2,6 +2,8 @@
 from collections import defaultdict
 from math import cos, radians, sqrt
 
+from gtfs.stop_identity import merge_key_of
+
 from _state import *  # noqa: F401,F403
 from stops.extent import _platform_extent
 from geometry import (
@@ -135,8 +137,8 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
         first_sid, last_sid = triplets[0][2], triplets[-1][2]
         if not first_sid or not last_sid:
             continue
-        term_uic = first_sid.split(":")[0]
-        if term_uic != last_sid.split(":")[0]:
+        term_uic = merge_key_of(first_sid)
+        if term_uic != merge_key_of(last_sid):
             continue
         t_lon, t_lat = triplets[0][0], triplets[0][1]
         cos_lat = cos(radians(t_lat))
@@ -145,7 +147,7 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
         best = None
         for i in range(1, n - 1):
             sid = triplets[i][2] if len(triplets[i]) >= 3 else ""
-            if not sid or sid.split(":")[0] == term_uic:
+            if not sid or merge_key_of(sid) == term_uic:
                 continue
             dx = (triplets[i][0] - t_lon) * 111320.0 * cos_lat
             dy = (triplets[i][1] - t_lat) * 111320.0
@@ -191,10 +193,10 @@ def _collect_close_zoom_visits(line_stops, line_lookup, stop_meta,
         first_sid = triplets[0][2] if len(triplets[0]) >= 3 else ""
         if first_sid and not (stop_meta.get(first_sid, {})
                               or {}).get("platform_code"):
-            first_uic = first_sid.split(":")[0]
+            first_uic = merge_key_of(first_sid)
             for later in triplets[1:-1]:
                 l_sid = later[2] if len(later) >= 3 else ""
-                if (l_sid and l_sid.split(":")[0] == first_uic
+                if (l_sid and merge_key_of(l_sid) == first_uic
                         and (stop_meta.get(l_sid, {})
                              or {}).get("platform_code")):
                     skip_first_layover = True

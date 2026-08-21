@@ -61,6 +61,14 @@ services:
   motis-import:
     image: koramaps/motis:footpath-matrix
     profiles: ["import"]
+    # The image runs as user `motis` (uid 999). On native Linux that
+    # user cannot write into the bind-mounted ./data (owned by the
+    # invoking user), and the import dies with an iostream error before
+    # any task runs. KORA_UID/KORA_GID map the container user onto the
+    # host user; unset (macOS Docker Desktop, which remaps ownership
+    # itself) the image default applies. Set for the import via e.g.
+    #   KORA_UID=$(id -u) KORA_GID=$(id -g) docker compose --profile import run --rm motis-import
+    user: "${KORA_UID:-999}:${KORA_GID:-999}"
     volumes:
       - ./config.yml:/data/config.yml:ro
       - ../data/gtfs_motis:/data/gtfs:ro

@@ -19,7 +19,9 @@ const NUM_ITINERARIES = 5;
 // to its own platform, which the old stripStationWalks() workaround
 // existed to trim.
 function formatPlace(ep: Endpoint, resolved: [number, number]): string {
-	if (ep.type === 'station') return `ch_Parent${ep.uic}`;
+	// pid carries the feed's parent stop id (SLOID scheme); the legacy
+	// Parent<uic> shape only exists in pre-migration timetables.
+	if (ep.type === 'station') return `ch_${ep.pid ?? `Parent${ep.uic}`}`;
 	if (ep.type === 'point')   return `${ep.coord[1]},${ep.coord[0]}`;
 	return `${resolved[1]},${resolved[0]}`;
 }

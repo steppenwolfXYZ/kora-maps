@@ -21,6 +21,7 @@ def content_tg_id(merged_uics) -> str:
     return hashlib.blake2s(payload, digest_size=4).hexdigest()
 
 from .loaders import GTFS
+from .stop_identity import draw_id_of, merge_key_of, uic_of
 from .frequency import (
     CORE_END,
     CORE_HOURS,
@@ -61,10 +62,13 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     """
     global _trip_group_export, _trip_stops_export, _trip_merged_export, _trip_weight_export, _trip_direction_export, _trip_dep_span_export, _dwell_export
 
+    # Station-level merge key: the UIC from the step-04 identity table
+    # (falling back to parent / self for stops it doesn't know). Numeric
+    # UICs — not SLOID parents — keep content_tg_id hashes and thus
+    # line_keys stable across the 2026-06 SLOID migration.
     stop_merge: dict = {}
-    for sid, meta in stop_meta.items():
-        parent = meta["parent"]
-        stop_merge[sid] = parent if parent else sid.split(":")[0]
+    for sid in stop_meta:
+        stop_merge[sid] = merge_key_of(sid)
 
     # Per-merged-UIC dwell accumulator (see _dwell_export docstring above).
     # avg dep − arr across every trip-stop row; rows with dep == arr are
@@ -148,7 +152,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         }
 
         raw_variant = frozenset(s[1] for s in stops)
-        merged_set = frozenset(stop_merge.get(s[1]) or s[1].split(":")[0] for s in stops)
+        merged_set = frozenset(stop_merge.get(s[1]) or merge_key_of(s[1]) for s in stops)
         sequence   = [(s[1], s[2], s[3]) for s in stops]
         annual_w = max(1, len(active_dates))
         winter_w = sum(1 for d in active_dates if _date_in_season(d, "winter"))
@@ -177,7 +181,13 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
             # routing.
             if stop_id.startswith("WPT:"):
                 continue
-            uic_for_dwell = stop_merge.get(stop_id) or stop_id.split(":")[0]
+            # Track-granularity collapse for the map: a sector variant
+            # (…_gen:…_pf:19A-D) is drawn as its quay, so every sequence,
+            # variant set, and downstream stop artifact operates on
+            # tracks. Routing keeps sectors — it reads the feed, not
+            # these exports (sloid-stop-identity.md § Track vs sector).
+            stop_id = draw_id_of(stop_id)
+            uic_for_dwell = stop_merge.get(stop_id) or uic_of(stop_id)
             if uic_for_dwell:
                 dwell_sum[uic_for_dwell] += max(0, dep - arr)
                 dwell_cnt[uic_for_dwell] += 1
@@ -308,8 +318,8 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
         _trip_weight_seasonal_export[tid] = trip_weight_seasonal.get(tid)
         first_sid = sequence[0][0]
         last_sid = sequence[-1][0]
-        first_uic = stop_merge.get(first_sid) or first_sid.split(":")[0]
-        last_uic = stop_merge.get(last_sid) or last_sid.split(":")[0]
+        first_uic = stop_merge.get(first_sid) or merge_key_of(first_sid)
+        last_uic = stop_merge.get(last_sid) or merge_key_of(last_sid)
         direction_key = (first_uic, last_uic)
         _trip_direction_export[tid] = direction_key
         var_key = (merged_set, direction_key)
@@ -357,14 +367,15 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
             total_time = seg[-1][2] - seg[0][2]
             if total_time <= 0:
                 continue
+            def _coord(sid):
+                return stop_coords.get(sid) or stop_coords.get(uic_of(sid))
             total_dist = sum(
                 haversine_km(
-                    *(stop_coords.get(seg[j][0]) or stop_coords.get(seg[j][0].split(":")[0]) or (0,0)),
-                    *(stop_coords.get(seg[j+1][0]) or stop_coords.get(seg[j+1][0].split(":")[0]) or (0,0)),
+                    *(_coord(seg[j][0]) or (0, 0)),
+                    *(_coord(seg[j + 1][0]) or (0, 0)),
                 )
                 for j in range(len(seg) - 1)
-                if (stop_coords.get(seg[j][0]) or stop_coords.get(seg[j][0].split(":")[0]))
-                and (stop_coords.get(seg[j+1][0]) or stop_coords.get(seg[j+1][0].split(":")[0]))
+                if _coord(seg[j][0]) and _coord(seg[j + 1][0])
             )
             if total_dist > 0:
                 seg_speeds.append(total_dist / (total_time / 3600))

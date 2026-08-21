@@ -10,6 +10,7 @@ import csv
 import json
 
 from common import PROJECT_ROOT
+from gtfs.stop_identity import merge_key_of
 from geometry import haversine_km
 
 GTFS_STOPS             = PROJECT_ROOT / "data" / "gtfs_routed" / "stops.txt"
@@ -224,10 +225,10 @@ def compute_terminus_skip_oids(line_stops: dict,
                 sid = trip[2]
                 if not sid:
                     continue
-                meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+                meta = stop_meta.get(sid)
                 if not meta or not meta.get("platform_code"):
                     continue
-                uics.add(sid.split(":")[0])
+                uics.add(merge_key_of(sid))
 
     for oid_arr, sid, lon_a, lat_a in arrivals_meta:
         info = line_lookup.get(oid_arr) or line_lookup.get(str(oid_arr))
@@ -249,12 +250,12 @@ def compute_terminus_skip_oids(line_stops: dict,
         # Rule 2: layover shadowed by same-line real-platform sibling.
         if stop_meta is None:
             continue
-        meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
+        meta = stop_meta.get(sid)
         if meta and meta.get("platform_code"):
             continue
         key = (info.get("ref", ""), info.get("agency_id", ""),
                info.get("mode", ""))
-        uic = sid.split(":")[0]
+        uic = merge_key_of(sid)
         if uic in sibling_platform_uics.get(key, set()):
             skip_last.add(oid_arr)
 

@@ -68,7 +68,8 @@ service_raw: dict = defaultdict(list)
 
 
 def _stop_display_name(sid: str) -> str:
-    entry = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0]) or {}
+    from gtfs.stop_identity import uic_of
+    entry = stop_meta.get(sid) or stop_meta.get(uic_of(sid)) or {}
     return entry.get("name") or ""
 
 
@@ -249,8 +250,9 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
 
         # Per-feature stops.
         stop_entries: list = []
+        from gtfs.stop_identity import uic_of
         for sid in stop_ids:
-            c = stop_coords.get(sid) or stop_coords.get(sid.split(":")[0])
+            c = stop_coords.get(sid) or stop_coords.get(uic_of(sid))
             if c:
                 stop_entries.append([c[0], c[1], sid])
         line_stops_out[feat_id] = {
@@ -380,9 +382,8 @@ def _uic_of(entry):
     sid = entry[2] if len(entry) >= 3 else ""
     if not sid:
         return ""
-    meta = stop_meta.get(sid) or stop_meta.get(sid.split(":")[0])
-    parent = meta["parent"] if meta else ""
-    return parent if parent else sid.split(":")[0]
+    from gtfs.stop_identity import merge_key_of
+    return merge_key_of(sid)
 
 # stop_contribs[uic][ref] = max contribution at this uic for that line.
 # stop_line_index[uic][(ref, mode)] = True if any variant terminates here.

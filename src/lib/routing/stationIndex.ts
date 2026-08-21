@@ -5,8 +5,13 @@
 export interface StationEntry {
 	/** Display name */
 	n: string;
-	/** Merged UIC */
+	/** Merged UIC — the stable client-facing station key */
 	u: string;
+	/** MOTIS parent stop id ("Parentch:1:sloid:7000"); the routing
+	 *  place id is "ch_" + p (client.ts formatPlace). Absent in
+	 *  pre-SLOID index files — formatPlace falls back to the legacy
+	 *  "Parent<uic>" shape. */
+	p?: string;
 	/** [lon, lat] — GTFS-derived station coord. Stable; used for search
 	 *  distance-scoring and map fly-to on selection. Routing does NOT
 	 *  send this coord — station endpoints go to MOTIS as stop IDs

@@ -62,7 +62,8 @@ def _parent_of(sid):
     # remap raw GTFS parent_station to the pill clusterer's leader parent
     # so multi-parent stations (Gümligen, Melchenbühl (Tram) 8507052 +
     # (Bus) 8577013) render as ONE hull, backdrop, and station label.
-    raw = stop_meta.get(sid, {}).get("parent") or sid.split(":")[0] or sid
+    meta = stop_meta.get(sid, {})
+    raw = meta.get("uic") or meta.get("parent") or sid
     if parent_leader:
         return parent_leader.get(raw, raw)
     return raw

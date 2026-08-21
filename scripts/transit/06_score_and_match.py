@@ -187,7 +187,8 @@ _SERVICE_AREA_INCLUDE: frozenset = frozenset({
 
 
 def is_in_service_area(stop_id: str) -> bool:
-    sid = stop_id.split(":")[0]
+    from gtfs.stop_identity import uic_of
+    sid = uic_of(stop_id) or stop_id.split(":")[0]
     if sid in _SERVICE_AREA_INCLUDE:
         return True
     if sid in _SERVICE_AREA_EXCLUDE:

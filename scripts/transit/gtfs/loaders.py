@@ -177,6 +177,13 @@ def load_frequencies() -> dict:
 
 
 def load_stops() -> dict:
+    """{stop_id: (lon, lat)}, plus one alias per station UIC so lookups
+    keyed by the merged UIC (dwell, grouping centroids, direction
+    endpoints) resolve to a representative coordinate. The UIC comes
+    from the step-04 identity table — the SLOID scheme's stop_ids carry
+    no parseable UIC (see sloid-stop-identity.md)."""
+    from .stop_identity import load_identity
+    identity = load_identity()
     coords = {}
     with open(GTFS / "stops.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
@@ -185,12 +192,13 @@ def load_stops() -> dict:
                 continue
             try:
                 lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
-                coords[sid] = (lon, lat)
-                base = sid.split(":")[0]
-                if base not in coords:
-                    coords[base] = (lon, lat)
             except ValueError:
-                pass
+                continue
+            coords[sid] = (lon, lat)
+            e = identity.get(sid)
+            uic = e["uic"] if e else ""
+            if uic and uic not in coords:
+                coords[uic] = (lon, lat)
     return coords
 
 
@@ -202,6 +210,8 @@ def load_stop_meta() -> dict:
     and comparisons are format-agnostic. `platform_code` is the raw GTFS
     field (empty string when the feed omits it).
     """
+    from .stop_identity import load_identity
+    identity = load_identity()
     meta: dict = {}
     stops_txt = GTFS / "stops.txt"
     # No exists() guard: a missing stops.txt must fail loudly here rather
@@ -211,16 +221,23 @@ def load_stop_meta() -> dict:
             sid = row["stop_id"]
             if sid.startswith("0000"):
                 continue
-            parent = row.get("parent_station", "").removeprefix("Parent")
+            e = identity.get(sid)
+            # platform_code: the identity table's track code, so sector
+            # variants surface their track ("19"), never the sector
+            # range ("19A-D") — rendering is track-granular per
+            # sloid-stop-identity.md. Raw GTFS platform_code is the
+            # fallback for stops the table doesn't know.
             entry = {
                 "name": row.get("stop_name", ""),
-                "parent": parent,
-                "platform_code": (row.get("platform_code") or "").strip(),
+                "parent": row.get("parent_station", "").removeprefix("Parent"),
+                "uic": e["uic"] if e else "",
+                "platform_code": (e["track"] if e else "")
+                                 or (row.get("platform_code") or "").strip(),
             }
             meta[sid] = entry
-            base = sid.split(":")[0]
-            if base not in meta:
-                meta[base] = entry
+            uic = entry["uic"]
+            if uic and uic not in meta:
+                meta[uic] = entry
     return meta
 
 

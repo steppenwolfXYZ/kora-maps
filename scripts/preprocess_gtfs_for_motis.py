@@ -42,6 +42,7 @@ updates `data/gtfs_routed/`, and before `docker compose up` for MOTIS.
 import csv
 import json
 import os
+import subprocess
 import sys
 from collections import defaultdict
 from math import cos, radians
@@ -108,17 +109,23 @@ def _snap_stop(index, uic: str, ref: str, anchor_lon: float, anchor_lat: float):
     return best_pt
 
 
-def _parent_uic(parent_station_id: str) -> str:
-    """Extract the bare UIC digits from a GTFS parent_station id like
-    "Parent8571393" → "8571393"."""
-    digits = "".join(c for c in parent_station_id if c.isdigit())
-    return digits
+IDENTITY_JSON = ROOT / "data" / "gtfs_filtered" / "stop_identity.json"
+
+
+def _load_identity() -> dict:
+    """Step 04's stop identity table (see sloid-stop-identity.md): the
+    per-stop UIC / track / sector, which the SLOID-scheme stop_ids no
+    longer carry and pfaedle's stops.txt strips."""
+    if not IDENTITY_JSON.exists():
+        sys.exit(f"missing {IDENTITY_JSON} — run pipeline step 4 first")
+    return json.loads(IDENTITY_JSON.read_text())
 
 
 def main() -> None:
     if not GTFS_IN.exists():
         sys.exit(f"missing {GTFS_IN} — run pipeline steps 1–5 first")
     index = _load_platforms()
+    identity = _load_identity()
 
     # Read stops.txt into memory, indexed by stop_id for parent lookup.
     stops_path = GTFS_IN / "stops.txt"
@@ -145,13 +152,16 @@ def main() -> None:
     n_no_match = 0
     max_shift_m = 0.0
     for row in rows:
-        code = (row.get("platform_code") or "").strip()
+        ident = identity.get(row["stop_id"]) or {}
+        uic = ident.get("uic", "")
+        # Sector variants try their sector-range code first (a matching
+        # OSM way is the most precise position), then their track; plain
+        # stops use their track code (sloid-stop-identity.md § Routing
+        # sidecar).
+        codes = [c for c in (ident.get("sector", ""), ident.get("track", ""))
+                 if c]
         parent_id = (row.get("parent_station") or "").strip()
-        if not code or not parent_id:
-            n_no_code += 1
-            continue
-        uic = _parent_uic(parent_id)
-        if not uic:
+        if not uic or not codes:
             n_no_code += 1
             continue
         # Anchor snap search from the parent centroid when available (child
@@ -162,7 +172,11 @@ def main() -> None:
                 anchor = (float(row["stop_lon"]), float(row["stop_lat"]))
             except (KeyError, TypeError, ValueError):
                 continue
-        snap = _snap_stop(index, uic, code, anchor[0], anchor[1])
+        snap = None
+        for code in codes:
+            snap = _snap_stop(index, uic, code, anchor[0], anchor[1])
+            if snap is not None:
+                break
         if snap is None:
             n_no_match += 1
             continue
@@ -201,11 +215,22 @@ def main() -> None:
 
     # Hardlink everything else. Symlinks would work on native Linux but
     # Docker Desktop on macOS may not follow them through the bind mount.
+    # On native Linux the pfaedle container writes gtfs_routed/ as root,
+    # and fs.protected_hardlinks then rejects hardlinks to files the
+    # user cannot write (EPERM) — fall back to `cp --reflink=auto`,
+    # which is an instant copy-on-write clone on btrfs/XFS and a plain
+    # copy elsewhere. macOS never takes this branch.
     n_hardlinked = 0
     for src in GTFS_IN.iterdir():
         if not src.is_file() or src.name == "stops.txt":
             continue
-        os.link(src, GTFS_OUT / src.name)
+        dst = GTFS_OUT / src.name
+        try:
+            os.link(src, dst)
+        except OSError:
+            subprocess.run(
+                ["cp", "--reflink=auto", str(src), str(dst)], check=True
+            )
         n_hardlinked += 1
 
     print(

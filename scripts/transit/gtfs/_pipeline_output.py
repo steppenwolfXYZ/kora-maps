@@ -7,10 +7,12 @@ cluster_m = float(lg_cfg.get("cluster_threshold_m", 250.0))
 
 # First-seen UIC → coords.
 uic_coords: dict = {}
+from gtfs.stop_identity import merge_key_of, uic_of
+
 for entry in line_stops_out.values():
     for stop in entry.get("stops", []):
         if len(stop) >= 3 and stop[2]:
-            uic = stop[2].split(":")[0]
+            uic = merge_key_of(stop[2])
             uic_coords.setdefault(uic, (float(stop[0]), float(stop[1])))
 
 super_of_uic = _cluster_uics(uic_coords, cluster_m)
@@ -20,7 +22,7 @@ lines_at_super: dict = defaultdict(set)
 for oid, entry in line_stops_out.items():
     for stop in entry.get("stops", []):
         if len(stop) >= 3 and stop[2]:
-            uic = stop[2].split(":")[0]
+            uic = merge_key_of(stop[2])
             super_id = super_of_uic.get(uic)
             if super_id is not None:
                 lines_at_super[super_id].add(oid)
@@ -515,7 +517,7 @@ for tg_key, var_outcomes in diag_filter.items():
         if ms_trips:
             any_stops = _trip_stops_export.get(ms_trips[0], [])
             for sid in any_stops:
-                uic = sid.split(":")[0]
+                uic = uic_of(sid)
                 entry = (stop_meta.get(sid)
                          or stop_meta.get(uic)
                          or {"name": "?"})
