@@ -25,7 +25,7 @@
 	} from './routing/routeLayers';
 	import { loadRouteColorIndex } from './routing/legColor';
 	import { itineraryFingerprint } from './routing/fingerprint';
-	import type { Itinerary, Leg } from './routing/types';
+	import type { Endpoint, Itinerary, Leg } from './routing/types';
 
 	// Register the pmtiles:// protocol handler once at module level
 	const pmtilesProtocol = new Protocol();
@@ -1191,9 +1191,15 @@
 				const payload = JSON.parse(decodeURIComponent(
 					target.getAttribute('data-route-endpoint') || ''));
 				const side = target.getAttribute('data-route-side') === 'to' ? 'to' : 'from';
-				const ep = payload.uic
-					? { type: 'station' as const, uic: String(payload.uic), name: String(payload.name ?? ''), coord: payload.coord as [number, number] }
-					: { type: 'point' as const, coord: payload.coord as [number, number] };
+				// Station endpoints need the feed's parent stop id (`pid`,
+				// SLOID scheme) for the MOTIS place id — the legacy
+				// `ch_Parent<uic>` fallback in client.ts formatPlace no longer
+				// resolves (404) since the SLOID migration. Resolve it from
+				// the station index; without a hit, route from the coord.
+				const hit = payload.uic ? routeStationIndex?.get(String(payload.uic)) : undefined;
+				const ep: Endpoint = hit
+					? { type: 'station', uic: hit.u, name: String(payload.name || hit.n), coord: payload.coord as [number, number], mode: hit.m, pid: hit.p }
+					: { type: 'point', coord: payload.coord as [number, number], displayName: String(payload.name ?? '') || undefined };
 				if (side === 'from') routingState.setFrom(ep);
 				else routingState.setTo(ep);
 				if (!routingState.open) routingState.openPanel();
