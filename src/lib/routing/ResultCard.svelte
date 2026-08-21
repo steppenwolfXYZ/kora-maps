@@ -11,6 +11,8 @@
 	import { isNarrow } from './layout';
 	import { itineraryFingerprint } from './fingerprint';
 	import { routingState } from './state.svelte';
+	import { buildSharePayload, createShare } from './share';
+	import SharePopup from './SharePopup.svelte';
 
 	interface Props {
 		itinerary: Itinerary;
@@ -121,6 +123,45 @@
 		return () => { cancelled = true; };
 	});
 
+	// Share button (connection-sharing.md § Share button): create a
+	// server-stored share of this connection, then open the share dialog
+	// (SharePopup) with the link, a copy button, and the native share sheet
+	// where the browser offers one. The button shows an exclamation mark
+	// for a moment when creation fails.
+	let shareState = $state<'idle' | 'busy' | 'error'>('idle');
+	let shareUrl = $state<string | null>(null);
+	let shareAnchor: DOMRect | null = $state(null);
+	let shareResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+	async function shareConnection(e: Event) {
+		e.stopPropagation();
+		if (shareState === 'busy') return;
+		const from = routingState.from;
+		const to = routingState.to;
+		if (!from || !to) return;
+		// Anchor for the speech bubble — captured now; the layout doesn't
+		// shift while the share is being created.
+		shareAnchor = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		shareState = 'busy';
+		if (shareResetTimer) clearTimeout(shareResetTimer);
+		try {
+			const legColors = itinerary.legs.map((leg) => legBadgeColor(colorIndex, leg));
+			const { url } = await createShare(buildSharePayload(itinerary, from, to, legColors));
+			shareUrl = url;
+			shareState = 'idle';
+		} catch (err) {
+			console.error('[share] failed:', err);
+			shareState = 'error';
+			shareResetTimer = setTimeout(() => { shareState = 'idle'; }, 2500);
+		}
+	}
+
+	const SHARE_TITLE: Record<typeof shareState, string> = {
+		idle: 'Share this connection',
+		busy: 'Creating share link…',
+		error: 'Sharing failed'
+	};
+
 	// First/last transit station of the trip, with departure / arrival times.
 	// Null for walk-only itineraries (direct walking options).
 	function transitEndpoints(it: Itinerary): { fromName: string; fromTime: string; toName: string; toTime: string } | null {
@@ -219,15 +260,32 @@
 			{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}
 			· {fmtDuration(walkSeconds(itinerary))} walking
 		</span>
-		<button
-			class="card-map"
-			type="button"
-			title="Show on map"
-			aria-label="Show on map"
-			onclick={showOnMap}
-		>
-			<span class="material-symbols-outlined" aria-hidden="true">map</span>
-		</button>
+		<span class="card-actions">
+			<button
+				class="card-share"
+				class:share-error={shareState === 'error'}
+				type="button"
+				title={SHARE_TITLE[shareState]}
+				aria-label={SHARE_TITLE[shareState]}
+				disabled={shareState === 'busy'}
+				onclick={shareConnection}
+			>
+				{#if shareState === 'error'}
+					<span class="card-share-error-mark" aria-hidden="true">!</span>
+				{:else}
+					<span class="material-symbols-outlined" aria-hidden="true">share</span>
+				{/if}
+			</button>
+			<button
+				class="card-map"
+				type="button"
+				title="Show on map"
+				aria-label="Show on map"
+				onclick={showOnMap}
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">map</span>
+			</button>
+		</span>
 	</div>
 	{#if expanded}
 		<div class="leg-list" transition:slide>
@@ -274,6 +332,9 @@
 		aria-expanded={expanded}
 		onclick={(e) => { e.stopPropagation(); toggleExpandOnly(); }}
 	><span class="card-expand-chevron" class:flipped={expanded}>▾</span></button>
+	{#if shareUrl && shareAnchor}
+		<SharePopup url={shareUrl} anchor={shareAnchor} onClose={() => { shareUrl = null; }} />
+	{/if}
 </div>
 
 <style>
@@ -294,18 +355,41 @@
 		transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
 	}
 
-	.card-map {
+	.card-actions {
+		flex: 0 0 auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.15rem;
+		margin: -0.3rem -0.15rem -0.3rem 0;
+	}
+
+	.card-map,
+	.card-share {
 		flex: 0 0 auto;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
 		width: 1.6rem;
 		height: 1.6rem;
-		margin: -0.3rem -0.15rem -0.3rem 0;
 		border: none;
 		border-radius: 999px;
 		background: transparent;
 		cursor: pointer;
+	}
+
+	/* Share stays monochrome next to the red map accent. */
+	.card-share :global(.material-symbols-outlined) {
+		font-size: 1.1rem;
+		line-height: 1;
+		color: #555;
+	}
+	.card-share:hover { background: #eee; }
+	.card-share:disabled { cursor: default; opacity: 0.6; }
+	.card-share-error-mark {
+		font-size: 1rem;
+		font-weight: 800;
+		line-height: 1;
+		color: #b83232;
 	}
 	/* Map glyph in the brand red — the one coloured accent on the
 	   otherwise monochrome card. */

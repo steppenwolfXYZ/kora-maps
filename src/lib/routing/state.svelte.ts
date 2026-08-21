@@ -6,6 +6,7 @@ import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
 } from './geolocation.svelte';
 import { pruneDominated } from './ranking';
+import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
 
@@ -52,6 +53,19 @@ let expandedFingerprint = $state<string | null>(null);
 // left via the header's back / details buttons or by the selection
 // clearing (browser back, ×, input change).
 let mapModeFlag = $state(false);
+
+// Shared-connection view (connection-sharing.md § Shared view). `sharedShare`
+// holds the share document while a /s/<id> landing drives the panel;
+// `sharedOnly` filters the visible list down to the one shared connection
+// (earlier/later exit it); `sharedExpired` shows the gone-error after the
+// re-query found no share-fingerprint match. `pendingShareFingerprint` is
+// the shared analogue of `pendingFingerprint`, resolved against the raw
+// (unpruned) cascade results because share matching must never be defeated
+// by the dominance pruning of the display list.
+let sharedShare = $state.raw<ShareData | null>(null);
+let sharedOnly = $state(false);
+let sharedExpired = $state(false);
+let pendingShareFingerprint: string | null = null;
 
 let pendingAbort: AbortController | null = null;
 
@@ -325,6 +339,12 @@ function syncUrl() {
  * clear pending too so a stale fingerprint doesn't re-attach when new
  * results come back. */
 function invalidateSelection() {
+	// Editing the query leaves the shared context behind — the share only
+	// describes the original from/to/time.
+	sharedShare = null;
+	sharedOnly = false;
+	sharedExpired = false;
+	pendingShareFingerprint = null;
 	if (!selectedItinerary && !selectedFingerprint && !pendingFingerprint) return;
 	selectedItinerary = null;
 	selectedFingerprint = null;
@@ -389,6 +409,14 @@ export const routingState = {
 	// Effective only while a selection exists — the flag alone never
 	// surfaces map mode on its own.
 	get mapMode() { return mapModeFlag && selectedItinerary !== null; },
+	get sharedOnly() { return sharedOnly; },
+	get sharedExpired() { return sharedExpired; },
+	/** What the panel renders: in shared-only mode just the verified shared
+	 * connection; otherwise the normal pruned result list. */
+	get displayedResults(): Itinerary[] {
+		if (sharedOnly && selectedItinerary) return [selectedItinerary];
+		return results;
+	},
 
 	openPanel() {
 		if (panelOpen) return;
@@ -406,6 +434,10 @@ export const routingState = {
 		results = [];
 		error = null;
 		hasQueried = false;
+		sharedShare = null;
+		sharedOnly = false;
+		sharedExpired = false;
+		pendingShareFingerprint = null;
 		selectedItinerary = null;
 		selectedFingerprint = null;
 		pendingFingerprint = null;
@@ -533,6 +565,9 @@ export const routingState = {
 		selectionInvalid = false;
 		pushedEntry = false;
 		mapModeFlag = false;
+		// Dismissing the shared card's selection exits the single-connection
+		// filter — the full list is then the only sensible thing to show.
+		sharedOnly = false;
 		const url = currentUrl();
 		writeRoutingQuery(url, { from, to, mode, time, route: null });
 		if (url.href !== window.location.href) {
@@ -559,6 +594,34 @@ export const routingState = {
 
 	exitMapMode() {
 		mapModeFlag = false;
+	},
+
+	/** Open the panel on a /s/<id> share landing (connection-sharing.md
+	 * § Shared view). `null` = unknown/deleted id — panel opens with only
+	 * the gone-error. Otherwise the stored query context is direct-written
+	 * (leave-at, anchored on the shared departure) and the share fingerprint
+	 * armed; the panel's query effect then runs the verification query. */
+	hydrateShare(share: ShareData | null) {
+		panelOpen = true;
+		if (!share) {
+			sharedExpired = true;
+			return;
+		}
+		from = share.from;
+		to = share.to;
+		mode = 'leave';
+		time = share.itinerary.startTime;
+		sharedShare = share;
+		sharedOnly = true;
+		sharedExpired = false;
+		pendingShareFingerprint = share.fingerprint;
+		pushedEntry = false;
+	},
+
+	/** Leave single-connection display (earlier/later buttons) — the list
+	 * then shows every fetched result like a normal query. */
+	exitSharedOnly() {
+		sharedOnly = false;
 	},
 
 	/** Direct-write initial state from a URL restore. Doesn't re-serialise. */
@@ -601,6 +664,14 @@ export const routingState = {
 
 			let pre = NARROW_PRE_POST_SEC;
 			let post = NARROW_PRE_POST_SEC;
+			// Share verification must not depend on the narrow-radius
+			// heuristics: a shared connection with a long first/last-mile
+			// walk would be invisible to the narrow query and read as
+			// expired. Go wide from the start.
+			if (pendingShareFingerprint) {
+				pre = WIDE_PRE_POST_SEC;
+				post = WIDE_PRE_POST_SEC;
+			}
 
 			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
 				return await plan({
@@ -689,6 +760,37 @@ export const routingState = {
 				if (ac.signal.aborted) return;
 			}
 
+			// Reconcile a pending share fingerprint (connection-sharing.md
+			// § Shared view). Matched against the raw `combined` set, not the
+			// pruned display list — dominance pruning must never turn a
+			// still-running connection into a false expiry. On a confirmed
+			// no-match, report to the server, which re-verifies before
+			// actually deleting the share files.
+			if (pendingShareFingerprint) {
+				const wanted = pendingShareFingerprint;
+				pendingShareFingerprint = null;
+				const match = combined.find((r) => shareFingerprint(r) === wanted);
+				if (match) {
+					selectedItinerary = match;
+					selectedFingerprint = itineraryFingerprint(match);
+					selectionInvalid = false;
+					// The shared connection opens with its leg details visible —
+					// the recipient came to look at exactly this connection.
+					expandedFingerprint = selectedFingerprint;
+					// Stamp page.state (URL untouched — the /s/<id> address is
+					// the share link and must stay clean): without the
+					// routeSelection marker, Map.svelte's back/forward effect
+					// reads the selection as a stale leftover and clears it.
+					replaceState(currentUrl(), {
+						...page.state, routeSelection: selectedFingerprint
+					});
+				} else {
+					sharedOnly = false;
+					sharedExpired = true;
+					if (sharedShare) reportShareExpired(sharedShare.id);
+				}
+			}
+
 			// Reconcile a pending fingerprint from a cold-load restore
 			// (route-display.md § Lifecycle). Match one of the returned
 			// itineraries by fingerprint; if none does, flag the URL
@@ -724,7 +826,9 @@ export const routingState = {
 			// cold-load restore is pending (matched above) or invalid
 			// (concept: show the error, don't silently swap in a different
 			// route).
-			if (!selectedFingerprint && !selectionInvalid && results.length > 0) {
+			// Also skipped right after a share expiry — the error must not be
+			// upstaged by silently putting a different connection on the map.
+			if (!selectedFingerprint && !selectionInvalid && !sharedExpired && results.length > 0) {
 				const it = mode === 'arrive' ? results[results.length - 1] : results[0];
 				const fp = itineraryFingerprint(it);
 				selectedItinerary = it;

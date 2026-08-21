@@ -13,7 +13,11 @@
 		onEnterMapMode?: (it: Itinerary) => void;
 	} = $props();
 
-	let cardStates = $derived(computeCardStates(routingState.results));
+	// Shared-only mode (connection-sharing.md § Shared view) renders just the
+	// verified shared connection; ranking badges are suppressed there — a
+	// single card comparing against itself would always wear the crown.
+	let displayed = $derived(routingState.displayedResults);
+	let cardStates = $derived(computeCardStates(displayed));
 
 	let resultsEl: HTMLDivElement | null = $state(null);
 	// After a query finishes (loading false→true→false), scroll the
@@ -28,7 +32,7 @@
 		if (wasLoading && !isLoading && resultsEl) {
 			const fp = untrack(() => routingState.selectedFingerprint);
 			if (fp) {
-				const results = untrack(() => routingState.results);
+				const results = untrack(() => routingState.displayedResults);
 				const idx = results.findIndex((it) => itineraryFingerprint(it) === fp);
 				if (idx >= 0) {
 					const card = resultsEl.querySelectorAll('.card')[idx] as HTMLElement | undefined;
@@ -121,15 +125,23 @@
 		/>
 	</div>
 
-	{#if routingState.hasQueried}
+	{#if routingState.hasQueried || routingState.sharedExpired}
 	<div class="rp-results-sep" aria-hidden="true"></div>
 	<div class="rp-results" bind:this={resultsEl}>
+			{#if routingState.sharedExpired}
+				<div class="rp-status rp-error">
+					This shared connection is no longer available — the timetable
+					has likely changed since it was shared.
+				</div>
+			{/if}
 			{#if routingState.loading}
 				<div class="rp-status">Searching…</div>
 			{:else if routingState.error}
 				<div class="rp-status rp-error">{routingState.error}</div>
-			{:else if routingState.results.length === 0}
-				<div class="rp-status">No connections found</div>
+			{:else if displayed.length === 0}
+				{#if routingState.hasQueried}
+					<div class="rp-status">No connections found</div>
+				{/if}
 			{:else}
 				{#if routingState.selectionInvalid}
 					<div class="rp-status rp-error">
@@ -139,20 +151,20 @@
 				<button
 					type="button"
 					class="rp-load-more rp-load-more-top"
-					onclick={() => routingState.loadMoreEarlier()}
+					onclick={() => { routingState.exitSharedOnly(); routingState.loadMoreEarlier(); }}
 					disabled={!!routingState.loadingMore || routingState.loading}
 				>
 					<span class="rp-load-more-icon rp-load-more-icon-up material-symbols-outlined" aria-hidden="true">chevron_right</span>
 					<span>{routingState.loadingMore === 'earlier' ? 'Loading…' : 'Earlier connections'}</span>
 				</button>
-				{#each routingState.results as it, i (i)}
-					{@const prevIso = i === 0 ? baselineIso() : routingState.results[i - 1].startTime}
+				{#each displayed as it, i (i)}
+					{@const prevIso = i === 0 ? baselineIso() : displayed[i - 1].startTime}
 					{#if i === 0 || dayKey(it.startTime) !== dayKey(prevIso)}
 						<div class="rp-day-marker">{fmtDay(it.startTime)}</div>
 					{/if}
 					<ResultCard
 						itinerary={it}
-						badge={cardStates[i]?.badge ?? null}
+						badge={routingState.sharedOnly ? null : cardStates[i]?.badge ?? null}
 						warnings={cardStates[i]?.warnings ?? []}
 						{onFocusLeg}
 						{onEnterMapMode}
@@ -161,7 +173,7 @@
 				<button
 					type="button"
 					class="rp-load-more rp-load-more-bottom"
-					onclick={() => routingState.loadMoreLater()}
+					onclick={() => { routingState.exitSharedOnly(); routingState.loadMoreLater(); }}
 					disabled={!!routingState.loadingMore || routingState.loading}
 				>
 					<span class="rp-load-more-icon rp-load-more-icon-down material-symbols-outlined" aria-hidden="true">chevron_right</span>

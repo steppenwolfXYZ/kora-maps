@@ -37,8 +37,8 @@ function itineraryPayload(it: Itinerary): string {
 
 // Short stable hash — a djb2-derived 32-bit fold expressed as 8 hex
 // characters. Not a cryptographic hash; sufficient for indexing 5 or so
-// itineraries per query.
-function hash8(input: string): string {
+// itineraries per query. Also used by the share fingerprint (share.ts).
+export function hash8(input: string): string {
 	let h = 5381;
 	for (let i = 0; i < input.length; i++) {
 		h = ((h << 5) + h) + input.charCodeAt(i);
