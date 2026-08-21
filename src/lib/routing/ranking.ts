@@ -208,7 +208,11 @@ const WALK_HALF_MIN = 30;
 // Absolute worseness thresholds — no dependency on the surviving set's
 // spread. Adding or removing another itinerary never re-ranks the rest.
 const GOOD_MAX_PCT = 0.07;   // within 7% of fastest → thumbs up
-const BAD_MIN_PCT  = 0.25;   // ≥ 25% worse → thumbs down (tunable)
+const BAD_MIN_PCT  = 0.3;    // ≥ 30% worse → thumbs down (tunable)
+// Minimum absolute effective-time gap before a thumbs down fires — on
+// short trips a small gap crosses the percentage threshold too easily
+// (2 min on a 7-min trip is already +29%).
+const BAD_MIN_DIFF_SEC = 5 * 60;
 
 const LONG_WALK_SEC        = 20 * 60;
 const MEDIUM_WALK_SEC      = 40 * 60;
@@ -296,7 +300,7 @@ export function computeCardStates(itins: Itinerary[]): CardState[] {
 		let badge: Badge | null = null;
 		if (isBest[i]) badge = 'best';
 		else if (worseness[i] <= GOOD_MAX_PCT) badge = 'good';
-		else if (worseness[i] >= BAD_MIN_PCT) badge = 'bad';
+		else if (worseness[i] >= BAD_MIN_PCT && effTimes[i] - minEff >= BAD_MIN_DIFF_SEC) badge = 'bad';
 
 		const warnings: Warning[] = [];
 		const walk = longestWalkLeg(it);

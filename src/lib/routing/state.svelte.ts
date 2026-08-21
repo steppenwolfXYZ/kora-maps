@@ -1,6 +1,6 @@
 import { pushState, replaceState } from '$app/navigation';
 import { page } from '$app/state';
-import { plan } from './client';
+import { plan, PlanRequestError } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
@@ -288,6 +288,21 @@ function hasLongWait(it: Itinerary): boolean {
 	return false;
 }
 
+/** Map a failed plan request to a short user-facing message. The raw
+ * error (HTTP status + MOTIS response body) goes to the console only —
+ * server internals are never rendered in the panel. */
+function userFacingError(e: unknown): string {
+	console.error('[routing] query failed:', e);
+	if (e instanceof PlanRequestError) {
+		// A 4xx from MOTIS almost always means an endpoint the current
+		// timetable doesn't know (e.g. a stale stop id in a bookmarked URL).
+		if (e.status >= 400 && e.status < 500) return 'Could not find a location for this route.';
+		return 'Route search is temporarily unavailable. Please try again later.';
+	}
+	if (e instanceof TypeError) return 'Route search is unreachable. Please check your connection.';
+	return 'Route search failed. Please try again.';
+}
+
 function currentUrl(): URL {
 	return new URL(window.location.href);
 }
@@ -346,7 +361,7 @@ async function loadMoreInDirection(direction: 'earlier' | 'later') {
 		await runHopCascade(dir, startEpoch, WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') {
-			error = e instanceof Error ? e.message : String(e);
+			error = userFacingError(e);
 		}
 	} finally {
 		if (pendingAbort === ac) pendingAbort = null;
@@ -722,7 +737,7 @@ export const routingState = {
 			lastQueryKey = key;
 		} catch (e) {
 			if ((e as Error).name === 'AbortError') return;
-			error = e instanceof Error ? e.message : String(e);
+			error = userFacingError(e);
 			results = [];
 		} finally {
 			// Only the run that still owns `pendingAbort` may clear `loading`.

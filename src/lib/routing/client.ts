@@ -10,6 +10,21 @@ const MOTIS_BASE = PUBLIC_MOTIS_URL.replace(/\/$/, '');
 
 const NUM_ITINERARIES = 5;
 
+/** A non-OK response from the MOTIS /plan endpoint. Carries the HTTP
+ * status so state.svelte.ts can pick a user-facing message; the raw
+ * server body stays in `body` / `message` for console diagnostics only —
+ * it must never be rendered in the UI. */
+export class PlanRequestError extends Error {
+	status: number;
+	body: string;
+	constructor(status: number, body: string) {
+		super(`MOTIS ${status}: ${body}`);
+		this.name = 'PlanRequestError';
+		this.status = status;
+		this.body = body;
+	}
+}
+
 // Station endpoints go to MOTIS as stop IDs ("ch_Parent<uic>"), not
 // coordinates. The forked MOTIS serves WALK offsets for stop-ID
 // endpoints straight from the imported Valhalla footpath matrix — zero
@@ -88,7 +103,7 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });
-	if (!res.ok) throw new Error(`MOTIS ${res.status}: ${await res.text().catch(() => res.statusText)}`);
+	if (!res.ok) throw new PlanRequestError(res.status, await res.text().catch(() => res.statusText));
 	// Every walking duration/geometry in the response is already
 	// Valhalla-computed server-side by the MOTIS fork (see
 	// valhalla-pedestrian-router.md) — no client-side rewriting.
