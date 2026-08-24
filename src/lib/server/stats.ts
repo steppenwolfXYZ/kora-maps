@@ -1,7 +1,7 @@
 // Nginx access-log parser for the /stats page. Reads the per-site
 // combined-format log plus its rotated siblings (.1, .2.gz, …) and
 // aggregates per-day hits, routing plan requests, unique client IPs,
-// and the most-requested route pairs. Place tokens stay unresolved
+// plus the most recent route requests. Place tokens stay unresolved
 // here ("u:<uic>" / "p:<parent stop id>" / "c:<lat>,<lon>") — the page
 // resolves them to station names client-side via stop_search_index.json,
 // which never exists inside the server build (deployment.md § SSR
@@ -38,20 +38,21 @@ export interface DayStats {
 	botHits: number;
 }
 
-export interface RoutePair {
+export interface RouteRequest {
+	/** "YYYY-MM-DD HH:MM:SS", server-local time from the log */
+	time: string;
 	/** "u:<uic>" | "p:<parent stop id>" | "c:<lat>,<lon>" (3 decimals) | "?:<raw>" */
 	from: string;
 	to: string;
-	count: number;
 	/** Display labels logged with the request (geocoded point endpoints
-	 *  send fromName/toName along, see client.ts) — first seen wins. */
+	 *  send fromName/toName along, see client.ts). */
 	fromName?: string;
 	toName?: string;
 	/** App deep-link from/to tokens (url.ts format: bare UIC or
-	 *  "lat,lon") built from the first logged request of the group —
-	 *  exact coords, not the rounded group key. A SLOID station place
-	 *  arrives as "p:<parent stop id>" for the page to resolve to its UIC
-	 *  client-side. Absent when a place token has an unknown format. */
+	 *  "lat,lon") — exact coords, not the rounded display token. A SLOID
+	 *  station place arrives as "p:<parent stop id>" for the page to
+	 *  resolve to its UIC client-side. Absent when a place token has an
+	 *  unknown format. */
 	linkFrom?: string;
 	linkTo?: string;
 }
@@ -60,20 +61,20 @@ export interface Stats {
 	available: boolean;
 	logPath: string;
 	days: DayStats[];
-	topRoutes: RoutePair[];
+	recentRoutes: RouteRequest[];
 	totalHits: number;
 	totalPlans: number;
 	totalUniqueIps: number;
 }
 
-/** "20/Aug/2026:20:17:01 +0200" → "2026-08-20" */
-function logTimeToDay(t: string): string | null {
-	const m = t.match(/^(\d{2})\/([A-Za-z]{3})\/(\d{4}):/);
+/** "20/Aug/2026:20:17:01 +0200" → "2026-08-20 20:17:01" (sortable) */
+function logTimeToStamp(t: string): string | null {
+	const m = t.match(/^(\d{2})\/([A-Za-z]{3})\/(\d{4}):(\d{2}:\d{2}:\d{2})/);
 	if (!m || !MONTHS[m[2]]) return null;
-	return `${m[3]}-${MONTHS[m[2]]}-${m[1]}`;
+	return `${m[3]}-${MONTHS[m[2]]}-${m[1]} ${m[4]}`;
 }
 
-/** fromPlace/toPlace value → grouping token */
+/** fromPlace/toPlace value → display token */
 function placeToken(raw: string): string {
 	const station = raw.match(/^ch_Parent(\d+)$/);
 	if (station) return `u:${station[1]}`;
@@ -120,10 +121,7 @@ export function buildStats(): Stats {
 	const texts = readLogFiles(logPath);
 
 	const days = new Map<string, { hits: number; plans: number; ips: Set<string>; bots: number }>();
-	const routeCounts = new Map<
-		string,
-		{ count: number; fromName?: string; toName?: string; linkFrom?: string; linkTo?: string }
-	>();
+	const routeRequests: RouteRequest[] = [];
 	const allIps = new Set<string>();
 	let totalHits = 0;
 	let totalPlans = 0;
@@ -133,8 +131,9 @@ export function buildStats(): Stats {
 			const m = line.match(LINE_RE);
 			if (!m) continue;
 			const [, ip, time, request, , ua] = m;
-			const day = logTimeToDay(time);
-			if (!day) continue;
+			const stamp = logTimeToStamp(time);
+			if (!stamp) continue;
+			const day = stamp.slice(0, 10);
 			let d = days.get(day);
 			if (!d) days.set(day, (d = { hits: 0, plans: 0, ips: new Set(), bots: 0 }));
 
@@ -159,33 +158,29 @@ export function buildStats(): Stats {
 				const from = params.get('fromPlace');
 				const to = params.get('toPlace');
 				if (!from || !to) continue;
-				const key = `${placeToken(from)}|${placeToken(to)}`;
-				let r = routeCounts.get(key);
-				if (!r) routeCounts.set(key, (r = { count: 0 }));
-				r.count++;
-				r.fromName ??= params.get('fromName') ?? undefined;
-				r.toName ??= params.get('toName') ?? undefined;
-				if (!r.linkFrom) {
-					const fromTok = placeUrlToken(from);
-					const toTok = placeUrlToken(to);
-					if (fromTok && toTok) {
-						r.linkFrom = fromTok;
-						r.linkTo = toTok;
-					}
+				const req: RouteRequest = {
+					time: stamp,
+					from: placeToken(from),
+					to: placeToken(to),
+					fromName: params.get('fromName') ?? undefined,
+					toName: params.get('toName') ?? undefined
+				};
+				const fromTok = placeUrlToken(from);
+				const toTok = placeUrlToken(to);
+				if (fromTok && toTok) {
+					req.linkFrom = fromTok;
+					req.linkTo = toTok;
 				}
+				routeRequests.push(req);
 			} catch {
 				// malformed query string — skip
 			}
 		}
 	}
 
-	const topRoutes: RoutePair[] = [...routeCounts.entries()]
-		.sort((a, b) => b[1].count - a[1].count)
-		.slice(0, 30)
-		.map(([key, r]) => {
-			const [from, to] = key.split('|');
-			return { from, to, ...r };
-		});
+	// Rotated files arrive in readdir order, so sort globally by the
+	// lexically sortable timestamp before taking the newest 100.
+	const recentRoutes = routeRequests.sort((a, b) => (a.time < b.time ? 1 : -1)).slice(0, 100);
 
 	return {
 		available: texts.length > 0,
@@ -199,7 +194,7 @@ export function buildStats(): Stats {
 				uniqueIps: d.ips.size,
 				botHits: d.bots
 			})),
-		topRoutes,
+		recentRoutes,
 		totalHits,
 		totalPlans,
 		totalUniqueIps: allIps.size

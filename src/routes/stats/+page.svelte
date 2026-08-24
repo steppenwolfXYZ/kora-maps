@@ -143,26 +143,26 @@
 		</section>
 
 		<section>
-			<h2>Requested routes</h2>
-			{#if stats.topRoutes.length === 0}
+			<h2>Recent route requests</h2>
+			{#if stats.recentRoutes.length === 0}
 				<p class="notice">No routing queries in the retained log window.</p>
 			{:else}
 				<table>
 					<thead>
 						<tr>
+							<th>Time</th>
 							<th>From</th>
 							<th>To</th>
-							<th class="num">Count</th>
 							<th></th>
 						</tr>
 					</thead>
 					<tbody>
-						{#each stats.topRoutes as r (r.from + '|' + r.to)}
+						{#each stats.recentRoutes as r, i (i)}
 							{@const link = routeLink(r)}
 							<tr>
+								<td class="time">{r.time}</td>
 								<td>{resolveToken(r.from, r.fromName)}</td>
 								<td>{resolveToken(r.to, r.toName)}</td>
-								<td class="num">{fmt.format(r.count)}</td>
 								<td class="num">
 									{#if link}
 										<a class="route-link" href={link} target="_blank" rel="noopener">open ↗</a>
@@ -272,6 +272,11 @@
 	}
 	.muted {
 		color: #a3988a;
+	}
+	.time {
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		color: #6e6155;
 	}
 
 	.notice {

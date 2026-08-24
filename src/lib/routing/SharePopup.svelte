@@ -46,9 +46,24 @@
 		setTimeout(() => { copied = false; }, 2000);
 	}
 
+	/** Share the rendered connection PNG as a file plus the link as text —
+	 * messengers then display the full image with the link underneath (the
+	 * SBB-Mobile-style share), instead of a cropped URL-preview card.
+	 * Browsers without file sharing get the URL-only share. */
 	async function nativeShare() {
+		let data: ShareData = { title: 'Kora Maps', url };
 		try {
-			await navigator.share({ title: 'Kora Maps', url });
+			const res = await fetch(`${url}/image.png`);
+			if (res.ok) {
+				const file = new File([await res.blob()], 'connection.png', { type: 'image/png' });
+				const withFile: ShareData = { files: [file], text: url };
+				if (navigator.canShare?.(withFile)) data = withFile;
+			}
+		} catch {
+			// Image fetch failed — URL-only share still works.
+		}
+		try {
+			await navigator.share(data);
 			onClose();
 		} catch {
 			// Abort = user closed the sheet — keep the bubble open.
