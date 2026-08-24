@@ -22,9 +22,11 @@
 		onFocusLeg?: (leg: Leg) => void;
 		/** Frame the whole route when entering mobile map mode. */
 		onEnterMapMode?: (it: Itinerary) => void;
+		/** Reset the camera to the whole-route overview (after a leg focus). */
+		onFrameRoute?: (it: Itinerary) => void;
 	}
 
-	let { itinerary, badge = null, warnings = [], onFocusLeg, onEnterMapMode }: Props = $props();
+	let { itinerary, badge = null, warnings = [], onFocusLeg, onEnterMapMode, onFrameRoute }: Props = $props();
 
 	function headsign(leg: Leg): string {
 		return leg.headsign ?? leg.tripHeadsign ?? '';
@@ -37,10 +39,16 @@
 	// only toggles expansion, so opening via the chevron does NOT select.
 	function toggleCard() {
 		const willExpand = !expanded;
+		const wasSelected = selected;
 		routingState.toggleExpanded(itinerary);
 		if (!isNarrow() && routingState.expandedFingerprint === fingerprint) {
 			routingState.selectItinerary(itinerary);
 		}
+		// Expanding/collapsing the on-map connection resets the camera to the
+		// route overview — a prior leg focus would otherwise leave the map
+		// zoomed to that segment. A fresh selection reframes via the overlay
+		// effect, so only the already-selected case needs the explicit call.
+		if (!isNarrow() && wasSelected) onFrameRoute?.(itinerary);
 		if (willExpand) scrollIntoViewSoon();
 	}
 
@@ -49,6 +57,7 @@
 	function toggleExpandOnly() {
 		const willExpand = !expanded;
 		routingState.toggleExpanded(itinerary);
+		if (!isNarrow() && selected) onFrameRoute?.(itinerary);
 		if (willExpand) scrollIntoViewSoon();
 	}
 
@@ -64,10 +73,16 @@
 	// the overlay at this connection (peek while another card stays open).
 	function showOnMap(e: Event) {
 		e.stopPropagation();
+		const wasSelected = selected;
 		routingState.selectItinerary(itinerary);
 		if (isNarrow()) {
 			routingState.enterMapMode();
 			onEnterMapMode?.(itinerary);
+		} else if (wasSelected) {
+			// Re-clicking the icon of the already-shown connection: the overlay
+			// effect won't re-run, so reset the overview framing here (e.g.
+			// after a leg focus zoomed into one segment).
+			onFrameRoute?.(itinerary);
 		}
 	}
 

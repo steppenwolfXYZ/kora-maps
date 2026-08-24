@@ -8,9 +8,10 @@
 	import { itineraryFingerprint } from './fingerprint';
 	import type { Itinerary, Leg } from './types';
 
-	let { onFocusLeg, onEnterMapMode }: {
+	let { onFocusLeg, onEnterMapMode, onFrameRoute }: {
 		onFocusLeg?: (leg: Leg) => void;
 		onEnterMapMode?: (it: Itinerary) => void;
+		onFrameRoute?: (it: Itinerary) => void;
 	} = $props();
 
 	// Shared-only mode (connection-sharing.md § Shared view) renders just the
@@ -20,6 +21,17 @@
 	let cardStates = $derived(computeCardStates(displayed));
 
 	let resultsEl: HTMLDivElement | null = $state(null);
+	let fromInput: EndpointInput | undefined = $state();
+	let toInput: EndpointInput | undefined = $state();
+
+	// Open-time cursor placement: openPanel records which endpoint field
+	// should receive focus; consume it once when the panel mounts. Remounts
+	// (e.g. exiting mobile map mode) find the request already cleared.
+	$effect(() => {
+		const side = routingState.consumeFocusRequest();
+		if (side === 'from') fromInput?.focusSearch();
+		else if (side === 'to') toInput?.focusSearch();
+	});
 	// After a query finishes (loading false→true→false), scroll the
 	// selected card into view — arrive-by auto-selects the last result,
 	// which sits at the bottom and would otherwise be off-screen. No-op
@@ -93,6 +105,7 @@
 	<div class="rp-endpoints">
 		<div class="rp-inputs">
 			<EndpointInput
+				bind:this={fromInput}
 				label="From"
 				endpoint={routingState.from}
 				placeholder="Start"
@@ -100,6 +113,7 @@
 				otherIsCurrent={routingState.to?.type === 'current'}
 			/>
 			<EndpointInput
+				bind:this={toInput}
 				label="To"
 				endpoint={routingState.to}
 				placeholder="Destination"
@@ -168,6 +182,7 @@
 						warnings={cardStates[i]?.warnings ?? []}
 						{onFocusLeg}
 						{onEnterMapMode}
+						{onFrameRoute}
 					/>
 				{/each}
 				<button

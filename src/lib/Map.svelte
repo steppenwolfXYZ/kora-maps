@@ -988,6 +988,14 @@
 		void frameRouteBounds(geo.bbox, 15);
 	}
 
+	// Reset to the whole-route overview after a leg focus zoomed in —
+	// triggered by the card's map icon and by expand/collapse when the
+	// selection itself doesn't change (so the overlay effect won't reframe).
+	function frameWholeRoute(it: Itinerary) {
+		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
+		void frameRouteBounds(geo.bbox, 15);
+	}
+
 	function enterRouteOverlay(map: maplibregl.Map, it: Itinerary) {
 		const geo = buildRouteGeoJSON(it, routeColorIndex, routeStationIndex);
 
@@ -1202,7 +1210,7 @@
 					: { type: 'point', coord: payload.coord as [number, number], displayName: String(payload.name ?? '') || undefined };
 				if (side === 'from') routingState.setFrom(ep);
 				else routingState.setTo(ep);
-				if (!routingState.open) routingState.openPanel();
+				if (!routingState.open) routingState.openPanel({ prefillCurrent: false });
 				closePopup();
 			} catch { /* malformed payload — ignore */ }
 		});
@@ -2099,7 +2107,7 @@
 	{/if}
 	{#if routingState.open}
 		<div class="top-controls" class:hidden-in-map-mode={routingState.mapMode}>
-			<RoutingPanel onFocusLeg={focusRouteLeg} onEnterMapMode={enterRouteMapMode} />
+			<RoutingPanel onFocusLeg={focusRouteLeg} onEnterMapMode={enterRouteMapMode} onFrameRoute={frameWholeRoute} />
 		</div>
 	{:else if !lineDetail}
 		<div class="top-controls">

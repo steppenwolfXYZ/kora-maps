@@ -49,6 +49,12 @@
 	let index = $state<IndexedStation[]>([]);
 	let query = $state('');
 	let editing = $state(false);
+	// Dropdown visibility, separate from `editing`: a programmatic focus
+	// (panel open-time cursor placement) keeps the input focused but the
+	// menu closed so it doesn't cover the other endpoint row — it opens on
+	// click into the field or on typing.
+	let menuOpen = $state(false);
+	let suppressMenuOnFocus = false;
 	let highlighted = $state(0);
 	let inputEl: HTMLInputElement | null = $state(null);
 	let rowEl: HTMLDivElement | null = $state(null);
@@ -92,7 +98,7 @@
 	}
 
 	$effect(() => {
-		if (!editing) return;
+		if (!editing || !menuOpen) return;
 		updateMenuPos();
 		const handler = () => updateMenuPos();
 		window.addEventListener('resize', handler);
@@ -137,6 +143,18 @@
 
 	function startEdit() {
 		editing = true;
+		menuOpen = true;
+		query = '';
+		highlighted = 0;
+		queueMicrotask(() => inputEl?.focus());
+	}
+
+	/** Programmatic focus for the panel's open-time cursor placement —
+	 * focuses the input without opening the dropdown. */
+	export function focusSearch() {
+		suppressMenuOnFocus = true;
+		editing = true;
+		menuOpen = false;
 		query = '';
 		highlighted = 0;
 		queueMicrotask(() => inputEl?.focus());
@@ -144,6 +162,7 @@
 
 	function commit(ep: Endpoint | null) {
 		editing = false;
+		menuOpen = false;
 		query = '';
 		geoResults = [];
 		onChange(ep);
@@ -176,16 +195,23 @@
 
 	function onBlur() {
 		// Delay so click on a dropdown row lands before we tear down.
-		setTimeout(() => { editing = false; query = ''; geoResults = []; }, 120);
+		setTimeout(() => { editing = false; menuOpen = false; query = ''; geoResults = []; }, 120);
+	}
+
+	function onFocus() {
+		editing = true;
+		// A programmatic focus keeps the menu closed (see focusSearch).
+		if (suppressMenuOnFocus) suppressMenuOnFocus = false;
+		else menuOpen = true;
 	}
 
 	// "Current location" is only offered when the user hasn't started
 	// typing — once there's a query, only search matches belong in the
 	// dropdown. Hidden once the permission has been denied, and when the
-	// other side already uses it.
+	// other side already uses it. Still offered while this side itself has
+	// it set, so re-picking it is possible after clicking into the field.
 	const showCurrent = $derived(
-		geoAvailable && !geolocationDenied() && !otherIsCurrent
-		&& endpoint?.type !== 'current' && !query.trim()
+		geoAvailable && !geolocationDenied() && !otherIsCurrent && !query.trim()
 	);
 
 	type Row =
@@ -213,6 +239,7 @@
 	function onKey(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			editing = false;
+			menuOpen = false;
 			query = '';
 			geoResults = [];
 			inputEl?.blur();
@@ -220,6 +247,10 @@
 		}
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
+			if (!menuOpen) {
+				menuOpen = true;
+				return;
+			}
 			highlighted = Math.min(highlighted + 1, rows.length - 1);
 			return;
 		}
@@ -254,12 +285,17 @@
 			autocomplete="off"
 			bind:value={query}
 			{placeholder}
-			onfocus={() => { editing = true; }}
+			onfocus={onFocus}
+			onmousedown={() => { if (editing) menuOpen = true; }}
+			oninput={() => { menuOpen = true; }}
 			onblur={onBlur}
 			onkeydown={onKey}
 		/>
-		{#if editing}
+		{#if editing && menuOpen}
 			<ul class="ep-menu" role="listbox" style={menuStyle}>
+				{#if !query.trim()}
+					<li class="ep-hint">Start typing to search stations or locations</li>
+				{/if}
 				{#each rows as row, i (row.kind === 'current' ? 'c' : row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
 					{#if row.kind === 'geo' && i === geoStartIdx && geoStartIdx > 0}
 						<li class="ep-divider" aria-hidden="true"></li>
@@ -433,6 +469,13 @@
 		font-size: 0.85rem;
 		color: #888;
 		font-style: italic;
+	}
+
+	.ep-hint {
+		padding: 0.35rem 0.7rem;
+		font-size: 0.8rem;
+		color: #888;
+		list-style: none;
 	}
 
 	.ep-divider {

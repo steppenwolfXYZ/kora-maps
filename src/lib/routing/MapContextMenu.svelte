@@ -23,7 +23,12 @@
 		if (!anchor) return;
 		const coord: [number, number] = [anchor.lng, anchor.lat];
 		const seq = ++pickSeq;
-		if (!routingState.open) routingState.openPanel();
+		// Focus override: the picked endpoint arrives async (reverse geocode),
+		// so at open time both fields are empty — point the cursor at the
+		// side the pick won't fill.
+		if (!routingState.open) {
+			routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from' });
+		}
 		onClose();
 		// Resolve the address first, then set the endpoint once — setting it
 		// nameless and attaching the name later would rewrite the endpoint

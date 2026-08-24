@@ -19,7 +19,12 @@ const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
 // realistic temporal-gap allowance.
 const WALK_SOFT_CAP_SEC = 30 * 60;   // linear knee-point (30 min)
 const WALK_TAIL_PER_SEC = 0.5;       // shallow slope past the knee
-const T_SLACK_MS = 60 * 1000;        // start/end jitter that still counts as "same time"
+// Absorbs seconds-granular walk-offset jitter (Valhalla walk legs shift
+// itinerary endpoints by seconds) — but must stay below 60 s: transit
+// times are minute-granular, and a full minute is a real difference on
+// short connections (a 60 s slack let a bus arriving a minute later
+// Pareto-dominate a tram and prune it via the Case 1 comfort test).
+const T_SLACK_MS = 50 * 1000;        // start/end jitter that still counts as "same time"
 // Case 1 (overlapping) marginality thresholds.
 const OVERLAP_TIME_MAX_MS = 9 * 60 * 1000;   // both endpoints must be within 9 min
 const OVERLAP_COMFORT_MAX_PCT = 0.20;        // effective-time worseness ≤ 20%

@@ -107,7 +107,7 @@ Mountain line color is purple (hue 290) with a deliberately narrow speed-driven 
 Keep exactly one unified `bridge-deck` layer covering all `brunnel=bridge` transportation. Do NOT split into per-class deck layers — they produce hollow "donut" artifacts. This has been tried and reverted multiple times; do not attempt again.
 
 ## Concepts
-When asked to "write a concept" or before implementing a non-trivial change, create a file in `.claude/concepts/<topic-name>.md`. Name files by topic, not date.
+When asked to "write a concept", or before implementing business-logic changes or major UI changes (new views, new interaction systems, cross-component reworks), create a file in `.claude/concepts/<topic-name>.md`. Normal UI changes (single-component work, styling, small interaction changes) do NOT need a concept doc — just implement them when authorised. Name files by topic, not date.
 
 The document is a **requirement definition**, not an implementation guide. Its purpose is to pin down what the change must do before work starts (so requirements don't drift mid-implementation) and to remain as a record of how it was supposed to work once done.
 

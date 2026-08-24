@@ -15,6 +15,9 @@ import { writeRoutingQuery } from './url';
 // mutate it. See transit-routing.md § Routing panel / § Entry points.
 
 let panelOpen = $state(false);
+// Which endpoint input the panel should focus right after opening —
+// consumed once by RoutingPanel on mount. Plain (non-reactive) on purpose.
+let focusRequest: 'from' | 'to' | null = null;
 let from = $state<Endpoint | null>(null);
 let to = $state<Endpoint | null>(null);
 let mode = $state<TimeMode>('leave');
@@ -418,15 +421,30 @@ export const routingState = {
 		return results;
 	},
 
-	openPanel() {
+	openPanel(opts?: { prefillCurrent?: boolean; focus?: 'from' | 'to' }) {
 		if (panelOpen) return;
 		panelOpen = true;
 		// Fresh open with no state: prefill From with current location (concept
 		// § Endpoint inputs). If URL restoration filled `from` first, skip.
 		// Skipped when geolocation is unavailable or already denied — the
 		// prefill would only produce a dead endpoint that errors on query.
-		if (!from && !to && hasGeolocation() && !geolocationDenied()) from = { type: 'current' };
+		// "Route from/to here" entry points pass prefillCurrent: false — the
+		// user picked an explicit point, current location shouldn't ride along.
+		if (opts?.prefillCurrent !== false && !from && !to && hasGeolocation() && !geolocationDenied()) {
+			from = { type: 'current' };
+		}
+		// Cursor lands in the first empty endpoint field (From filled with
+		// current location → To). Context menu overrides via opts.focus since
+		// its endpoint arrives async, after the panel is already open.
+		focusRequest = opts?.focus ?? (!from ? 'from' : !to ? 'to' : null);
 		syncUrl();
+	},
+
+	/** One-shot read of the requested endpoint focus (set by openPanel). */
+	consumeFocusRequest(): 'from' | 'to' | null {
+		const r = focusRequest;
+		focusRequest = null;
+		return r;
 	},
 
 	closePanel() {
