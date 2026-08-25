@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
@@ -42,6 +42,15 @@
 	$effect(() => {
 		const isLoading = routingState.loading;
 		if (wasLoading && !isLoading && resultsEl) {
+			// Fresh result set: reset the autoscroll edge state before any
+			// programmatic scrolling below fires scroll events.
+			hasScrolledDown = false;
+			armedEarlier = true;
+			armedLater = true;
+			// The scrollIntoView below can land the list at the bottom edge
+			// (arrive-by selects the last card) — briefly suppress the edge
+			// sentinels so that placement doesn't auto-load later results.
+			suppressAutoUntil = performance.now() + 400;
 			const fp = untrack(() => routingState.selectedFingerprint);
 			if (fp) {
 				const results = untrack(() => routingState.displayedResults);
@@ -53,6 +62,158 @@
 			}
 		}
 		wasLoading = isLoading;
+	});
+
+	// ── Autoscroll (replaces the earlier/later load-more buttons) ──────
+	// Bottom edge: reaching it by scrolling loads later connections.
+	// Top edge: starts gesture-gated (an upward wheel/touch gesture that
+	// BEGINS while resting at the top loads earlier connections); once
+	// the user has scrolled down, arriving back at the top behaves like
+	// the bottom edge and triggers on its own. A direction that returned
+	// nothing new is disarmed for position-based triggers and only a
+	// fresh gesture retries it. Wheel/touch gestures also work when the
+	// content is too short to scroll (e.g. the shared-connection view).
+	const EDGE_EPS = 2;
+	const GESTURE_GAP_MS = 300;
+	const TOUCH_THRESHOLD = 12;
+
+	let hasScrolledDown = false;
+	let armedEarlier = true;
+	let armedLater = true;
+	let suppressAutoUntil = 0;
+	let lastWheelT = 0;
+	let wheelFromTop = false;
+	let wheelFromBottom = false;
+	let touchStartY = 0;
+	let touchFromTop = false;
+	let touchFromBottom = false;
+	let touchFired = false;
+
+	function atTop(el: HTMLElement): boolean {
+		return el.scrollTop <= EDGE_EPS;
+	}
+	function atBottom(el: HTMLElement): boolean {
+		return el.scrollTop + el.clientHeight >= el.scrollHeight - EDGE_EPS;
+	}
+	function inFlight(): boolean {
+		return routingState.loading || !!routingState.loadingMore;
+	}
+	function canExtend(): boolean {
+		return routingState.hasQueried && displayed.length > 0;
+	}
+
+	function onScroll() {
+		const el = resultsEl;
+		if (!el || !canExtend()) return;
+		if (el.scrollTop > EDGE_EPS) hasScrolledDown = true;
+		if (inFlight() || performance.now() < suppressAutoUntil) return;
+		if (armedLater && atBottom(el) && el.scrollHeight > el.clientHeight + EDGE_EPS) {
+			void triggerLater();
+		} else if (armedEarlier && hasScrolledDown && atTop(el)) {
+			void triggerEarlier();
+		}
+	}
+
+	function onWheel(e: WheelEvent) {
+		const el = resultsEl;
+		if (!el || !canExtend()) return;
+		const now = performance.now();
+		// A pause between wheel events starts a new gesture; momentum
+		// events of a fling arrive faster and stay in the old one, so a
+		// fling that merely arrives at an edge cannot trigger.
+		if (now - lastWheelT > GESTURE_GAP_MS) {
+			wheelFromTop = atTop(el);
+			wheelFromBottom = atBottom(el);
+		}
+		lastWheelT = now;
+		if (inFlight()) return;
+		if (e.deltaY < 0 && wheelFromTop && atTop(el)) {
+			wheelFromTop = false; // one trigger per gesture
+			void triggerEarlier();
+		} else if (e.deltaY > 0 && wheelFromBottom && atBottom(el)) {
+			wheelFromBottom = false;
+			void triggerLater();
+		}
+	}
+
+	function onTouchStart(e: TouchEvent) {
+		const el = resultsEl;
+		if (!el) return;
+		touchStartY = e.touches[0].clientY;
+		touchFromTop = atTop(el);
+		touchFromBottom = atBottom(el);
+		touchFired = false;
+	}
+
+	function onTouchMove(e: TouchEvent) {
+		const el = resultsEl;
+		if (!el || touchFired || !canExtend() || inFlight()) return;
+		const dy = e.touches[0].clientY - touchStartY;
+		// Finger moving down = scrolling up (earlier); up = later.
+		if (dy > TOUCH_THRESHOLD && touchFromTop && atTop(el)) {
+			touchFired = true;
+			void triggerEarlier();
+		} else if (dy < -TOUCH_THRESHOLD && touchFromBottom && atBottom(el)) {
+			touchFired = true;
+			void triggerLater();
+		}
+	}
+
+	async function triggerLater() {
+		if (inFlight() || !canExtend()) return;
+		armedLater = false;
+		routingState.exitSharedOnly();
+		const prevCount = displayed.length;
+		await routingState.loadMoreLater();
+		if (displayed.length > prevCount) armedLater = true;
+	}
+
+	async function triggerEarlier() {
+		if (inFlight() || !canExtend()) return;
+		armedEarlier = false;
+		routingState.exitSharedOnly();
+		const prevCount = displayed.length;
+		const p = routingState.loadMoreEarlier();
+		// Let the top loader row enter the DOM uncompensated (it nudges
+		// the cards down as visible feedback), then compensate every
+		// further top-side height change — the streamed prepends and the
+		// loader's removal — so the card the user is looking at never
+		// moves once results start arriving.
+		await tick();
+		compensateTop = true;
+		try {
+			await p;
+			await tick();
+		} finally {
+			compensateTop = false;
+		}
+		if (displayed.length > prevCount) armedEarlier = true;
+	}
+
+	// Scroll-position preservation while earlier results stream in: the
+	// pre-effect snapshots the scroll metrics before each DOM update
+	// caused by result/loader changes, the post-effect restores the
+	// visual position by the measured growth. Manual on purpose — native
+	// scroll anchoring is not reliable across browsers for this.
+	let compensateTop = false;
+	let topPrePending = false;
+	let topPreHeight = 0;
+	let topPreTop = 0;
+	$effect.pre(() => {
+		void displayed.length;
+		void routingState.loadingMore;
+		if (!compensateTop || !resultsEl) return;
+		topPreHeight = resultsEl.scrollHeight;
+		topPreTop = resultsEl.scrollTop;
+		topPrePending = true;
+	});
+	$effect(() => {
+		void displayed.length;
+		void routingState.loadingMore;
+		if (!topPrePending || !resultsEl) return;
+		topPrePending = false;
+		const delta = resultsEl.scrollHeight - topPreHeight;
+		if (delta !== 0) resultsEl.scrollTop = topPreTop + delta;
 	});
 
 	// Main routing shell. Replaces the map menu / stop search top-controls
@@ -141,7 +302,17 @@
 
 	{#if routingState.hasQueried || routingState.sharedExpired}
 	<div class="rp-results-sep" aria-hidden="true"></div>
-	<div class="rp-results" bind:this={resultsEl}>
+	<!-- Touch handlers only extend the scroll gesture (autoscroll edge
+	     triggers), they add no interactive semantics. -->
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="rp-results"
+		bind:this={resultsEl}
+		onscroll={onScroll}
+		onwheel={onWheel}
+		ontouchstart={onTouchStart}
+		ontouchmove={onTouchMove}
+	>
 			{#if routingState.sharedExpired}
 				<div class="rp-status rp-error">
 					This shared connection is no longer available — the timetable
@@ -164,15 +335,11 @@
 						The saved route is no longer valid. Pick one below.
 					</div>
 				{/if}
-				<button
-					type="button"
-					class="rp-load-more rp-load-more-top"
-					onclick={() => { routingState.exitSharedOnly(); routingState.loadMoreEarlier(); }}
-					disabled={!!routingState.loadingMore || routingState.loading}
-				>
-					<span class="rp-load-more-icon rp-load-more-icon-up material-symbols-outlined" aria-hidden="true">chevron_right</span>
-					<span>{routingState.loadingMore === 'earlier' ? 'Loading…' : 'Earlier connections'}</span>
-				</button>
+				{#if routingState.loadingMore === 'earlier'}
+					<div class="rp-inline-loader" role="status" aria-label="Loading earlier connections">
+						<div class="loading-track loading-track-inline"><div class="loading-ball"></div></div>
+					</div>
+				{/if}
 				{#each displayed as it, i (i)}
 					{@const prevIso = i === 0 ? baselineIso() : displayed[i - 1].startTime}
 					{#if i === 0 || dayKey(it.startTime) !== dayKey(prevIso)}
@@ -187,15 +354,11 @@
 						{onFrameRoute}
 					/>
 				{/each}
-				<button
-					type="button"
-					class="rp-load-more rp-load-more-bottom"
-					onclick={() => { routingState.exitSharedOnly(); routingState.loadMoreLater(); }}
-					disabled={!!routingState.loadingMore || routingState.loading}
-				>
-					<span class="rp-load-more-icon rp-load-more-icon-down material-symbols-outlined" aria-hidden="true">chevron_right</span>
-					<span>{routingState.loadingMore === 'later' ? 'Loading…' : 'Later connections'}</span>
-				</button>
+				{#if routingState.loadingMore === 'later'}
+					<div class="rp-inline-loader" role="status" aria-label="Loading later connections">
+						<div class="loading-track loading-track-inline"><div class="loading-ball"></div></div>
+					</div>
+				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -333,12 +496,15 @@
 	.loading-track {
 		position: relative;
 		width: 100%;
-		height: 2.2rem;
+		height: var(--loader-h, 2.2rem);
 		border: 2px solid transparent;
 		border-radius: var(--radius-pill);
 		background: linear-gradient(var(--anthracite), var(--anthracite)) padding-box,
 			linear-gradient(90deg, var(--kora-green), var(--kora-brown)) border-box;
 	}
+	/* Compact variant for the in-list earlier/later loaders. */
+	.loading-track-inline { --loader-h: 1.5rem; }
+	.rp-inline-loader { padding: 0.1rem 0; }
 	.loading-ball {
 		position: absolute;
 		top: 2px;
@@ -357,7 +523,7 @@
 			background-color: var(--kora-green);
 		}
 		to {
-			left: calc(100% - 2.2rem + 6px);
+			left: calc(100% - var(--loader-h, 2.2rem) + 6px);
 			background-color: var(--kora-brown);
 		}
 	}
@@ -381,38 +547,4 @@
 		background: #e5e5e5;
 	}
 
-	.rp-load-more {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 0.35rem;
-		border: 1px solid var(--gray-200);
-		background: var(--gray-50);
-		color: var(--gray-850);
-		font-family: inherit;
-		font-size: 0.8rem;
-		font-weight: 600;
-		letter-spacing: 0.01em;
-		padding: 0.45rem 0.6rem;
-		border-radius: 0.5rem;
-		cursor: pointer;
-		transition: border-color 0.12s, background 0.12s, color 0.12s;
-	}
-	.rp-load-more-icon {
-		font-size: 1.1rem;
-		line-height: 1;
-	}
-	.rp-load-more-icon-up { transform: rotate(-90deg); }
-	.rp-load-more-icon-down { transform: rotate(90deg); }
-	.rp-load-more:hover:not(:disabled) {
-		background: #ebebeb;
-		border-color: #bbb;
-	}
-	.rp-load-more:active:not(:disabled) {
-		background: #e0e0e0;
-	}
-	.rp-load-more:disabled {
-		opacity: 0.55;
-		cursor: default;
-	}
 </style>
