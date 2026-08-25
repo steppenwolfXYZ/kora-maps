@@ -16,6 +16,23 @@
 	--brand: #740013;
 	--brand-hover: #8a0418;
 	--warn: #b83232;
+	/* Kora gradient — the green→brown landscape ramp (nature → human
+	   spaces). Keep the endpoint values in sync with the inlined splash
+	   background in app.html, which cannot reference these variables
+	   (it must paint before this stylesheet loads). Always run the
+	   gradient diagonally (135deg). */
+	--kora-green: #a0c8a0;
+	--kora-brown: #c4a078;
+	--gradient-brand: linear-gradient(135deg, var(--kora-green) 0%, var(--kora-brown) 100%);
+	/* Steeper variant for thin, wide elements (input focus rings, the
+	   loader track): on a ~300×34px ring the 135° gradient reads as a
+	   plain left-to-right fade because width dominates the projection;
+	   ~165° restores a visibly diagonal sweep at those proportions. */
+	--gradient-brand-input: linear-gradient(165deg, var(--kora-green) 0%, var(--kora-brown) 100%);
+	/* Brand anthracite — the dark fill for highlighted rows and dark
+	   chrome. Same value as --gray-800; use this name when the fill is
+	   a deliberate brand-dark, the ramp when it's just a gray. */
+	--anthracite: #333;
 
 	/* Neutral ramp (darkest → lightest). One-off in-between grays stay
 	   literal in their components; this ramp covers the recurring ones. */

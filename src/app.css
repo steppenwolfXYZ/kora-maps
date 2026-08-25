@@ -39,6 +39,27 @@ body {
 	padding: 0;
 }
 
+/* Backgroundless icon button — the small ×/chevron/utility buttons:
+   transparent at rest, circular light-gray fill and brand-red glyph on
+   hover. Components layer their sizing (padding, font-size, margins)
+   on top; they must NOT re-set color/background or the hover state
+   loses the cascade. */
+.icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	background: transparent;
+	color: var(--gray-500);
+	border-radius: var(--radius-pill);
+	padding: 0.25rem;
+	cursor: pointer;
+}
+.icon-btn:hover {
+	background: var(--gray-100);
+	color: var(--brand);
+}
+
 /* ── MapLibre controls ───────────────────────────────────────────────────
    Styling of MapLibre's own control DOM (vendor markup, so global by
    nature). Scoped under .map-wrap, which only the map page renders.

@@ -477,9 +477,33 @@
 	.card-warning-strong :global(.material-symbols-outlined) { font-size: 0.85rem; }
 	.card:hover { border-color: var(--gray-250); background: #fafafa; }
 	.card.selected {
-		border-color: var(--gray-900);
+		border-color: transparent;
 		background: var(--gray-75);
-		box-shadow: 0 0 0 1px var(--gray-900) inset;
+	}
+	/* Brand-gradient strip along the selected card's left edge. Painted
+	   before the ::after ring so the border stays on top of it. */
+	.card.selected::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		top: 0;
+		bottom: 0;
+		width: 4px;
+		border-radius: 0.6rem 0 0 0.6rem;
+		background: var(--gradient-brand);
+	}
+	/* The selected border as an overlay ring ABOVE the card content
+	   (a real border paints below positioned children, so the strip
+	   would overlap it). Inset -1px covers the card's own 1px border
+	   slot, keeping the outer geometry identical to the unselected
+	   card. */
+	.card.selected::after {
+		content: '';
+		position: absolute;
+		inset: -1px;
+		border: 2px solid var(--gray-900);
+		border-radius: 0.6rem;
+		pointer-events: none;
 	}
 	.card + :global(.card) { margin-top: 0.4rem; }
 

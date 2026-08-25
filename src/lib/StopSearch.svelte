@@ -298,8 +298,10 @@
 		/* Same height as the menu toggle button so the top-controls row
 		   aligns (MapMenu .menu-toggle is 2.1rem). */
 		height: var(--control-size);
-		padding: 0 0.8rem;
-		border: none;
+		padding: 0 calc(0.8rem - 2px);
+		/* Permanent transparent border so the gradient focus ring can
+		   appear without a layout shift (padding compensates). */
+		border: 2px solid transparent;
 		border-radius: var(--radius-pill);
 		background: var(--white);
 		box-shadow: var(--shadow-control);
@@ -310,7 +312,7 @@
 		outline: none;
 	}
 	input:focus {
-		box-shadow: var(--shadow-control), 0 0 0 2px var(--gray-800);
+		background: linear-gradient(var(--white), var(--white)) padding-box, var(--gradient-brand-input) border-box;
 	}
 	.results {
 		position: absolute;
@@ -337,7 +339,7 @@
 		cursor: pointer;
 	}
 	.result.highlighted {
-		background: var(--gray-800);
+		background: var(--anthracite);
 		color: var(--white);
 	}
 	.mode-icon {

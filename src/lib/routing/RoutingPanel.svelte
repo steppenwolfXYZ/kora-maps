@@ -96,7 +96,7 @@
 			Route
 		</span>
 		<button
-			class="rp-close"
+			class="rp-close icon-btn"
 			onclick={() => routingState.closePanel()}
 			aria-label="Close route planning"
 		>×</button>
@@ -122,7 +122,7 @@
 			/>
 		</div>
 		<button
-			class="rp-swap"
+			class="rp-swap icon-btn"
 			onclick={() => routingState.swap()}
 			aria-label="Swap start and destination"
 		>
@@ -149,7 +149,9 @@
 				</div>
 			{/if}
 			{#if routingState.loading}
-				<div class="rp-status">Searching…</div>
+				<div class="rp-loading" role="status" aria-label="Searching for connections">
+					<div class="loading-track"><div class="loading-ball"></div></div>
+				</div>
 			{:else if routingState.error}
 				<div class="rp-status rp-error">{routingState.error}</div>
 			{:else if displayed.length === 0}
@@ -204,7 +206,10 @@
 		width: 22rem;
 		max-height: calc(100vh - 2rem);
 		max-height: calc(100dvh - 2rem);
-		background: var(--white);
+		/* Brand-gradient hairline along the top edge, white below. The
+		   layered background (not border-top) follows the top corner
+		   radius and stays put over the scrolling results. */
+		background: var(--gradient-brand) top / 100% 3px no-repeat, var(--white);
 		border-radius: 0.9rem;
 		box-shadow: var(--shadow-control);
 		padding: 0.7rem 0.85rem 0.85rem;
@@ -236,29 +241,31 @@
 	.rp-title {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.3rem;
+		gap: 0.4rem;
 		font-size: 0.7rem;
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--gray-500);
+		color: var(--anthracite);
 	}
 	.rp-title-icon {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 1.5rem;
+		height: 1.5rem;
+		border-radius: var(--radius-pill);
+		background: var(--gradient-brand);
 		font-size: 1rem;
 		line-height: 1;
-		color: var(--gray-700);
+		color: var(--white);
 	}
+	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.rp-close {
-		border: none;
-		background: transparent;
 		font-size: 1.25rem;
 		line-height: 1;
-		color: var(--gray-600);
 		padding: 0.15rem 0.4rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
 	}
-	.rp-close:hover { background: var(--gray-100); color: var(--black); }
 
 	.rp-endpoints {
 		display: flex;
@@ -274,17 +281,12 @@
 		flex: 1 1 auto;
 		min-width: 0;
 	}
+	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.rp-swap {
 		flex: 0 0 auto;
-		border: none;
-		background: transparent;
-		color: var(--gray-500);
 		padding: 0.25rem 0.35rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.rp-swap:hover { background: var(--gray-100); color: var(--black); }
 
 	.rp-results-sep {
 		/* Sits outside the scroll container so it never scrolls — the line
@@ -318,6 +320,47 @@
 		padding: 0.35rem 0.15rem;
 	}
 	.rp-error { color: #a11; }
+
+	.rp-loading {
+		padding: 0.5rem 0.15rem;
+	}
+	/* Bouncing-ball loader (Ogoy-style): a full-width anthracite pill
+	   with a gradient border; the ball swings side-to-side and fades
+	   kora-green ↔ kora-brown over each half-cycle. The border gradient
+	   is deliberately HORIZONTAL (not the diagonal brand angle): the
+	   ball's fade tracks its x-position, so at any moment the border
+	   above/below the ball has the ball's own color. */
+	.loading-track {
+		position: relative;
+		width: 100%;
+		height: 2.2rem;
+		border: 2px solid transparent;
+		border-radius: var(--radius-pill);
+		background: linear-gradient(var(--anthracite), var(--anthracite)) padding-box,
+			linear-gradient(90deg, var(--kora-green), var(--kora-brown)) border-box;
+	}
+	.loading-ball {
+		position: absolute;
+		top: 2px;
+		bottom: 2px;
+		aspect-ratio: 1;
+		border-radius: 50%;
+		animation: loader-bounce 1s infinite alternate ease-in-out;
+	}
+	/* Ball diameter = track height 2.2rem − 2×2px border − 2×2px gap;
+	   the right endpoint offsets by exactly that plus the gap. Position
+	   and color share the keyframe timeline, so the ball's color always
+	   matches the border at its x. */
+	@keyframes loader-bounce {
+		from {
+			left: 2px;
+			background-color: var(--kora-green);
+		}
+		to {
+			left: calc(100% - 2.2rem + 6px);
+			background-color: var(--kora-brown);
+		}
+	}
 
 	.rp-day-marker {
 		display: flex;

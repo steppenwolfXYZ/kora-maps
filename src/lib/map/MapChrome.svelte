@@ -109,13 +109,17 @@
 	}
 
 	/* Round routing entry point — base disc styling from .control-disc
-	   (app.css § Shared patterns), same family as MapMenu's toggle. */
+	   (app.css § Shared patterns), same family as MapMenu's toggle.
+	   Brand red marks it as the primary action on the map. */
+	.route-button {
+		color: var(--brand);
+	}
 	.route-button .material-symbols-outlined {
 		font-size: 1.25rem;
 		line-height: 1;
 	}
 	.route-button:hover {
-		background: var(--gray-800);
+		background: var(--brand);
 		color: var(--white);
 	}
 

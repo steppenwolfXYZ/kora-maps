@@ -171,13 +171,13 @@
 			onchange={(e) => onDateChange((e.currentTarget as HTMLInputElement).value)}
 		/>
 		<button
-			class="ts-day-step"
+			class="ts-day-step icon-btn"
 			onclick={() => shiftDay(-1)}
 			title="Previous day"
 			aria-label="Previous day"
 		><span class="material-symbols-outlined ts-day-step-back" aria-hidden="true">chevron_right</span></button>
 		<button
-			class="ts-day-step"
+			class="ts-day-step icon-btn"
 			onclick={() => shiftDay(1)}
 			title="Next day"
 			aria-label="Next day"
@@ -214,7 +214,7 @@
 			{/if}
 		</div>
 		<button
-			class="ts-now"
+			class="ts-now icon-btn"
 			onclick={refresh}
 			title="Reset to now"
 			aria-label="Reset to now"
@@ -230,21 +230,20 @@
 	}
 	.ts-mode {
 		display: flex;
-		border: 1px solid var(--gray-200);
 		border-radius: 0.55rem;
 		overflow: hidden;
 		width: fit-content;
 	}
 	.ts-mode button {
 		border: none;
-		background: transparent;
+		background: var(--gray-100);
 		font-family: var(--font-ui);
 		font-size: 0.85rem;
 		padding: 0.35rem 0.8rem;
 		cursor: pointer;
 		color: var(--gray-700);
 	}
-	.ts-mode button.active { background: var(--gray-800); color: var(--white); }
+	.ts-mode button.active { background: var(--gradient-brand); color: var(--white); }
 
 	.ts-time {
 		display: flex;
@@ -256,34 +255,32 @@
 	   between the chevrons and the time input. */
 	.ts-date + .ts-day-step { margin-left: -0.4rem; }
 	.ts-day-step + .ts-day-step { margin-left: -0.25rem; }
+	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.ts-day-step {
 		flex: 0 0 auto;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		border: none;
-		background: transparent;
-		color: var(--gray-500);
-		cursor: pointer;
 		padding: 0.1rem;
-		border-radius: 0.3rem;
 	}
 	.ts-day-step :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
 	/* chevron_left isn't in the icon subset — mirror chevron_right instead.
 	   scaleX (not rotate): the glyph sits slightly off-center vertically,
 	   so a 180° rotation would shift it down relative to its twin. */
 	.ts-day-step :global(.ts-day-step-back) { transform: scaleX(-1); display: inline-block; }
-	.ts-day-step:hover { background: var(--gray-100); color: var(--black); }
 	.ts-date {
 		flex: 1 1 auto;
 		max-width: 9rem;
-		border: none;
+		/* Permanent transparent border so the gradient focus ring can
+		   appear without a layout shift (padding compensates). */
+		border: 2px solid transparent;
 		background: var(--gray-50);
 		border-radius: 0.55rem;
-		padding: 0.35rem 0.5rem;
+		padding: calc(0.35rem - 2px) calc(0.5rem - 2px);
 		font-family: var(--font-ui);
 		font-size: 0.85rem;
 		color: var(--gray-850);
+	}
+	.ts-date:focus {
+		outline: none;
+		background: linear-gradient(var(--gray-50), var(--gray-50)) padding-box, var(--gradient-brand-input) border-box;
 	}
 	.ts-timebox {
 		flex: 0 1 auto;
@@ -292,15 +289,20 @@
 	}
 	.ts-timein {
 		width: 100%;
-		border: none;
+		/* Same transparent-border trick as .ts-date. */
+		border: 2px solid transparent;
 		background: var(--gray-50);
 		border-radius: 0.55rem;
-		padding: 0.35rem 0.5rem;
+		padding: calc(0.35rem - 2px) calc(0.5rem - 2px);
 		font-family: var(--font-ui);
 		font-size: 0.85rem;
 		color: var(--gray-850);
 		text-align: left;
 		font-variant-numeric: tabular-nums;
+	}
+	.ts-timein:focus {
+		outline: none;
+		background: linear-gradient(var(--gray-50), var(--gray-50)) padding-box, var(--gradient-brand-input) border-box;
 	}
 	.ts-menu {
 		position: fixed;
@@ -323,25 +325,17 @@
 		cursor: pointer;
 	}
 	.ts-row.full-hour { font-weight: 600; }
-	.ts-row.now { color: #1565c0; font-weight: 600; }
+	.ts-row.now { color: var(--brand); font-weight: 600; }
 	.ts-row:hover { background: var(--gray-100); }
-	.ts-row.selected { background: var(--gray-800); color: var(--white); }
+	.ts-row.selected { background: var(--gradient-brand); color: var(--white); }
 
+	/* Base look + hover from .icon-btn (app.css). Sized and spaced like
+	   the swap button next to the from/to rows (0.35rem gap + 1.85rem
+	   button) so the time field's right edge aligns with the endpoint
+	   fields' right edge. */
 	.ts-now {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		border: none;
-		background: transparent;
-		color: var(--gray-500);
-		cursor: pointer;
-		/* Sized and spaced like the swap button next to the from/to rows
-		   (0.35rem gap + 1.85rem button) so the time field's right edge
-		   aligns with the endpoint fields' right edge. */
 		padding: 0.25rem 0.35rem;
 		margin-left: -0.15rem;
-		border-radius: var(--radius-pill);
 	}
 	.ts-now :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.ts-now:hover { background: var(--gray-100); color: var(--black); }
 </style>

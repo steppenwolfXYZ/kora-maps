@@ -89,7 +89,7 @@
 				<span class="line-detail-route">{sel.route}</span>
 			{/if}
 			<button
-				class="line-detail-close"
+				class="line-detail-close icon-btn"
 				onclick={onClose}
 				aria-label="Close line detail view"
 			>×</button>
@@ -240,20 +240,11 @@
 		text-overflow: ellipsis;
 	}
 
+	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.line-detail-close {
-		border: none;
-		background: transparent;
-		color: var(--gray-600);
 		font-size: 1.1rem;
 		line-height: 1;
-		cursor: pointer;
 		padding: 0.15rem 0.35rem;
-		border-radius: var(--radius-pill);
 		flex: 0 0 auto;
-	}
-
-	.line-detail-close:hover {
-		background: var(--gray-100);
-		color: var(--black);
 	}
 </style>

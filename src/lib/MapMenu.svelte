@@ -148,7 +148,7 @@
 	}
 
 	.menu-toggle.active {
-		background: var(--gray-800);
+		background: var(--gradient-brand);
 		color: var(--white);
 	}
 
@@ -161,7 +161,9 @@
 		max-height: calc(100vh - 5rem);
 		max-height: calc(100dvh - 5rem);
 		overflow-y: auto;
-		background: var(--white);
+		/* Brand-gradient hairline along the top edge (layered background
+		   so it follows the corner radius and doesn't scroll away). */
+		background: var(--gradient-brand) top / 100% 3px no-repeat, var(--white);
 		border-radius: 0.9rem;
 		box-shadow: var(--shadow-control);
 		padding: 0.85rem 1rem;
@@ -180,7 +182,7 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--gray-300);
+		color: var(--anthracite);
 		margin-bottom: 0.45rem;
 	}
 
@@ -188,13 +190,12 @@
 		display: flex;
 		border-radius: 0.6rem;
 		overflow: hidden;
-		border: 1px solid var(--gray-200);
 		width: fit-content;
 	}
 
 	.view-toggle button {
 		border: none;
-		background: transparent;
+		background: var(--gray-100);
 		font-family: inherit;
 		font-size: 0.85rem;
 		line-height: 1.2;
@@ -204,7 +205,7 @@
 	}
 
 	.view-toggle button.active {
-		background: var(--gray-800);
+		background: var(--gradient-brand);
 		color: var(--white);
 	}
 
@@ -256,7 +257,7 @@
 	}
 
 	.row-toggle.active .switch {
-		background: var(--gray-800);
+		background: var(--gradient-brand);
 	}
 
 	.row-toggle.active .switch::after {

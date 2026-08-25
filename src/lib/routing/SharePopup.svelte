@@ -159,7 +159,11 @@
 		color: var(--gray-800);
 		padding: 0.4rem 0.5rem;
 	}
-	.share-url:focus { outline: none; border-color: var(--gray-300); }
+	.share-url:focus {
+		outline: none;
+		border-color: transparent;
+		background: linear-gradient(#f7f7f7, #f7f7f7) padding-box, var(--gradient-brand-input) border-box;
+	}
 
 	.share-actions {
 		display: flex;

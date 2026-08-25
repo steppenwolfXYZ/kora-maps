@@ -352,7 +352,7 @@
 			</span>
 			<span class="ep-text">{labelFor(endpoint)}</span>
 		</button>
-		<button class="ep-clear" onclick={clear} aria-label="Clear {label.toLowerCase()}">×</button>
+		<button class="ep-clear icon-btn" onclick={clear} aria-label="Clear {label.toLowerCase()}">×</button>
 	{/if}
 </div>
 
@@ -362,10 +362,16 @@
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		padding: 0.35rem 0.5rem;
+		/* Permanent transparent border so the gradient focus ring can
+		   appear without a layout shift (padding compensates). */
+		border: 2px solid transparent;
+		padding: calc(0.35rem - 2px) calc(0.5rem - 2px);
 		background: var(--gray-50);
 		border-radius: 0.55rem;
 		font-family: var(--font-ui);
+	}
+	.ep-row:focus-within {
+		background: linear-gradient(var(--gray-50), var(--gray-50)) padding-box, var(--gradient-brand-input) border-box;
 	}
 
 	.ep-label {
@@ -406,18 +412,13 @@
 		min-width: 0;
 	}
 
+	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.ep-clear {
 		flex: 0 0 auto;
-		border: none;
-		background: transparent;
-		color: var(--gray-400);
 		font-size: 1.1rem;
 		line-height: 1;
 		padding: 0.15rem 0.3rem;
-		border-radius: var(--radius-pill);
-		cursor: pointer;
 	}
-	.ep-clear:hover { background: var(--gray-100); color: var(--black); }
 
 	.ep-menu {
 		/* Fixed positioning escapes the routing panel's `overflow: hidden`.
@@ -444,7 +445,7 @@
 		color: var(--gray-850);
 		cursor: pointer;
 	}
-	.ep-row-item.highlighted { background: var(--gray-800); color: var(--white); }
+	.ep-row-item.highlighted { background: var(--anthracite); color: var(--white); }
 	.ep-row-item.highlighted .ep-icon { color: var(--white); }
 
 	.ep-icon {
