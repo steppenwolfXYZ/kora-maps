@@ -40,6 +40,15 @@
 		if (v) commitParts(v, timeValue);
 	}
 
+	function shiftDay(delta: number) {
+		const d = new Date(shown);
+		d.setDate(d.getDate() + delta);
+		commitParts(
+			`${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+			timeValue
+		);
+	}
+
 	function refresh() {
 		nowTick++;
 		onTime(null);
@@ -161,6 +170,18 @@
 			aria-label="Date"
 			onchange={(e) => onDateChange((e.currentTarget as HTMLInputElement).value)}
 		/>
+		<button
+			class="ts-day-step"
+			onclick={() => shiftDay(-1)}
+			title="Previous day"
+			aria-label="Previous day"
+		><span class="material-symbols-outlined ts-day-step-back" aria-hidden="true">chevron_right</span></button>
+		<button
+			class="ts-day-step"
+			onclick={() => shiftDay(1)}
+			title="Next day"
+			aria-label="Next day"
+		><span class="material-symbols-outlined" aria-hidden="true">chevron_right</span></button>
 		<div class="ts-timebox" bind:this={timeWrapEl}>
 			<input
 				bind:this={timeInputEl}
@@ -230,25 +251,51 @@
 		align-items: center;
 		gap: 0.5rem;
 	}
+	/* Pull the chevron pair toward the date field (≈0.1rem) so it visually
+	   belongs to it, and tighten the pair itself; the flex slack stays
+	   between the chevrons and the time input. */
+	.ts-date + .ts-day-step { margin-left: -0.4rem; }
+	.ts-day-step + .ts-day-step { margin-left: -0.25rem; }
+	.ts-day-step {
+		flex: 0 0 auto;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		background: transparent;
+		color: #666;
+		cursor: pointer;
+		padding: 0.1rem;
+		border-radius: 0.3rem;
+	}
+	.ts-day-step :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
+	/* chevron_left isn't in the icon subset — mirror chevron_right instead.
+	   scaleX (not rotate): the glyph sits slightly off-center vertically,
+	   so a 180° rotation would shift it down relative to its twin. */
+	.ts-day-step :global(.ts-day-step-back) { transform: scaleX(-1); display: inline-block; }
+	.ts-day-step:hover { background: #eee; color: #000; }
 	.ts-date {
 		flex: 1 1 auto;
-		min-width: 0;
-		border: 1px solid #ddd;
-		border-radius: 0.4rem;
-		padding: 0.25rem 0.4rem;
+		max-width: 9rem;
+		border: none;
+		background: #f5f5f5;
+		border-radius: 0.55rem;
+		padding: 0.35rem 0.5rem;
 		font-family: 'Saira', sans-serif;
 		font-size: 0.85rem;
 		color: #222;
 	}
 	.ts-timebox {
-		flex: 0 0 auto;
-		width: 4.6rem;
+		flex: 0 1 auto;
+		width: 5.2rem;
+		margin-left: auto;
 	}
 	.ts-timein {
 		width: 100%;
-		border: 1px solid #ddd;
-		border-radius: 0.4rem;
-		padding: 0.25rem 0.4rem;
+		border: none;
+		background: #f5f5f5;
+		border-radius: 0.55rem;
+		padding: 0.35rem 0.5rem;
 		font-family: 'Saira', sans-serif;
 		font-size: 0.85rem;
 		color: #222;
@@ -288,8 +335,12 @@
 		background: transparent;
 		color: #666;
 		cursor: pointer;
-		padding: 0.1rem;
-		border-radius: 0.3rem;
+		/* Sized and spaced like the swap button next to the from/to rows
+		   (0.35rem gap + 1.85rem button) so the time field's right edge
+		   aligns with the endpoint fields' right edge. */
+		padding: 0.25rem 0.35rem;
+		margin-left: -0.15rem;
+		border-radius: 999px;
 	}
 	.ts-now :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
 	.ts-now:hover { background: #eee; color: #000; }

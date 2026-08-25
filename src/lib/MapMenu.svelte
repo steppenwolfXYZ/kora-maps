@@ -156,6 +156,10 @@
 		padding: 0;
 	}
 
+	.menu-toggle:hover {
+		background: #eee;
+	}
+
 	.menu-toggle.active {
 		background: #333;
 		color: #fff;

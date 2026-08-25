@@ -52,6 +52,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /usr/local/bin/pfaedle /usr/local/bin/pfaedle
 COPY --from=build /usr/local/etc/pfaedle /usr/local/etc/pfaedle
 
+# Kora patch: drop `psv=yes` from the bus profile's fast class (osm_filter_lvl2
+# in [bus, coach]). A bare psv=yes only records that public-service vehicles are
+# *permitted* — on pedestrian zones it would otherwise outrank
+# highway=pedestrian and turn them into 55 km/h shortcuts (canonical case:
+# Langenthal Marktgasse, buses 52/64 drawn through the pedestrian zone instead
+# of the real Farbgasse route). Dedicated bus infrastructure keeps its
+# psv=designated / bus=yes fast-class entries. The line-count check makes an
+# upstream config reshuffle fail the build instead of silently losing the patch.
+RUN cfg=/usr/local/etc/pfaedle/pfaedle.cfg \
+    && awk 'BEGIN{sec="";blk=""} /^\[/{sec=$0} /^[a-z0-9_]+:/{blk=$0} !(sec=="[bus, coach]" && blk ~ /^osm_filter_lvl2:/ && $0 ~ /^[ \t]*psv=yes[ \t]*$/)' "$cfg" > "$cfg.patched" \
+    && [ "$(wc -l < "$cfg.patched")" -eq "$(( $(wc -l < "$cfg") - 1 ))" ] \
+    && mv "$cfg.patched" "$cfg"
+
 WORKDIR /data
 
 # Default entrypoint is a no-op shell; caller picks the tool (pfaedle / osmium).

@@ -2112,6 +2112,14 @@
 	{:else if !lineDetail}
 		<div class="top-controls">
 			<MapMenu {viewMode} {setView} {contoursEnabled} {toggleContours} bind:open={menuOpen} />
+			<button
+				class="route-button"
+				type="button"
+				aria-label="Plan a route"
+				onclick={() => routingState.openPanel()}
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">directions</span>
+			</button>
 			{#if viewMode === 'transit-focus'}
 				<StopSearch map={mapRef} />
 			{/if}
@@ -2247,6 +2255,32 @@
 	}
 	.top-controls.hidden-in-map-mode {
 		display: none;
+	}
+
+	/* Round routing entry point — same disc styling as MapMenu's
+	   .menu-toggle so the row reads as one control family. */
+	.route-button {
+		flex: 0 0 auto;
+		width: 2.1rem;
+		height: 2.1rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: none;
+		border-radius: 999px;
+		background: #ffffff;
+		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		color: #333;
+		cursor: pointer;
+		padding: 0;
+	}
+	.route-button .material-symbols-outlined {
+		font-size: 1.25rem;
+		line-height: 1;
+	}
+	.route-button:hover {
+		background: #333;
+		color: #fff;
 	}
 
 	/* Narrow screens (keep in sync with NARROW_BREAKPOINT in
