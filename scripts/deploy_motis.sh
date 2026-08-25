@@ -18,10 +18,14 @@
 # Roles (see the Mac/data-machine split): the dev Mac ships the arm64
 # image when the fork changes; the data-refresh machine ships only fresh
 # indexes with --data-only — its local fork image is amd64 (import only)
-# and must never reach the arm64 server.
+# and must never reach the arm64 server. The default deliberately skips
+# motis/data/: the dev Mac's indexes are usually older than what the
+# data machine last deployed, and shipping them would downgrade the
+# server (the data rsync runs with --delete).
 #
-#   ./scripts/deploy_motis.sh              # image + data (dev Mac)
-#   ./scripts/deploy_motis.sh --data-only  # data only (data machine)
+#   ./scripts/deploy_motis.sh              # image + config, NO data (dev Mac)
+#   ./scripts/deploy_motis.sh --with-data  # also ship motis/data/ (exception)
+#   ./scripts/deploy_motis.sh --data-only  # data only, no image (data machine)
 #
 # Extra arguments are passed through to rsync, e.g.:
 #   ./scripts/deploy_motis.sh --dry-run
@@ -35,14 +39,24 @@ IMAGE="koramaps/motis:footpath-matrix"
 
 DRY_RUN=0
 DATA_ONLY=0
+WITH_DATA=0
 RSYNC_ARGS=()
 for a in "$@"; do
 	case "$a" in
 		--data-only) DATA_ONLY=1 ;;
+		--with-data) WITH_DATA=1 ;;
 		--dry-run|-n) DRY_RUN=1; RSYNC_ARGS+=("$a") ;;
 		*) RSYNC_ARGS+=("$a") ;;
 	esac
 done
+
+if [ "$DATA_ONLY" -eq 1 ] && [ "$WITH_DATA" -eq 1 ]; then
+	echo "error: --data-only and --with-data are mutually exclusive." >&2
+	exit 2
+fi
+
+# SHIP_DATA: only on explicit request (--with-data / --data-only).
+SHIP_DATA=$(( DATA_ONLY || WITH_DATA ))
 
 # Sanity-check the image exists locally before touching the server —
 # there's no upstream to pull it from. The server is arm64 (Hetzner
@@ -68,13 +82,17 @@ fi
 # MOTIS memory-maps its index files; replacing them under a running server
 # can fault mid-query. Stop the container first, sync, restart. Skipped
 # silently on the first-ever deploy (no compose file on the server yet).
-if [ "$DRY_RUN" -eq 0 ]; then
+# Only needed when data ships — an image-only deploy just docker-loads
+# the new image and `up -d` recreates the container from it.
+if [ "$DRY_RUN" -eq 0 ] && [ "$SHIP_DATA" -eq 1 ]; then
 	ssh "$REMOTE" "[ -f ${REMOTE_PATH}docker-compose.prod.yml ] && cd $REMOTE_PATH && docker compose -f docker-compose.prod.yml down" || true
 fi
 
 # --partial keeps half-transferred files so a dropped connection resumes
 # mid-file on rerun instead of restarting the file from zero.
-rsync -avz --partial --delete ${RSYNC_ARGS[@]+"${RSYNC_ARGS[@]}"} "$ROOT/motis/data/" "$REMOTE:${REMOTE_PATH}data/"
+if [ "$SHIP_DATA" -eq 1 ]; then
+	rsync -avz --partial --delete ${RSYNC_ARGS[@]+"${RSYNC_ARGS[@]}"} "$ROOT/motis/data/" "$REMOTE:${REMOTE_PATH}data/"
+fi
 rsync -avz ${RSYNC_ARGS[@]+"${RSYNC_ARGS[@]}"} \
 	"$ROOT/motis/config.yml" \
 	"$ROOT/motis/docker-compose.prod.yml" \

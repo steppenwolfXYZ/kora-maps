@@ -551,19 +551,28 @@ std::vector<n::routing::offset> routing::get_offsets(
             // walking further than that away from an explicitly chosen
             // station is out of scope — and the matrix is foot-profile
             // only (wheelchair is not surfaced by this deployment).
+            //
+            // The matrix is directed (elevation-aware, so uphill and
+            // downhill differ): the start side (kForward) walks FROM
+            // this station outward → footpaths_out_; the destination
+            // side (kBackward) is reached by walks TOWARD this station
+            // → footpaths_in_ (its entries carry the source stop as
+            // target() with the source→station duration).
             auto offsets = std::vector<n::routing::offset>{};
             auto const wants_walk =
                 utl::find(modes, api::ModeEnum::WALK) != end(modes);
             if (wants_walk) {
+              auto const& fps =
+                  dir == osr::direction::kForward
+                      ? tt_->locations_.footpaths_out_[n::kFootProfile]
+                      : tt_->locations_.footpaths_in_[n::kFootProfile];
               auto const max_dur =
                   std::chrono::duration_cast<n::duration_t>(max);
               auto best = n::hash_map<n::location_idx_t, n::duration_t>{};
               for_each_meta(
                   *tt_, nigiri::routing::location_match_mode::kEquivalent,
                   l.l_, [&](n::location_idx_t const c) {
-                    for (auto const fp :
-                         tt_->locations_.footpaths_out_[n::kFootProfile].at(
-                             c)) {
+                    for (auto const fp : fps.at(c)) {
                       if (fp.duration() > max_dur) {
                         continue;
                       }
