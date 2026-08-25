@@ -359,10 +359,10 @@
 		flex-direction: column;
 		gap: 0.25rem;
 		padding: 0.55rem 0.7rem;
-		background: #ffffff;
-		border: 1px solid #eee;
+		background: var(--white);
+		border: 1px solid var(--gray-100);
 		border-radius: 0.6rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		text-align: left;
 		width: 100%;
 		cursor: pointer;
@@ -387,7 +387,7 @@
 		width: 1.6rem;
 		height: 1.6rem;
 		border: none;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		background: transparent;
 		cursor: pointer;
 	}
@@ -396,22 +396,22 @@
 	.card-share :global(.material-symbols-outlined) {
 		font-size: 1.1rem;
 		line-height: 1;
-		color: #555;
+		color: var(--gray-600);
 	}
-	.card-share:hover { background: #eee; }
+	.card-share:hover { background: var(--gray-100); }
 	.card-share:disabled { cursor: default; opacity: 0.6; }
 	.card-share-error-mark {
 		font-size: 1rem;
 		font-weight: 800;
 		line-height: 1;
-		color: #b83232;
+		color: var(--warn);
 	}
 	/* Map glyph in the brand red — the one coloured accent on the
 	   otherwise monochrome card. */
 	.card-map :global(.material-symbols-outlined) {
 		font-size: 1.25rem;
 		line-height: 1;
-		color: #740013;
+		color: var(--brand);
 	}
 	.card-map:hover { background: #f3e2e5; }
 	/* This card is the one on the map: invert to a red disc with a white
@@ -419,9 +419,9 @@
 	   mobile the map is never visible while the list is, so the icon
 	   never shows the active state there. */
 	@media (min-width: 700px) {
-		.card.selected .card-map { background: #740013; }
-		.card.selected .card-map :global(.material-symbols-outlined) { color: #fff; }
-		.card.selected .card-map:hover { background: #8a0418; }
+		.card.selected .card-map { background: var(--brand); }
+		.card.selected .card-map :global(.material-symbols-outlined) { color: var(--white); }
+		.card.selected .card-map:hover { background: var(--brand-hover); }
 	}
 
 	.card-badge {
@@ -433,11 +433,11 @@
 		justify-content: center;
 		width: 1.35rem;
 		height: 1.35rem;
-		border-radius: 999px;
-		border: 1px solid #eee;
-		background: #ffffff;
+		border-radius: var(--radius-pill);
+		border: 1px solid var(--gray-100);
+		background: var(--white);
 		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
-		color: #444;
+		color: var(--gray-700);
 		z-index: 1;
 	}
 	.card-badge :global(.material-symbols-outlined) { font-size: 0.95rem; line-height: 1; }
@@ -462,48 +462,48 @@
 		line-height: 1;
 	}
 	/* standard: plain red icon */
-	.card-warning-standard { color: #b83232; }
+	.card-warning-standard { color: var(--warn); }
 	/* medium / strong: white icon inside a coloured circle */
 	.card-warning-medium,
 	.card-warning-strong {
 		width: 1.2rem;
 		height: 1.2rem;
-		border-radius: 999px;
-		color: #fff;
+		border-radius: var(--radius-pill);
+		color: var(--white);
 	}
 	.card-warning-medium { background: #d9a400; }
-	.card-warning-strong { background: #b83232; }
+	.card-warning-strong { background: var(--warn); }
 	.card-warning-medium :global(.material-symbols-outlined),
 	.card-warning-strong :global(.material-symbols-outlined) { font-size: 0.85rem; }
-	.card:hover { border-color: #ccc; background: #fafafa; }
+	.card:hover { border-color: var(--gray-250); background: #fafafa; }
 	.card.selected {
-		border-color: #1a1a1a;
-		background: #f2f2f2;
-		box-shadow: 0 0 0 1px #1a1a1a inset;
+		border-color: var(--gray-900);
+		background: var(--gray-75);
+		box-shadow: 0 0 0 1px var(--gray-900) inset;
 	}
 	.card + :global(.card) { margin-top: 0.4rem; }
 
 	.card-clear {
 		border: none;
 		background: transparent;
-		color: #444;
+		color: var(--gray-700);
 		font-size: 1.1rem;
 		line-height: 1;
 		cursor: pointer;
 		padding: 0 0.35rem;
 		margin-left: 0.15rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		flex: 0 0 auto;
 	}
-	.card-clear:hover { background: #ddd; color: #000; }
+	.card-clear:hover { background: var(--gray-200); color: var(--black); }
 
 	.card-head {
 		display: flex;
 		align-items: baseline;
 		gap: 0.5rem;
 	}
-	.card-time { font-weight: 700; font-size: 0.95rem; color: #222; flex: 0 0 auto; }
-	.card-dur  { font-size: 0.85rem; color: #555; flex: 0 0 auto; margin-left: auto; }
+	.card-time { font-weight: 700; font-size: 0.95rem; color: var(--gray-850); flex: 0 0 auto; }
+	.card-dur  { font-size: 0.85rem; color: var(--gray-600); flex: 0 0 auto; margin-left: auto; }
 
 	.card-summary {
 		display: flex;
@@ -512,7 +512,7 @@
 	}
 	.card-route {
 		font-size: 0.8rem;
-		color: #444;
+		color: var(--gray-700);
 	}
 
 	.card-legs {
@@ -529,12 +529,12 @@
 	.card-mode {
 		font-size: 1.05rem;
 		line-height: 1;
-		color: #444;
+		color: var(--gray-700);
 	}
-	.card-leg.walk .card-mode { color: #888; }
+	.card-leg.walk .card-mode { color: var(--gray-400); }
 	.card-leg-dur {
 		font-size: 0.72rem;
-		color: #666;
+		color: var(--gray-500);
 		white-space: nowrap;
 	}
 	.card-ref {
@@ -544,11 +544,11 @@
 		font-size: 0.72rem;
 		font-weight: 800;
 		letter-spacing: 0.02em;
-		background: #999;
-		color: #fff;
+		background: var(--gray-300);
+		color: var(--white);
 		white-space: nowrap;
 	}
-	.card-sep { font-size: 0.9rem; color: #ccc; }
+	.card-sep { font-size: 0.9rem; color: var(--gray-250); }
 
 	.card-meta {
 		display: flex;
@@ -569,7 +569,7 @@
 		display: flex;
 		justify-content: center;
 		border-radius: 0.4rem;
-		color: #888;
+		color: var(--gray-400);
 		line-height: 1.2;
 	}
 	.card-expand-chevron {
@@ -581,8 +581,8 @@
 	/* Hover signals the chevron is a separate control: opening/closing
 	   the card without activating it on the map (click stops propagation,
 	   so the card's own click handler never fires). */
-	.card-expand:hover { background: #f0f0f0; color: #444; }
-	/* On a selected card (#f2f2f2) the default hover is nearly
+	.card-expand:hover { background: #f0f0f0; color: var(--gray-700); }
+	/* On a selected card (var(--gray-75)) the default hover is nearly
 	   invisible — darken it there, matching the leg-item hover. */
 	.card.selected .card-expand:hover { background: #e0e0e0; }
 
@@ -590,7 +590,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.1rem;
-		border-top: 1px solid #eee;
+		border-top: 1px solid var(--gray-100);
 		padding-top: 0.35rem;
 	}
 	.leg-item {
@@ -604,14 +604,14 @@
 		background: transparent;
 		border-radius: 0.4rem;
 		padding: 0.35rem 0.4rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		font-size: inherit;
 		cursor: pointer;
 		color: inherit;
 	}
 	.leg-item:hover,
 	.leg-item:focus-visible { background: #f0f0f0; outline: none; }
-	/* On a selected card (#f2f2f2) the default hover is nearly
+	/* On a selected card (var(--gray-75)) the default hover is nearly
 	 * invisible — darken the inner-element hover there. */
 	.card.selected .leg-item:hover,
 	.card.selected .leg-item:focus-visible { background: #e0e0e0; }
@@ -621,8 +621,8 @@
 		gap: 0.35rem;
 		color: #777;
 	}
-	.leg-walk-dur { font-size: 0.78rem; color: #666; }
-	.leg-walk-dur strong { font-weight: 600; color: #444; }
+	.leg-walk-dur { font-size: 0.78rem; color: var(--gray-500); }
+	.leg-walk-dur strong { font-weight: 600; color: var(--gray-700); }
 
 	.leg-line-row {
 		display: flex;
@@ -639,12 +639,12 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		font-size: 0.78rem;
-		color: #444;
+		color: var(--gray-700);
 	}
 	.leg-dur {
 		flex: 0 0 auto;
 		font-size: 0.78rem;
-		color: #555;
+		color: var(--gray-600);
 		white-space: nowrap;
 	}
 	.leg-stop-row {
@@ -655,7 +655,7 @@
 	}
 	.leg-time {
 		font-weight: 600;
-		color: #222;
+		color: var(--gray-850);
 		width: 2.4rem;
 		flex: 0 0 auto;
 	}
@@ -665,14 +665,14 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		color: #333;
+		color: var(--gray-800);
 	}
 	.leg-stop-end .leg-stop-name { font-weight: 700; color: #111; }
 	.leg-stop-end .leg-time { font-weight: 700; color: #111; }
 	.leg-pf {
 		flex: 0 0 auto;
 		font-size: 0.72rem;
-		color: #666;
+		color: var(--gray-500);
 		white-space: nowrap;
 	}
 </style>

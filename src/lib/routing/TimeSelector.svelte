@@ -230,7 +230,7 @@
 	}
 	.ts-mode {
 		display: flex;
-		border: 1px solid #ddd;
+		border: 1px solid var(--gray-200);
 		border-radius: 0.55rem;
 		overflow: hidden;
 		width: fit-content;
@@ -238,13 +238,13 @@
 	.ts-mode button {
 		border: none;
 		background: transparent;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		font-size: 0.85rem;
 		padding: 0.35rem 0.8rem;
 		cursor: pointer;
-		color: #444;
+		color: var(--gray-700);
 	}
-	.ts-mode button.active { background: #333; color: #fff; }
+	.ts-mode button.active { background: var(--gray-800); color: var(--white); }
 
 	.ts-time {
 		display: flex;
@@ -263,7 +263,7 @@
 		justify-content: center;
 		border: none;
 		background: transparent;
-		color: #666;
+		color: var(--gray-500);
 		cursor: pointer;
 		padding: 0.1rem;
 		border-radius: 0.3rem;
@@ -273,17 +273,17 @@
 	   scaleX (not rotate): the glyph sits slightly off-center vertically,
 	   so a 180° rotation would shift it down relative to its twin. */
 	.ts-day-step :global(.ts-day-step-back) { transform: scaleX(-1); display: inline-block; }
-	.ts-day-step:hover { background: #eee; color: #000; }
+	.ts-day-step:hover { background: var(--gray-100); color: var(--black); }
 	.ts-date {
 		flex: 1 1 auto;
 		max-width: 9rem;
 		border: none;
-		background: #f5f5f5;
+		background: var(--gray-50);
 		border-radius: 0.55rem;
 		padding: 0.35rem 0.5rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 	}
 	.ts-timebox {
 		flex: 0 1 auto;
@@ -293,12 +293,12 @@
 	.ts-timein {
 		width: 100%;
 		border: none;
-		background: #f5f5f5;
+		background: var(--gray-50);
 		border-radius: 0.55rem;
 		padding: 0.35rem 0.5rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 		text-align: left;
 		font-variant-numeric: tabular-nums;
 	}
@@ -307,9 +307,9 @@
 		margin: 0;
 		padding: 0.2rem 0;
 		list-style: none;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.55rem;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+		box-shadow: var(--shadow-popover);
 		max-height: 13rem;
 		overflow-y: auto;
 		z-index: 30;
@@ -317,15 +317,15 @@
 	.ts-row {
 		padding: 0.25rem 0.7rem;
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 		text-align: left;
 		font-variant-numeric: tabular-nums;
 		cursor: pointer;
 	}
 	.ts-row.full-hour { font-weight: 600; }
 	.ts-row.now { color: #1565c0; font-weight: 600; }
-	.ts-row:hover { background: #eee; }
-	.ts-row.selected { background: #333; color: #fff; }
+	.ts-row:hover { background: var(--gray-100); }
+	.ts-row.selected { background: var(--gray-800); color: var(--white); }
 
 	.ts-now {
 		display: inline-flex;
@@ -333,15 +333,15 @@
 		justify-content: center;
 		border: none;
 		background: transparent;
-		color: #666;
+		color: var(--gray-500);
 		cursor: pointer;
 		/* Sized and spaced like the swap button next to the from/to rows
 		   (0.35rem gap + 1.85rem button) so the time field's right edge
 		   aligns with the endpoint fields' right edge. */
 		padding: 0.25rem 0.35rem;
 		margin-left: -0.15rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 	}
 	.ts-now :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.ts-now:hover { background: #eee; color: #000; }
+	.ts-now:hover { background: var(--gray-100); color: var(--black); }
 </style>

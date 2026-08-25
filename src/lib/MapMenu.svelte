@@ -43,7 +43,7 @@
 
 <div class="menu">
 	<button
-		class="menu-toggle"
+		class="control-disc menu-toggle"
 		class:active={open}
 		onclick={() => (open = !open)}
 		aria-expanded={open}
@@ -141,51 +141,38 @@
 		position: relative;
 	}
 
-	.menu-toggle {
-		background: #ffffff;
-		border: none;
-		border-radius: 999px;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-		width: 2.1rem;
-		height: 2.1rem;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		cursor: pointer;
-		color: #333;
-		padding: 0;
-	}
-
+	/* Base disc styling comes from .control-disc (app.css § Shared
+	   patterns); only the states are component-specific. */
 	.menu-toggle:hover {
-		background: #eee;
+		background: var(--gray-100);
 	}
 
 	.menu-toggle.active {
-		background: #333;
-		color: #fff;
+		background: var(--gray-800);
+		color: var(--white);
 	}
 
 	.panel {
 		position: absolute;
-		top: calc(2.1rem + 0.5rem);
+		top: calc(var(--control-size) + 0.5rem);
 		left: 0;
 		z-index: 10;
 		width: 15rem;
 		max-height: calc(100vh - 5rem);
 		max-height: calc(100dvh - 5rem);
 		overflow-y: auto;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.9rem;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-control);
 		padding: 0.85rem 1rem;
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-ui);
 		user-select: none;
 	}
 
 	.section + .section {
 		margin-top: 0.9rem;
 		padding-top: 0.8rem;
-		border-top: 1px solid #eee;
+		border-top: 1px solid var(--gray-100);
 	}
 
 	.section-title {
@@ -193,7 +180,7 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: #999;
+		color: var(--gray-300);
 		margin-bottom: 0.45rem;
 	}
 
@@ -201,7 +188,7 @@
 		display: flex;
 		border-radius: 0.6rem;
 		overflow: hidden;
-		border: 1px solid #ddd;
+		border: 1px solid var(--gray-200);
 		width: fit-content;
 	}
 
@@ -213,12 +200,12 @@
 		line-height: 1.2;
 		padding: 0.35rem 0.8rem;
 		cursor: pointer;
-		color: #333;
+		color: var(--gray-800);
 	}
 
 	.view-toggle button.active {
-		background: #333;
-		color: #fff;
+		background: var(--gray-800);
+		color: var(--white);
 	}
 
 	.row-toggle {
@@ -232,7 +219,7 @@
 		cursor: pointer;
 		font-family: inherit;
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 	}
 
 	.row-toggle svg {
@@ -251,8 +238,8 @@
 		position: relative;
 		width: 1.7rem;
 		height: 1rem;
-		border-radius: 999px;
-		background: #ccc;
+		border-radius: var(--radius-pill);
+		background: var(--gray-250);
 		transition: background 0.15s ease;
 	}
 
@@ -264,12 +251,12 @@
 		width: calc(1rem - 4px);
 		height: calc(1rem - 4px);
 		border-radius: 50%;
-		background: #fff;
+		background: var(--white);
 		transition: left 0.15s ease;
 	}
 
 	.row-toggle.active .switch {
-		background: #333;
+		background: var(--gray-800);
 	}
 
 	.row-toggle.active .switch::after {
@@ -293,17 +280,17 @@
 		flex: 0 0 auto;
 		width: 1.6rem;
 		height: 5px;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 	}
 
 	.mode-label {
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 		line-height: 1.25;
 	}
 
 	.mode-note {
-		color: #888;
+		color: var(--gray-400);
 		font-size: 0.75rem;
 	}
 
@@ -314,7 +301,7 @@
 	.speed-bar {
 		width: 100%;
 		height: 5px;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 	}
 
 	.freq-wedge {
@@ -327,15 +314,15 @@
 		display: flex;
 		justify-content: space-between;
 		font-size: 0.8rem;
-		color: #444;
+		color: var(--gray-700);
 	}
 
 	.about {
 		font-size: 0.8rem;
-		color: #888;
+		color: var(--gray-400);
 	}
 
 	.about a {
-		color: #666;
+		color: var(--gray-500);
 	}
 </style>

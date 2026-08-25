@@ -281,7 +281,7 @@
 	.stop-search {
 		position: relative;
 		width: 18rem;
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-ui);
 	}
 	@media (max-width: 600px) {
 		.stop-search {
@@ -297,20 +297,20 @@
 		box-sizing: border-box;
 		/* Same height as the menu toggle button so the top-controls row
 		   aligns (MapMenu .menu-toggle is 2.1rem). */
-		height: 2.1rem;
+		height: var(--control-size);
 		padding: 0 0.8rem;
 		border: none;
-		border-radius: 999px;
-		background: #ffffff;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		border-radius: var(--radius-pill);
+		background: var(--white);
+		box-shadow: var(--shadow-control);
 		font-family: inherit;
 		font-size: 0.85rem;
 		line-height: 1.2;
-		color: #222;
+		color: var(--gray-850);
 		outline: none;
 	}
 	input:focus {
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3), 0 0 0 2px #333;
+		box-shadow: var(--shadow-control), 0 0 0 2px var(--gray-800);
 	}
 	.results {
 		position: absolute;
@@ -320,9 +320,9 @@
 		margin: 0;
 		padding: 0.25rem 0;
 		list-style: none;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.5rem;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+		box-shadow: var(--shadow-popover);
 		max-height: 60vh;
 		overflow-y: auto;
 		z-index: 10;
@@ -333,12 +333,12 @@
 		gap: 0.5rem;
 		padding: 0.35rem 0.7rem;
 		font-size: 0.85rem;
-		color: #222;
+		color: var(--gray-850);
 		cursor: pointer;
 	}
 	.result.highlighted {
-		background: #333;
-		color: #fff;
+		background: var(--gray-800);
+		color: var(--white);
 	}
 	.mode-icon {
 		display: inline-block;
@@ -346,11 +346,11 @@
 		height: 1.1rem;
 		font-size: 1.1rem;
 		line-height: 1;
-		color: #666;
+		color: var(--gray-500);
 		flex: 0 0 auto;
 	}
 	.result.highlighted .mode-icon {
-		color: #fff;
+		color: var(--white);
 	}
 	.stop-name {
 		flex: 1 1 auto;
@@ -359,7 +359,7 @@
 	.empty {
 		padding: 0.35rem 0.7rem;
 		font-size: 0.85rem;
-		color: #888;
+		color: var(--gray-400);
 		font-style: italic;
 	}
 </style>

@@ -204,11 +204,11 @@
 		width: 22rem;
 		max-height: calc(100vh - 2rem);
 		max-height: calc(100dvh - 2rem);
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.9rem;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-control);
 		padding: 0.7rem 0.85rem 0.85rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		display: flex;
 		flex-direction: column;
 		gap: 0.6rem;
@@ -241,24 +241,24 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: #666;
+		color: var(--gray-500);
 	}
 	.rp-title-icon {
 		font-size: 1rem;
 		line-height: 1;
-		color: #444;
+		color: var(--gray-700);
 	}
 	.rp-close {
 		border: none;
 		background: transparent;
 		font-size: 1.25rem;
 		line-height: 1;
-		color: #555;
+		color: var(--gray-600);
 		padding: 0.15rem 0.4rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		cursor: pointer;
 	}
-	.rp-close:hover { background: #eee; color: #000; }
+	.rp-close:hover { background: var(--gray-100); color: var(--black); }
 
 	.rp-endpoints {
 		display: flex;
@@ -278,13 +278,13 @@
 		flex: 0 0 auto;
 		border: none;
 		background: transparent;
-		color: #666;
+		color: var(--gray-500);
 		padding: 0.25rem 0.35rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		cursor: pointer;
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.rp-swap:hover { background: #eee; color: #000; }
+	.rp-swap:hover { background: var(--gray-100); color: var(--black); }
 
 	.rp-results-sep {
 		/* Sits outside the scroll container so it never scrolls — the line
@@ -292,7 +292,7 @@
 		   panel flex child it spans the panel content box, so its edges
 		   align with the cards (the scrollbar gutter is carved out only
 		   on .rp-results via its negative margin). */
-		border-top: 1px solid #eee;
+		border-top: 1px solid var(--gray-100);
 		height: 0;
 		/* Tighten the panel gap below so the first card sits where it did
 		   when the line was a border-top on .rp-results with padding-top. */
@@ -314,7 +314,7 @@
 	}
 	.rp-status {
 		font-size: 0.85rem;
-		color: #666;
+		color: var(--gray-500);
 		padding: 0.35rem 0.15rem;
 	}
 	.rp-error { color: #a11; }
@@ -327,7 +327,7 @@
 		font-weight: 600;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: #888;
+		color: var(--gray-400);
 		padding: 0.25rem 0.1rem 0.1rem;
 	}
 	.rp-day-marker::before,
@@ -343,9 +343,9 @@
 		align-items: center;
 		justify-content: center;
 		gap: 0.35rem;
-		border: 1px solid #ddd;
-		background: #f5f5f5;
-		color: #222;
+		border: 1px solid var(--gray-200);
+		background: var(--gray-50);
+		color: var(--gray-850);
 		font-family: inherit;
 		font-size: 0.8rem;
 		font-weight: 600;

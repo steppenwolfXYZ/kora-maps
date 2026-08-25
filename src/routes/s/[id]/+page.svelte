@@ -54,7 +54,7 @@
 		align-items: center;
 		justify-content: center;
 		padding: 24px;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		text-align: center;
 	}
 </style>

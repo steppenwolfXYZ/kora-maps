@@ -1,3 +1,5 @@
+@import './variables.css';
+
 /* Global reset */
 *,
 *::before,
@@ -12,4 +14,107 @@ body {
 	height: 100%;
 	width: 100%;
 	overflow: hidden;
+}
+
+/* ── Shared patterns ─────────────────────────────────────────────────────
+   Small set of classes used across components. Component styles layer
+   their specifics (hover, active, icon sizing) on top. */
+
+/* Round white control disc — the map's control family: menu toggle,
+   route button; the MapLibre ctrl groups mirror the same look via the
+   rules below. */
+.control-disc {
+	flex: 0 0 auto;
+	width: var(--control-size);
+	height: var(--control-size);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--white);
+	box-shadow: var(--shadow-control);
+	color: var(--gray-800);
+	cursor: pointer;
+	padding: 0;
+}
+
+/* ── MapLibre controls ───────────────────────────────────────────────────
+   Styling of MapLibre's own control DOM (vendor markup, so global by
+   nature). Scoped under .map-wrap, which only the map page renders.
+   State classes (.routing-active / .routing-map-mode) are set on
+   .map-wrap by Map.svelte. */
+
+/* Align the top-right controls with the top-left search bar
+   (.top-controls sits at top: 1rem — see MapChrome). */
+.map-wrap .maplibregl-ctrl-top-right {
+	top: 1rem;
+	right: 1rem;
+}
+
+/* Zero MapLibre's default per-ctrl margin so the pill's top edge
+   matches .top-controls exactly. Keep a small bottom gap between
+   the navigation pill and the geolocate disc below it. */
+.map-wrap .maplibregl-ctrl-top-right .maplibregl-ctrl {
+	margin: 0 0 0.5rem 0;
+}
+
+/* Round the top-right controls to match the round control discs. The
+   single-button geolocate group becomes a circle; the 3-button
+   navigation stack becomes a vertical pill. overflow:hidden clips the
+   square button faces to the group's rounded outline so we don't need
+   per-button corner rules. */
+.map-wrap .maplibregl-ctrl-top-right .maplibregl-ctrl-group {
+	border-radius: var(--radius-pill);
+	box-shadow: var(--shadow-control);
+	overflow: hidden;
+}
+
+.map-wrap .maplibregl-ctrl-top-right .maplibregl-ctrl-group button {
+	width: var(--control-size);
+	height: var(--control-size);
+}
+
+/* Scale bar lives alone in the bottom-left corner container; shift
+   the whole container to bottom-center so the brand overlay can
+   claim the bottom-left corner. Reset MapLibre's default left margin
+   on the ctrl wrapper so the translateX(-50%) centering is true. */
+.map-wrap .maplibregl-ctrl-bottom-left {
+	left: 50%;
+	transform: translateX(-50%);
+}
+.map-wrap .maplibregl-ctrl-bottom-left .maplibregl-ctrl {
+	margin: 0 0 0.4rem;
+}
+
+/* Hide the scale bar while routing — the panel already dominates the
+   left column and the ruler competes visually with the results. */
+.map-wrap.routing-active .maplibregl-ctrl-bottom-left .maplibregl-ctrl-scale {
+	display: none;
+}
+
+/* Keep the (i) credits out from under the routing panel on desktop:
+   bound the bottom-right control strip to the space right of the
+   panel (22 rem + margins) so expanded attribution text wraps
+   instead of sliding underneath. */
+@media (min-width: 700px) {
+	.map-wrap.routing-active .maplibregl-ctrl-bottom-right {
+		left: 23.5rem;
+	}
+}
+
+/* Narrow screens (keep in sync with NARROW_BREAKPOINT in
+   routing/layout.ts): the full-width routing page owns the viewport,
+   so the zoom / orientation / geolocate controls and the (i) credits
+   hide while the list is up. In fullscreen map mode they stay
+   visible, the controls pushed below the summary header. (The zoom
+   badge and brand overlay hide via their own rules in MapChrome.) */
+@media (max-width: 699px) {
+	.map-wrap.routing-active:not(.routing-map-mode) .maplibregl-ctrl-top-right,
+	.map-wrap.routing-active:not(.routing-map-mode) .maplibregl-ctrl-bottom-right {
+		display: none;
+	}
+	.map-wrap.routing-map-mode .maplibregl-ctrl-top-right {
+		top: 5.2rem;
+	}
 }

@@ -192,7 +192,7 @@
 	}
 
 	.page {
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-ui);
 		color: #2a241c;
 		max-width: 46rem;
 		margin: 0 auto;
@@ -216,7 +216,7 @@
 		transition: color 0.15s ease;
 	}
 	.back:hover {
-		color: #740013;
+		color: var(--brand);
 	}
 	.back-arrow {
 		font-size: 20px;
@@ -296,7 +296,7 @@
 	.route-link {
 		font-size: 0.85em;
 		font-weight: 600;
-		color: #740013;
+		color: var(--brand);
 		text-decoration: none;
 		white-space: nowrap;
 	}

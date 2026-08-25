@@ -363,9 +363,9 @@
 		align-items: center;
 		gap: 0.4rem;
 		padding: 0.35rem 0.5rem;
-		background: #f5f5f5;
+		background: var(--gray-50);
 		border-radius: 0.55rem;
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-ui);
 	}
 
 	.ep-label {
@@ -374,8 +374,8 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: #999;
-		width: 2.1rem;
+		color: var(--gray-300);
+		width: var(--control-size);
 	}
 
 	.ep-input {
@@ -384,7 +384,7 @@
 		background: transparent;
 		font-family: inherit;
 		font-size: 0.9rem;
-		color: #222;
+		color: var(--gray-850);
 		outline: none;
 		padding: 0.15rem 0;
 		min-width: 0;
@@ -400,7 +400,7 @@
 		text-align: left;
 		font-family: inherit;
 		font-size: 0.9rem;
-		color: #222;
+		color: var(--gray-850);
 		cursor: pointer;
 		padding: 0.15rem 0;
 		min-width: 0;
@@ -410,14 +410,14 @@
 		flex: 0 0 auto;
 		border: none;
 		background: transparent;
-		color: #888;
+		color: var(--gray-400);
 		font-size: 1.1rem;
 		line-height: 1;
 		padding: 0.15rem 0.3rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		cursor: pointer;
 	}
-	.ep-clear:hover { background: #eee; color: #000; }
+	.ep-clear:hover { background: var(--gray-100); color: var(--black); }
 
 	.ep-menu {
 		/* Fixed positioning escapes the routing panel's `overflow: hidden`.
@@ -427,9 +427,9 @@
 		margin: 0;
 		padding: 0.25rem 0;
 		list-style: none;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.55rem;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+		box-shadow: var(--shadow-popover);
 		max-height: 40vh;
 		overflow-y: auto;
 		z-index: 30;
@@ -441,18 +441,18 @@
 		gap: 0.5rem;
 		padding: 0.35rem 0.7rem;
 		font-size: 0.9rem;
-		color: #222;
+		color: var(--gray-850);
 		cursor: pointer;
 	}
-	.ep-row-item.highlighted { background: #333; color: #fff; }
-	.ep-row-item.highlighted .ep-icon { color: #fff; }
+	.ep-row-item.highlighted { background: var(--gray-800); color: var(--white); }
+	.ep-row-item.highlighted .ep-icon { color: var(--white); }
 
 	.ep-icon {
 		width: 1.1rem;
 		height: 1.1rem;
 		font-size: 1.1rem;
 		line-height: 1;
-		color: #666;
+		color: var(--gray-500);
 		flex: 0 0 auto;
 	}
 
@@ -467,14 +467,14 @@
 	.ep-empty {
 		padding: 0.35rem 0.7rem;
 		font-size: 0.85rem;
-		color: #888;
+		color: var(--gray-400);
 		font-style: italic;
 	}
 
 	.ep-hint {
 		padding: 0.35rem 0.7rem;
 		font-size: 0.8rem;
-		color: #888;
+		color: var(--gray-400);
 		list-style: none;
 	}
 

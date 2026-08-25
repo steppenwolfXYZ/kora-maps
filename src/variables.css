@@ -1,0 +1,49 @@
+/* Design tokens. All UI colors, the type stacks, elevation and the
+   shared control sizing live here — components reference these instead
+   of literals. Data-driven colors (transit mode colors, badge
+   foregrounds computed in JS, MapLibre paint values) stay literal in
+   their modules: the map renderer cannot read CSS variables.
+
+   Breakpoints CANNOT be variables (CSS media queries don't resolve
+   var()). The app's literals, kept in sync by hand:
+     699px — NARROW_BREAKPOINT (routing/layout.ts): routing panel goes
+             full-bleed, map controls hide.
+     600px — MENU_AUTOCLOSE_MAX_WIDTH (map/uiState.svelte.ts): menu
+             panel auto-closes on map interaction. */
+
+:root {
+	/* Brand */
+	--brand: #740013;
+	--brand-hover: #8a0418;
+	--warn: #b83232;
+
+	/* Neutral ramp (darkest → lightest). One-off in-between grays stay
+	   literal in their components; this ramp covers the recurring ones. */
+	--gray-900: #1a1a1a;
+	--gray-850: #222;
+	--gray-800: #333;
+	--gray-700: #444;
+	--gray-600: #555;
+	--gray-500: #666;
+	--gray-400: #888;
+	--gray-300: #999;
+	--gray-250: #ccc;
+	--gray-200: #ddd;
+	--gray-100: #eee;
+	--gray-75: #f2f2f2;
+	--gray-50: #f5f5f5;
+	--white: #ffffff;
+	--black: #000000;
+
+	/* Typography (self-hosted Saira — see app.html @font-face) */
+	--font-ui: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+	--font-mono: 'ui-monospace', 'SFMono-Regular', 'Menlo', monospace;
+
+	/* Elevation */
+	--shadow-control: 0 1px 4px rgba(0, 0, 0, 0.3);
+	--shadow-popover: 0 4px 12px rgba(0, 0, 0, 0.25);
+
+	/* Shape & sizing */
+	--radius-pill: 999px;
+	--control-size: 2.1rem; /* round map control buttons */
+}

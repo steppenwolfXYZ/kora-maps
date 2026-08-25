@@ -70,11 +70,11 @@
 	.mcm {
 		position: absolute;
 		z-index: 30;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.5rem;
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+		box-shadow: var(--shadow-popover);
 		padding: 0.25rem 0;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		min-width: 11rem;
 	}
 	.mcm button {
@@ -87,15 +87,15 @@
 		text-align: left;
 		font-family: inherit;
 		font-size: 0.9rem;
-		color: #222;
+		color: var(--gray-850);
 		padding: 0.4rem 0.75rem;
 		cursor: pointer;
 	}
-	.mcm button:hover { background: #f2f2f2; }
+	.mcm button:hover { background: var(--gray-75); }
 
 	.mcm-icon {
 		font-size: 1.1rem;
 		line-height: 1;
-		color: #666;
+		color: var(--gray-500);
 	}
 </style>

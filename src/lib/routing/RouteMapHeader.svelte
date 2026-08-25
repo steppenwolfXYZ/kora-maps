@@ -72,11 +72,11 @@
 		align-items: center;
 		gap: 0.5rem;
 		width: min(94vw, 34rem);
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 1.1rem;
-		box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+		box-shadow: var(--shadow-control);
 		padding: 0.55rem 0.7rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		z-index: 5;
 	}
 
@@ -88,14 +88,14 @@
 		width: 2rem;
 		height: 2rem;
 		border: none;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		background: transparent;
-		color: #444;
+		color: var(--gray-700);
 		font-size: 1.3rem;
 		line-height: 1;
 		cursor: pointer;
 	}
-	.rmh-btn:hover { background: #eee; color: #000; }
+	.rmh-btn:hover { background: var(--gray-100); color: var(--black); }
 
 	.rmh-body {
 		flex: 1 1 auto;
@@ -110,8 +110,8 @@
 		justify-content: space-between;
 		gap: 0.5rem;
 	}
-	.rmh-time { font-weight: 700; font-size: 0.95rem; color: #222; }
-	.rmh-meta { font-size: 0.8rem; color: #555; white-space: nowrap; }
+	.rmh-time { font-weight: 700; font-size: 0.95rem; color: var(--gray-850); }
+	.rmh-meta { font-size: 0.8rem; color: var(--gray-600); white-space: nowrap; }
 
 	.rmh-legs {
 		display: flex;
@@ -120,9 +120,9 @@
 		gap: 0.15rem 0.25rem;
 	}
 	.rmh-leg { display: inline-flex; align-items: center; gap: 0.15rem; }
-	.rmh-mode { font-size: 1rem; line-height: 1; color: #444; }
-	.rmh-leg.walk .rmh-mode { color: #888; }
-	.rmh-leg-dur { font-size: 0.7rem; color: #666; white-space: nowrap; }
+	.rmh-mode { font-size: 1rem; line-height: 1; color: var(--gray-700); }
+	.rmh-leg.walk .rmh-mode { color: var(--gray-400); }
+	.rmh-leg-dur { font-size: 0.7rem; color: var(--gray-500); white-space: nowrap; }
 	.rmh-ref {
 		display: inline-block;
 		padding: 1px 5px;
@@ -130,9 +130,9 @@
 		font-size: 0.72rem;
 		font-weight: 800;
 		letter-spacing: 0.02em;
-		background: #999;
-		color: #fff;
+		background: var(--gray-300);
+		color: var(--white);
 		white-space: nowrap;
 	}
-	.rmh-sep { font-size: 0.9rem; color: #ccc; }
+	.rmh-sep { font-size: 0.9rem; color: var(--gray-250); }
 </style>

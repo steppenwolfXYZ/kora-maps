@@ -149,7 +149,7 @@
 	}
 
 	.page {
-		font-family: 'Saira', 'Helvetica Neue', Arial, sans-serif;
+		font-family: var(--font-ui);
 		color: #2a241c;
 		max-width: 62rem;
 		margin: 0 auto;
@@ -174,7 +174,7 @@
 		padding: 0.3rem 0;
 		transition: color 0.15s ease;
 	}
-	.back:hover { color: #740013; }
+	.back:hover { color: var(--brand); }
 	.back-arrow {
 		font-size: 20px;
 		transform: rotate(180deg);
@@ -221,7 +221,7 @@
 		font-size: 0.78rem;
 		letter-spacing: 0.22em;
 		text-transform: uppercase;
-		color: #740013;
+		color: var(--brand);
 	}
 	.hero h1 {
 		font-weight: 800;
@@ -245,13 +245,13 @@
 	}
 	.beta-pill {
 		display: inline-block;
-		background: #740013;
-		color: #fff;
+		background: var(--brand);
+		color: var(--white);
 		font-weight: 700;
 		font-size: 0.72rem;
 		letter-spacing: 0.05em;
 		padding: 0.3rem 0.6rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 	}
 
 	/* ---------- Problem statement ---------- */
@@ -266,7 +266,7 @@
 		margin: 0;
 	}
 	.car-hl {
-		color: #740013;
+		color: var(--brand);
 		background: linear-gradient(to top, rgba(116, 0, 19, 0.14) 38%, transparent 38%);
 		padding: 0 0.08em;
 	}
@@ -318,13 +318,13 @@
 	.section-text {
 		padding: 1.3rem 1.4rem 1.4rem 1.6rem;
 		border: 1px solid rgba(42, 36, 28, 0.1);
-		border-left: 4px solid #740013;
+		border-left: 4px solid var(--brand);
 		border-radius: 0.5rem 0.9rem 0.9rem 0.5rem;
 	}
 	.section.flip .section-text {
 		padding: 1.3rem 1.6rem 1.4rem 1.4rem;
 		border: 1px solid rgba(42, 36, 28, 0.1);
-		border-right: 4px solid #740013;
+		border-right: 4px solid var(--brand);
 		border-radius: 0.9rem 0.5rem 0.5rem 0.9rem;
 	}
 	.section h2 {
@@ -425,14 +425,14 @@
 	.close-block.beta {
 		background: #eeddd7;
 		border-color: rgba(116, 0, 19, 0.22);
-		border-top-color: #740013;
+		border-top-color: var(--brand);
 	}
 	.close-block h3 {
 		font-weight: 800;
 		font-size: 1.08rem;
 		margin-bottom: 0.6rem;
 	}
-	.close-block.beta h3 { color: #740013; }
+	.close-block.beta h3 { color: var(--brand); }
 	.close-block p {
 		font-size: 0.95rem;
 		line-height: 1.65;
@@ -443,16 +443,16 @@
 		margin-top: 1.1rem;
 		font-weight: 700;
 		font-size: 0.92rem;
-		color: #740013;
+		color: var(--brand);
 		text-decoration: none;
-		border: 1.5px solid #740013;
-		border-radius: 999px;
+		border: 1.5px solid var(--brand);
+		border-radius: var(--radius-pill);
 		padding: 0.42rem 0.9rem;
 		transition: background 0.15s ease, color 0.15s ease;
 	}
 	.contact:hover {
-		background: #740013;
-		color: #fff;
+		background: var(--brand);
+		color: var(--white);
 	}
 
 	/* ---------- Footer ---------- */
@@ -472,7 +472,7 @@
 		text-decoration: none;
 	}
 	.foot img { height: 1.5rem; width: 1.5rem; }
-	.foot a:hover { color: #740013; }
+	.foot a:hover { color: var(--brand); }
 
 	/* ---------- Responsive ---------- */
 	@media (max-width: 860px) {
@@ -491,7 +491,7 @@
 		.art-card { order: 2; }
 		.section.flip .section-text {
 			padding: 1.3rem 1.4rem 1.4rem 1.6rem;
-			border-left: 4px solid #740013;
+			border-left: 4px solid var(--brand);
 			border-right: 1px solid rgba(42, 36, 28, 0.1);
 			border-radius: 0.5rem 0.9rem 0.9rem 0.5rem;
 		}

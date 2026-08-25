@@ -122,11 +122,11 @@
 	.share-bubble {
 		position: fixed;
 		z-index: 61;
-		background: #ffffff;
+		background: var(--white);
 		border-radius: 0.7rem;
 		box-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
 		padding: 0.6rem;
-		font-family: 'Saira', sans-serif;
+		font-family: var(--font-ui);
 		display: flex;
 		flex-direction: column;
 		gap: 0.45rem;
@@ -142,24 +142,24 @@
 	}
 	.share-bubble:not(.below)::after {
 		top: 100%;
-		border-top-color: #ffffff;
+		border-top-color: var(--white);
 	}
 	.share-bubble.below::after {
 		bottom: 100%;
-		border-bottom-color: #ffffff;
+		border-bottom-color: var(--white);
 	}
 
 	.share-url {
 		width: 100%;
-		border: 1px solid #ddd;
+		border: 1px solid var(--gray-200);
 		border-radius: 0.5rem;
 		background: #f7f7f7;
 		font-family: inherit;
 		font-size: 0.8rem;
-		color: #333;
+		color: var(--gray-800);
 		padding: 0.4rem 0.5rem;
 	}
-	.share-url:focus { outline: none; border-color: #999; }
+	.share-url:focus { outline: none; border-color: var(--gray-300); }
 
 	.share-actions {
 		display: flex;
@@ -167,9 +167,9 @@
 	}
 	.share-btn {
 		flex: 1 1 auto;
-		border: 1px solid #ddd;
-		background: #f5f5f5;
-		color: #222;
+		border: 1px solid var(--gray-200);
+		background: var(--gray-50);
+		color: var(--gray-850);
 		font-family: inherit;
 		font-size: 0.82rem;
 		font-weight: 600;
@@ -180,9 +180,9 @@
 	}
 	.share-btn:hover { background: #ebebeb; border-color: #bbb; }
 	.share-btn-primary {
-		background: #740013;
-		border-color: #740013;
-		color: #fff;
+		background: var(--brand);
+		border-color: var(--brand);
+		color: var(--white);
 	}
-	.share-btn-primary:hover { background: #8a0418; border-color: #8a0418; }
+	.share-btn-primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
 </style>
