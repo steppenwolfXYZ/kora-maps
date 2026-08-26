@@ -25,10 +25,7 @@ These two states drive the panel layout (see Requirements).
 
 ### No-route-set view
 
-When no route is set, the panel changes shape:
-
-- The date/time and arrive/leave controls are hidden until both endpoints are set.
-- In their place, a **recent routes** section appears: a list of the most recent routes the user has shown.
+When no route is set, a **recent routes** section appears below the date/time controls: a list of the most recent routes the user has shown. (The date/time and arrive/leave controls stay visible — hiding them until both endpoints were set was tried and reverted after testing.)
 
 ### Recent routes list
 

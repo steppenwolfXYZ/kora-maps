@@ -5,6 +5,7 @@
 	import ResultCard from './ResultCard.svelte';
 	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
+	import { recentRoutes, endpointLabel, type RecentRoute } from './recents.svelte';
 	import { itineraryFingerprint } from './fingerprint';
 	import type { Itinerary, Leg } from './types';
 
@@ -19,6 +20,9 @@
 	// single card comparing against itself would always wear the crown.
 	let displayed = $derived(routingState.displayedResults);
 	let cardStates = $derived(computeCardStates(displayed));
+	// "Route set" (routing-persistence.md § Definitions): both endpoints
+	// finally set. Drives the clear button and the when/recents swap.
+	let routeSet = $derived(!!routingState.from && !!routingState.to);
 
 	let resultsEl: HTMLDivElement | null = $state(null);
 	let fromInput: EndpointInput | undefined = $state();
@@ -231,6 +235,26 @@
 		void routingState.runQuery();
 	});
 
+	function clearRoute() {
+		routingState.clearRoute();
+		// The From input remounts in its empty-search form — focus lands
+		// there so the user can start the next route immediately.
+		void tick().then(() => fromInput?.focusSearch());
+	}
+
+	function pickRecent(r: RecentRoute) {
+		// Past date/time falls back to "depart now" — only here, on recents
+		// selection; URL loads and in-session restores keep past times
+		// (routing-persistence.md § Constraints).
+		const past = r.time !== null && Date.parse(r.time) < Date.now();
+		routingState.loadRoute({
+			from: r.from,
+			to: r.to,
+			mode: past ? 'leave' : r.mode,
+			time: past ? null : r.time
+		});
+	}
+
 	// Local-calendar day key so day-boundary markers respect the viewer's TZ.
 	function dayKey(iso: string): string {
 		const d = new Date(iso);
@@ -256,6 +280,12 @@
 			<span class="material-symbols-outlined rp-title-icon" aria-hidden="true">directions</span>
 			Route
 		</span>
+		{#if routeSet}
+			<button class="rp-clear" onclick={clearRoute}>
+				<span class="material-symbols-outlined" aria-hidden="true">delete</span>
+				Clear route
+			</button>
+		{/if}
 		<button
 			class="rp-close icon-btn"
 			onclick={() => routingState.closePanel()}
@@ -299,6 +329,21 @@
 			onTime={(t) => routingState.setTime(t)}
 		/>
 	</div>
+
+	{#if !routeSet && recentRoutes.list.length > 0}
+		<!-- No-route-set view (routing-persistence.md): recent routes show
+		     below the when-controls until both endpoints are set. -->
+		<div class="rp-recents">
+			<div class="rp-recents-title">Recent</div>
+			{#each recentRoutes.list as r (r.at)}
+				<button class="rp-recent" onclick={() => pickRecent(r)}>
+					<span class="rp-recent-ep">{endpointLabel(r.from)}</span>
+					<span class="material-symbols-outlined rp-recent-arrow" aria-hidden="true">chevron_right</span>
+					<span class="rp-recent-ep">{endpointLabel(r.to)}</span>
+				</button>
+			{/each}
+		</div>
+	{/if}
 
 	{#if routingState.hasQueried || routingState.sharedExpired}
 	<div class="rp-results-sep" aria-hidden="true"></div>
@@ -366,6 +411,9 @@
 
 <style>
 	.routing-panel {
+		/* Width of the swap / × trailing column — keeps the head row's
+		   right-alignment in sync with the endpoints row. */
+		--rp-tail-col: 1.85rem;
 		width: 22rem;
 		max-height: calc(100vh - 2rem);
 		max-height: calc(100dvh - 2rem);
@@ -398,8 +446,36 @@
 	.rp-head {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
+		/* Same gap as .rp-endpoints so the clear button's right edge
+		   aligns with the From input's right edge (the × column below
+		   mirrors the swap column's width). */
+		gap: 0.35rem;
+	}
+	/* Visible pill button. margin-left:auto right-aligns it; the ×
+	   column right of it matches the swap column (see .rp-close), so
+	   its right edge lines up with the From input's right edge. */
+	.rp-clear {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		margin-left: auto;
+		border: none;
+		background: var(--gray-100);
+		font-family: inherit;
+		font-size: 0.72rem;
+		line-height: 1.2;
+		color: var(--gray-800);
+		padding: 0.25rem 0.6rem 0.25rem 0.45rem;
+		border-radius: var(--radius-pill);
+		cursor: pointer;
+	}
+	.rp-clear :global(.material-symbols-outlined) {
+		font-size: 0.9rem;
+		line-height: 1;
+	}
+	.rp-clear:hover {
+		background: var(--gray-200);
+		color: var(--brand);
 	}
 	.rp-title {
 		display: inline-flex;
@@ -423,11 +499,21 @@
 		line-height: 1;
 		color: var(--white);
 	}
-	/* Base look + hover from .icon-btn (app.css); sizing only here. */
+	/* Base look + hover from .icon-btn (app.css); sizing only here.
+	   Fixed width mirrors the swap column (--rp-tail-col) so whatever
+	   sits left of the × right-aligns with the From input. Without a
+	   clear button the × pins itself right via margin-left:auto; with
+	   one, the clear button's auto margin takes over (two auto margins
+	   would split the free space and float the clear button mid-row). */
 	.rp-close {
 		font-size: 1.25rem;
 		line-height: 1;
-		padding: 0.15rem 0.4rem;
+		padding: 0.15rem 0;
+		width: var(--rp-tail-col);
+		margin-left: auto;
+	}
+	.rp-clear + .rp-close {
+		margin-left: 0;
 	}
 
 	.rp-endpoints {
@@ -447,9 +533,61 @@
 	/* Base look + hover from .icon-btn (app.css); sizing only here. */
 	.rp-swap {
 		flex: 0 0 auto;
-		padding: 0.25rem 0.35rem;
+		padding: 0.25rem 0;
+		width: var(--rp-tail-col);
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
+
+	.rp-recents {
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		/* Hairline + extra air separates the recents block from the
+		   search criteria above (same line style as .rp-results-sep). */
+		border-top: 1px solid var(--gray-100);
+		margin-top: 0.15rem;
+		padding-top: 0.55rem;
+	}
+	/* Uppercase micro-title — anthracite per ux-guidelines.md. */
+	.rp-recents-title {
+		font-size: 0.7rem;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--anthracite);
+		padding: 0.1rem 0.15rem 0.15rem;
+	}
+	.rp-recent {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		border: none;
+		background: transparent;
+		font-family: inherit;
+		font-size: 0.85rem;
+		line-height: 1.25;
+		color: var(--gray-800);
+		padding: 0.3rem 0.4rem;
+		border-radius: 0.5rem;
+		cursor: pointer;
+		text-align: left;
+		min-width: 0;
+	}
+	.rp-recent:hover {
+		background: var(--gray-100);
+	}
+	.rp-recent-ep {
+		flex: 0 1 auto;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.rp-recent-arrow {
+		flex: 0 0 auto;
+		font-size: 1rem;
+		color: var(--gray-400);
+	}
 
 	.rp-results-sep {
 		/* Sits outside the scroll container so it never scrolls — the line
@@ -536,7 +674,8 @@
 		font-weight: 600;
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		color: var(--gray-400);
+		/* Uppercase micro-title — anthracite per ux-guidelines.md. */
+		color: var(--anthracite);
 		padding: 0.25rem 0.1rem 0.1rem;
 	}
 	.rp-day-marker::before,

@@ -6,6 +6,7 @@ import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
 } from './geolocation.svelte';
 import { pruneDominated } from './ranking';
+import { recentRoutes } from './recents.svelte';
 import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
@@ -447,11 +448,14 @@ export const routingState = {
 		return r;
 	},
 
+	/** Close the panel WITHOUT discarding the route (routing-persistence.md
+	 * § Restore on reopen): endpoints, mode, time, results, cascade state
+	 * and `lastQueryKey` all survive, so reopening restores the exact view
+	 * with no re-query. Only the selection (map overlay) and any shared
+	 * context are dropped, plus the routing URL params — the address
+	 * reflects what is visible. */
 	closePanel() {
 		panelOpen = false;
-		results = [];
-		error = null;
-		hasQueried = false;
 		sharedShare = null;
 		sharedOnly = false;
 		sharedExpired = false;
@@ -463,9 +467,13 @@ export const routingState = {
 		pushedEntry = false;
 		expandedFingerprint = null;
 		mapModeFlag = false;
-		lastQueryKey = null;
 		abortInFlight();
-		resetCascadeState();
+		// A close mid-query leaves the flags dangling — the aborted run
+		// skips its finally-clear because it no longer owns pendingAbort.
+		// lastQueryKey is only ever set by a completed run, so an aborted
+		// query re-runs via the panel's query effect on reopen.
+		loading = false;
+		loadingMore = null;
 		const url = currentUrl();
 		writeRoutingQuery(url, {
 			from: null, to: null, mode: 'leave', time: null, route: null
@@ -473,10 +481,53 @@ export const routingState = {
 		if (url.href !== window.location.href) {
 			replaceState(url, { ...page.state, routeSelection: undefined });
 		}
+	},
+
+	/** Reset to the no-route-set state (routing-persistence.md § Clear-route
+	 * button) — endpoints, time, results and selection all drop; the panel
+	 * stays open. Never touches the recents list. */
+	clearRoute() {
+		abortInFlight();
 		from = null;
 		to = null;
 		mode = 'leave';
 		time = null;
+		results = [];
+		loading = false;
+		loadingMore = null;
+		error = null;
+		hasQueried = false;
+		lastQueryKey = null;
+		resetCascadeState();
+		invalidateSelection();
+		const url = currentUrl();
+		writeRoutingQuery(url, {
+			from: null, to: null, mode: 'leave', time: null, route: null
+		});
+		if (url.href !== window.location.href) {
+			replaceState(url, { ...page.state, routeSelection: undefined });
+		}
+	},
+
+	/** Load a complete query in one shot (recents selection —
+	 * routing-persistence.md § Recent routes list). One state write + one
+	 * URL sync; the panel's query effect then runs the query. */
+	loadRoute(next: {
+		from: Endpoint; to: Endpoint; mode: TimeMode; time: string | null;
+	}) {
+		abortInFlight();
+		from = next.from;
+		to = next.to;
+		mode = next.mode;
+		time = next.time;
+		timeVersion++;
+		results = [];
+		hasQueried = false;
+		error = null;
+		lastQueryKey = null;
+		resetCascadeState();
+		invalidateSelection();
+		syncUrl();
 	},
 
 	setFrom(ep: Endpoint | null) {
@@ -856,6 +907,12 @@ export const routingState = {
 				if (url.href !== window.location.href) {
 					replaceState(url, { ...page.state, routeSelection: fp });
 				}
+			}
+			// A route was shown → record it (routing-persistence.md § Recent
+			// routes list). Covers fresh queries, URL restores and shared
+			// landings alike; empty result sets are not worth remembering.
+			if (results.length > 0 && from && to) {
+				recentRoutes.record(from, to, mode, time);
 			}
 			lastQueryKey = key;
 		} catch (e) {

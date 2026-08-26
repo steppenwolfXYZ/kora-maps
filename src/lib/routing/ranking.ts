@@ -1,8 +1,13 @@
-import type { Itinerary, Leg, TimeMode } from './types';
+import type { Itinerary, Leg, LegPlace, TimeMode } from './types';
 
 // Quality ranking for the merged cascade results — see transit-routing.md
-// § Ranking. Each pair (A, B) falls into one of two shapes and is judged
-// by a case-specific rule:
+// § Ranking. Three unconditional prunes run on Pareto-time-dominated
+// pairs first: Rule 0 (same route minus a vehicle, slower AND more
+// walking), Rule 0b (prefix/suffix dominance — the distinct trains are
+// provably catchable from B's own legs with less walking), Rule 0c
+// (shared endpoint + more walking = no benefit anywhere). Every other
+// pair (A, B) falls into one of two shapes and is judged by a
+// case-specific rule:
 //   Case 1 (overlapping): B Pareto-time-dominates A — A takes strictly
 //     more of the user's day for no time benefit. A survives only when
 //     BOTH the time gap AND the comfort gap are marginal.
@@ -94,6 +99,111 @@ interface Entry {
 	end: number;
 	score: number;
 	effTime: number;
+	walk: number;
+	transitKeys: Set<string>;
+}
+
+/** Identity keys of an itinerary's transit legs: same vehicle (trip),
+ * boarded and left at the same stops. Legs without a tripId fall back to
+ * route + departure time, which is equally stable within one result set. */
+function transitLegKeys(it: Itinerary): Set<string> {
+	const keys = new Set<string>();
+	for (const l of it.legs) {
+		if (l.mode === 'WALK' || l.mode === 'BIKE' || l.mode === 'CAR') continue;
+		const vehicle = l.tripId ?? `${l.routeId ?? l.routeShortName ?? ''}@${l.startTime}`;
+		keys.add(`${vehicle}|${l.from?.stopId ?? l.from?.name ?? ''}|${l.to?.stopId ?? l.to?.name ?? ''}`);
+	}
+	return keys;
+}
+
+/** True when A is "same route minus a vehicle": A rides at least one
+ * transit leg, every one of them is also in B (same trip, same board/
+ * alight stops), and B rides strictly more — so A differs from B only by
+ * replacing vehicles with walking. */
+function vehicleSubset(a: Entry, b: Entry): boolean {
+	if (a.transitKeys.size === 0 || a.transitKeys.size >= b.transitKeys.size) return false;
+	for (const k of a.transitKeys) if (!b.transitKeys.has(k)) return false;
+	return true;
+}
+
+function isTransitLeg(l: Leg): boolean {
+	return l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR';
+}
+
+/** Station identity for the prefix/suffix dominance checks — parent
+ * station preferred so different platforms of one station compare equal. */
+function stationKey(p?: LegPlace): string | null {
+	return p?.parentId ?? p?.stopId ?? p?.name ?? null;
+}
+
+// Walking-difference guard for the unconditional prunes (Rules 0b/0c):
+// Valhalla walk durations are seconds-granular, so two similar accesses
+// can differ by jitter alone. The dominated side must walk meaningfully
+// more before an unconditional drop fires.
+const WALK_DOM_SLACK_SEC = 60;
+
+/** Prefix dominance (access side): S = the station where A boards its
+ * first transit leg. If B's own legs are provably at S ready to board at
+ * or before A's departure from S, having walked meaningfully less than A
+ * up to that point, A's access is pointless — B's actual prefix departs
+ * home later, walks less, and still catches A's trains. Only B's real
+ * legs are consulted; no timetable speculation. */
+function accessDominated(a: Itinerary, b: Itinerary): boolean {
+	const iA = a.legs.findIndex(isTransitLeg);
+	if (iA < 0) return false;
+	const s = stationKey(a.legs[iA].from);
+	if (!s) return false;
+	const depA = Date.parse(a.legs[iA].startTime);
+	let walkA = 0;
+	for (let k = 0; k < iA; k++) if (a.legs[k].mode === 'WALK') walkA += legDuration(a.legs[k]);
+
+	let walkB = 0;
+	for (let j = 0; j < b.legs.length; j++) {
+		const l = b.legs[j];
+		if (isTransitLeg(l)) {
+			const lessWalk = walkA - walkB > WALK_DOM_SLACK_SEC;
+			if (stationKey(l.from) === s) {
+				const ready = j === 0 ? Date.parse(l.startTime) : Date.parse(b.legs[j - 1].endTime);
+				if (ready <= depA && lessWalk) return true;
+			}
+			if (stationKey(l.to) === s && Date.parse(l.endTime) <= depA && lessWalk) return true;
+		} else if (l.mode === 'WALK') {
+			walkB += legDuration(l);
+		}
+	}
+	return false;
+}
+
+/** Suffix dominance (egress side), mirror of accessDominated: S = the
+ * station where A alights its last transit leg. Fires when B's own legs
+ * depart S at or after A's arrival there with meaningfully less walking
+ * left, or when B alights at S and only walks from there (a pure walk is
+ * time-shiftable, so A could always follow it). */
+function egressDominated(a: Itinerary, b: Itinerary): boolean {
+	let iA = -1;
+	for (let k = a.legs.length - 1; k >= 0; k--) if (isTransitLeg(a.legs[k])) { iA = k; break; }
+	if (iA < 0) return false;
+	const s = stationKey(a.legs[iA].to);
+	if (!s) return false;
+	const arrA = Date.parse(a.legs[iA].endTime);
+	let walkA = 0;
+	for (let k = iA + 1; k < a.legs.length; k++) if (a.legs[k].mode === 'WALK') walkA += legDuration(a.legs[k]);
+
+	const walkAfter = (j: number) => {
+		let sum = 0;
+		for (let k = j + 1; k < b.legs.length; k++) if (b.legs[k].mode === 'WALK') sum += legDuration(b.legs[k]);
+		return sum;
+	};
+	for (let j = 0; j < b.legs.length; j++) {
+		const l = b.legs[j];
+		if (!isTransitLeg(l)) continue;
+		if (stationKey(l.from) === s && Date.parse(l.startTime) >= arrA
+			&& walkA - walkAfter(j) > WALK_DOM_SLACK_SEC) return true;
+		if (stationKey(l.to) === s
+			&& b.legs.slice(j + 1).every((r) => r.mode === 'WALK')
+			&& walkA - walkAfter(j) > WALK_DOM_SLACK_SEC) return true;
+	}
+	return false;
 }
 
 /** True when B Pareto-dominates A in time: B departs later-or-equal AND
@@ -144,11 +254,35 @@ function droppedByNonOverlap(a: Entry, b: Entry, mode: TimeMode): boolean {
 	return a.score - b.score > allowed;
 }
 
-/** Dispatches (a, b) to the case-specific rule. When B Pareto-time-
- * dominates A the pair is overlapping (Case 1). When A dominates B the
- * pair is B's problem, not A's — return false. Otherwise apply Case 2. */
+/** Dispatches (a, b) to the case-specific rule. Two unconditional prunes
+ * run first, both only for Pareto-time-dominated A (no marginality
+ * allowance applies):
+ *   Rule 0 — A is the same route as B minus one or more vehicles (walked
+ *     instead) and the trade also cost walking: pure noise. If the trade
+ *     wins on either axis (faster, or less walking), A falls through.
+ *   Rule 0b — prefix/suffix dominance: A's distinct trains buy nothing,
+ *     because B's actual legs reach A's first boarding station in time to
+ *     catch them (or leave A's last alighting station after A arrives)
+ *     with meaningfully less walking.
+ *   Rule 0c — shared endpoint: A arrives (or departs) together with B,
+ *     is dominated, and walks meaningfully more — no benefit anywhere.
+ * Then: when B Pareto-time-dominates A the pair is overlapping (Case 1).
+ * When A dominates B the pair is B's problem, not A's — return false.
+ * Otherwise apply Case 2. */
 function droppedBy(a: Entry, b: Entry, mode: TimeMode): boolean {
-	if (paretoTimeDominates(b, a)) return droppedByOverlap(a, b);
+	if (paretoTimeDominates(b, a)) {
+		if (vehicleSubset(a, b) && a.walk > b.walk) return true;
+		if (accessDominated(a.it, b.it) || egressDominated(a.it, b.it)) return true;
+		// Rule 0c — shared endpoint: A and B arrive together (or leave
+		// together), so A's whole time claim collapses onto its one worse
+		// endpoint. Had both started at that shared point, A would simply
+		// be slower for no benefit; extra walking must not rescue it. A
+		// with meaningfully LESS walking still offers a real trade and
+		// falls through to Case 1's marginality.
+		if ((Math.abs(a.end - b.end) <= T_SLACK_MS || Math.abs(a.start - b.start) <= T_SLACK_MS)
+			&& a.walk - b.walk > WALK_DOM_SLACK_SEC) return true;
+		return droppedByOverlap(a, b);
+	}
 	if (paretoTimeDominates(a, b)) return false;
 	return droppedByNonOverlap(a, b, mode);
 }
@@ -162,7 +296,9 @@ export function pruneDominated(its: Itinerary[], mode: TimeMode): Itinerary[] {
 		start: Date.parse(it.startTime),
 		end: Date.parse(it.endTime),
 		score: itineraryScore(it),
-		effTime: it.duration * comfortFactor(it)
+		effTime: it.duration * comfortFactor(it),
+		walk: walkSeconds(it),
+		transitKeys: transitLegKeys(it)
 	}));
 	return entries
 		.filter((a) => !entries.some((b) => b !== a && droppedBy(a, b, mode)))

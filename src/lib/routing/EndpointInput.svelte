@@ -380,7 +380,8 @@
 		font-weight: 600;
 		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--gray-300);
+		/* Uppercase micro-title — anthracite per ux-guidelines.md. */
+		color: var(--anthracite);
 		width: var(--control-size);
 	}
 
