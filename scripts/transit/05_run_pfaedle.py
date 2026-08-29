@@ -41,7 +41,10 @@ CFG_PATH = ROOT / "scripts" / "transit" / "config.yaml"
 
 # Files that carry per-trip rows and therefore get split across shards.
 # Everything else is copied whole into every shard and taken back from
-# shard 0's pfaedle output (pfaedle normalises column sets on the way).
+# shard 0's pfaedle output (pfaedle normalises column sets on the way) —
+# except transfers.txt, which carries trip-level rows and is filtered
+# per shard in make_shards / restored from the filtered feed in
+# merge_shards.
 TRIP_FILES = ("trips.txt", "stop_times.txt", "frequencies.txt")
 SHAPE_FILE = "shapes.txt"
 
@@ -115,9 +118,11 @@ def make_shards(n: int) -> list:
     for d in shard_dirs:
         d.mkdir(parents=True)
 
-    # Non-trip files: copied whole into every shard.
+    # Non-trip files: copied whole into every shard. transfers.txt is
+    # handled below — it references trip ids, so a verbatim copy would
+    # fail pfaedle's load-time validation in every shard.
     for f in GTFS_IN.iterdir():
-        if f.is_file() and f.name not in TRIP_FILES:
+        if f.is_file() and f.name not in TRIP_FILES and f.name != "transfers.txt":
             for d in shard_dirs:
                 shutil.copy2(f, d / f.name)
 
@@ -173,6 +178,44 @@ def make_shards(n: int) -> list:
                 outs[k].write(line)
             for fh in outs:
                 fh.close()
+
+    # transfers.txt → per-shard filter. The feed carries trip-level
+    # transfer rows (from_trip_id / to_trip_id); pfaedle refuses the
+    # whole feed when a transfer references a trip missing from
+    # trips.txt. Rows without trip refs go to every shard (routes.txt
+    # is copied whole, so route refs always resolve). Rows whose trip
+    # refs all land in one shard go to that shard; cross-shard rows are
+    # dropped here — pfaedle doesn't use transfers for shape-fitting,
+    # and the merged feed takes the full file back from the filtered
+    # feed (see merge_shards).
+    src = GTFS_IN / "transfers.txt"
+    if src.exists():
+        n_dropped = 0
+        with open(src, encoding="utf-8-sig", newline="") as fin:
+            reader = csv.DictReader(fin)
+            fields = reader.fieldnames or []
+            handles = [open(d / "transfers.txt", "w", encoding="utf-8", newline="")
+                       for d in shard_dirs]
+            writers = [csv.DictWriter(fh, fieldnames=fields) for fh in handles]
+            for w in writers:
+                w.writeheader()
+            for row in reader:
+                refs = [t for t in ((row.get("from_trip_id") or "").strip(),
+                                    (row.get("to_trip_id") or "").strip()) if t]
+                if not refs:
+                    for w in writers:
+                        w.writerow(row)
+                    continue
+                shards = {trip_shard.get(t) for t in refs}
+                if len(shards) == 1 and None not in shards:
+                    writers[shards.pop()].writerow(row)
+                else:
+                    n_dropped += 1
+            for fh in handles:
+                fh.close()
+        if n_dropped:
+            print(f"  transfers.txt: {n_dropped:,} cross-shard trip-level rows "
+                  "left out of the shards (kept in the merged feed)")
     return shard_dirs
 
 
@@ -233,6 +276,8 @@ def merge_shards(shard_dirs: list) -> None:
     trips.txt: concatenated, shape_id rewritten with the same prefix.
     stop_times.txt / frequencies.txt: concatenated (trips stay contiguous
     — every consumer that streams stop_times relies on that).
+    transfers.txt: the full filtered-feed file (shard copies are
+    trip-filtered, see make_shards).
     Everything else: shard 0's copy.
     """
     if GTFS_OUT.exists():
@@ -242,6 +287,12 @@ def merge_shards(shard_dirs: list) -> None:
     for f in shard_dirs[0].iterdir():
         if f.is_file() and f.name not in TRIP_FILES and f.name != SHAPE_FILE:
             shutil.copy2(f, GTFS_OUT / f.name)
+
+    # transfers.txt: shard copies are per-shard filtered — put the full
+    # filtered-feed file back so downstream consumers (MOTIS sidecar,
+    # footpath matrix) see every transfer row.
+    if (GTFS_IN / "transfers.txt").exists():
+        shutil.copy2(GTFS_IN / "transfers.txt", GTFS_OUT / "transfers.txt")
 
     # shapes.txt
     n_shapes = 0
