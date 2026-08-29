@@ -6,12 +6,16 @@ pfaedle models a stop as a directionless point on a street centerline. Which sid
 
 ## Requirements
 
-### Phase 1 — side-violation diagnostic (impact assessment, then benchmark)
+### Phase 1 — direction-violation diagnostic (impact assessment, then benchmark)
 
-- A diagnostic that detects, for every drawn road-mode line feature (bus, regional_bus, tram), each stop passage where the stop's platform-precise GTFS coordinate lies on the **left** of the shape's direction of travel at that stop.
-- Works purely from existing pipeline outputs (line geometries, per-feature stop sequences, stop coordinates) — no pfaedle re-run required.
-- Ignores offsets below a configurable minimum lateral distance (GTFS coordinate noise); knob `stop_side_diagnostic.min_offset_m` in the pipeline config.
-- Output `data/transit/stop_side_violations.json`: one record per violation with line ref, agency, line_key, stop id + name, lateral offset in metres, and travel bearing; plus a per-line summary sorted by violation count. A companion link list (map deep links per violation) for manual review, following the established offender-list pattern.
+> Amended after the first implementation round: detection via the geometric *side* of the GTFS coordinate (left of travel) proved unusable — the signal is a few metres, the same magnitude as quay-coordinate and OSM-centerline imprecision, so the side's sign is noise. Detection is now **pure directionality** against the Atlas per-quay `compassDirection` attribute (the direction the quay is served in), which the pipeline already downloads. Validated network-wide: the bearing-difference distribution is strongly bimodal (84% of passages within 15°, a clean second cluster at 180°, sparse in between), and it detects the canonical Brunnhof shape (travel 177° vs quay 357°) while staying quiet on correct lines.
+
+- A diagnostic that detects, for every drawn road-mode line feature (bus, regional_bus, tram), each stop passage where the shape's travel bearing at the stop **opposes the quay's Atlas `compassDirection`** — angular difference at or above a configurable threshold, knob `stop_side_diagnostic.min_bearing_diff_deg` in the pipeline config (sits below the 180° wrong-direction cluster with headroom for angled terminal bays).
+- Stops without a defined `compassDirection` are ignored (no directionality to test against; roughly two thirds of passages).
+- Works purely from existing pipeline outputs (line geometries, per-feature stop sequences, Atlas stop attributes) — no pfaedle re-run required.
+- Additionally excludes, with per-class counts reported: stops outside Switzerland (UIC prefix ≠ 85 — lines partly outside the OSM bbox, out of scope for now) and quays that appear in both directions of the same line (the feed frequently registers a single quay — and its compassDirection — for both directions, so the opposite direction of a correctly drawn line always reads ~180°).
+- Output `data/transit/stop_side_violations.json`: one record per violation with line ref, agency, line_key, stop id + name, travel bearing, quay compassDirection, and angular difference; plus a per-line summary sorted by violation count. A companion link list (map deep links per violation) for manual review, following the established offender-list pattern.
+- Known limit: only the emitted representative shape per variant is checked — wrong shapes on non-representative trips (e.g. construction diversions that lose the rep-trip vote, the live Brunnhof case) surface in routing results but not in this count.
 - Role: first run quantifies the real-world impact and surfaces unknown cases before any pfaedle work; after Phase 2 it is the regression benchmark — the violation count must drop, and no new violations may appear on previously clean lines.
 
 ### Phase 2 — wrong-side penalty in pfaedle

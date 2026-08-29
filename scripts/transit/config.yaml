@@ -371,6 +371,19 @@ citybus_promotion:
   pass_halving_km: 4.0
   pass_soften: 0.049
 
+# ── Stop-direction diagnostic (pfaedle-stop-side-awareness.md) ───────────────
+# Wrong-direction detection for road modes (bus, regional_bus, tram): each
+# quay's Atlas record carries compassDirection — the direction the quay is
+# served in. A stop passage whose shape travel bearing differs from the
+# quay's compassDirection by at least min_bearing_diff_deg is a violation
+# (the shape threads the stop in the impossible direction). Quays without a
+# compassDirection are ignored. The measured distribution is bimodal
+# (correct ≤15°, wrong ≈180°, sparse in between); the threshold sits below
+# the wrong cluster with headroom for angled terminal bays. Read by
+# data/transit/diagnostics/find_stop_side_violations.py.
+stop_side_diagnostic:
+  min_bearing_diff_deg: 135.0
+
 # ── Line width endpoints per bucket ──────────────────────────────────────────
 # min: width_base for a line at score = 0 (worst_freq); max: at score = 1
 # (best_freq). Train is set wider than other modes. Mountain has min = max
