@@ -334,11 +334,98 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
 //    remainder primary or alternate on BOTH axes offers nothing — the
 //    destination is not "between the stations" — and is dropped. When
 //    each station wins one axis, both stay.
+// 3. Ride-through redundancy: an alternate whose exit station is served
+//    no later by a kept journey's endpoint vehicle — ridden past that
+//    journey's own exit, without requiring an earlier departure from
+//    home — is the same corridor journey in disguise (canonical:
+//    28→6→Egghölzli vs 28→8→Weltpostverein, where the 8 itself reaches
+//    Egghölzli one stop later). Every station it serves, the kept
+//    journey's vehicle serves at least as well. Mirrored to the
+//    boarding side for arrive-by.
 template <direction SearchDir, typename Journeys>
 void kora_dedupe_alternatives(timetable const& tt,
+                              rt_timetable const* rtt,
                               Journeys const& primaries,
                               std::vector<journey>& alts) {
   constexpr auto const kFwd = SearchDir == direction::kForward;
+  constexpr auto const kSlack = duration_t{1};
+
+  // Endpoint-side transit leg (the vehicle adjacent to the varied
+  // endpoint): last transit leg in presented order for forward queries,
+  // first for backward.
+  auto const endpoint_leg = [&](journey const& j) -> journey::leg const* {
+    if constexpr (kFwd) {
+      for (auto it = j.legs_.rbegin(); it != j.legs_.rend(); ++it) {
+        if (std::holds_alternative<journey::run_enter_exit>(it->uses_)) {
+          return &*it;
+        }
+      }
+    } else {
+      for (auto const& l : j.legs_) {
+        if (std::holds_alternative<journey::run_enter_exit>(l.uses_)) {
+          return &l;
+        }
+      }
+    }
+    return nullptr;
+  };
+
+  // Coverage descriptor of a kept journey for rule 3: its endpoint
+  // vehicle and the stop index bounding what a rider of that journey
+  // could still reach (after boarding for fwd, before alighting for
+  // bwd), plus the journey's own door times for the no-earlier-
+  // commitment gate.
+  struct cover {
+    rt::run run_;
+    stop_idx_t bound_;
+    unixtime_t dep_, arr_;
+  };
+  auto covers = std::vector<cover>{};
+  auto const add_cover = [&](journey const& j) {
+    auto const* l = endpoint_leg(j);
+    if (l == nullptr) {
+      return;
+    }
+    auto const& r = std::get<journey::run_enter_exit>(l->uses_);
+    covers.push_back(
+        {r.r_,
+         kFwd ? r.stop_range_.from_
+              : static_cast<stop_idx_t>(r.stop_range_.to_ - 1U),
+         j.departure_time(), j.arrival_time()});
+  };
+  auto const ride_through_redundant = [&](journey const& a) {
+    auto const* l = endpoint_leg(a);
+    if (l == nullptr) {
+      return false;
+    }
+    auto const s = kora_parent_of(tt, kFwd ? l->to_ : l->from_);
+    auto const t_a = kFwd ? l->arr_time_ : l->dep_time_;
+    for (auto const& c : covers) {
+      if (kFwd ? c.dep_ + kSlack < a.departure_time()
+               : c.arr_ - kSlack > a.arrival_time()) {
+        continue;  // would require an earlier commitment than a
+      }
+      auto const fr = rt::frun{tt, rtt, c.run_};
+      if constexpr (kFwd) {
+        for (auto i = c.bound_ + 1U; i < fr.size(); ++i) {
+          auto const stp = fr[static_cast<stop_idx_t>(i)];
+          if (kora_parent_of(tt, stp.get_location_idx()) == s &&
+              stp.time(event_type::kArr) <= t_a + kSlack) {
+            return true;
+          }
+        }
+      } else {
+        for (auto i = stop_idx_t{0U}; i < c.bound_; ++i) {
+          auto const stp = fr[i];
+          if (kora_parent_of(tt, stp.get_location_idx()) == s &&
+              stp.time(event_type::kDep) >= t_a - kSlack) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
   struct info {
     kora_fingerprint_t prefix_;
     unixtime_t time_;
@@ -386,6 +473,7 @@ void kora_dedupe_alternatives(timetable const& tt,
     if (j.is_reconstructed_) {
       seen_fps.emplace_back(kora_transit_fingerprint(tt, j));
       refs.emplace_back(get_info(j));
+      add_cover(j);
     }
   }
   alts.erase(
@@ -403,8 +491,12 @@ void kora_dedupe_alternatives(timetable const& tt,
                 })) {
               return true;
             }
+            if (ride_through_redundant(a)) {
+              return true;
+            }
             seen_fps.emplace_back(std::move(fp));
             refs.emplace_back(std::move(in));
+            add_cover(a);
             return false;
           }),
       end(alts));

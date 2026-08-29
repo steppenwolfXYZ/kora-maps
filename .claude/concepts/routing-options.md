@@ -1,4 +1,4 @@
-# Routing Search Preferences
+# Routing Options
 
 Walking speed, connection safety, minimize-walking, and step-free mode
 for the connection search — plus the "more options" UI that hosts them.
@@ -87,9 +87,10 @@ dominant cost after feasibility. (The ranking is penalty-based, not
 literal percentages; the requirement is the relative-importance shift,
 mapped onto the existing penalty constants.)
 
-Prerequisite: `walking-optimized-routing.md` must be implemented
-first — re-weighting the ranking is only meaningful once the search
-actually produces walking-optimized candidates to rank.
+Related: `walking-optimized-routing.md` is not a prerequisite — try
+the re-weighting on its own first, and implement walking-optimized
+candidate generation afterwards if the re-ranked results aren't
+walking-friendly enough.
 
 ### 5. Step-free mode (wheelchair / stroller)
 

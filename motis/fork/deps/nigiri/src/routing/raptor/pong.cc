@@ -466,7 +466,7 @@ routing_result pong(timetable const& tt,
     return !a.is_reconstructed_ || a.travel_time() >= fastest_direct ||
            a.travel_time() >= q.max_travel_time_;
   });
-  kora_dedupe_alternatives<SearchDir>(tt, s_state.results_,
+  kora_dedupe_alternatives<SearchDir>(tt, rtt, s_state.results_,
                                       s_state.alternatives_);
 
   trace_pong("RESULT:\n\t{}",

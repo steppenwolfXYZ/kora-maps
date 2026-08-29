@@ -359,7 +359,7 @@ struct search {
                                j.travel_time() >= fastest_direct_ ||
                                j.travel_time() > q_.max_travel_time_));
     });
-    kora_dedupe_alternatives<SearchDir>(tt_, state_.results_,
+    kora_dedupe_alternatives<SearchDir>(tt_, rtt_, state_.results_,
                                         state_.alternatives_);
 
     stats_.execute_time_ =
