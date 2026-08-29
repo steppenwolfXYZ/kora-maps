@@ -74,3 +74,47 @@ gets to see them.
 - The cascade's hop queries inherit the knobs unchanged; the resulting
   growth of the merged pre-pruning set is accepted (layer 2 already
   scales to it).
+
+## Amendments (settled during implementation)
+
+Requirements that emerged once the feature ran against real queries —
+all consequences of deliberately reading out non-optimal journeys,
+which forfeits the sensibility guarantees the search's optimality used
+to provide implicitly:
+
+- **Sensibility filters.** An alternate must never re-board the same
+  line (compared by line name — opposite directions and variants of a
+  line count as the same line), and must never return to or ride
+  through a parent station the journey already visited (a station shared
+  between two legs purely as their transfer point is fine). Both shapes
+  are reconstruction fabrications, feasible but pointless.
+- **Duplicate control by ridden vehicles.** Alternates are deduplicated
+  by quay-blind vehicle fingerprint (the runs ridden plus board/alight
+  parent stations) against the primaries and each other — never by
+  station exclusivity, so two different lines arriving at different
+  platforms of one station both survive.
+- **Endpoint-station dominance.** Among journeys identical except the
+  varied endpoint station, an alternate equal-or-worse in both endpoint
+  time and endpoint walk is dropped; two stations coexist only when the
+  destination genuinely lies between them (each wins one axis).
+- **Ride-through redundancy.** An alternate whose endpoint station is
+  served no later by a kept journey's endpoint vehicle — ridden past
+  that journey's own exit, without requiring an earlier departure from
+  home — is the same corridor journey in disguise and is dropped.
+- **Once per Pareto point.** Extraction runs once per (arrival,
+  transfers) point, not once per search-cursor rediscovery. The
+  accepted performance budget is ~2.5× the alternates-off search time
+  (measured ≈ 35 → 80 ms locally on the reference query).
+- **No exact-time anchor guessing.** Candidate times are upper bounds;
+  reconstruction accepts a vehicle arriving at or before the anchor and
+  the endpoint leg is snapped to the vehicle actually found. Deriving
+  an exact anchor from search-internal values is forbidden — which
+  internal writer set a stop's entry is unobservable, and guessing made
+  results flip between otherwise-identical queries.
+- **Diagnostics.** With the server env `KORA_ALT_DEBUG=1`, extraction
+  logs one line per candidate with its outcome (accepted / the reason
+  dropped) to stderr.
+- **Client counterpart.** The cascade's hop merge must never split a
+  same-minute departure group across its merge cap (the follow-up hop
+  anchors past that minute, permanently losing the unmerged sibling) —
+  alternates made same-minute siblings common enough to expose this.
