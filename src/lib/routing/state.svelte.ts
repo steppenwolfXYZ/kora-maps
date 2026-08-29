@@ -219,11 +219,26 @@ async function runHopCascade(
 		// extending it. Items beyond the cap stay unmarked in
 		// seenFingerprints, so a later hop re-fetches them as fresh.
 		const needed = Math.max(1, resultTarget - results.length);
-		const fresh = unseen
-			.sort((a, b) => dir === 1
-				? Date.parse(a.startTime) - Date.parse(b.startTime)
-				: Date.parse(b.endTime) - Date.parse(a.endTime))
-			.slice(0, needed);
+		const anchorOf = (i: Itinerary) =>
+			Date.parse(dir === 1 ? i.startTime : i.endTime);
+		const ordered = unseen.sort((a, b) => dir === 1
+			? anchorOf(a) - anchorOf(b)
+			: anchorOf(b) - anchorOf(a));
+		const fresh = ordered.slice(0, needed);
+		// Never split a same-minute anchor group across the merge cap: the
+		// next hop starts one minute past this batch's last anchor, so an
+		// unmerged sibling departing (arriving) in the same minute would sit
+		// behind every later hop window and vanish for good (canonical:
+		// a 0-transfer and a 1-transfer option leaving the same minute —
+		// the server sorts the 0-transfer first, and a cap of 1 would
+		// permanently eat its sibling).
+		if (fresh.length > 0) {
+			const edge = anchorOf(fresh[fresh.length - 1]);
+			for (const it of ordered.slice(fresh.length)) {
+				if (anchorOf(it) !== edge) break;
+				fresh.push(it);
+			}
+		}
 		for (const it of fresh) seenFingerprints.add(itineraryFingerprint(it));
 		if (fresh.length === 0) {
 			emptyStreak++;
