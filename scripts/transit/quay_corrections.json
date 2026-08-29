@@ -1,0 +1,25 @@
+{
+  "_comment": "Ground-truth quay assignment corrections for the GTFS feed. Not consumed by any pipeline step yet — collection only, for a possible future per-line quay override. Quay ids and timetables change with feed releases; verify against the current feed before use. correct_quay null = confirmed correct as-is; feed_quay null = feed has the trip on the platform-less station stop.",
+  "stations": [
+    {
+      "name": "Bolligen, Sternen",
+      "uic": 8576460,
+      "quays": {
+        "A": { "stop_id": "ch:1:sloid:76460:0:2", "location": "north pair, west side, southbound" },
+        "B": { "stop_id": "ch:1:sloid:76460:0:3", "location": "north pair, east side, northbound" },
+        "C": { "stop_id": "ch:1:sloid:76460:0:1", "location": "south platform, northbound from the south" }
+      },
+      "corrections": [
+        { "agency_id": "850", "ref": "46", "direction_to": "Bolligen, Bahnhof", "feed_quay": "A", "correct_quay": null },
+        { "agency_id": "850", "ref": "46", "direction_to": "Habstetten, Rössli", "feed_quay": "B", "correct_quay": null },
+        { "agency_id": "850", "ref": "48", "direction_to": "Papiermühle, Bahnhof", "feed_quay": "A", "correct_quay": null },
+        { "agency_id": "850", "ref": "48", "direction_to": "Habstetten, Rössli", "feed_quay": null, "correct_quay": "A" },
+        { "agency_id": "850", "ref": "47", "direction_to": "Bolligen, Bahnhof", "feed_quay": null, "correct_quay": "A" },
+        { "agency_id": "850", "ref": "47", "direction_to": "Ittigen, Mannenberg", "feed_quay": null, "correct_quay": "C" },
+        { "agency_id": "801", "ref": "451", "direction_to": "Hindelbank, Bahnhof", "feed_quay": "A", "correct_quay": "B" },
+        { "agency_id": "801", "ref": "451", "direction_to": "Bolligen, Bahnhof", "feed_quay": "C", "correct_quay": "A" }
+      ],
+      "recorded": "2026-08-29"
+    }
+  ]
+}
