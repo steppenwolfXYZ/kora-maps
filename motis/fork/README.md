@@ -55,6 +55,16 @@ re-importing, or the task silently keeps the old `tt_ext.bin`.
   (accepted / reason dropped) — read via `docker logs kora-motis`.
   Off by default; zero cost when unset.
 
+**Expected log noise:** the server log fills with
+`[VERIFY FAIL] intermodal destination reconstruction failed …` lines
+(hundreds per alternates-enabled query). These are the ε-alternates
+extraction probing candidates and discarding infeasible ones — caught
+by design, never lost journeys (zero such lines with
+`alternativesEpsilon=0`). A rare
+`[VERIFY FAIL] no pong for transfers=…` means the PONG driver hit a
+ping/pong level mismatch and the query silently re-ran on rRAPTOR —
+correct results, roughly doubled latency for that one request.
+
 ## What to check when bumping MOTIS_REF
 
 `MOTIS_REF` in the Dockerfile is pinned because three overlays are

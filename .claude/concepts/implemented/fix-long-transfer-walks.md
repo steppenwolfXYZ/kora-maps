@@ -86,3 +86,41 @@ and redefines the *cost* criterion.
   judges what the tables make reachable.
 - Upstream sync: the criterion change is fork-only; the upstream bump
   procedure in `motis/fork/README.md` applies unchanged.
+
+## Amendments (settled during implementation)
+
+- **Points cap.** Realised through the existing maximum-transfers
+  constant (now 45, upstream 14) rather than a new knob — the round
+  index simply counts points. Side effect: a client-sent `maxTransfers`
+  now caps points, not boardings (the app never sends it), and the
+  one-to-all endpoint's transfer dimension counts levels.
+- **Dominance pruning of ahead-written labels.** A label written ahead
+  of its round (weighted walk / seed) that is equalled or beaten by a
+  fewer-points label before its round starts is dropped un-boarded.
+  Pure work saving — such a label can only produce journeys the final
+  Pareto filter would discard — but essential: without it the level
+  smear cost ~7× the route-scan work on sparse rural queries.
+- **Measured performance outcome** (search operations vs old code, same
+  data): common urban queries ~1×, coordinate queries ~1.5×, wide
+  rural cascade ~1.4×, sparse-rural worst case ~3.5× (≈1.2 s locally;
+  the remainder is the intrinsic cost of ~3× more point levels than
+  ride rounds on walk-heavy queries). Accepted.
+- **Reconstruction termination.** With variable per-boarding cost, the
+  backward reconstruction can no longer run a fixed ride count; it ends
+  when the remaining level matches a start seed's walk class.
+- **ε-alternates interaction.** Alternate egress candidates are scanned
+  across all levels per stop and each candidate carries its own level.
+  Failed candidate probes print `[VERIFY FAIL] intermodal destination
+  reconstruction failed` lines to the server log — expected discard
+  noise, never lost journeys (zero such lines with alternates off).
+- **PONG symmetry.** Every walk's delta attaches to the same
+  footpath/offset in both search directions, keeping the ping/pong
+  exact-level pairing intact. Rare mismatches abort PONG and fall back
+  to rRAPTOR automatically — correct results, roughly doubled latency
+  for that query.
+- **Visibility note.** Whether the pre-fix pathology surfaced in the
+  app was a data lottery: the client's unconditional prune hides a
+  walk-heavy connection whenever some same-arrival, later-departing
+  alternative lands in the merged result set. The engine emitted the
+  bad connections on every data snapshot tested; only the older local
+  snapshot let them through to the UI.
