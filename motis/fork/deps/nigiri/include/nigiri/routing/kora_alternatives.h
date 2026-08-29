@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -39,6 +40,7 @@
 
 #include "nigiri/common/delta_t.h"
 #include "nigiri/routing/journey.h"
+#include "nigiri/routing/kora_walk_points.h"
 #include "nigiri/routing/query.h"
 #include "nigiri/routing/transfer_time_settings.h"
 #include "nigiri/rt/frun.h"
@@ -197,30 +199,54 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
   };
   auto const best = unix_to_delta(base, j.dest_time_);
 
-  auto cands = std::vector<std::pair<delta_t, offset const*>>{};
+  // kora fork walk-weighted points (kora_walk_points.h): with weighted
+  // walks the round index is a point level, and a path reaching an
+  // egress stop can sit at any level up to the primary's — scan them all
+  // (rows are cheap int16 reads) and keep the best candidate per stop:
+  // earliest anchored endpoint time, level as tiebreak. The candidate's
+  // journey level is the label's level plus the egress walk's own class
+  // delta; reconstruction is anchored at exactly that level.
+  struct kora_cand {
+    delta_t time_;
+    offset const* o_;
+    unsigned level_;  // label level + egress walk delta
+  };
+  auto cands = std::vector<kora_cand>{};
   for (auto const& o : q.destination_) {
     auto const s = o.target_;
-    auto const rt = round_times[k][to_idx(s)][0];
-    if (rt == kInvalidDelta<SearchDir>) {
-      continue;
-    }
+    auto const kd = kora_walk_delta(static_cast<int>(o.duration_.count()));
     auto const change = adjusted_transfer_time(
         q.transfer_time_settings_, tt.locations_.transfer_time_[s].count());
-    auto const cand =
-        clamp(static_cast<int>(rt) + dir(static_cast<int>(o.duration_.count())));
-    auto const gap = kFwd ? static_cast<int>(cand) - static_cast<int>(best)
-                          : static_cast<int>(best) - static_cast<int>(cand);
-    // The anchor overshoots the true endpoint time by up to the change
-    // buffer when the entry was vehicle-written — widen the gate by it;
-    // the exact slack is re-checked after reconstruction tightened the
-    // times.
-    if (gap > q.kora_alt_epsilon_.count() + change) {
-      continue;
+    auto best_cand = std::optional<kora_cand>{};
+    for (auto lvl = 1U; lvl <= k; ++lvl) {
+      if (lvl + kd >= round_times.n_rows_) {
+        break;
+      }
+      auto const rt = round_times[lvl][to_idx(s)][0];
+      if (rt == kInvalidDelta<SearchDir>) {
+        continue;
+      }
+      auto const cand = clamp(static_cast<int>(rt) +
+                              dir(static_cast<int>(o.duration_.count())));
+      auto const gap = kFwd ? static_cast<int>(cand) - static_cast<int>(best)
+                            : static_cast<int>(best) - static_cast<int>(cand);
+      // The anchor overshoots the true endpoint time by up to the change
+      // buffer when the entry was vehicle-written — widen the gate by it;
+      // the exact slack is re-checked after reconstruction tightened the
+      // times.
+      if (gap > q.kora_alt_epsilon_.count() + change) {
+        continue;
+      }
+      if (!best_cand.has_value() || better(cand, best_cand->time_)) {
+        best_cand = kora_cand{cand, &o, lvl + kd};
+      }
     }
-    cands.emplace_back(cand, &o);
+    if (best_cand.has_value()) {
+      cands.emplace_back(*best_cand);
+    }
   }
   std::sort(begin(cands), end(cands), [&](auto const& a, auto const& b) {
-    return better(a.first, b.first);
+    return better(a.time_, b.time_);
   });
 
   // Stderr diagnostics, off unless the container runs with
@@ -241,7 +267,7 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
   auto const limit = static_cast<unsigned>(q.kora_alt_max_) +
                      (primary_in_seen ? 0U : 1U);
   auto n_added = 0U;
-  for (auto const& [cand, o] : cands) {
+  for (auto const& [cand, o, cand_level] : cands) {
     if (n_added == limit) {
       dbg(o->target_, cand, "limit-full");
       continue;
@@ -250,7 +276,10 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
                      .start_time_ = j.start_time_,
                      .dest_time_ = delta_to_unix(base, cand),
                      .dest_ = j.dest_,
-                     .transfers_ = j.transfers_};
+                     // kora fork walk-weighted points: the candidate's
+                     // own level, not the primary's — reconstruction
+                     // anchors at transfers_ + 1.
+                     .transfers_ = static_cast<std::uint8_t>(cand_level - 1U)};
     a.kora_alt_egress_ = o->target_;
     try {
       reconstruct(a);

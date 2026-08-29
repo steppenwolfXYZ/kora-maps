@@ -20,6 +20,18 @@
 #                                    access variants read out of the
 #                                    finished RAPTOR/PONG state (see
 #                                    near-optimal-endpoint-alternatives.md)
+#   deps/nigiri/include/nigiri/routing/kora_walk_points.h (new)
+#   deps/nigiri/include/nigiri/routing/limits.h
+#   deps/nigiri/include/nigiri/routing/raptor/raptor.h
+#                                  — walk-weighted transfer points:
+#                                    RAPTOR's discrete criterion counts
+#                                    points (boarding cost scales with
+#                                    the preceding walk's class) instead
+#                                    of plain boardings (see
+#                                    fix-long-transfer-walks.md). Touches
+#                                    limits.h, so a fork iteration after
+#                                    this change rebuilds most of nigiri
+#                                    (~15-25 min instead of ~5-10).
 # No OSR walking fallback anywhere; OSR remains for non-foot profiles.
 #
 # Build:
@@ -131,7 +143,10 @@ RUN touch -c \
         /src/deps/nigiri/include/nigiri/routing/query.h \
         /src/deps/nigiri/include/nigiri/routing/journey.h \
         /src/deps/nigiri/include/nigiri/routing/search.h \
-        /src/deps/nigiri/include/nigiri/routing/kora_alternatives.h && \
+        /src/deps/nigiri/include/nigiri/routing/kora_alternatives.h \
+        /src/deps/nigiri/include/nigiri/routing/kora_walk_points.h \
+        /src/deps/nigiri/include/nigiri/routing/limits.h \
+        /src/deps/nigiri/include/nigiri/routing/raptor/raptor.h && \
     cmake -S . -B build && \
     cmake --build build --target motis -- -j4
 

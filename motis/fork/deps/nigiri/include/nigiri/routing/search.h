@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+
 #include "fmt/format.h"
 
 #include "utl/enumerate.h"
@@ -17,6 +19,7 @@
 #include "nigiri/routing/interval_estimate.h"
 #include "nigiri/routing/journey.h"
 #include "nigiri/routing/kora_alternatives.h"
+#include "nigiri/routing/kora_walk_points.h"
 #include "nigiri/routing/limits.h"
 #include "nigiri/routing/pareto_set.h"
 #include "nigiri/routing/query.h"
@@ -465,7 +468,19 @@ private:
           for (auto const& s : it_range{from_it, to_it}) {
             trace("init: time_at_start={}, time_at_stop={} at {}\n",
                   s.time_at_start_, s.time_at_stop_, loc{tt_, s.stop_});
-            algo_.add_start(s.stop_, s.time_at_stop_);
+            // kora fork: walk-weighted transfer points — seed the start
+            // at the access walk's point level (kora_walk_points.h) so
+            // the first boarding totals the walk's class.
+            if constexpr (requires {
+                            algo_.add_start(s.stop_, s.time_at_stop_, 0U);
+                          }) {
+              auto const walk_min = static_cast<int>(
+                  std::abs((s.time_at_stop_ - s.time_at_start_).count()));
+              algo_.add_start(s.stop_, s.time_at_stop_,
+                              kora_walk_delta(walk_min));
+            } else {
+              algo_.add_start(s.stop_, s.time_at_stop_);
+            }
           }
           trace("RUN ALGO\n");
 

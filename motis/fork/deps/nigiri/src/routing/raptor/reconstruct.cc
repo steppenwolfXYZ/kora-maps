@@ -11,6 +11,7 @@
 #include "nigiri/for_each_meta.h"
 #include "nigiri/location_match_mode.h"
 #include "nigiri/routing/journey.h"
+#include "nigiri/routing/kora_walk_points.h"
 #include "nigiri/routing/raptor/debug.h"
 #include "nigiri/routing/raptor/raptor_state.h"
 #include "nigiri/rt/frun.h"
@@ -520,15 +521,30 @@ void reconstruct_journey_with_vias(timetable const& tt,
     return std::nullopt;
   };
 
+  // kora fork: walk-weighted transfer points (kora_walk_points.h) —
+  // check_fp additionally reports the walk's point delta: the search
+  // wrote this footpath's target `delta` rounds ahead of the ride, so
+  // the ride must be looked up at round k - delta and the caller
+  // continues the backward walk at k - delta - 1. The same-stop
+  // transfer buffer (is_transfer_buffer) is a change buffer, not a
+  // walk — its delta is always 0, mirroring update_transfers.
   auto const check_fp = [&](unsigned const k, location_idx_t const l,
                             delta_t const curr_time, footpath const fp,
                             bool const adjust_transfer_time,
-                            bool const is_td_footpath)
-      -> std::optional<std::pair<journey::leg, journey::leg>> {
+                            bool const is_td_footpath,
+                            bool const is_transfer_buffer)
+      -> std::optional<std::tuple<journey::leg, journey::leg, unsigned>> {
     auto const fp_duration =
         adjust_transfer_time ? adjusted_transfer_time(q.transfer_time_settings_,
                                                       fp.duration().count())
                              : fp.duration().count();
+    auto const kora_delta =
+        is_transfer_buffer ? 0U
+                           : kora_walk_delta(static_cast<int>(fp_duration));
+    if (k <= kora_delta) {
+      // the ride preceding this walk would sit at level <= 0
+      return std::nullopt;
+    }
 
     auto const backup_v = v;
 
@@ -537,7 +553,7 @@ void reconstruct_journey_with_vias(timetable const& tt,
     // adjust_via=false => don't count this stop as via
     // (might have already been visited before -> no via increment in search)
     auto const attempt = [&](bool const adjust_via)
-        -> std::optional<std::pair<journey::leg, journey::leg>> {
+        -> std::optional<std::tuple<journey::leg, journey::leg, unsigned>> {
       auto adjusted = false;
       auto stay_l = 0_minutes;
       auto stay_fp_target = 0_minutes;
@@ -601,7 +617,8 @@ void reconstruct_journey_with_vias(timetable const& tt,
 
       trace_rc_check_fp;
       auto const transport_leg =
-          get_transport(k, fp.target(), stay_start, is_td_footpath);
+          get_transport(k - kora_delta, fp.target(), stay_start,
+                        is_td_footpath);
 
       if (transport_leg.has_value()) {
         trace_rc_legs_found;
@@ -630,7 +647,7 @@ void reconstruct_journey_with_vias(timetable const& tt,
                          delta_to_unix(base, fp_start),
                          delta_to_unix(base, fp_start + dir(fp_duration)),
                          footpath{fp.target(), fp.duration()}};
-        return std::pair{fp_leg, *transport_leg};
+        return std::tuple{fp_leg, *transport_leg, kora_delta};
       } else {
         trace_reconstruct("nothing found\n");
       }
@@ -651,7 +668,7 @@ void reconstruct_journey_with_vias(timetable const& tt,
   auto const find_dest_leg = [&](unsigned const k, location_idx_t const l,
                                  offset const dest_offset,
                                  bool const td_footpath)
-      -> std::optional<std::pair<journey::leg, journey::leg>> {
+      -> std::optional<std::tuple<journey::leg, journey::leg, unsigned>> {
     if (dest_offset.duration_ >= footpath::kMaxDuration) {
       // can happen when considering a td_footpath candidate from another stop
       // that departs more than 8:30 hours (kMaxDuration) later than the actual
@@ -659,7 +676,8 @@ void reconstruct_journey_with_vias(timetable const& tt,
       return std::nullopt;
     }
 
-    auto ret = std::optional<std::pair<journey::leg, journey::leg>>{};
+    auto ret =
+        std::optional<std::tuple<journey::leg, journey::leg, unsigned>>{};
     // kora fork: an ε-alternate (near-optimal-endpoint-alternatives.md)
     // anchors its destination leg at the synthesized dest_time_ instead
     // of the optimal round_times entry at the intermodal target — the
@@ -672,11 +690,12 @@ void reconstruct_journey_with_vias(timetable const& tt,
     for_each_meta(
         tt, location_match_mode::kIntermodal, dest_offset.target_,
         [&](location_idx_t const eq) {
-          auto intermodal_dest = check_fp(
-              k, l, curr_time, {eq, dest_offset.duration_}, false, td_footpath);
+          auto intermodal_dest =
+              check_fp(k, l, curr_time, {eq, dest_offset.duration_}, false,
+                       td_footpath, /*is_transfer_buffer=*/false);
           if (intermodal_dest.has_value()) {
             trace_rc_intermodal_dest_match;
-            intermodal_dest->first.uses_ = offset{
+            std::get<0>(*intermodal_dest).uses_ = offset{
                 eq, dest_offset.duration_, dest_offset.transport_mode_id_};
             ret = std::move(intermodal_dest);
           } else {
@@ -687,9 +706,11 @@ void reconstruct_journey_with_vias(timetable const& tt,
   };
 
   // l = destination of current leg
+  // kora fork: the third tuple element is the walk's point delta — the
+  // caller continues the backward walk at level k - delta - 1.
   auto const get_legs =
-      [&](unsigned const k,
-          location_idx_t const l) -> std::pair<journey::leg, journey::leg> {
+      [&](unsigned const k, location_idx_t const l)
+      -> std::tuple<journey::leg, journey::leg, unsigned> {
     auto const curr_time = round_times[k][to_idx(l)][v];
     trace_reconstruct("get_legs: k={}, v={}, l={}, curr_time={}\n", k, v,
                       loc{tt, l}, delta_to_unix(base, curr_time));
@@ -777,7 +798,7 @@ void reconstruct_journey_with_vias(timetable const& tt,
                      ? 0_u8_minutes
                      : adjusted_transfer_time(q.transfer_time_settings_,
                                               tt.locations_.transfer_time_[l])},
-        false, false);
+        false, false, /*is_transfer_buffer=*/true);
     if (transfer_at_same_stop.has_value()) {
       return std::move(*transfer_at_same_stop);
     }
@@ -789,7 +810,8 @@ void reconstruct_journey_with_vias(timetable const& tt,
       auto const footpaths = kFwd ? tt.locations_.footpaths_in_[q.prf_idx_][l]
                                   : tt.locations_.footpaths_out_[q.prf_idx_][l];
       for (auto const& fp : footpaths) {
-        auto fp_legs = check_fp(k, l, curr_time, fp, true, false);
+        auto fp_legs = check_fp(k, l, curr_time, fp, true, false,
+                                /*is_transfer_buffer=*/false);
         if (fp_legs.has_value()) {
           return std::move(*fp_legs);
         }
@@ -804,10 +826,12 @@ void reconstruct_journey_with_vias(timetable const& tt,
       auto const td_footpaths = kFwd ? rtt->td_footpaths_in_[q.prf_idx_][l]
                                      : rtt->td_footpaths_out_[q.prf_idx_][l];
       auto const unix_now = delta_to_unix(base, curr_time);
-      auto legs = std::optional<std::pair<journey::leg, journey::leg>>{};
+      auto legs =
+          std::optional<std::tuple<journey::leg, journey::leg, unsigned>>{};
       for_each_footpath<SearchDir>(
           td_footpaths, unix_now, [&](footpath const& fp) {
-            auto fp_legs = check_fp(k, l, curr_time, fp, true, true);
+            auto fp_legs = check_fp(k, l, curr_time, fp, true, true,
+                                    /*is_transfer_buffer=*/false);
             if (fp_legs.has_value()) {
               legs = std::move(*fp_legs);
               return utl::cflow::kBreak;
@@ -824,18 +848,51 @@ void reconstruct_journey_with_vias(timetable const& tt,
         j.transfers_, v, loc{tt, l}, delta_to_unix(base, curr_time));
   };
 
+  // kora fork: with walk-weighted transfer points the number of rides is
+  // no longer j.transfers_ + 1 — each iteration consumes one level for
+  // the boarding plus the preceding walk's delta, and the loop ends when
+  // the remaining level matches a start seed (the access walk's class,
+  // see add_start in raptor.h) instead of after a fixed count.
+  auto const is_seed_start = [&](unsigned const level,
+                                 location_idx_t const at,
+                                 unixtime_t const board_time) {
+    return utl::any_of(q.start_, [&](offset const& o) {
+      auto hit = false;
+      for_each_meta(tt, q.start_match_mode_, o.target(),
+                    [&](location_idx_t const eq) { hit = hit || eq == at; });
+      if (!hit ||
+          kora_walk_delta(static_cast<int>(o.duration().count())) != level) {
+        return false;
+      }
+      auto const latest_leave =
+          q.start_match_mode_ == location_match_mode::kIntermodal
+              ? board_time - dir(o.duration())
+              : board_time;
+      return is_better_or_eq(j.start_time_, latest_leave);
+    });
+  };
+
   auto l = j.dest_;
-  for (auto i = 0U; i <= j.transfers_; ++i) {
-    auto const k = j.transfers_ + 1 - i;
+  auto k = static_cast<unsigned>(j.transfers_) + 1U;
+  auto first_leg = true;
+  while (true) {
     trace_reconstruct("RECONSTRUCT WITH k={}\n", k);
-    auto [fp_leg, transport_leg] = get_legs(k, l);
+    auto [fp_leg, transport_leg, kora_delta] = get_legs(k, l);
     l = kFwd ? transport_leg.from_ : transport_leg.to_;
+    auto const board_time =
+        kFwd ? transport_leg.dep_time_ : transport_leg.arr_time_;
     // don't add a 0-minute footpath at the end (fwd) or beginning (bwd)
-    if (i != 0 || fp_leg.from_ != fp_leg.to_ ||
+    if (!first_leg || fp_leg.from_ != fp_leg.to_ ||
         fp_leg.dep_time_ != fp_leg.arr_time_) {
       j.add(std::move(fp_leg));
     }
     j.add(std::move(transport_leg));
+    first_leg = false;
+    auto const next_k = k - kora_delta - 1U;
+    if (next_k == 0U || is_seed_start(next_k, l, board_time)) {
+      break;
+    }
+    k = next_k;
   }
 
   auto init_fp =

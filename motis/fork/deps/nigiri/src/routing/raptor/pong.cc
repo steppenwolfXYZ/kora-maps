@@ -17,6 +17,7 @@
 #include "nigiri/routing/get_earliest_transport.h"
 #include "nigiri/routing/gpu/raptor.h"
 #include "nigiri/routing/kora_alternatives.h"
+#include "nigiri/routing/kora_walk_points.h"
 #include "nigiri/routing/leg_alternatives.h"
 #include "nigiri/routing/transfer_time_settings.h"
 #include "nigiri/rt/frun.h"
@@ -263,7 +264,15 @@ routing_result pong(timetable const& tt,
     for (auto const& s : starts) {
       trace_pong("--- PING START: {} at time_at_start={} time_at_stop={}",
                  loc{tt, s.stop_}, s.time_at_start_, s.time_at_stop_);
-      ping.add_start(s.stop_, s.time_at_stop_);
+      // kora fork: walk-weighted transfer points — seed at the access
+      // walk's point level (kora_walk_points.h).
+      if constexpr (requires { ping.add_start(s.stop_, s.time_at_stop_, 0U); }) {
+        ping.add_start(s.stop_, s.time_at_stop_,
+                       kora_walk_delta(static_cast<int>(std::abs(
+                           (s.time_at_stop_ - s.time_at_start_).count()))));
+      } else {
+        ping.add_start(s.stop_, s.time_at_stop_);
+      }
     }
     auto const worst_time_at_dest =
         start_time + (kFwd ? 1 : -1) * (q.max_travel_time_ + duration_t{1});
@@ -352,7 +361,18 @@ routing_result pong(timetable const& tt,
       for (auto const& s : starts) {
         trace_pong("---- PONG START: {} at time_at_start={} time_at_stop={}",
                    loc{tt, s.stop_}, s.time_at_start_, s.time_at_stop_);
-        po.add_start(s.stop_, s.time_at_stop_);
+        // kora fork: walk-weighted transfer points — the pong pass
+        // starts from the original egress side, so this seeds the
+        // egress walk's point level (mirrors the ping side's intermodal
+        // egress weighting; the levels must match or the pong journey
+        // lands on a different level than its ping counterpart).
+        if constexpr (requires { po.add_start(s.stop_, s.time_at_stop_, 0U); }) {
+          po.add_start(s.stop_, s.time_at_stop_,
+                       kora_walk_delta(static_cast<int>(std::abs(
+                           (s.time_at_stop_ - s.time_at_start_).count()))));
+        } else {
+          po.add_start(s.stop_, s.time_at_stop_);
+        }
       }
       po.execute(ping_j.dest_time_, ping_j.transfers_,
                  ping_j.start_time_ - duration_t{kFwd ? 1 : -1},
