@@ -1028,7 +1028,25 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # MODE_RANK wins when a station is served by multiple modes; the
     # winning dot's `stop_tier` is carried through for the client's
     # ranking (kept as the pipeline string, not pre-normalised).
+    #
+    # Station colors for the routing panel's Connect board: `cd` is the
+    # dominant color (the winning dot's drawn color), `ca` the mean-RGB
+    # average over every distinct line color at the station — collected
+    # across ALL of the station's dots (a rail-pass dot and a non-rail
+    # dot share the UIC), so a tram+bus station averages both modes.
+    def _blend_hex(colors):
+        rgb = [(int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16))
+               for h in colors if isinstance(h, str)
+               and len(h) == 7 and h.startswith("#")]
+        if not rgb:
+            return ""
+        n = len(rgb)
+        return "#%02x%02x%02x" % (round(sum(c[0] for c in rgb) / n),
+                                  round(sum(c[1] for c in rgb) / n),
+                                  round(sum(c[2] for c in rgb) / n))
+
     _search_seen: dict[str, dict] = {}
+    _search_line_colors: dict[str, dict] = defaultdict(dict)
     for f in dot_features:
         props = f.get("properties", {})
         name = props.get("stop_name")
@@ -1040,6 +1058,14 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         coords = f.get("geometry", {}).get("coordinates")
         if not coords or len(coords) < 2:
             continue
+        # Line colors accumulate from every dot sharing the UIC, before
+        # the mode-rank dedup below skips lower-ranked dots.
+        try:
+            for line in json.loads(props.get("lines_json") or "[]"):
+                _search_line_colors[uic][(line.get("ref"), line.get("mode"))] = \
+                    line.get("color")
+        except (ValueError, TypeError):
+            pass
         mode = props.get("mode") or ""
         rank = MODE_RANK.get(mode, 99)
         existing = _search_seen.get(uic)
@@ -1060,6 +1086,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
             "c": [round(coords[0], 6), round(coords[1], 6)],
             "m": mode,
             "t": props.get("stop_tier") or "",
+            "cd": props.get("color") or "",
             "_rank": rank,
         }
     # `cw` (walkable coord) is no longer emitted: routing sends station
@@ -1070,6 +1097,11 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     for e in sorted(_search_seen.values(), key=lambda e: e["n"]):
         row = {"n": e["n"], "u": e["u"], "p": e["p"], "c": e["c"],
                "m": e["m"], "t": e["t"]}
+        ca = _blend_hex(_search_line_colors.get(e["u"], {}).values())
+        if e["cd"]:
+            row["cd"] = e["cd"]
+        if ca:
+            row["ca"] = ca
         _search_entries.append(row)
     OUT_STOP_SEARCH_INDEX.parent.mkdir(parents=True, exist_ok=True)
     OUT_STOP_SEARCH_INDEX.write_text(json.dumps(_search_entries, ensure_ascii=False))

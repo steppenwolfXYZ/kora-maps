@@ -31,6 +31,13 @@ const BUCKET_COLOR: Record<string, string> = {
 };
 const NEUTRAL = '#888888';
 
+/** Mid-tone for a pipeline bucket/mode name ("train", "regional_bus", …).
+ * Used where only the station's highest-ranked mode is known, no route_id
+ * (e.g. the Connect board tiles). */
+export function modeMidColor(mode: string | undefined): string | null {
+	return (mode && BUCKET_COLOR[mode]) || null;
+}
+
 /** GTFS extended route_type → bucket, mirroring the pipeline's
  * `gtfs_type_to_bucket`. Regional-vs-city bus disambiguation needs
  * pipeline state (line index), so 700/702 default to city `bus`; if the

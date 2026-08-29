@@ -23,6 +23,12 @@ export interface StationEntry {
 	m?: string;
 	/** Stop tier */
 	t?: string;
+	/** Dominant line color — the station's drawn dot color. Absent in
+	 *  older index files. */
+	cd?: string;
+	/** Average color — mean-RGB over every distinct line color serving
+	 *  the station, all modes. Absent in older index files. */
+	ca?: string;
 }
 
 const INDEX_URL = '/map-assets/stop_search_index.json';

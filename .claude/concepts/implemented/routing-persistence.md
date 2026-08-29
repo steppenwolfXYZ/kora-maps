@@ -32,6 +32,7 @@ When no route is set, a **recent routes** section appears below the date/time co
 - **Stored in `localStorage`** (not a cookie) under the key `kora.routing.recents`, so it survives reloads and works without an account.
 - An entry is recorded (or refreshed to the top) whenever a route is **shown** — a query for a from/to pair successfully returns results. This includes routes loaded from URLs.
 - Each entry carries: both endpoints (display name + whatever identity is needed to re-query, incl. custom coordinate endpoints), date/time, and arrive/leave mode.
+- **Current-location endpoints are never stored as such** — a live "current location" can't reproduce the shown result later. At record time the coordinate the query actually resolved is stored as a point endpoint, reverse-geocoded to an address like the map right-click (nameless coordinate fallback when the geocoder doesn't answer in time). If no resolved coordinate exists, the entry is skipped. Legacy stored entries with a current-location endpoint are filtered out on read.
 - Deduplication by from/to pair: showing an already-listed pair moves it to the top and updates its date/time and mode; the list never contains the same pair twice.
 - Capacity: the 30 most recent pairs; older entries drop off. The list shows 10 collapsed, with a "Show more" button revealing the rest (collapses again on panel reopen).
 - **Selecting an entry re-queries.** Date/time handling on selection:

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { tick, untrack } from 'svelte';
+	import { browser } from '$app/environment';
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
@@ -7,6 +8,8 @@
 	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
 	import { recentRoutes, endpointLabel, type RecentRoute } from './recents.svelte';
+	import { loadStationIndex, type StationEntry } from './stationIndex';
+	import { modeMidColor } from './legColor';
 	import { itineraryFingerprint } from './fingerprint';
 	import type { Endpoint, Itinerary, Leg } from './types';
 
@@ -57,22 +60,82 @@
 		recentsExpanded ? recentRoutes.list : recentRoutes.list.slice(0, RECENTS_COLLAPSED)
 	);
 
-	// No-route-set tabs (routing-persistence.md § Connect): Connect default.
-	let noRouteTab = $state<'connect' | 'recent'>('connect');
+	// Station colors for the recent-route stop boxes — same source and
+	// fallback chain as the Connect tiles (ConnectGrid.tileGrad): baked
+	// average → dominant color from the search index, else a tint→tone
+	// of the mode mid-color, else null (CSS anthracite fallback).
+	let stationIdx = $state<Map<string, StationEntry> | null>(null);
+	$effect(() => {
+		void loadStationIndex().then((idx) => { if (idx) stationIdx = idx; });
+	});
+	function epGrad(ep: Endpoint): { a: string; b: string } | null {
+		if (ep.type !== 'station') return null;
+		const e = stationIdx?.get(ep.uic);
+		if (e?.ca && e?.cd) return { a: e.ca, b: e.cd };
+		const mid = modeMidColor(ep.mode);
+		return mid ? { a: `color-mix(in srgb, ${mid} 72%, #fff)`, b: mid } : null;
+	}
+
+	// Kept in sync with EndpointInput's STATION_MODE_ICON / endpointIcon.
+	const RECENT_MODE_ICON: Record<string, string> = {
+		train:        'train',
+		metro:        'subway',
+		tram:         'tram',
+		bus:          'directions_bus',
+		regional_bus: 'directions_bus',
+		ferry:        'directions_boat',
+		mountain:     'gondola_lift'
+	};
+	// No 'current' branch: recents never contain current-location
+	// endpoints (materialized at record time, legacy entries filtered
+	// out on read — see recents.svelte.ts).
+	function epIcon(ep: Endpoint): string {
+		if (ep.type === 'point') return ep.kind === 'poi' ? 'place' : 'home_work';
+		if (ep.type !== 'station') return 'directions_transit_filled';
+		return (ep.mode && RECENT_MODE_ICON[ep.mode]) || 'directions_transit_filled';
+	}
+
+	// No-route-set tabs (routing-persistence.md § Connect): Connect default;
+	// the last choice persists in localStorage across panel opens/reloads.
+	const TAB_KEY = 'kora.routing.suggestTab';
+	function readStoredTab(): 'connect' | 'recent' {
+		if (!browser) return 'connect';
+		try {
+			return localStorage.getItem(TAB_KEY) === 'recent' ? 'recent' : 'connect';
+		} catch {
+			return 'connect';
+		}
+	}
+	let noRouteTab = $state<'connect' | 'recent'>(readStoredTab());
+	function pickTab(tab: 'connect' | 'recent') {
+		noRouteTab = tab;
+		try {
+			localStorage.setItem(TAB_KEY, tab);
+		} catch {
+			// Storage unavailable — the choice still holds this session.
+		}
+	}
 
 	// Connect board drag result: a full pair loads the route in one shot
 	// (current mode/time kept); a half connection through an empty cell
-	// clears that side and puts the cursor there.
+	// clears that side and puts the cursor there. Either way the filled
+	// side's input must leave search mode — the panel's open-time cursor
+	// placement may have left it there, and a lingering (empty) search
+	// form would hide the endpoint the drag just set.
 	function connectRoute(from: Endpoint | null, to: Endpoint | null) {
 		if (from && to) {
+			fromInput?.stopEdit();
+			toInput?.stopEdit();
 			routingState.loadRoute({
 				from, to, mode: routingState.mode, time: routingState.time
 			});
 		} else if (from) {
+			fromInput?.stopEdit();
 			routingState.setTo(null);
 			routingState.setFrom(from);
 			void tick().then(() => toInput?.focusSearch());
 		} else if (to) {
+			toInput?.stopEdit();
 			routingState.setFrom(null);
 			routingState.setTo(to);
 			void tick().then(() => fromInput?.focusSearch());
@@ -355,8 +418,14 @@
 				label="From"
 				endpoint={routingState.from}
 				placeholder="Start"
-				onChange={(ep) => routingState.setFrom(ep)}
+				onChange={(ep) => {
+					routingState.setFrom(ep);
+					// Picking a From with no To yet: move the cursor on so the
+					// destination can be typed right away.
+					if (ep && !routingState.to) void tick().then(() => toInput?.focusSearch());
+				}}
 				otherIsCurrent={routingState.to?.type === 'current'}
+				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
 			/>
 			<EndpointInput
 				bind:this={toInput}
@@ -365,6 +434,7 @@
 				placeholder="Destination"
 				onChange={(ep) => routingState.setTo(ep)}
 				otherIsCurrent={routingState.from?.type === 'current'}
+				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
 			/>
 		</div>
 		<button
@@ -390,29 +460,50 @@
 		     Connect grid / Recent list below the when-controls, until both
 		     endpoints are set. -->
 		<div class="rp-suggest">
-			<div class="rp-tabs" role="group" aria-label="Suggestions">
+			<div class="rp-tabs" role="tablist" aria-label="Suggestions">
 				<button
+					role="tab"
+					aria-selected={noRouteTab === 'connect'}
 					class:active={noRouteTab === 'connect'}
-					onclick={() => (noRouteTab = 'connect')}
+					onclick={() => pickTab('connect')}
 				>Connect</button>
 				<button
+					role="tab"
+					aria-selected={noRouteTab === 'recent'}
 					class:active={noRouteTab === 'recent'}
-					onclick={() => (noRouteTab = 'recent')}
+					onclick={() => pickTab('recent')}
 				>Recent</button>
 			</div>
+			<div class="rp-suggest-scroll">
 			{#if noRouteTab === 'connect'}
 				<ConnectGrid {getMapCenter} onConnect={connectRoute} />
 			{:else if recentRoutes.list.length > 0}
+				<!-- One row per route (click runs it): the two stops as
+				     boxes, chevron between. Truncated names surface in
+				     full via the native title tooltip. -->
 				<div class="rp-recents">
 					{#each visibleRecents as r (r.at)}
-						<button class="rp-recent" onclick={() => pickRecent(r)}>
-							<span class="rp-recent-ep">{endpointLabel(r.from)}</span>
-							<span class="material-symbols-outlined rp-recent-arrow" aria-hidden="true">chevron_right</span>
-							<span class="rp-recent-ep">{endpointLabel(r.to)}</span>
+						<button class="rr-row" onclick={() => pickRecent(r)}>
+							{#each [r.from, r.to] as ep, i (i)}
+								{#if i === 1}
+									<span class="material-symbols-outlined rr-arrow" aria-hidden="true">chevron_right</span>
+								{/if}
+								{@const g = epGrad(ep)}
+								<span
+									class="rr-ep"
+									class:ep-point={ep.type === 'point'}
+									style:--tile-a={g?.a}
+									style:--tile-b={g?.b}
+									title={endpointLabel(ep)}
+								>
+									<span class="material-symbols-outlined rr-ep-icon" aria-hidden="true">{epIcon(ep)}</span>
+									<span class="rr-ep-text">{endpointLabel(ep)}</span>
+								</span>
+							{/each}
 						</button>
 					{/each}
 					{#if !recentsExpanded && recentRoutes.list.length > RECENTS_COLLAPSED}
-						<button class="rp-recents-more" onclick={() => (recentsExpanded = true)}>
+						<button class="rr-more" onclick={() => (recentsExpanded = true)}>
 							Show more
 						</button>
 					{/if}
@@ -420,6 +511,7 @@
 			{:else}
 				<div class="rp-status">No recent routes yet</div>
 			{/if}
+			</div>
 		</div>
 	{/if}
 
@@ -625,68 +717,131 @@
 		border-top: 1px solid var(--gray-100);
 		margin-top: 0.15rem;
 		padding-top: 0.55rem;
-		overflow-y: auto;
+		/* Flex children don't shrink below content height by default —
+		   without this the block overflows the panel (whose overflow is
+		   hidden) and the scroll area inside never engages. */
+		min-height: 0;
 	}
-	/* Segmented toggle per ux-guidelines.md: no container border,
-	   inactive segments gray with dark text, active segment gradient
-	   with white text. */
+	/* Scroll area below the (pinned) tab bar. Same scrollbar-gutter
+	   trick as .rp-results: pull into the panel's right padding so the
+	   overlay scrollbar paints there, inset the content back by the
+	   same amount. */
+	.rp-suggest-scroll {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		overflow-y: auto;
+		min-height: 0;
+		/* Left side mirrors the right-side gutter trick so full-bleed
+		   children (the recent-row hover bands) can reach the panel
+		   edges via negative margins without tripping overflow-x. */
+		margin: 0 -0.75rem 0 -0.85rem;
+		padding: 0 0.75rem 0 0.85rem;
+	}
+	/* Real tabs, not a segmented toggle (that shape is reserved for the
+	   leave-at/arrive-by control): text labels on a shared baseline rule,
+	   the active tab marked by a gradient underline. Steep gradient
+	   variant per ux-guidelines.md — the underline is a thin wide element. */
 	.rp-tabs {
 		display: flex;
-		width: fit-content;
-		border-radius: var(--radius-pill);
-		overflow: hidden;
+		gap: 1.1rem;
+		border-bottom: 1px solid var(--gray-100);
 	}
 	.rp-tabs button {
+		position: relative;
 		border: none;
-		background: var(--gray-100);
+		background: transparent;
 		font-family: inherit;
 		font-size: 0.78rem;
+		font-weight: 600;
 		line-height: 1.2;
-		color: var(--gray-800);
-		padding: 0.3rem 0.8rem;
+		letter-spacing: 0.03em;
+		color: var(--gray-500);
+		padding: 0.25rem 0.1rem 0.4rem;
 		cursor: pointer;
 	}
+	.rp-tabs button:hover {
+		color: var(--brand);
+	}
 	.rp-tabs button.active {
-		background: var(--gradient-brand);
-		color: var(--white);
+		color: var(--anthracite);
+	}
+	/* Sits on the container's baseline rule (bottom: -1px covers it). */
+	.rp-tabs button.active::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: -1px;
+		height: 2px;
+		background: var(--gradient-brand-input);
 	}
 	.rp-recents {
 		display: flex;
 		flex-direction: column;
-		gap: 0.1rem;
+		align-items: stretch;
+		gap: 0.35rem;
+		flex-shrink: 0;
 	}
-	.rp-recent {
+	/* Whole row loads the route; hovering paints a soft blue band across
+	   the full panel width (square corners). The negative margins bleed
+	   into the scroll container's padding (see .rp-suggest-scroll); the
+	   compensating padding keeps the boxes aligned with the panel
+	   content. */
+	.rr-row {
 		display: flex;
 		align-items: center;
 		gap: 0.25rem;
+		min-width: 0;
 		border: none;
 		background: transparent;
 		font-family: inherit;
+		margin: 0 -0.75rem 0 -0.85rem;
+		padding: 0.3rem 1.05rem 0.3rem 1.15rem;
+		cursor: pointer;
+	}
+	.rr-row:hover {
+		background: var(--gray-200);
+	}
+	/* Station-colored stop boxes, same recipe as the Connect tiles:
+	   average → dominant line color at 135°, white text/icons.
+	   --tile-a/--tile-b come inline from epGrad; anthracite is the
+	   no-color fallback. Point endpoints get a flat utility fill
+	   instead (recents never contain current-location endpoints). */
+	.rr-ep {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		flex: 0 1 auto;
+		min-width: 0;
+		--tile-a: color-mix(in srgb, var(--anthracite) 72%, #fff);
+		--tile-b: var(--anthracite);
+		background: linear-gradient(135deg, var(--tile-a) 0%, var(--tile-b) 100%);
+		border-radius: 0.45rem;
 		font-size: 0.85rem;
 		line-height: 1.25;
-		color: var(--gray-800);
-		padding: 0.3rem 0.4rem;
-		border-radius: 0.5rem;
-		cursor: pointer;
+		color: var(--white);
+		padding: 0.28rem 0.55rem;
 		text-align: left;
-		min-width: 0;
 	}
-	.rp-recent:hover {
-		background: var(--gray-100);
+	.rr-ep.ep-point { background: #7b7b7b; }
+	.rr-ep-icon {
+		flex: 0 0 auto;
+		font-size: 1rem;
+		color: var(--white);
 	}
-	.rp-recent-ep {
-		flex: 0 1 auto;
+	.rr-ep-text {
 		min-width: 0;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.rp-recent-arrow {
+	.rr-arrow {
 		flex: 0 0 auto;
 		font-size: 1rem;
 		color: var(--gray-400);
 	}
-	.rp-recents-more {
+	.rr-more {
 		align-self: flex-start;
 		border: none;
 		background: transparent;
@@ -697,7 +852,7 @@
 		border-radius: var(--radius-pill);
 		cursor: pointer;
 	}
-	.rp-recents-more:hover {
+	.rr-more:hover {
 		background: var(--gray-100);
 		color: var(--gray-800);
 	}

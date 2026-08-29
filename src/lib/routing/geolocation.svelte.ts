@@ -8,6 +8,12 @@ const TIMEOUT_MS = 8_000;
 
 let cache: { coord: [number, number]; at: number } | null = null;
 
+/** Drop the cached fix so the next `resolveCurrent` asks the browser for
+ * a fresh position (endpoint-input refresh button). */
+export function invalidateCurrent() {
+	cache = null;
+}
+
 // Reactive denied flag: once the user rejects the permission prompt, the
 // "Current location" suggestion disappears from the routing dropdowns.
 // Synced from the Permissions API where available (covers a pre-denied

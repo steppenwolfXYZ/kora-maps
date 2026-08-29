@@ -12,6 +12,7 @@
 	} from './connect.svelte';
 	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
 	import { loadStationIndex, type StationEntry } from './stationIndex';
+	import { modeMidColor } from './legColor';
 	import type { Endpoint } from './types';
 
 	let { getMapCenter, onConnect }: {
@@ -38,35 +39,53 @@
 
 	// Suggestions are computed once per mount from the map center at open
 	// time — a moving map must not reshuffle the board under the user.
+	// The index itself is kept for tile-color lookups (usage-sourced tiles
+	// come from localStorage, which stores no colors).
 	let suggestions = $state<StationEntry[]>([]);
+	let stationIdx = $state<Map<string, StationEntry> | null>(null);
 	$effect(() => {
 		const anchor = getMapCenter();
-		if (!anchor) return;
 		const used = untrack(() => connectStations.list);
 		const free = GRID_CAPACITY - Math.min(used.length, GRID_CAPACITY);
-		if (free <= 0) return;
 		void loadStationIndex().then((idx) => {
 			if (!idx) return;
+			stationIdx = idx;
+			if (!anchor || free <= 0) return;
 			suggestions = coldStartSuggestions(
 				anchor, idx, new Set(used.map((e) => e.u)), free);
 		});
 	});
 
-	type Tile = { u: string; n: string; m?: string; ep: Endpoint };
+	type Grad = { a: string; b: string };
+	type Tile = { u: string; n: string; m?: string; grad: Grad | null; ep: Endpoint };
 
 	function stationEp(s: { u: string; n: string; c: [number, number]; m?: string; p?: string }): Endpoint {
 		return { type: 'station', uic: s.u, name: s.n, coord: s.c, mode: s.m, pid: s.p };
 	}
 
+	/** Tile gradient ends: baked average → dominant color from the index
+	 * when present; else a tint→tone of the mode mid-color; else null
+	 * (CSS anthracite fallback). */
+	function tileGrad(u: string, m?: string): Grad | null {
+		const e = stationIdx?.get(u);
+		if (e?.ca && e?.cd) return { a: e.ca, b: e.cd };
+		const mid = modeMidColor(m);
+		return mid ? { a: `color-mix(in srgb, ${mid} 72%, #fff)`, b: mid } : null;
+	}
+
 	let tiles = $derived.by<Tile[]>(() => {
 		const real: Tile[] = connectStations.list
 			.slice(0, GRID_CAPACITY)
-			.map((s: ConnectStation) => ({ u: s.u, n: s.n, m: s.m, ep: stationEp(s) }));
+			.map((s: ConnectStation) => ({
+				u: s.u, n: s.n, m: s.m, grad: tileGrad(s.u, s.m), ep: stationEp(s)
+			}));
 		const seen = new Set(real.map((t) => t.u));
 		const fill: Tile[] = suggestions
 			.filter((s) => !seen.has(s.u))
 			.slice(0, GRID_CAPACITY - real.length)
-			.map((s) => ({ u: s.u, n: s.n, m: s.m, ep: stationEp(s) }));
+			.map((s) => ({
+				u: s.u, n: s.n, m: s.m, grad: tileGrad(s.u, s.m), ep: stationEp(s)
+			}));
 		return [...real, ...fill];
 	});
 
@@ -154,9 +173,11 @@
 		{#each tiles as t (t.u)}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="cell"
+				class="cell filled"
 				class:drag-source={dragFrom === t.u}
 				class:drag-target={dragTarget === t.u}
+				style:--tile-a={t.grad?.a}
+				style:--tile-b={t.grad?.b}
 				data-conn={t.u}
 				onpointerdown={(e) => startDrag(e, t.u)}
 			>
@@ -174,7 +195,7 @@
 		{#if showCurrent}
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="cell"
+				class="cell filled cell-current"
 				class:drag-source={dragFrom === CURRENT}
 				class:drag-target={dragTarget === CURRENT}
 				data-conn={CURRENT}
@@ -187,7 +208,7 @@
 		<div class="halves">
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="cell half"
+				class="cell half filled cell-start"
 				class:drag-source={dragFrom === EMPTY_FROM}
 				class:drag-target={dragTarget === EMPTY_FROM}
 				data-conn={EMPTY_FROM}
@@ -198,7 +219,7 @@
 			</div>
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div
-				class="cell half"
+				class="cell half filled cell-stop"
 				class:drag-source={dragFrom === EMPTY_TO}
 				class:drag-target={dragTarget === EMPTY_TO}
 				data-conn={EMPTY_TO}
@@ -230,6 +251,11 @@
 		border-radius: 0.55rem;
 		overflow: hidden;
 		touch-action: none;
+		/* Refuse flex shrinking in the scrolling .rp-suggest — with
+		   overflow:hidden the board would shrink-and-clip its cells
+		   instead of overflowing (which is what makes the parent
+		   scroll). */
+		flex-shrink: 0;
 	}
 	.connect-board.dragging {
 		user-select: none;
@@ -264,7 +290,7 @@
 		align-items: center;
 		gap: 0.4rem;
 		min-width: 0;
-		min-height: 3.4rem;
+		min-height: 4rem;
 		background: var(--white);
 		font-size: 0.82rem;
 		line-height: 1.25;
@@ -275,11 +301,39 @@
 	.cell.filler {
 		cursor: default;
 	}
-	.cell:not(.filler):hover {
+	/* Filled tiles wear a full-tile 135° gradient (brand-gradient
+	   direction) with white text/icon. Station tiles: average line color →
+	   dominant line color, baked into the search index (`ca` / `cd`),
+	   passed inline as --tile-a/--tile-b; with an older index the ends
+	   fall back to a tint→tone of the mode mid-color (computed in
+	   tileGrad). The utility cells and the no-color fallback derive the
+	   same tint→tone shape from a single --tile-c. Hover and drag states
+	   deepen the fill rather than swapping to gray. */
+	.cell.filled {
+		--tile-c: var(--anthracite);
+		--tile-a: color-mix(in srgb, var(--tile-c) 72%, #fff);
+		--tile-b: var(--tile-c);
+		background: linear-gradient(135deg, var(--tile-a) 0%, var(--tile-b) 100%);
+		color: var(--white);
+	}
+	/* Bottom row: flat fills (no gradient — that stays a station thing),
+	   three clearly distinct tones: blue-tinted gray for current
+	   location, light gray for Start, dark gray for Stop. */
+	.cell.filled.cell-current { background: #5d6f82; }
+	.cell.filled.cell-start   { background: #7b7b7b; }
+	.cell.filled.cell-stop    { background: #5c5c5c; }
+	.cell.filled:hover {
+		filter: brightness(0.94);
+	}
+	.cell.filled.drag-source,
+	.cell.filled.drag-target {
+		filter: brightness(0.85);
+	}
+	.cell:not(.filler):not(.filled):hover {
 		background: var(--gray-50);
 	}
-	.cell.drag-source,
-	.cell.drag-target {
+	.cell:not(.filled).drag-source,
+	.cell:not(.filled).drag-target {
 		background: var(--gray-100);
 	}
 	.cell-icon {
@@ -287,11 +341,19 @@
 		font-size: 1rem;
 		color: var(--gray-500);
 	}
+	.cell.filled .cell-icon {
+		color: var(--white);
+	}
+	/* Two lines before truncation — long Swiss stop names ("Grindelwald
+	   Terminal", "Melchtal Stöckalp (Talstation)") wrap instead of
+	   ellipsizing after a few characters. */
 	.cell-label {
 		min-width: 0;
-		white-space: nowrap;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
 		overflow: hidden;
-		text-overflow: ellipsis;
 	}
 	.drag-line {
 		position: absolute;

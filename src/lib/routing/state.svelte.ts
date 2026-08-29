@@ -3,12 +3,14 @@ import { page } from '$app/state';
 import { plan, PlanRequestError } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import {
-	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
+	geolocationDenied, geolocationErrorMessage, hasGeolocation,
+	invalidateCurrent, resolveCurrent
 } from './geolocation.svelte';
 import { pruneDominated } from './ranking';
 import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
 import { reportShareExpired, shareFingerprint, type ShareData } from './share';
+import { reverseAddress } from '$lib/geocoding/client';
 import type { Endpoint, Itinerary, TimeMode } from './types';
 import { writeRoutingQuery } from './url';
 
@@ -136,6 +138,45 @@ function resetCascadeState() {
 	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
 	resultTarget = TARGET_RESULT_COUNT;
+}
+
+// Recents never store a live "current location" endpoint — it can't
+// reproduce the shown result later. The resolved query coordinate is
+// recorded as a point endpoint instead, reverse-geocoded to an address
+// like the map right-click (nameless coord fallback). See
+// routing-persistence.md § Recent routes list.
+const RECENT_REVERSE_TIMEOUT_MS = 2000;
+
+async function materializeCurrent(
+	ep: Endpoint, coord: [number, number] | null
+): Promise<Endpoint | null> {
+	if (ep.type !== 'current') return ep;
+	if (!coord) return null;
+	const ac = new AbortController();
+	const timer = setTimeout(() => ac.abort(), RECENT_REVERSE_TIMEOUT_MS);
+	let name: string | null = null;
+	try {
+		name = await reverseAddress(coord[0], coord[1], ac.signal);
+	} catch {
+		// Geocoder down / timed out — record with raw coords.
+	} finally {
+		clearTimeout(timer);
+	}
+	return { type: 'point', coord, displayName: name ?? undefined, kind: 'address' };
+}
+
+async function recordRecentRoute(
+	from: Endpoint, to: Endpoint, mode: TimeMode, time: string | null
+) {
+	// Snapshot before the awaits — a follow-up query may reset it.
+	const coord = resolvedCurrentCoord;
+	const [f, t] = await Promise.all([
+		materializeCurrent(from, coord),
+		materializeCurrent(to, coord)
+	]);
+	// A current endpoint without a resolved coord can't be reproduced —
+	// skip the entry rather than store a dead one.
+	if (f && t) recentRoutes.record(f, t, mode, time);
 }
 
 function currentSortFn() {
@@ -729,6 +770,16 @@ export const routingState = {
 		panelOpen = true;
 	},
 
+	/** Endpoint-input refresh button on a "Current location" endpoint:
+	 * drop the cached geolocation fix and re-run the query with a fresh
+	 * position. The dedup key ignores the resolved coord, so the guard
+	 * must be cleared explicitly. */
+	refreshCurrentLocation() {
+		invalidateCurrent();
+		lastQueryKey = null;
+		if (from && to) void routingState.runQuery();
+	},
+
 	async runQuery() {
 		if (!from || !to) return;
 		const key = JSON.stringify({ from, to, mode, time });
@@ -935,9 +986,10 @@ export const routingState = {
 			// A route was shown → record it (routing-persistence.md § Recent
 			// routes list / § Connect). Covers fresh queries, URL restores and
 			// shared landings alike; empty result sets are not worth
-			// remembering.
+			// remembering. Async fire-and-forget: current-location endpoints
+			// are materialized (reverse geocode) before the entry is stored.
 			if (results.length > 0 && from && to) {
-				recentRoutes.record(from, to, mode, time);
+				void recordRecentRoute(from, to, mode, time);
 				connectStations.record(from);
 				connectStations.record(to);
 			}

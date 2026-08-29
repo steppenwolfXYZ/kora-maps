@@ -42,9 +42,15 @@
 		 * suppresses the suggestion on this side (a current→current route is
 		 * pointless). */
 		otherIsCurrent?: boolean;
+		/** Shown as a refresh button while the endpoint is "Current
+		 * location" — re-resolves the position (and re-queries). */
+		onRefreshCurrent?: () => void;
 	}
 
-	let { label, endpoint, placeholder, onChange, otherIsCurrent = false }: Props = $props();
+	let {
+		label, endpoint, placeholder, onChange,
+		otherIsCurrent = false, onRefreshCurrent
+	}: Props = $props();
 
 	let index = $state<IndexedStation[]>([]);
 	let query = $state('');
@@ -147,6 +153,18 @@
 		query = '';
 		highlighted = 0;
 		queueMicrotask(() => inputEl?.focus());
+	}
+
+	/** Exit search mode without committing — the row shows its endpoint
+	 * value again. Used by the Connect board, whose drag fills endpoints
+	 * from outside while this input may still sit in its (empty) search
+	 * form and would otherwise hide the fresh value. */
+	export function stopEdit() {
+		editing = false;
+		menuOpen = false;
+		query = '';
+		geoResults = [];
+		inputEl?.blur();
 	}
 
 	/** Programmatic focus for the panel's open-time cursor placement —
@@ -352,6 +370,15 @@
 			</span>
 			<span class="ep-text">{labelFor(endpoint)}</span>
 		</button>
+		{#if endpoint.type === 'current' && onRefreshCurrent}
+			<button
+				class="ep-refresh icon-btn"
+				onclick={onRefreshCurrent}
+				aria-label="Update current location"
+			>
+				<span class="material-symbols-outlined">refresh</span>
+			</button>
+		{/if}
 		<button class="ep-clear icon-btn" onclick={clear} aria-label="Clear {label.toLowerCase()}">×</button>
 	{/if}
 </div>
@@ -419,6 +446,15 @@
 		font-size: 1.1rem;
 		line-height: 1;
 		padding: 0.15rem 0.3rem;
+	}
+	.ep-refresh {
+		flex: 0 0 auto;
+		padding: 0.15rem 0.25rem;
+	}
+	.ep-refresh :global(.material-symbols-outlined) {
+		font-size: 1rem;
+		line-height: 1;
+		display: block;
 	}
 
 	.ep-menu {

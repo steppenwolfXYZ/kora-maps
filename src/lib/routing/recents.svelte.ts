@@ -46,7 +46,10 @@ function isValidEntry(e: unknown): e is RecentRoute {
 function isValidEndpoint(e: unknown): e is Endpoint {
 	if (typeof e !== 'object' || e === null) return false;
 	const ep = e as Record<string, unknown>;
-	if (ep.type === 'current') return true;
+	// 'current' endpoints are not accepted: new entries materialize them
+	// into point endpoints at record time (state.svelte.ts), and legacy
+	// stored entries can't reproduce their result — this filter hides
+	// them on read.
 	if (ep.type === 'station') return typeof ep.uic === 'string' && typeof ep.name === 'string';
 	if (ep.type === 'point') return Array.isArray(ep.coord) && ep.coord.length === 2;
 	return false;
