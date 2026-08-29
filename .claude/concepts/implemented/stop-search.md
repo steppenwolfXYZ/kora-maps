@@ -12,7 +12,7 @@ There is no way to jump to a specific transit stop by name. Finding a known stop
 
 ### Search index
 - The searchable set is every stop that appears on a drawn transit line — the same stops that render as dots / pills / pill-arrows on the map. Stops filtered out upstream (excluded agencies, EV-prefix routes, non-drawable trips, foreign termini) do not appear in results.
-- Each entry carries: display name, coordinates, merged-UIC identifier, transport mode, and stop importance tier (the pipeline's `stop_tier`, e.g. `major_train` … `small_bus`). Mode and tier drive ranking; the UIC is kept for the future highlight step.
+- Each entry carries: display name, coordinates, merged-UIC identifier, transport mode, stop importance tier (the pipeline's `stop_tier`, e.g. `major_train` … `small_bus`), and the station colors `cd` (dominant — the station's drawn dot color) / `ca` (mean-RGB average over every distinct line color at the station, all modes). Mode and tier drive ranking; the UIC is kept for the future highlight step; the colors feed the routing panel's Connect tiles and recent-route stop boxes (a `ca`→`cd` gradient), not search itself.
 - One entry per unique station (dedup by merged UIC). When a station is served by multiple modes, the entry keeps the highest-ranked mode (train wins over metro, over tram, over bus, etc.) — matches the mode-rank order used elsewhere in the pipeline.
 - The index is built at transit-pipeline time and shipped as a static JSON asset. Small enough to load once and search entirely client-side.
 
