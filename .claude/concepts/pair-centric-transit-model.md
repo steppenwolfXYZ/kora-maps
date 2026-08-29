@@ -14,7 +14,7 @@ A secondary problem: overlapping line features make label placement effectively 
 
 ## Current workaround
 
-Per-line `transit_lines.geojson` features, each with its own frequency, speed, color, and OSM-derived geometry. Lines are drawn in z-order by mode hierarchy. Overlapping segments stack visually with no aggregation. Click/hover and label placement are not implemented; the model can't support them cleanly.
+Per-line `transit_lines.geojson` features, each with its own frequency, speed, color, and OSM-derived geometry. Lines are drawn in z-order by mode hierarchy. Overlapping segments stack visually with no aggregation. Click (popups, line detail view) and stop labels have since been implemented on top of the per-line model, but inline line labels on corridors remain impossible — no single line can carry a readable label where several overlap.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ Pairs are extracted from trips after GTFS line grouping (see the `gtfs-line-grou
 - Unordered stop pair using **merged stop identities** (parent_station + post-pipeline clustering), not raw stop_ids.
 - Mode.
 - Set of contributing lines, referenced by trip-group ID from the line-grouping pass.
-- Per-time-bucket frequency contribution from each contributing line (existing time buckets: core_wd, eve_wd, we).
+- Per-time-bucket frequency contribution from each contributing line (existing time windows: core, eve, we).
 - Aggregated pair frequency: a separate score per segment, computed by recomputing frequency from total trip counts per time bucket on the pair, not by summing line-level freq scores.
 - List of OSM relations covering this pair (potentially more than one).
 
@@ -63,7 +63,7 @@ Mountain and ferry lines participate in the pair model but require special handl
 - Mode color palette is unchanged. The palette is applied at chunk level rather than line level.
 - Branching where two lines share a physical line up to a divergence point that has no station is rendered as overlapping pair chunks until the first station after divergence. This is preferred over geometric handling of stationless splits.
 - Speed coloring depends on the extended hierarchy version. The base version alone cannot reproduce express speeds on shared track.
-- Time-of-day model is unchanged from current: bucketed (core_wd, eve_wd, we). Date-aware rendering for construction or seasonal services is out of scope and may be revisited long after MVP.
+- Time-of-day model is unchanged from current: windowed (core, eve, we). Date-aware rendering for construction or seasonal services is out of scope and may be revisited long after MVP.
 - **Known unresolved challenge (not solved by this concept):** any two stops can in principle be "connected" through the network graph via arbitrary paths that are not part of any real line. The parent–child rule must distinguish legitimate parents (a nonstop trip on the same physical line as the children) from accidental graph connections. The precise rule needs further research at implementation time; this is a known general problem with known patterns.
 - **Future refinement (not part of MVP):** pair-frequency aggregation should evolve from trip-count summation toward average-departure-interval. Two IC trains spaced 4 minutes apart inside a 30-minute window are not equivalent to 8 trains per hour. The long-term model uses average gap, not count, for the rendered frequency.
 - This concept implies a substantial rendering overhaul. `transit_lines.geojson` as a per-line output is replaced by a per-chunk output. Style code that derives per-line visuals is replaced by chunk-level paint rules. The change is scoped to transit features and does not affect the rest of the basemap.

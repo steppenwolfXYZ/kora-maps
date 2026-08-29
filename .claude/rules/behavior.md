@@ -77,6 +77,8 @@ Always use the full word "pill-arrow" for the z17+ rendering. Never shorten to "
 ## Script execution
 Never run pipeline scripts autonomously. After code changes, give the user the command and let them run it. If you believe Claude should run a script, state the reason explicitly and wait for confirmation.
 
+The same applies to any command that is long-running (> ~30 s) or touches running services — docker build, docker compose up/stop/restart, MOTIS/Valhalla imports, deploys, package installs. "Verification" and "part of implementing" are not exceptions; rationalizing a build or restart as outside this rule is the violation pattern. Hand over the command; the user runs it. Quick read-only checks (curl against an already-running server, `npx svelte-check`, parse-checks) stay fine.
+
 ## Never run npm run build
 The user keeps an always-running `npm run dev` process; `npm run build` kills it. Never run `npm run build` (or `vite build`). For verification use `npx svelte-check`, or a throwaway `npx vite dev` on a non-default port (kill it by port afterwards).
 

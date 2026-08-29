@@ -9,6 +9,17 @@
 #   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
 #                                    transfer) via Valhalla /route
 #   src/server.cc                  — startup probe: no Valhalla, no serve
+#   deps/nigiri/src/routing/raptor/optimize_footpaths.cc
+#                                  — same-stop re-boarding as a transfer-
+#                                    optimizer candidate (see
+#                                    transfer-point-optimization.md)
+#   deps/nigiri/include/nigiri/routing/{query.h,journey.h,search.h,
+#                                       kora_alternatives.h}
+#   deps/nigiri/src/routing/raptor/{reconstruct.cc,pong.cc}
+#                                  — ε-alternates: near-optimal egress/
+#                                    access variants read out of the
+#                                    finished RAPTOR/PONG state (see
+#                                    near-optimal-endpoint-alternatives.md)
 # No OSR walking fallback anywhere; OSR remains for non-foot profiles.
 #
 # Build:
@@ -93,6 +104,11 @@ RUN cmake -G Ninja -S . -B build \
 # `Re-checking globbed directories` in the log confirms it.
 COPY include/ /src/include/
 COPY src/ /src/src/
+# deps/ overlays land INSIDE dependency checkouts that the baseline
+# configure step populated (e.g. deps/nigiri/) — nigiri is pinned
+# transitively via MOTIS's .pkg, so these are full-file copies of that
+# pinned commit's files, same rules as the MOTIS overlays above.
+COPY deps/ /src/deps/
 # Touch exactly the overlaid files (a blanket find-touch would mark every
 # upstream source dirty and re-trigger the full 90-min build). ADD NEW
 # OVERLAY FILES HERE when the fork grows.
@@ -108,7 +124,14 @@ RUN touch -c \
         /src/src/kora_valhalla.cc \
         /src/src/server.cc \
         /src/src/endpoints/routing.cc \
-        /src/src/osr/street_routing.cc && \
+        /src/src/osr/street_routing.cc \
+        /src/deps/nigiri/src/routing/raptor/optimize_footpaths.cc \
+        /src/deps/nigiri/src/routing/raptor/reconstruct.cc \
+        /src/deps/nigiri/src/routing/raptor/pong.cc \
+        /src/deps/nigiri/include/nigiri/routing/query.h \
+        /src/deps/nigiri/include/nigiri/routing/journey.h \
+        /src/deps/nigiri/include/nigiri/routing/search.h \
+        /src/deps/nigiri/include/nigiri/routing/kora_alternatives.h && \
     cmake -S . -B build && \
     cmake --build build --target motis -- -j4
 

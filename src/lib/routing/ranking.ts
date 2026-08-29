@@ -54,10 +54,17 @@ export function legDuration(leg: Leg): number {
 }
 
 /** Seconds walking across all WALK legs, including inter-station transfer
- * walks (same total the result card shows). */
+ * walks (same total the result card shows). Same-stop "walk" legs are
+ * excluded: MOTIS renders the mandatory change-time buffer of a
+ * same-platform transfer as a WALK leg from a stop to itself — that's
+ * waiting, not walking, and counting it distorts the comfort rating. */
 export function walkSeconds(it: Itinerary): number {
 	let s = 0;
-	for (const l of it.legs) if (l.mode === 'WALK') s += legDuration(l);
+	for (const l of it.legs) {
+		if (l.mode !== 'WALK') continue;
+		if (l.from?.stopId != null && l.from.stopId === l.to?.stopId) continue;
+		s += legDuration(l);
+	}
 	return s;
 }
 
@@ -101,6 +108,7 @@ interface Entry {
 	effTime: number;
 	walk: number;
 	transitKeys: Set<string>;
+	vehicles: string;
 }
 
 /** Identity keys of an itinerary's transit legs: same vehicle (trip),
@@ -114,6 +122,45 @@ function transitLegKeys(it: Itinerary): Set<string> {
 		keys.add(`${vehicle}|${l.from?.stopId ?? l.from?.name ?? ''}|${l.to?.stopId ?? l.to?.name ?? ''}`);
 	}
 	return keys;
+}
+
+/** Vehicle-only identity: the ordered trips ridden, ignoring where they
+ * are boarded and left. Two itineraries with equal vehicle keys are pure
+ * endpoint-walk variants of one another (enter/exit the same runs at
+ * different stations). */
+function vehicleKeys(it: Itinerary): string {
+	const keys: string[] = [];
+	for (const l of it.legs) {
+		if (l.mode === 'WALK' || l.mode === 'BIKE' || l.mode === 'CAR') continue;
+		keys.push(l.tripId ?? `${l.routeId ?? l.routeShortName ?? ''}@${l.startTime}`);
+	}
+	return keys.join('|');
+}
+
+// Walk-difference slack for the same-vehicles rule: below this, two
+// endpoint choices count as equally good on the walking axis.
+const SAME_VEHICLE_WALK_SLACK_SEC = 30;
+
+/** Rule 0d — same vehicles, worse endpoints: A and B ride exactly the
+ * same runs and differ only in where they enter/exit (and thus in the
+ * endpoint walks). Such pairs are compared ONLY on (arrival, total
+ * walking) — the departure axis is ignored, because leaving home a
+ * minute earlier or later to reach a different stop of the same vehicle
+ * is not a real alternative. A is dropped when B is equal-or-better on
+ * both axes and strictly better on one; on a full tie, the later
+ * departure (then input order) wins so exactly one of the pair
+ * survives. */
+function sameVehiclesDropped(a: Entry, b: Entry, aIdx: number, bIdx: number): boolean {
+	if (a.vehicles.length === 0 || a.vehicles !== b.vehicles) return false;
+	const arrWorse = a.end >= b.end - T_SLACK_MS;
+	const walkWorse = a.walk >= b.walk - SAME_VEHICLE_WALK_SLACK_SEC;
+	if (!arrWorse || !walkWorse) return false;
+	const arrStrict = a.end > b.end + T_SLACK_MS;
+	const walkStrict = a.walk > b.walk + SAME_VEHICLE_WALK_SLACK_SEC;
+	if (arrStrict || walkStrict) return true;
+	// Full tie on both axes — deterministic tie-break, one survivor.
+	if (a.start !== b.start) return a.start < b.start;
+	return aIdx > bIdx;
 }
 
 /** True when A is "same route minus a vehicle": A rides at least one
@@ -298,10 +345,12 @@ export function pruneDominated(its: Itinerary[], mode: TimeMode): Itinerary[] {
 		score: itineraryScore(it),
 		effTime: it.duration * comfortFactor(it),
 		walk: walkSeconds(it),
-		transitKeys: transitLegKeys(it)
+		transitKeys: transitLegKeys(it),
+		vehicles: vehicleKeys(it)
 	}));
 	return entries
-		.filter((a) => !entries.some((b) => b !== a && droppedBy(a, b, mode)))
+		.filter((a, ai) => !entries.some((b, bi) =>
+			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, mode))))
 		.map((e) => e.it);
 }
 

@@ -8,7 +8,7 @@ import { endpointToParam } from './url';
 // mode, blocked storage) degrade to an empty, non-persisting list.
 
 const STORAGE_KEY = 'kora.routing.recents';
-const MAX_ENTRIES = 10;
+const MAX_ENTRIES = 30;
 
 export interface RecentRoute {
 	from: Endpoint;

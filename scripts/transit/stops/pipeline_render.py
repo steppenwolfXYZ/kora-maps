@@ -1079,7 +1079,7 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     pill_features.extend(indicator_features)
 
     # ==========================================================================
-    # Emit stop_label_anchor + stop_label_leader features (stop-labels.md § Pill-zoom)
+    # Emit stop_label_anchor features (stop-labels.md § Pill-zoom)
     # ==========================================================================
     # Two cases:
     #   Simple  — station has only a dot / endpoint or a single straight pill

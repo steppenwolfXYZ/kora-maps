@@ -33,14 +33,28 @@ When no route is set, a **recent routes** section appears below the date/time co
 - An entry is recorded (or refreshed to the top) whenever a route is **shown** — a query for a from/to pair successfully returns results. This includes routes loaded from URLs.
 - Each entry carries: both endpoints (display name + whatever identity is needed to re-query, incl. custom coordinate endpoints), date/time, and arrive/leave mode.
 - Deduplication by from/to pair: showing an already-listed pair moves it to the top and updates its date/time and mode; the list never contains the same pair twice.
-- Capacity: the 10 most recent pairs; older entries drop off.
+- Capacity: the 30 most recent pairs; older entries drop off. The list shows 10 collapsed, with a "Show more" button revealing the rest (collapses again on panel reopen).
 - **Selecting an entry re-queries.** Date/time handling on selection:
   - Stored date/time still in the future (or now): keep it, keep the arrive/leave mode.
   - Stored date/time in the past: switch to "now" (depart now).
 
+### Connect (station tile grid)
+
+The no-route-set view grows two tabs: **Connect** (default) and **Recent** (the list above). The name is "Connect" — not "touch timetable", though the SBB app's touch timetable is the reference interaction.
+
+- Connect is a **lined grid** of station cells (grid lines, not buttons). Interaction is **drag-to-connect**: press a cell, drag — a line follows the pointer — release on another cell, and the route is set (start cell = From, release cell = To).
+- **Capacity: 10 station options**, plus a fixed **bottom row** (SBB-style): a **Current location** cell (hidden when geolocation is unavailable or denied) and two **empty half-cells**, "Start" and "Stop". A connection drawn through an empty cell leaves that side of the route empty — the station on the other end of the line fills the opposite side, and the cursor lands in the empty side's input.
+- **Real options**: the user's most-used stations, stored in `localStorage` under `kora.connect.stations`. Every station endpoint of a shown route bumps its usage; ranking is by recency-decayed frequency (half-life on the order of months). Stations only — point/address endpoints don't tile pre-account.
+- **Cold start**: while fewer than 10 real options exist, the remaining slots are filled with standard suggestions computed from location:
+  - the closest station,
+  - the closest station of each stop tier higher than the closest one's tier,
+  - the 4 closest stations of the highest tier (major train stations).
+  Deduplicated, sorted by distance, capped to the free slots. Real options always displace suggestions as usage accumulates.
+- **Anchor** for "closest": the map center. Geolocation is never requested on panel open (house rule — location only on explicit user action); the map center is where the user is looking and needs no permission.
+
 ### Later version (out of scope here, recorded as direction)
 
-- The no-route-set view grows tabs: **Recent** (this list) and a **Touch timetable** — SBB-app-style saved favorite connections, tappable to query instantly. Possibly localStorage first, possibly account-backed.
+- Account-backed sync of recents and Connect usage data.
 
 ## Constraints
 

@@ -3,16 +3,18 @@
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
+	import ConnectGrid from './ConnectGrid.svelte';
 	import { computeCardStates } from './ranking';
 	import { routingState } from './state.svelte';
 	import { recentRoutes, endpointLabel, type RecentRoute } from './recents.svelte';
 	import { itineraryFingerprint } from './fingerprint';
-	import type { Itinerary, Leg } from './types';
+	import type { Endpoint, Itinerary, Leg } from './types';
 
-	let { onFocusLeg, onEnterMapMode, onFrameRoute }: {
+	let { onFocusLeg, onEnterMapMode, onFrameRoute, getMapCenter = () => null }: {
 		onFocusLeg?: (leg: Leg) => void;
 		onEnterMapMode?: (it: Itinerary) => void;
 		onFrameRoute?: (it: Itinerary) => void;
+		getMapCenter?: () => [number, number] | null;
 	} = $props();
 
 	// Shared-only mode (connection-sharing.md § Shared view) renders just the
@@ -20,9 +22,62 @@
 	// single card comparing against itself would always wear the crown.
 	let displayed = $derived(routingState.displayedResults);
 	let cardStates = $derived(computeCardStates(displayed));
+	// Loading-edge suppression: the card at the time-advancing edge (last
+	// for leave-at, first for arrive-by) is hidden while it carries a
+	// very-slow warning — that is exactly the card retroactive pruning
+	// may remove once the next batch loads its dominators, which would
+	// make it visibly vanish mid-scroll (every observed vanish case wore
+	// the very-slow warning). Hidden, the next batch either prunes it
+	// (nothing changes on screen) or keeps it, at which point it is no
+	// longer the edge card and appears. Never applied to a sole result,
+	// the shared view, or the currently selected connection.
+	let cards = $derived.by(() => {
+		const items = displayed.map((it, i) => ({ it, state: cardStates[i] }));
+		if (routingState.sharedOnly || items.length <= 1) return items;
+		const arrive = routingState.mode === 'arrive';
+		const edge = arrive ? 0 : items.length - 1;
+		const e = items[edge];
+		if (
+			e?.state?.warnings.some((w) => w.kind === 'very-slow') &&
+			itineraryFingerprint(e.it) !== routingState.selectedFingerprint
+		) {
+			return arrive ? items.slice(1) : items.slice(0, -1);
+		}
+		return items;
+	});
 	// "Route set" (routing-persistence.md § Definitions): both endpoints
 	// finally set. Drives the clear button and the when/recents swap.
 	let routeSet = $derived(!!routingState.from && !!routingState.to);
+
+	// Recents list: 10 rows collapsed, the full stored list (30) after
+	// "Show more". Collapses again with the panel remount.
+	const RECENTS_COLLAPSED = 10;
+	let recentsExpanded = $state(false);
+	let visibleRecents = $derived(
+		recentsExpanded ? recentRoutes.list : recentRoutes.list.slice(0, RECENTS_COLLAPSED)
+	);
+
+	// No-route-set tabs (routing-persistence.md § Connect): Connect default.
+	let noRouteTab = $state<'connect' | 'recent'>('connect');
+
+	// Connect board drag result: a full pair loads the route in one shot
+	// (current mode/time kept); a half connection through an empty cell
+	// clears that side and puts the cursor there.
+	function connectRoute(from: Endpoint | null, to: Endpoint | null) {
+		if (from && to) {
+			routingState.loadRoute({
+				from, to, mode: routingState.mode, time: routingState.time
+			});
+		} else if (from) {
+			routingState.setTo(null);
+			routingState.setFrom(from);
+			void tick().then(() => toInput?.focusSearch());
+		} else if (to) {
+			routingState.setFrom(null);
+			routingState.setTo(to);
+			void tick().then(() => fromInput?.focusSearch());
+		}
+	}
 
 	let resultsEl: HTMLDivElement | null = $state(null);
 	let fromInput: EndpointInput | undefined = $state();
@@ -330,18 +385,41 @@
 		/>
 	</div>
 
-	{#if !routeSet && recentRoutes.list.length > 0}
-		<!-- No-route-set view (routing-persistence.md): recent routes show
-		     below the when-controls until both endpoints are set. -->
-		<div class="rp-recents">
-			<div class="rp-recents-title">Recent</div>
-			{#each recentRoutes.list as r (r.at)}
-				<button class="rp-recent" onclick={() => pickRecent(r)}>
-					<span class="rp-recent-ep">{endpointLabel(r.from)}</span>
-					<span class="material-symbols-outlined rp-recent-arrow" aria-hidden="true">chevron_right</span>
-					<span class="rp-recent-ep">{endpointLabel(r.to)}</span>
-				</button>
-			{/each}
+	{#if !routeSet}
+		<!-- No-route-set view (routing-persistence.md § Connect): tabbed
+		     Connect grid / Recent list below the when-controls, until both
+		     endpoints are set. -->
+		<div class="rp-suggest">
+			<div class="rp-tabs" role="group" aria-label="Suggestions">
+				<button
+					class:active={noRouteTab === 'connect'}
+					onclick={() => (noRouteTab = 'connect')}
+				>Connect</button>
+				<button
+					class:active={noRouteTab === 'recent'}
+					onclick={() => (noRouteTab = 'recent')}
+				>Recent</button>
+			</div>
+			{#if noRouteTab === 'connect'}
+				<ConnectGrid {getMapCenter} onConnect={connectRoute} />
+			{:else if recentRoutes.list.length > 0}
+				<div class="rp-recents">
+					{#each visibleRecents as r (r.at)}
+						<button class="rp-recent" onclick={() => pickRecent(r)}>
+							<span class="rp-recent-ep">{endpointLabel(r.from)}</span>
+							<span class="material-symbols-outlined rp-recent-arrow" aria-hidden="true">chevron_right</span>
+							<span class="rp-recent-ep">{endpointLabel(r.to)}</span>
+						</button>
+					{/each}
+					{#if !recentsExpanded && recentRoutes.list.length > RECENTS_COLLAPSED}
+						<button class="rp-recents-more" onclick={() => (recentsExpanded = true)}>
+							Show more
+						</button>
+					{/if}
+				</div>
+			{:else}
+				<div class="rp-status">No recent routes yet</div>
+			{/if}
 		</div>
 	{/if}
 
@@ -385,15 +463,15 @@
 						<div class="loading-track loading-track-inline"><div class="loading-ball"></div></div>
 					</div>
 				{/if}
-				{#each displayed as it, i (i)}
-					{@const prevIso = i === 0 ? baselineIso() : displayed[i - 1].startTime}
+				{#each cards as { it, state }, i (i)}
+					{@const prevIso = i === 0 ? baselineIso() : cards[i - 1].it.startTime}
 					{#if i === 0 || dayKey(it.startTime) !== dayKey(prevIso)}
 						<div class="rp-day-marker">{fmtDay(it.startTime)}</div>
 					{/if}
 					<ResultCard
 						itinerary={it}
-						badge={routingState.sharedOnly ? null : cardStates[i]?.badge ?? null}
-						warnings={cardStates[i]?.warnings ?? []}
+						badge={routingState.sharedOnly ? null : state?.badge ?? null}
+						warnings={state?.warnings ?? []}
 						{onFocusLeg}
 						{onEnterMapMode}
 						{onFrameRoute}
@@ -538,24 +616,44 @@
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
 
+	/* Hairline + extra air separates the suggestions block from the
+	   search criteria above (same line style as .rp-results-sep). */
+	.rp-suggest {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		border-top: 1px solid var(--gray-100);
+		margin-top: 0.15rem;
+		padding-top: 0.55rem;
+		overflow-y: auto;
+	}
+	/* Segmented toggle per ux-guidelines.md: no container border,
+	   inactive segments gray with dark text, active segment gradient
+	   with white text. */
+	.rp-tabs {
+		display: flex;
+		width: fit-content;
+		border-radius: var(--radius-pill);
+		overflow: hidden;
+	}
+	.rp-tabs button {
+		border: none;
+		background: var(--gray-100);
+		font-family: inherit;
+		font-size: 0.78rem;
+		line-height: 1.2;
+		color: var(--gray-800);
+		padding: 0.3rem 0.8rem;
+		cursor: pointer;
+	}
+	.rp-tabs button.active {
+		background: var(--gradient-brand);
+		color: var(--white);
+	}
 	.rp-recents {
 		display: flex;
 		flex-direction: column;
 		gap: 0.1rem;
-		/* Hairline + extra air separates the recents block from the
-		   search criteria above (same line style as .rp-results-sep). */
-		border-top: 1px solid var(--gray-100);
-		margin-top: 0.15rem;
-		padding-top: 0.55rem;
-	}
-	/* Uppercase micro-title — anthracite per ux-guidelines.md. */
-	.rp-recents-title {
-		font-size: 0.7rem;
-		font-weight: 600;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--anthracite);
-		padding: 0.1rem 0.15rem 0.15rem;
 	}
 	.rp-recent {
 		display: flex;
@@ -587,6 +685,21 @@
 		flex: 0 0 auto;
 		font-size: 1rem;
 		color: var(--gray-400);
+	}
+	.rp-recents-more {
+		align-self: flex-start;
+		border: none;
+		background: transparent;
+		font-family: inherit;
+		font-size: 0.78rem;
+		color: var(--gray-500);
+		padding: 0.3rem 0.4rem;
+		border-radius: var(--radius-pill);
+		cursor: pointer;
+	}
+	.rp-recents-more:hover {
+		background: var(--gray-100);
+		color: var(--gray-800);
 	}
 
 	.rp-results-sep {

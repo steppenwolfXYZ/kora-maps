@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
+#include <tuple>
 #include <optional>
 #include <variant>
 
@@ -562,10 +564,21 @@ std::vector<n::routing::offset> routing::get_offsets(
             auto const wants_walk =
                 utl::find(modes, api::ModeEnum::WALK) != end(modes);
             if (wants_walk) {
-              auto const& fps =
-                  dir == osr::direction::kForward
-                      ? tt_->locations_.footpaths_out_[n::kFootProfile]
-                      : tt_->locations_.footpaths_in_[n::kFootProfile];
+              // The FULL 2-h table — the foot profile holds only the
+              // capped default transfer table since the two-tier split
+              // (transfer-point-optimization.md), and endpoint offsets
+              // must keep full station walking reach. Pre-two-tier index
+              // data has the full slot empty; fall back to foot then
+              // (which holds the full table in that data).
+              auto const prf =
+                  tt_->locations_
+                          .footpaths_out_[kora_valhalla::kFullTransferProfile]
+                          .empty()
+                      ? n::kFootProfile
+                      : kora_valhalla::kFullTransferProfile;
+              auto const& fps = dir == osr::direction::kForward
+                                    ? tt_->locations_.footpaths_out_[prf]
+                                    : tt_->locations_.footpaths_in_[prf];
               auto const max_dur =
                   std::chrono::duration_cast<n::duration_t>(max);
               auto best = n::hash_map<n::location_idx_t, n::duration_t>{};
@@ -848,6 +861,37 @@ std::vector<api::ModeEnum> deduplicate(std::vector<api::ModeEnum> m) {
 api::plan_response routing::operator()(boost::urls::url_view const& url) const {
   metrics_->routing_requests_.Increment();
 
+  // kora fork: two-tier transfer table selector. Not part of the
+  // generated API params — read straight off the URL (MOTIS ignores
+  // unknown params, so the flag is invisible to upstream code). The app
+  // sends koraFullTransfers=true on cascade escalation (sparse-service
+  // fallback); see transfer-point-optimization.md § Two-tier transfer
+  // table.
+  auto const kora_full_transfers = [&]() {
+    for (auto const& p : url.params()) {
+      if (p.key == "koraFullTransfers") {
+        return p.value == "true";
+      }
+    }
+    return false;
+  }();
+
+  // kora fork: ε-alternates (near-optimal-endpoint-alternatives.md).
+  // Fork-only URL params, invisible to the generated API like
+  // koraFullTransfers above: `alternativesEpsilon` (seconds) is the
+  // slack within which a worse egress/access stop still yields an
+  // alternate journey (0 = off), `alternativesMax` caps the alternates
+  // per Pareto point.
+  auto kora_alt_epsilon_sec = 0;
+  auto kora_alt_max = 0;
+  for (auto const& p : url.params()) {
+    if (p.key == "alternativesEpsilon") {
+      kora_alt_epsilon_sec = std::clamp(std::atoi(p.value.c_str()), 0, 1800);
+    } else if (p.key == "alternativesMax") {
+      kora_alt_max = std::clamp(std::atoi(p.value.c_str()), 0, 10);
+    }
+  }
+
   auto const query = api::plan_params{url.params()};
   auto const max_matching_distance =
       std::min(query.maxMatchingDistance_,
@@ -1119,7 +1163,12 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
                   : query.pedestrianProfile_ ==
                           api::PedestrianProfileEnum::WHEELCHAIR
                       ? n::kWheelchairProfile
-                      : n::kFootProfile
+                      // kora fork: two-tier transfer table — the
+                      // escalation flag selects the full 2-h table,
+                      // default queries search the capped one.
+                      : kora_full_transfers
+                          ? kora_valhalla::kFullTransferProfile
+                          : n::kFootProfile
                 : 0U),
         .allowed_claszes_ = to_clasz_mask(query.transitModes_),
         .require_bike_transport_ = query.requireBikeTransport_,
@@ -1143,8 +1192,21 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
         .slow_direct_ = query.slowDirect_,
         .fastest_slow_direct_factor_ = query.fastestSlowDirectFactor_};
     remove_slower_than_fastest_direct(q);
+
+    // kora fork: ε-alternates knobs (nigiri works at minute
+    // granularity — round the second-based API value up).
+    q.kora_alt_epsilon_ = n::duration_t{(kora_alt_epsilon_sec + 59) / 60};
+    q.kora_alt_max_ = static_cast<std::uint8_t>(kora_alt_max);
+
     UTL_STOP_TIMING(query_preparation);
 
+    // kora fork: with pre-two-tier index data the full-table slot is
+    // empty — degrade to the foot profile (whatever the matrix import
+    // put there) rather than all the way to profile 0.
+    if (q.prf_idx_ == kora_valhalla::kFullTransferProfile &&
+        tt_->locations_.footpaths_out_.at(q.prf_idx_).empty()) {
+      q.prf_idx_ = n::kFootProfile;
+    }
     if (tt_->locations_.footpaths_out_.at(q.prf_idx_).empty()) {
       q.prf_idx_ = 0U;
     }
@@ -1257,6 +1319,22 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
     }
 
     auto journeys = r.journeys_->els_;
+
+    // kora fork: ε-alternates ride along as ordinary journeys — same
+    // response shape, same post-processing (transfer optimizer already
+    // ran during reconstruction; WALK legs render via Valhalla like any
+    // journey). The client's own pruning layer decides which survive.
+    if (!search_state.alternatives_.empty()) {
+      for (auto& aj : search_state.alternatives_) {
+        journeys.emplace_back(std::move(aj));
+      }
+      std::sort(begin(journeys), end(journeys),
+                [](auto const& a, auto const& b) {
+                  return std::tie(a.start_time_, a.transfers_) <
+                         std::tie(b.start_time_, b.transfers_);
+                });
+    }
+
     auto search_interval = r.interval_;
     if (query.maxItineraries_.has_value()) {
       search_interval = shrink(start_time.extend_interval_earlier_,

@@ -61,6 +61,12 @@ export interface PlanArgs {
 	 * to 7200 (2 h) once it's advancing `time` forward to accumulate more
 	 * results. */
 	searchWindow?: number;
+	/** Two-tier transfer table (transfer-point-optimization.md): default
+	 * queries search transfers on the capped (30 min) Valhalla table;
+	 * `true` selects the full 2-h table. The cascade sets it whenever it
+	 * runs with the wide walking budget — the sparse-service situations
+	 * where long transfer-walk connections matter. */
+	fullTransfers?: boolean;
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -99,6 +105,23 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	// past that, it falls back to weird walking-heavy transit hybrids
 	// (WALK 45m + BUS 0m + WALK 1m). Lift to the 8 h server ceiling.
 	params.set('maxDirectTime', '28800');
+	// Without this flag MOTIS transfers on nigiri's default footpath set
+	// (GTFS transfers.txt — sparse, direction-incomplete) instead of the
+	// fork's imported Valhalla matrix, producing needlessly long transfer
+	// walks (see transfer-point-optimization.md).
+	params.set('useRoutedTransfers', 'true');
+	// Fork-only flag (upstream MOTIS ignores it): select the full 2-h
+	// transfer table instead of the capped default one.
+	if (args.fullTransfers) params.set('koraFullTransfers', 'true');
+	// Fork-only ε-alternates (near-optimal-endpoint-alternatives.md):
+	// besides each Pareto-optimal journey, return egress/access-stop
+	// variants arriving within the slack, as ordinary itineraries — the
+	// pruning in ranking.ts decides which survive. 540 s = ranking.ts's
+	// Case-1 overlap window (OVERLAP_TIME_MAX_MS), so the server returns
+	// a slight superset of what layer 2 would ever keep; max 3 alternates
+	// per Pareto point.
+	params.set('alternativesEpsilon', '540');
+	params.set('alternativesMax', '3');
 	params.set('searchWindow', String(args.searchWindow ?? 900));
 
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;

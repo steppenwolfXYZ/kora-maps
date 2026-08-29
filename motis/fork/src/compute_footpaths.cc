@@ -8,8 +8,14 @@
 //
 // The env var KORA_FOOTPATH_MATRIX_PATH selects Valhalla as the
 // footpath source. When set, this function ignores every OSR argument
-// and populates tt.locations_.footpaths_out_/_in_[kFootProfile] from
-// the matrix. When unset, the function throws — the concept forbids a
+// and populates TWO transfer tables from the matrix (two-tier split,
+// see transfer-point-optimization.md § Two-tier transfer table):
+//   - kFootProfile: rows ≤ KORA_TRANSFER_CAP_MINUTES (default 30) —
+//     the table default queries search on.
+//   - kora_valhalla::kFullTransferProfile: all rows up to
+//     max_footpath_length (2 h) — fallback queries (cascade
+//     escalation) and station-endpoint offsets.
+// When unset, the function throws — the concept forbids a
 // silent fallback to the OSM walker, since mixing Valhalla-quality and
 // OSR-quality times in one result set is worse than either alone.
 //
@@ -23,10 +29,12 @@
 // the values inside it change.
 
 #include "motis/compute_footpaths.h"
+#include "motis/kora_valhalla.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -49,6 +57,27 @@ namespace motis {
 namespace {
 
 constexpr auto kEnvVar = "KORA_FOOTPATH_MATRIX_PATH";
+
+// Cap (minutes) of the DEFAULT transfer table (foot profile). The full
+// 2-h table goes into kora_valhalla::kFullTransferProfile for fallback
+// queries and station-endpoint offsets. See transfer-point-optimization.md
+// § Two-tier transfer table.
+constexpr auto kCapEnvVar = "KORA_TRANSFER_CAP_MINUTES";
+constexpr auto kDefaultCapMinutes = 30L;
+
+std::chrono::minutes read_transfer_cap() {
+  auto const* env = std::getenv(kCapEnvVar);
+  if (env == nullptr || *env == '\0') {
+    return std::chrono::minutes{kDefaultCapMinutes};
+  }
+  auto mins = 0L;
+  auto const [ptr, ec] =
+      std::from_chars(env, env + std::strlen(env), mins);
+  utl::verify(ec == std::errc{} && *ptr == '\0' && mins > 0,
+              "kora fork: {} must be a positive integer, got '{}'",
+              kCapEnvVar, env);
+  return std::chrono::minutes{mins};
+}
 
 // Trim a single trailing CR (Windows line endings) — everything else is
 // tolerated by std::string_view comparisons directly.
@@ -184,30 +213,16 @@ elevator_footpath_map_t compute_footpaths(
   auto transfers_in =
       n::vector_map<n::location_idx_t, std::vector<n::footpath>>{};
 
-  for (auto const& mode : settings) {
-    for (auto& fps : transfers) {
-      fps.clear();
-    }
-
-    if (mode.profile_idx_ == n::kFootProfile) {
-      load_matrix_into(tt, transfers, mode.max_duration_);
-    } else {
-      // Non-foot profiles: keep the transfer table empty. The map's UI
-      // does not surface wheelchair or car routing; leaving these empty
-      // costs nothing at query time and preserves the concept's "no
-      // silent OSR fallback" invariant.
-      fmt::println(std::clog,
-                   "kora fork: profile_idx {} left empty (Valhalla covers "
-                   "foot only)",
-                   static_cast<unsigned>(mode.profile_idx_));
-    }
-
+  // Sort, filter, mirror, and write `transfers` into the given profile
+  // slot, then build its lower-bound graphs.
+  auto const publish = [&](n::profile_idx_t const profile_idx,
+                           std::chrono::minutes const max_duration) {
     // Sort each source's list by (target, duration) to satisfy nigiri's
     // build_lb_graph assumptions; drop over-cap entries as a safety
     // net (load_matrix_into already filters, but sort/erase is cheap).
     for (auto& fps : transfers) {
       std::erase_if(fps, [&](n::footpath fp) {
-        return fp.duration() > mode.max_duration_;
+        return fp.duration() > max_duration;
       });
       std::sort(fps.begin(), fps.end());
     }
@@ -226,14 +241,52 @@ elevator_footpath_map_t compute_footpaths(
     }
 
     for (auto const& x : transfers) {
-      tt.locations_.footpaths_out_[mode.profile_idx_].emplace_back(x);
+      tt.locations_.footpaths_out_[profile_idx].emplace_back(x);
     }
     for (auto const& x : transfers_in) {
-      tt.locations_.footpaths_in_[mode.profile_idx_].emplace_back(x);
+      tt.locations_.footpaths_in_[profile_idx].emplace_back(x);
     }
 
-    n::loader::build_lb_graph<n::direction::kForward>(tt, mode.profile_idx_);
-    n::loader::build_lb_graph<n::direction::kBackward>(tt, mode.profile_idx_);
+    n::loader::build_lb_graph<n::direction::kForward>(tt, profile_idx);
+    n::loader::build_lb_graph<n::direction::kBackward>(tt, profile_idx);
+  };
+
+  for (auto const& mode : settings) {
+    for (auto& fps : transfers) {
+      fps.clear();
+    }
+
+    if (mode.profile_idx_ == n::kFootProfile) {
+      // Two-tier split (transfer-point-optimization.md § Two-tier
+      // transfer table): the foot profile gets only the capped subset
+      // default queries search on; the full table goes into the spare
+      // slot below.
+      auto const cap = std::min(read_transfer_cap(),
+                                std::chrono::duration_cast<std::chrono::minutes>(
+                                    mode.max_duration_));
+      load_matrix_into(tt, transfers, cap);
+      publish(n::kFootProfile, cap);
+
+      for (auto& fps : transfers) {
+        fps.clear();
+      }
+      load_matrix_into(tt, transfers, mode.max_duration_);
+      publish(kora_valhalla::kFullTransferProfile,
+              std::chrono::duration_cast<std::chrono::minutes>(
+                  mode.max_duration_));
+    } else {
+      // Non-foot profiles: keep the transfer table empty. The map's UI
+      // does not surface wheelchair or car routing; leaving these empty
+      // costs nothing at query time and preserves the concept's "no
+      // silent OSR fallback" invariant.
+      fmt::println(std::clog,
+                   "kora fork: profile_idx {} left empty (Valhalla covers "
+                   "foot only)",
+                   static_cast<unsigned>(mode.profile_idx_));
+      publish(mode.profile_idx_,
+              std::chrono::duration_cast<std::chrono::minutes>(
+                  mode.max_duration_));
+    }
   }
 
   return elevator_footpath_map_t{};

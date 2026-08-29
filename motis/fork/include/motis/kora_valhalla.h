@@ -24,7 +24,18 @@
 #include "geo/latlng.h"
 #include "geo/polyline.h"
 
+#include "nigiri/types.h"
+
 namespace motis::kora_valhalla {
+
+// Profile slot holding the FULL (2 h) Valhalla transfer table. The foot
+// profile carries only the capped subset (KORA_TRANSFER_CAP_MINUTES,
+// default 30) that default queries search on; the full table lives in
+// the otherwise-unused bike slot and is selected per query via the
+// `koraFullTransfers=true` flag the app sends on cascade escalation.
+// Station-endpoint WALK offsets always read the full table. See
+// transfer-point-optimization.md § Two-tier transfer table.
+constexpr auto const kFullTransferProfile = nigiri::kBikeProfile;
 
 // Base walking speed baked into every Valhalla call. MUST stay equal to
 // WALK_SPEED_KMH in scripts/build_valhalla_footpath_matrix.py — the

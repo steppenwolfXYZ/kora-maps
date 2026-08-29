@@ -41,7 +41,15 @@
 {/if}
 {#if routingState.open}
 	<div class="top-controls" class:hidden-in-map-mode={routingState.mapMode}>
-		<RoutingPanel onFocusLeg={focusSelectedLeg} onEnterMapMode={frameSelectedItinerary} onFrameRoute={frameSelectedItinerary} />
+		<RoutingPanel
+			onFocusLeg={focusSelectedLeg}
+			onEnterMapMode={frameSelectedItinerary}
+			onFrameRoute={frameSelectedItinerary}
+			getMapCenter={() => {
+				const c = mapUi.mapRef?.getCenter();
+				return c ? ([c.lng, c.lat] as [number, number]) : null;
+			}}
+		/>
 	</div>
 {:else if !lineDetailState.selection}
 	<div class="top-controls">

@@ -6,6 +6,7 @@ import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation, resolveCurrent
 } from './geolocation.svelte';
 import { pruneDominated } from './ranking';
+import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
 import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import type { Endpoint, Itinerary, TimeMode } from './types';
@@ -201,7 +202,11 @@ async function runHopCascade(
 			currentCoord: resolvedCurrentCoord,
 			maxPreTransitTime: pre,
 			maxPostTransitTime: post,
-			searchWindow: HOP_SEARCH_WINDOW_SEC
+			searchWindow: HOP_SEARCH_WINDOW_SEC,
+			// Full 2-h transfer table rides along with the wide walking
+			// budget — both mark "sparse service, search exhaustively"
+			// (transfer-point-optimization.md § Two-tier transfer table).
+			fullTransfers: pre === WIDE_PRE_POST_SEC
 		}, ac.signal);
 		if (ac.signal.aborted) return 'done';
 		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
@@ -748,7 +753,11 @@ export const routingState = {
 					currentCoord: resolvedCurrentCoord,
 					maxPreTransitTime: pre,
 					maxPostTransitTime: post,
-					searchWindow
+					searchWindow,
+					// Full 2-h transfer table rides along with the wide walking
+					// budget (escalation + share verification) — see
+					// transfer-point-optimization.md § Two-tier transfer table.
+					fullTransfers: pre === WIDE_PRE_POST_SEC
 				}, ac.signal);
 			};
 
@@ -909,10 +918,13 @@ export const routingState = {
 				}
 			}
 			// A route was shown → record it (routing-persistence.md § Recent
-			// routes list). Covers fresh queries, URL restores and shared
-			// landings alike; empty result sets are not worth remembering.
+			// routes list / § Connect). Covers fresh queries, URL restores and
+			// shared landings alike; empty result sets are not worth
+			// remembering.
 			if (results.length > 0 && from && to) {
 				recentRoutes.record(from, to, mode, time);
+				connectStations.record(from);
+				connectStations.record(to);
 			}
 			lastQueryKey = key;
 		} catch (e) {
