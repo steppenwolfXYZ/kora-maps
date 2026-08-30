@@ -1,5 +1,12 @@
 # pfaedle Stop-Side Awareness
 
+> **DEFERRED (2026-08-30).** Both phases were fully built and measured; the mechanism was then rolled back by decision. What the experiment established:
+>
+> - **Phase 1 diagnostic** (compass-based, in `data/transit/diagnostics/find_stop_side_violations.py`) works and stays — but field checks showed its surviving flags are dominated by wrong Atlas `compassDirection` values (entered backwards or attached to the wrong quay) and crossed quay references in the feed, not wrong shapes. It is a **data-quality anomaly finder**, not a shape-error benchmark.
+> - **Phase 2 penalty** was implemented as a pfaedle fork overlay (candidate-level penalty, profile keys `routing_wrong_dir_penalty` / `routing_wrong_dir_angle`, compass sidecar via `PFAEDLE_STOP_COMPASS` env; the fork files were removed with the rollback — the design and hook point, `ShapeBuilder::getEdgCands`, are recorded in this doc's Phase 2). Calibration: the Brunnhof case tips at ≈25 s. A network sweep at 26 s changed 41 of 80 flagged lines at 65 locations; field review found nearly all changes harmful (turnaround micro-loops bought at data-error stops) with only two verified wins (Brunnhof's 61 diversion trips, Wallisellen Haldenstrasse line 772).
+> - **Structural limits found:** (a) the penalty binds only at mid-street platforms — at junctions/hairpins pfaedle evades it by snapping the stop to a nearby compass-compatible edge without rerouting (Horgen Bocken, Kriens Kuonimatt); (b) acceptance filters over the penalized output (net length delta, backtrack counts, per-window variants) were each defeated by netting or corridor reuse — a per-change-site splice would be required, out of proportion to the residual value.
+> - **Verdict:** wrong-direction shapes are better handled per case with `gtfs_trip_overrides` `insert_waypoint` (the Dornach pattern). Open pin: Horgen Bocken, SZU 132 SE-bound, waypoint on the turnout road ~`[8.610459, 47.244489]` between Schnegg (UIC 8588987) and Bocken (8588416).
+
 ## Problem
 
 pfaedle models a stop as a directionless point on a street centerline. Which side of the street the platform sits on dictates the only physically possible direction of travel for serving it (right-hand traffic), but pfaedle's cost model cannot see sides — so when two route alternatives are near-tied, it may thread a trip through a stop in the impossible direction and then "repair" the path with U-turns or back-street loops. Canonical case: bus 17's 2026 construction diversion at Bern Brunnhof platform A — served northbound in reality, drawn southbound with a nonsense loop via Mattenhofstrasse/Lilienweg. Temporary diversions are extra-exposed because they have no OSM route relation, so no line prior corrects the choice. This failure class has produced issues before and will recur.
@@ -18,14 +25,16 @@ pfaedle models a stop as a directionless point on a street centerline. Which sid
 - Known limit: only the emitted representative shape per variant is checked — wrong shapes on non-representative trips (e.g. construction diversions that lose the rep-trip vote, the live Brunnhof case) surface in routing results but not in this count.
 - Role: first run quantifies the real-world impact and surfaces unknown cases before any pfaedle work; after Phase 2 it is the regression benchmark — the violation count must drop, and no new violations may appear on previously clean lines.
 
-### Phase 2 — wrong-side penalty in pfaedle
+### Phase 2 — wrong-direction penalty in pfaedle
 
-- Patch to the locally built pfaedle image (same fork-carrying pattern as the MOTIS fork) adding a penalty when a candidate path passes a stop with the stop's original coordinate on the wrong side of the direction of travel.
-- Sign of the side is derived from the stop's original GTFS coordinate relative to the traversal direction at the matched position — data pfaedle already holds; no new inputs.
-- New per-mode profile key `routing_wrong_side_penalty` (seconds), default 0 (= off, upstream behaviour unchanged). Enabled for bus and tram profiles only; rail unaffected.
-- The penalty is **soft**: sized to break near-ties (the Brunnhof case) but to lose against structurally cheaper evidence — it must never force long detours to satisfy a side, because GTFS coordinates are occasionally on the wrong side themselves.
-- Below the same small lateral-offset floor as the diagnostic, no penalty applies.
-- Success criteria: the Brunnhof bus-17 diversion variant draws the correct shape (northbound through platform A, right turn onto Schwarztorstrasse); the Phase-1 violation count drops substantially across the network; spot-checked previously-correct lines are unchanged.
+> Amended with Phase 1's findings: the penalty keys on the same signal as the amended diagnostic — the quay's Atlas `compassDirection` versus the candidate's traversal bearing — not on the geometric side of the GTFS coordinate (proven noise). Because most compass-opposed passages are DATA errors on correctly drawn shapes, the penalty must be sized empirically before any full-feed adoption; the standalone tipping experiment below exists for exactly that.
+
+- Fork overlay on the locally built pfaedle image (`scripts/transit/pfaedle/fork/`, same fork-carrying pattern as the MOTIS fork): a penalty on a stop's **edge candidate** when the candidate's traversal bearing opposes the stop's Atlas `compassDirection` by at least a configurable angle. Candidates are directed edges, so the correctly-directed twin stays unpenalized and near-ties resolve toward it.
+- Compass data reaches pfaedle as a sidecar CSV (`stop_id,degrees`) named by the `PFAEDLE_STOP_COMPASS` env var; a compassDirection of exactly 0 counts as unset. No penalty without the sidecar.
+- New profile keys `routing_wrong_dir_penalty` (raw pfaedle weight units, like the other `*_penalty` keys; 1 s ≈ 0.0083) and `routing_wrong_dir_angle` (degrees, default 135). Penalty default 0 = off, upstream behaviour unchanged. Enabled for bus and tram profiles only; rail unaffected.
+- The penalty is **soft**: sized to break near-ties (the Brunnhof case) but to lose against structurally cheaper evidence — it must never force loops or detours at the many stops whose compass/quay data is itself wrong (Hallmattstrasse class). pfaedle's 120 s full-turn penalty is the natural guard: straight-through stops cannot redraw under a tie-breaker-sized value.
+- Sizing is empirical: `scripts/transit/tools/wrong_dir_experiment.py` shapes per-line mini-feeds against per-line OSM cuts with the patched image — `calibrate` bisects the smallest penalty that tips the Brunnhof bus-17 diversion trips, `run` shapes every Phase-1-flagged line at that value and diffs shapes against the zero-penalty baseline. The diff is the authoritative "what would change" list.
+- Success criteria: the Brunnhof bus-17 diversion trips draw the correct shape (northbound through platform A); confirmed-wrong drawn cases (Horgen Bocken, Kriens Kuonimatt) improve; the experiment sweep shows no redraw at confirmed-correct flagged stops (Hallmattstrasse, Vevey Marché, Lens, Chur). Adoption into the full pipeline only after the sweep is reviewed.
 
 ## Constraints
 

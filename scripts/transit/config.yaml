@@ -102,6 +102,48 @@ gtfs_trip_overrides:
     before_stop_id: "8515296"       # Brig Bahnhofplatz (parent)
     waypoint: [8.4481645, 46.531923]  # mid-tunnel vertex of the Furka-Basistunnel OSM way
     reason: "Reverse direction of the GEX Furka base tunnel override above."
+  - agency_id: "807"              # Automobildienst SZU
+    route_short_name: "132"
+    action: insert_waypoint
+    after_stop_id: "8588987"        # Horgen, Schnegg
+    before_stop_id: "8588416"       # Horgen, Bocken
+    waypoint: [8.610459, 47.244489]  # mid-vertex of the Bocken turnout service road
+    reason: "SE-bound trips are drawn as a near-U-turn on Einsiedlerstrasse facing the opposite platform; in reality the bus turns right into the curved turnout road and left back onto Einsiedlerstrasse (confirmed on site, pfaedle-stop-side-awareness.md)."
+  - agency_id: "801"              # PostAuto AG
+    route_short_name: "671"
+    action: insert_waypoint
+    after_stop_id: "8573697"        # Hettlingen, Föhrenstrasse
+    before_stop_id: "8503705"       # Hettlingen, Dorf
+    waypoint: [8.70970, 47.54554]   # southern approach street vertex, north of the Dorf stop
+    reason: "Drawn via the northern shortcut street, missing the Dorf stop by ~240 m; the real route turns south and serves the stop directly (confirmed wrong on the map, pfaedle-stop-side-awareness.md)."
+  - agency_id: "801"              # PostAuto AG
+    route_short_name: "677"
+    action: insert_waypoint
+    after_stop_id: "8573697"        # Hettlingen, Föhrenstrasse
+    before_stop_id: "8503705"       # Hettlingen, Dorf
+    waypoint: [8.70970, 47.54554]   # southern approach street vertex, north of the Dorf stop
+    reason: "Same Hettlingen Dorf misroute as the 671 override above."
+  - agency_id: "773"              # Verkehrsbetriebe Glattal
+    route_short_name: "771"
+    action: insert_waypoint
+    after_stop_id: "8587655"        # Wallisellen, Bahnhof (first stop)
+    before_stop_id: "8590896"       # Wallisellen, Schäfligraben
+    waypoint: [8.59445, 47.41266]   # apex of the eastern station loop
+    reason: "Departure from Wallisellen Bahnhof is drawn hooking west of the station; the real departure circulates via the eastern loop (confirmed wrong on the map, pfaedle-stop-side-awareness.md)."
+  - agency_id: "773"              # Verkehrsbetriebe Glattal
+    route_short_name: "772"
+    action: insert_waypoint
+    after_stop_id: "8590884"        # Wallisellen, Florastrasse
+    before_stop_id: "8587655"       # Wallisellen, Bahnhof
+    waypoint: [8.59244, 47.41345]   # vertex on the northern station loop
+    reason: "Arrival at Wallisellen Bahnhof is drawn cutting straight along the south side; the real approach circulates via the northern loop to the platform (confirmed wrong on the map, pfaedle-stop-side-awareness.md)."
+  - agency_id: "827"              # Städtische Verkehrsbetriebe Bern
+    route_short_name: "17"
+    action: insert_waypoint
+    after_stop_id: "8590014"        # Bern, Fischermätteli
+    before_stop_id: "ch:1:sloid:90010:0:2"  # Bern, Brunnhof platform A (diversion quay ONLY)
+    waypoint: [7.426521, 46.942913]  # vertex on the northbound approach street south of platform A
+    reason: "2026 construction-diversion trips serve Brunnhof platform A northbound, but pfaedle draws them southbound with a loop via Mattenhofstrasse/Lilienweg (the pfaedle-stop-side-awareness.md canonical case). Scoped to the platform-A quay so regular trips via quay 0:4 are untouched; drop this entry when the diversion leaves the feed."
 
 # ── GTFS preprocessing: agency denylists ─────────────────────────────────────
 # Both lists key on substrings of agency_name (case-insensitive) as found in
