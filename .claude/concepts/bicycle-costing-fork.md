@@ -57,9 +57,12 @@ Additional signals:
   straight-ahead passage along a through road, a traffic signal at
   the node may serve as the proxy for "a real crossing of two big
   roads".
-- **Official cycle-route relations** (OSM route relations) count as a
-  positive signal. If the needed information is not available at
-  query time, making it available is in scope for the fork.
+- **Official bicycle routes** (OSM cycle-route relations) are
+  slightly favored: membership gives an edge a small bonus in the
+  same spirit as the *great* tier — enough to tip the balance between
+  otherwise comparable options, never enough to win meaningful
+  detours. If the needed information is not available at query time,
+  making it available is in scope for the fork.
 - **Hills:** the strong hill-avoidance default from the main concept
   is preserved and must compose with the tier model (a flat bad road
   vs. a hilly fine road remains a meaningful trade-off, not an
@@ -72,6 +75,15 @@ Additional signals:
 - All tunable constants live in one central, documented place so
   tuning stays reviewable and future user-facing preferences
   (hilliness, stairs) map onto them cleanly.
+
+### Later enhancements (very provisional)
+
+Not part of this step, subject to change — noted so the constants are
+shaped with them in mind. User-facing ruler settings in the style of
+the transit options, each a per-request scaling of existing
+constants: fast ↔ calm (strength of the bad-tier and crossing
+penalties), hill avoidance, stronger favoring of official bicycle
+routes.
 
 ### Benchmark set
 
