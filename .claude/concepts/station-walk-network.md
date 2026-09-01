@@ -43,7 +43,9 @@ exactly the large interchanges where transfers are tight.
 - The walk line follows the platform's shape. A platform that curves must
   produce a curved walk line; a straight rectangular platform must
   produce a straight one. The line must stay inside the platform
-  footprint over its whole length.
+  footprint over its whole length, and must not wander laterally where
+  the footprint merely changes width — a stair opening or a widened head
+  is not a bend in the platform.
 - Platforms already mapped as open ways are used directly and are not
   re-synthesised.
 - Walk lines carry the level of the platform they were derived from.
@@ -62,9 +64,15 @@ exactly the large interchanges where transfers are tight.
   falling back to `layer`. A way whose level set does not intersect the
   platform's level set must never be welded, even where it passes
   directly over or under the platform.
-- Where neither the platform nor the candidate way carries level or
-  layer information, they are treated as compatible — this is the
-  ordinary at-grade station and must keep working.
+- Level compatibility is **asymmetric**. A platform that says nothing
+  about its level is an ordinary at-grade stop — most of Switzerland is
+  mapped that way — and there anything nearby may connect. But once a
+  platform declares a level, silence from the candidate is not
+  agreement: an undeclared candidate must not be welded to it.
+  (Treating silence as agreement welded two untagged
+  `tunnel=building_passage` ways on Bern's Welle overpass onto the
+  level-0 platform 1/2, and the router then routed passengers off the
+  street onto a platform that has no street access.)
 - Welding must reuse the identity of the existing pedestrian node, so
   that the connection is a real graph connection and not a second,
   parallel piece of geometry.
