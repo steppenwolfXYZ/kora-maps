@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 
 #include "fmt/format.h"
 
@@ -109,7 +111,16 @@ struct search {
                 "too many via stops: {}, limit: {}", q_.via_stops_.size(),
                 kMaxVias);
 
-    tts.factor_ = std::max(tts.factor_, 1.0F);
+    // kora fork: allow transfer factors < 1 (fast-walker speed tiers and
+    // the "daring" safety mode, see routing-options.md). Upstream floors
+    // at 1.0 because the precomputed lower-bound graph uses base transfer
+    // times — with factor < 1 the real cost can undercut the bound and
+    // the pruning would drop feasible journeys. We keep bounds sound by
+    // scaling the dijkstra lb results with the same factor below
+    // (scaled_cost >= factor * base_cost >= factor * base_lb). Floor at
+    // 0.2, comfortably below the smallest composed client factor
+    // (running x daring ~ 0.23).
+    tts.factor_ = std::max(tts.factor_, 0.2F);
     tts.min_transfer_time_ = std::max(tts.min_transfer_time_, 0_minutes);
     tts.additional_time_ = std::max(tts.additional_time_, 0_minutes);
     tts.default_ = tts.factor_ == 1.0F  //
@@ -140,6 +151,21 @@ struct search {
           state_.travel_time_lower_bound_);
       UTL_STOP_TIMING(lb);
       stats_.lb_time_ = static_cast<std::uint64_t>(UTL_TIMING_MS(lb));
+
+      // kora fork: with a transfer factor < 1 the dijkstra bounds (built
+      // from base transfer times) can overshoot the real scaled cost —
+      // shrink them by the factor to keep them valid lower bounds. See
+      // the factor floor above.
+      if (tts.factor_ < 1.0F) {
+        constexpr auto const kUnreachableLb =
+            std::numeric_limits<std::uint16_t>::max();
+        for (auto& lb : state_.travel_time_lower_bound_) {
+          if (lb != kUnreachableLb) {
+            lb = static_cast<std::uint16_t>(
+                std::floor(static_cast<float>(lb) * tts.factor_));
+          }
+        }
+      }
 
 #if defined(NIGIRI_TRACING)
       for (auto const& o : q_.start_) {
@@ -476,8 +502,11 @@ private:
                           }) {
               auto const walk_min = static_cast<int>(
                   std::abs((s.time_at_stop_ - s.time_at_start_).count()));
-              algo_.add_start(s.stop_, s.time_at_stop_,
-                              kora_walk_delta(walk_min));
+              algo_.add_start(
+                  s.stop_, s.time_at_stop_,
+                  kora_walk_delta(
+                      walk_min,
+                      q_.transfer_time_settings_.kora_minwalk_points_));
             } else {
               algo_.add_start(s.stop_, s.time_at_stop_);
             }

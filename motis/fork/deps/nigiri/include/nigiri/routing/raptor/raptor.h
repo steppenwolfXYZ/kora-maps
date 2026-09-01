@@ -892,7 +892,9 @@ private:
           // be updated (it would wrongly prune fewer-point labels);
           // the per-round merge in execute() absorbs the entry when its
           // round starts, and the pending mark makes it boardable then.
-          auto const kd = kora_walk_delta(static_cast<int>(fp_dur));
+          auto const kd = kora_walk_delta(
+              static_cast<int>(fp_dur),
+              transfer_time_settings_.kora_minwalk_points_);
           if (kd != 0U) {
             auto const tk = k + kd;
             if (tk <= kMaxTransfers + 1U &&
@@ -1025,7 +1027,8 @@ private:
           // kora fork: walk-weighted transfer points — see
           // update_footpaths for the rationale.
           auto const kd =
-              kora_walk_delta(static_cast<int>(fp.duration().count()));
+              kora_walk_delta(static_cast<int>(fp.duration().count()),
+                              transfer_time_settings_.kora_minwalk_points_);
           if (kd != 0U) {
             auto const tk = k + kd;
             if (tk <= kMaxTransfers + 1U &&
@@ -1133,7 +1136,8 @@ private:
         // boards anything, so no pending mark is needed; the per-round
         // merge and the journey collection read the entry.
         auto const kora_end_delta =
-            kora_walk_delta(static_cast<int>(dist_to_end_[i]));
+            kora_walk_delta(static_cast<int>(dist_to_end_[i]),
+                            transfer_time_settings_.kora_minwalk_points_);
         auto const ek = k + kora_end_delta;
         auto const kora_end_ok = ek <= kMaxTransfers + 1U;
 
@@ -1213,7 +1217,9 @@ private:
 
           // kora fork: same egress weighting as above, but with the
           // td offset's own duration.
-          auto const td_kd = kora_walk_delta(static_cast<int>(duration.count()));
+          auto const td_kd =
+              kora_walk_delta(static_cast<int>(duration.count()),
+                              transfer_time_settings_.kora_minwalk_points_);
           auto const td_ek = k + td_kd;
 
           if (td_ek <= kMaxTransfers + 1U &&

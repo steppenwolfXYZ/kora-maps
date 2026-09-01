@@ -1,5 +1,6 @@
 #include "nigiri/routing/raptor/pong.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -77,6 +78,36 @@ routing_result pong(timetable const& tt,
   s_state.alternatives_.clear();
   q.sanitize(tt);
 
+  // kora fork: sanitize the transfer-time settings like search.h does —
+  // PONG bypasses search<>::init(), so without this a raw factor from
+  // the API would flow through unclamped. Factors < 1 are allowed down
+  // to 0.2 (fast-walker tiers / daring mode, routing-options.md); the
+  // lower bounds computed below are shrunk by the same factor to stay
+  // valid (scaled_cost >= factor * base_cost >= factor * base_lb).
+  {
+    auto& tts = q.transfer_time_settings_;
+    tts.factor_ = std::max(tts.factor_, 0.2F);
+    tts.min_transfer_time_ = std::max(tts.min_transfer_time_, 0_minutes);
+    tts.additional_time_ = std::max(tts.additional_time_, 0_minutes);
+    tts.default_ = tts.factor_ == 1.0F  //
+                   && tts.min_transfer_time_ == 0_minutes  //
+                   && tts.additional_time_ == 0_minutes;
+  }
+  auto const kora_scale_lb = [&](std::vector<std::uint16_t>& lb_vec) {
+    auto const f = q.transfer_time_settings_.factor_;
+    if (f >= 1.0F) {
+      return;
+    }
+    constexpr auto const kUnreachableLb =
+        std::numeric_limits<std::uint16_t>::max();
+    for (auto& lb : lb_vec) {
+      if (lb != kUnreachableLb) {
+        lb = static_cast<std::uint16_t>(
+            std::floor(static_cast<float>(lb) * f));
+      }
+    }
+  };
+
   auto const processing_start_time = std::chrono::steady_clock::now();
 
   auto const fastest_direct = get_fastest_direct(tt, q, SearchDir);
@@ -125,6 +156,7 @@ routing_result pong(timetable const& tt,
                                        : &(kFwd ? rtt->fwd_search_lb_graph_
                                                 : rtt->bwd_search_lb_graph_)),
              ping_lb);
+    kora_scale_lb(ping_lb);
   }
   lb_time += std::chrono::steady_clock::now() - ping_lb_start;
 
@@ -178,6 +210,7 @@ routing_result pong(timetable const& tt,
                                          : &(kFwd ? rtt->bwd_search_lb_graph_
                                                   : rtt->fwd_search_lb_graph_)),
                pong_lb);
+      kora_scale_lb(pong_lb);
     }
   }
   lb_time += std::chrono::steady_clock::now() - pong_lb_start;
@@ -268,8 +301,10 @@ routing_result pong(timetable const& tt,
       // walk's point level (kora_walk_points.h).
       if constexpr (requires { ping.add_start(s.stop_, s.time_at_stop_, 0U); }) {
         ping.add_start(s.stop_, s.time_at_stop_,
-                       kora_walk_delta(static_cast<int>(std::abs(
-                           (s.time_at_stop_ - s.time_at_start_).count()))));
+                       kora_walk_delta(
+                           static_cast<int>(std::abs(
+                               (s.time_at_stop_ - s.time_at_start_).count())),
+                           q.transfer_time_settings_.kora_minwalk_points_));
       } else {
         ping.add_start(s.stop_, s.time_at_stop_);
       }
@@ -368,8 +403,10 @@ routing_result pong(timetable const& tt,
         // lands on a different level than its ping counterpart).
         if constexpr (requires { po.add_start(s.stop_, s.time_at_stop_, 0U); }) {
           po.add_start(s.stop_, s.time_at_stop_,
-                       kora_walk_delta(static_cast<int>(std::abs(
-                           (s.time_at_stop_ - s.time_at_start_).count()))));
+                       kora_walk_delta(
+                           static_cast<int>(std::abs(
+                               (s.time_at_stop_ - s.time_at_start_).count())),
+                           q.transfer_time_settings_.kora_minwalk_points_));
         } else {
           po.add_start(s.stop_, s.time_at_stop_);
         }

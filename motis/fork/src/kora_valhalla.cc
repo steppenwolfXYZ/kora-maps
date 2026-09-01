@@ -15,6 +15,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "boost/asio/co_spawn.hpp"
 #include "boost/asio/io_context.hpp"
@@ -254,6 +256,59 @@ geo::polyline decode_polyline6(std::string_view const encoded) {
   return out;
 }
 
+// Accumulate ascent / descent over a sampled elevation profile with a
+// reversal threshold (kElevationNoiseM): a run in one direction is
+// committed only once the profile turns back by more than the
+// threshold, so DEM jitter between neighbouring samples never becomes
+// climb. Returns nullopt for a profile too short to say anything.
+std::optional<std::pair<double, double>> elevation_gain(
+    std::vector<double> const& profile) {
+  if (profile.size() < 2U) {
+    return std::nullopt;
+  }
+  auto up = 0.0;
+  auto down = 0.0;
+  auto anchor = profile.front();  // last committed point
+  auto ext = profile.front();  // running extreme since the anchor
+  auto dir = 0;  // 0 = undecided, 1 = climbing, -1 = descending
+  for (auto i = std::size_t{1U}; i != profile.size(); ++i) {
+    auto const v = profile[i];
+    if (dir == 0) {
+      if (v - anchor > kElevationNoiseM) {
+        dir = 1;
+        ext = v;
+      } else if (anchor - v > kElevationNoiseM) {
+        dir = -1;
+        ext = v;
+      }
+    } else if (dir == 1) {
+      if (v > ext) {
+        ext = v;
+      } else if (ext - v > kElevationNoiseM) {
+        up += ext - anchor;
+        anchor = ext;
+        ext = v;
+        dir = -1;
+      }
+    } else {
+      if (v < ext) {
+        ext = v;
+      } else if (v - ext > kElevationNoiseM) {
+        down += anchor - ext;
+        anchor = ext;
+        ext = v;
+        dir = 1;
+      }
+    }
+  }
+  if (dir == 1) {
+    up += ext - anchor;
+  } else if (dir == -1) {
+    down += anchor - ext;
+  }
+  return std::pair{up, down};
+}
+
 }  // namespace
 
 std::optional<walk_route> route(geo::latlng const& from,
@@ -266,6 +321,11 @@ std::optional<walk_route> route(geo::latlng const& from,
     auto body = costing();
     body["locations"] = locations_json({from, to});
     body["directions_options"] = json::object{{"units", "kilometers"}};
+    // Ask for the elevation profile along the shape — it feeds the
+    // leg's ascent / descent (transit-routing.md § Walk elevation).
+    // Valhalla omits the array when no elevation data is configured;
+    // that stays a soft absence, never an error.
+    body["elevation_interval"] = kElevationIntervalM;
 
     auto const res = post_sync("/route", json::serialize(body), 10s);
     if (res.status_ == 400) {
@@ -284,6 +344,8 @@ std::optional<walk_route> route(geo::latlng const& from,
     auto duration = 0.0;
     auto distance_km = 0.0;
     auto shape = geo::polyline{};
+    auto profile = std::vector<double>{};
+    auto has_profile = false;
     for (auto const& leg : legs) {
       auto const& lo = leg.as_object();
       auto const& summary = lo.at("summary").as_object();
@@ -291,14 +353,36 @@ std::optional<walk_route> route(geo::latlng const& from,
       distance_km += num(summary.at("length"));
       auto decoded = decode_polyline6(lo.at("shape").as_string());
       shape.insert(end(shape), begin(decoded), end(decoded));
+      if (auto const* e = lo.if_contains("elevation");
+          e != nullptr && e->is_array()) {
+        has_profile = true;
+        for (auto const& v : e->as_array()) {
+          // Valhalla writes a null-ish sample where the elevation tile
+          // has no data; skipping keeps the neighbouring samples
+          // adjacent, which is the least-wrong reading of a gap.
+          if (v.is_double() || v.is_int64()) {
+            profile.push_back(num(v));
+          }
+        }
+      }
     }
+
+    // Explicit optional type on the else branch: a bare std::nullopt
+    // has no common type with optional<pair> and would not compile.
+    auto const gain = has_profile
+                          ? elevation_gain(profile)
+                          : std::optional<std::pair<double, double>>{};
 
     result = legs.empty()
                  ? std::optional<walk_route>{}
                  : std::optional{walk_route{
                        std::chrono::seconds{static_cast<std::int64_t>(
                            std::ceil(duration))},
-                       distance_km * 1000.0, std::move(shape)}};
+                       distance_km * 1000.0, std::move(shape),
+                       gain ? std::optional<double>{gain->first}
+                            : std::optional<double>{},
+                       gain ? std::optional<double>{gain->second}
+                            : std::optional<double>{}}};
     route_cache().put(key, *result);
   }
 

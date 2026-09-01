@@ -8,6 +8,13 @@
 #                                    selection) via Valhalla one-to-many
 #   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
 #                                    transfer) via Valhalla /route
+#   include/motis/osr/parameters.h — kora_walk_factor_: query-scoped
+#                                    walking-speed scaling of the
+#                                    Valhalla surfaces (routing-options.md)
+#   openapi.yaml                   — Leg.elevationUp / Leg.elevationDown:
+#                                    walk ascent / descent sampled from
+#                                    Valhalla's elevation profile
+#                                    (transit-routing.md § Walk elevation)
 #   src/server.cc                  — startup probe: no Valhalla, no serve
 #   deps/nigiri/src/routing/raptor/optimize_footpaths.cc
 #                                  — same-stop re-boarding as a transfer-
@@ -116,6 +123,14 @@ RUN cmake -G Ninja -S . -B build \
 # `Re-checking globbed directories` in the log confirms it.
 COPY include/ /src/include/
 COPY src/ /src/src/
+# The API schema drives codegen (openapi_generate -> motis-api). It is
+# deliberately ABSENT from the touch list below: re-touching it on every
+# iteration would regenerate motis-api.h and recompile nearly every TU
+# (~full rebuild each time). COPY preserves the working tree's mtime,
+# which is newer than the baseline layer's generated header, so a real
+# edit still triggers regeneration. Caveat for a MOTIS_REF bump: re-diff
+# and re-save this file so its mtime lands after the new baseline layer.
+COPY openapi.yaml /src/openapi.yaml
 # deps/ overlays land INSIDE dependency checkouts that the baseline
 # configure step populated (e.g. deps/nigiri/) — nigiri is pinned
 # transitively via MOTIS's .pkg, so these are full-file copies of that
@@ -132,6 +147,7 @@ COPY deps/ /src/deps/
 # re-configure fast (~1-2 min).
 RUN touch -c \
         /src/include/motis/kora_valhalla.h \
+        /src/include/motis/osr/parameters.h \
         /src/src/compute_footpaths.cc \
         /src/src/kora_valhalla.cc \
         /src/src/server.cc \
@@ -145,6 +161,7 @@ RUN touch -c \
         /src/deps/nigiri/include/nigiri/routing/search.h \
         /src/deps/nigiri/include/nigiri/routing/kora_alternatives.h \
         /src/deps/nigiri/include/nigiri/routing/kora_walk_points.h \
+        /src/deps/nigiri/include/nigiri/routing/transfer_time_settings.h \
         /src/deps/nigiri/include/nigiri/routing/limits.h \
         /src/deps/nigiri/include/nigiri/routing/raptor/raptor.h && \
     cmake -S . -B build && \

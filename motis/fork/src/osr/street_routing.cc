@@ -1,5 +1,10 @@
 #include "motis/osr/street_routing.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+
 #include "geo/polyline_format.h"
 
 #include "utl/concat.h"
@@ -261,7 +266,29 @@ api::Itinerary street_routing(osr::ways const& w,
     // were derived from Valhalla numbers already (offsets at query
     // time, the footpath matrix at import time); Valhalla here supplies
     // the geometry.
-    auto const walk = kora_valhalla::route(from.pos_, to.pos_, max);
+    // kora fork: walking-speed support (routing-options.md). Valhalla
+    // is queried at the base kWalkSpeedKmh so the coordinate-keyed
+    // route cache stays shared across speeds; the budget is converted
+    // into base-speed terms for the call and the returned duration is
+    // rescaled to the requested speed. Factor 1.0 (no pedestrianSpeed
+    // sent) reproduces today's numbers bit-for-bit.
+    //
+    // Geometry-only mode (both leg times fixed by the journey): the
+    // caller's `max` is the leg duration plus a small slack, expressed
+    // in REQUESTED-speed terms. Dividing it like a search budget makes
+    // real walks read as "no path" (cancelled leg, no geometry drawn) —
+    // instead widen it so the base-speed walk always fits: unchanged
+    // for factor >= 1 (base duration is shorter), expanded by 1/factor
+    // for factor < 1.
+    auto const walk_factor = osr_params.kora_walk_factor_;
+    auto const geometry_only = start_time.has_value() && end_time.has_value();
+    auto const base_budget =
+        walk_factor <= 0.0
+            ? max
+            : std::chrono::seconds{static_cast<std::int64_t>(std::ceil(
+                  static_cast<double>(max.count()) /
+                  (geometry_only ? std::min(walk_factor, 1.0) : walk_factor)))};
+    auto const walk = kora_valhalla::route(from.pos_, to.pos_, base_budget);
     if (!walk.has_value()) {
       if (!start_time.has_value() || !end_time.has_value()) {
         return {};
@@ -271,10 +298,12 @@ api::Itinerary street_routing(osr::ways const& w,
                              /*cancelled=*/true);
     }
 
+    auto const walk_duration = std::chrono::seconds{static_cast<std::int64_t>(
+        std::ceil(static_cast<double>(walk->duration_.count()) * walk_factor))};
     auto const deduced_start_time =
-        start_time ? *start_time : *end_time - walk->duration_;
+        start_time ? *start_time : *end_time - walk_duration;
     auto const deduced_end_time =
-        end_time ? *end_time : *start_time + walk->duration_;
+        end_time ? *end_time : *start_time + walk_duration;
 
     auto itinerary = api::Itinerary{
         .duration_ = std::chrono::duration_cast<std::chrono::seconds>(
@@ -292,6 +321,19 @@ api::Itinerary street_routing(osr::ways const& w,
         .startTime_ = deduced_start_time,
         .endTime_ = deduced_end_time,
         .distance_ = walk->distance_m_,
+        // kora fork: ascent / descent of this walk, from the elevation
+        // profile Valhalla samples along the shape (openapi.yaml adds
+        // both fields to Leg). Absent when Valhalla returned no
+        // elevation array.
+        .elevationUp_ = walk->ascent_m_
+                            ? std::optional<std::int64_t>{static_cast<
+                                  std::int64_t>(std::lround(*walk->ascent_m_))}
+                            : std::optional<std::int64_t>{},
+        .elevationDown_ =
+            walk->descent_m_
+                ? std::optional<std::int64_t>{static_cast<std::int64_t>(
+                      std::lround(*walk->descent_m_))}
+                : std::optional<std::int64_t>{},
         // steps_ stays empty: Valhalla maneuvers are not mapped to
         // MOTIS step instructions; the app does not render steps.
         .legGeometry_ = detailed_leg

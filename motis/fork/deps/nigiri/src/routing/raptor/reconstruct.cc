@@ -540,7 +540,9 @@ void reconstruct_journey_with_vias(timetable const& tt,
                              : fp.duration().count();
     auto const kora_delta =
         is_transfer_buffer ? 0U
-                           : kora_walk_delta(static_cast<int>(fp_duration));
+                           : kora_walk_delta(
+                                 static_cast<int>(fp_duration),
+                                 q.transfer_time_settings_.kora_minwalk_points_);
     if (k <= kora_delta) {
       // the ride preceding this walk would sit at level <= 0
       return std::nullopt;
@@ -861,7 +863,9 @@ void reconstruct_journey_with_vias(timetable const& tt,
       for_each_meta(tt, q.start_match_mode_, o.target(),
                     [&](location_idx_t const eq) { hit = hit || eq == at; });
       if (!hit ||
-          kora_walk_delta(static_cast<int>(o.duration().count())) != level) {
+          kora_walk_delta(static_cast<int>(o.duration().count()),
+                          q.transfer_time_settings_.kora_minwalk_points_) !=
+              level) {
         return false;
       }
       auto const latest_leave =

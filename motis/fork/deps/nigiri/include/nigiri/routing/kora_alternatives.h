@@ -214,7 +214,9 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
   auto cands = std::vector<kora_cand>{};
   for (auto const& o : q.destination_) {
     auto const s = o.target_;
-    auto const kd = kora_walk_delta(static_cast<int>(o.duration_.count()));
+    auto const kd = kora_walk_delta(
+        static_cast<int>(o.duration_.count()),
+        q.transfer_time_settings_.kora_minwalk_points_);
     auto const change = adjusted_transfer_time(
         q.transfer_time_settings_, tt.locations_.transfer_time_[s].count());
     auto best_cand = std::optional<kora_cand>{};

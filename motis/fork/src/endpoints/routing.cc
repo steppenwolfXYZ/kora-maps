@@ -312,12 +312,21 @@ std::vector<n::routing::offset> get_offsets(
       auto const durations = kora_valhalla::one_to_many(
           pos.pos_, stop_coords, dir == osr::direction::kForward);
 
+      // kora fork: rescale the base-speed Valhalla durations to the
+      // requested walking speed (routing-options.md). Factor 1.0 (no
+      // pedestrianSpeed sent) reproduces today's numbers bit-for-bit.
+      auto const walk_factor = osr_params.kora_walk_factor_;
       for (auto const [d, l] : utl::zip(durations, near_stops)) {
-        if (d.has_value() && *d <= max) {
+        if (!d.has_value()) {
+          continue;
+        }
+        auto const scaled = std::chrono::seconds{static_cast<std::int64_t>(
+            std::ceil(static_cast<double>(d->count()) * walk_factor))};
+        if (scaled <= max) {
           offsets.emplace_back(
               l,
               n::duration_t{
-                  static_cast<unsigned>(std::ceil(d->count() / 60.0))},
+                  static_cast<unsigned>(std::ceil(scaled.count() / 60.0))},
               static_cast<n::transport_mode_id_t>(profile));
         }
       }
@@ -581,17 +590,27 @@ std::vector<n::routing::offset> routing::get_offsets(
                                     : tt_->locations_.footpaths_in_[prf];
               auto const max_dur =
                   std::chrono::duration_cast<n::duration_t>(max);
+              // kora fork: walking-speed support (routing-options.md) —
+              // matrix durations describe the base kWalkSpeedKmh walker;
+              // rescale them to the requested speed like the live
+              // one-to-many offsets. Factor 1.0 = unchanged.
+              auto const walk_factor = osr_params.kora_walk_factor_;
+              auto const rescale = [&](n::duration_t const d) {
+                return n::duration_t{static_cast<n::duration_t::rep>(
+                    std::ceil(static_cast<double>(d.count()) * walk_factor))};
+              };
               auto best = n::hash_map<n::location_idx_t, n::duration_t>{};
               for_each_meta(
                   *tt_, nigiri::routing::location_match_mode::kEquivalent,
                   l.l_, [&](n::location_idx_t const c) {
                     for (auto const fp : fps.at(c)) {
-                      if (fp.duration() > max_dur) {
+                      auto const scaled = rescale(fp.duration());
+                      if (scaled > max_dur) {
                         continue;
                       }
                       auto const it = best.find(fp.target());
-                      if (it == end(best) || fp.duration() < it->second) {
-                        best[fp.target()] = fp.duration();
+                      if (it == end(best) || scaled < it->second) {
+                        best[fp.target()] = scaled;
                       }
                     }
                   });
@@ -884,11 +903,19 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
   // per Pareto point.
   auto kora_alt_epsilon_sec = 0;
   auto kora_alt_max = 0;
+  // kora fork: minimize-walking point table (routing-options.md
+  // § Minimize walking) — `koraWalkPoints=minwalk` switches RAPTOR's
+  // walk-weighted transfer points to the steeper per-query table
+  // (kora_walk_points.h), so walking-light journeys survive as their
+  // own Pareto points. Fork-only URL param like the ones above.
+  auto kora_minwalk_points = false;
   for (auto const& p : url.params()) {
     if (p.key == "alternativesEpsilon") {
       kora_alt_epsilon_sec = std::clamp(std::atoi(p.value.c_str()), 0, 1800);
     } else if (p.key == "alternativesMax") {
       kora_alt_max = std::clamp(std::atoi(p.value.c_str()), 0, 10);
+    } else if (p.key == "koraWalkPoints") {
+      kora_minwalk_points = p.value == "minwalk";
     }
   }
 
@@ -987,7 +1014,20 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
               *query.maxTransfers_ <= n::routing::kMaxTransfers
           ? (*query.maxTransfers_ - (api_version < 3 ? 1 : 0))
           : n::routing::kMaxTransfers;
-  auto const osr_params = get_osr_parameters(query);
+  auto osr_params = get_osr_parameters(query);
+  // kora fork: walking-speed support (routing-options.md). Valhalla is
+  // always queried at the base kWalkSpeedKmh (shared caches); the
+  // factor rescales its durations to the requested speed. Mirrors the
+  // upstream pedestrianSpeed validation range (0.3–10 m/s) — an
+  // out-of-range or absent value keeps the neutral 1.0 and the query
+  // behaves exactly like today. Transfer times are NOT scaled here —
+  // the client expresses them via `transferTimeFactor` (nigiri applies
+  // it to the imported matrix at query time).
+  if (query.pedestrianSpeed_.has_value() && *query.pedestrianSpeed_ > 0.3 &&
+      *query.pedestrianSpeed_ < 10.0) {
+    osr_params.kora_walk_factor_ =
+        (kora_valhalla::kWalkSpeedKmh / 3.6) / *query.pedestrianSpeed_;
+  }
   auto const detailed_transfers =
       query.detailedTransfers_.value_or(query.detailedLegs_);
 
@@ -1182,7 +1222,12 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
                 .min_transfer_time_ = n::duration_t{query.minTransferTime_},
                 .additional_time_ =
                     n::duration_t{query.additionalTransferTime_},
-                .factor_ = static_cast<float>(query.transferTimeFactor_)},
+                .factor_ = static_cast<float>(query.transferTimeFactor_),
+                // kora fork: minimize-walking point table selector —
+                // rides on the tts because that already reaches every
+                // consumer (raptor, both drivers, reconstruction,
+                // alternates). Not part of `default_`.
+                .kora_minwalk_points_ = kora_minwalk_points},
         .via_stops_ = get_via_stops(*tt_, *tags_, query.via_,
                                     query.viaMinimumStay_, query.arriveBy_),
         .fastest_direct_ = fastest_direct == kInfinityDuration

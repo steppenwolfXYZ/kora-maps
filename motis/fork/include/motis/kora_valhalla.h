@@ -44,10 +44,28 @@ constexpr auto const kFullTransferProfile = nigiri::kBikeProfile;
 // rebuild.
 constexpr auto const kWalkSpeedKmh = 5.1;
 
+// Spacing (metres) at which Valhalla samples the elevation profile along
+// a walk shape. Matches the ~30 m native resolution of the SRTM-derived
+// elevation tiles — finer sampling would only add interpolation noise.
+constexpr auto const kElevationIntervalM = 30.0;
+
+// Reversal threshold (metres) of the ascent / descent accumulator. A
+// direction change smaller than this is DEM noise, not a hill: summing
+// raw sample deltas over a multi-kilometre walk otherwise invents tens
+// of metres of climb.
+constexpr auto const kElevationNoiseM = 3.0;
+
 struct walk_route {
   std::chrono::seconds duration_;
   double distance_m_;
   geo::polyline shape_;
+  // Noise-filtered ascent / descent along the walk, in metres, derived
+  // from the elevation profile Valhalla samples every
+  // kElevationIntervalM along the shape. nullopt when the response
+  // carried no elevation array (no elevation data built) — the API's
+  // leg.elevationUp / leg.elevationDown then stay absent.
+  std::optional<double> ascent_m_;
+  std::optional<double> descent_m_;
 };
 
 // Point-to-point pedestrian route. Returns nullopt when Valhalla finds
