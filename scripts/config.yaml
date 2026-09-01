@@ -136,6 +136,14 @@ walkability:
 paths:
   color: "#c08040"
   color_unpaved: "#b08050"
+  # Pedestrian areas (squares, plazas) arrive as Polygons in the same
+  # `class=path` bucket as footway lines. Drawn as a fill, not an outline:
+  # a boundary line is indistinguishable from a path and reads as one, which
+  # is misleading — the surface is walkable, its edge is not a route.
+  # Softer than `color` because a large fill carries far more visual weight
+  # than a 1 px line of the same value.
+  area_color: "#d6bf9f"
+  area_min_zoom: 14
   width: 1.2
   min_zoom: 14
   unpaved_dasharray: [3, 2]

@@ -108,6 +108,16 @@ WELD_TOLERANCE_M = 3.0
 LIFT_TOLERANCE_M = 2.0
 # A quay farther than this from any platform walk line is left alone.
 ANCHOR_MAX_M = 25.0
+# Upper bound on visibility-graph nodes per pedestrian area. A handful of
+# enormous plazas would otherwise dominate the build for no routing gain;
+# they are logged rather than silently truncated.
+AREA_MAX_GRAPH_NODES = 60
+# Crossings shorter than this are already covered by the ring itself.
+AREA_MIN_CROSS_M = 2.0
+# Points sampled along a candidate crossing to prove it stays on walkable
+# ground. Nine catches the sliver holes that defeated a single midpoint
+# test, at no measurable build cost.
+AREA_VISIBILITY_SAMPLES = 9
 
 
 # ---------------------------------------------------------------- geometry
@@ -223,6 +233,31 @@ def trace_centreline(xy):
     if len(out) < 2:
         out = [pts[0], pts[-1]]
     return out
+
+
+def segments_cross(p1, p2, p3, p4) -> bool:
+    """Proper intersection of segments p1p2 and p3p4.
+
+    Touching at an endpoint does not count — visibility edges legitimately
+    start and end on ring vertices, and a shared endpoint would otherwise
+    read as an obstruction.
+    """
+    def side(a, b, c):
+        v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        return 0 if abs(v) < 1e-12 else (1 if v > 0 else -1)
+    d1, d2 = side(p3, p4, p1), side(p3, p4, p2)
+    d3, d4 = side(p1, p2, p3), side(p1, p2, p4)
+    return d1 * d2 < 0 and d3 * d4 < 0
+
+
+def is_reflex(prev_p, p, next_p) -> bool:
+    """Whether vertex p turns into the polygon (a concave corner).
+
+    Only reflex corners can be needed to route around an obstruction, so
+    the convex ones are left out of the visibility graph.
+    """
+    return ((p[0] - prev_p[0]) * (next_p[1] - p[1])
+            - (p[1] - prev_p[1]) * (next_p[0] - p[0])) < 0
 
 
 def point_in_ring(x, y, ring) -> bool:
@@ -381,6 +416,10 @@ def run_extract(force: bool) -> None:
         "w/railway=platform", "w/public_transport=platform",
         "w/highway=platform",
         "r/railway=platform", "r/public_transport=platform",
+        # Pedestrian squares. Only relations can carry inner rings, and
+        # tags-filter brings their member ways along, which is how the
+        # holes reach us.
+        "r/highway=pedestrian",
         f"w/highway={hw}", "n/highway=elevator",
     ]
     print("  $", " ".join(cmd))
@@ -413,7 +452,10 @@ class Reader:
         self.platforms = []   # dicts: ring(lonlat), tags, refs, osm
         self.lifts = []       # dicts: ring(lonlat), tags, osm
         self.ped_nodes = []   # (node_id, lon, lat, level_set)
+        self.ped_node_ids = set()
         self.open_platforms = []  # platforms already mapped as open ways
+        self.areas = []       # pedestrian squares: outer/inners as node lists
+        self._area_way_ids = set()
         self._cells = set()
 
     def _mark(self, pts) -> None:
@@ -449,8 +491,22 @@ class Reader:
     def _read_platforms(self, path: Path) -> None:
         fp = osmium.FileProcessor(str(path)).with_areas().with_locations()
         for obj in fp:
+            if obj.is_relation():
+                # Boundary ways of a pedestrian area are geometry, not
+                # routes. Remembering them lets pass 2 leave their nodes
+                # out of the walkable set, so an area's own outline is
+                # never mistaken for a way entering it.
+                t = dict(obj.tags)
+                if t.get("highway") == "pedestrian":
+                    for m in obj.members:
+                        if m.type == "w":
+                            self._area_way_ids.add(m.ref)
+                continue
             if obj.is_area():
                 tags = dict(obj.tags)
+                if tags.get("highway") == "pedestrian":
+                    self._read_pedestrian_area(obj, tags)
+                    continue
                 if not (is_platform(tags) or is_lift(tags)):
                     continue
                 rings = []
@@ -489,11 +545,40 @@ class Reader:
                         })
                         self._mark(pts)
 
+    def _read_pedestrian_area(self, obj, tags) -> None:
+        """A pedestrian square, kept with node ids so crossings can be
+        welded onto the real graph rather than duplicated beside it."""
+        rings = []
+        for outer in obj.outer_rings():
+            pts = [(n.ref, n.lon, n.lat) for n in outer]
+            if len(pts) < 4:
+                continue
+            inners = []
+            for inner in obj.inner_rings(outer):
+                ip = [(n.ref, n.lon, n.lat) for n in inner]
+                if len(ip) >= 4:
+                    inners.append(ip)
+            rings.append((pts, inners))
+        if not rings:
+            return
+        outer, inners = max(rings, key=lambda r: ring_area(
+            [(x, y) for _, x, y in r[0]]))
+        self.areas.append({
+            "outer": outer, "inners": inners, "tags": tags,
+            "levels": level_set(tags),
+            "osm": f"{'w' if obj.from_way() else 'r'}{obj.orig_id()}",
+        })
+        self._mark([(x, y) for _, x, y in outer])
+        if obj.from_way():
+            self._area_way_ids.add(obj.orig_id())
+
     def _read_ped_nodes(self, path: Path) -> None:
         fp = osmium.FileProcessor(str(path)).with_locations()
         for obj in fp:
             if obj.is_way():
                 tags = dict(obj.tags)
+                if obj.id in self._area_way_ids:
+                    continue
                 if tags.get("highway") not in WALKABLE_HIGHWAY:
                     continue
                 lv = level_set(tags)
@@ -505,6 +590,7 @@ class Reader:
                         continue
                     self.ped_nodes.append(
                         (n.ref, n.location.lon, n.location.lat, lv))
+                    self.ped_node_ids.add(n.ref)
             elif obj.is_node():
                 tags = dict(obj.tags)
                 if (tags.get("highway") == "elevator"
@@ -575,7 +661,9 @@ def build(reader: Reader, overlay: Overlay):
 
     walk_lines = []   # dicts: line(lonlat), refs, levels, connected, osm
     stats = {"platforms": 0, "welds": 0, "orphans": 0, "lifts": 0,
-             "lift_links": 0, "open_platforms": 0, "open_synthesised": 0}
+             "lift_links": 0, "open_platforms": 0, "open_synthesised": 0,
+             "areas_seen": 0, "areas_crossed": 0, "areas_no_entry": 0,
+             "areas_too_large": 0, "area_edges": 0, "area_edges_blocked": 0}
 
     # --- platforms mapped as areas: trace a walk line, then weld it.
     # Open platform ways that the router cannot see join the same path,
@@ -722,7 +810,104 @@ def build(reader: Reader, overlay: Overlay):
             })
         stats["lift_links"] += len(touching)
 
+    # --- pedestrian squares: direct crossings between their entry points
+    for area in reader.areas:
+        _cross_area(area, reader, overlay, stats)
+
     return walk_lines, stats
+
+
+def _cross_area(area, reader, overlay, stats) -> None:
+    """Make one pedestrian square traversable.
+
+    Builds a visibility graph over the square's entry points plus the
+    corners that could be needed to get round an obstruction — reflex
+    vertices of the outline and every vertex of an inner ring — and emits
+    an edge wherever the straight line between two of them stays inside
+    the square and clear of its holes.
+
+    Direct lines rather than a central hub: a hub drags a crossing to the
+    middle of a long thin square even when the real walk clips a corner.
+    Corners are in the graph so that an obstructed pair still connects, by
+    the shortest way round rather than not at all — which keeps the drawn
+    line out of the building it would otherwise cut through.
+    """
+    stats["areas_seen"] += 1
+    outer, inners = area["outer"], area["inners"]
+    lat0 = outer[0][2]
+    kx, ky = metric_frame(lat0)
+    ring_xy = [to_xy(x, y, kx, ky) for _, x, y in outer]
+    inner_xy = [[to_xy(x, y, kx, ky) for _, x, y in ring] for ring in inners]
+
+    # Entry points: boundary nodes that some other walkable way also uses.
+    entries = []
+    for i, (nid, lon, lat) in enumerate(outer):
+        if nid in reader.ped_node_ids:
+            entries.append(i)
+    if len(set(outer[i][0] for i in entries)) < 2:
+        stats["areas_no_entry"] += 1
+        return
+
+    # Graph nodes: entries, reflex outline corners, all inner-ring corners.
+    idx = {}
+    def add(nid, xy):
+        if nid not in idx:
+            idx[nid] = xy
+    for i in entries:
+        add(outer[i][0], ring_xy[i])
+    n = len(ring_xy)
+    for i in range(n - 1):
+        if is_reflex(ring_xy[i - 1], ring_xy[i], ring_xy[(i + 1) % (n - 1)]):
+            add(outer[i][0], ring_xy[i])
+    for ring, rxy in zip(inners, inner_xy):
+        for (nid, _, _), xy in zip(ring, rxy):
+            add(nid, xy)
+
+    if len(idx) > AREA_MAX_GRAPH_NODES:
+        stats["areas_too_large"] += 1
+        return
+
+    edges = [(ring_xy[i], ring_xy[i + 1]) for i in range(len(ring_xy) - 1)]
+    for rxy in inner_xy:
+        edges += [(rxy[i], rxy[i + 1]) for i in range(len(rxy) - 1)]
+
+    def visible(a, b):
+        # Sample along the segment rather than testing its midpoint alone.
+        # A single sample misses the cases that matter here: a chord whose
+        # centre falls on walkable ground while an end of it clips a hole,
+        # and slivers where ray casting on one point is numerically
+        # unlucky. Sampling is cheap next to being wrong — an edge through
+        # a building is drawn on the map, not merely mis-costed.
+        for k in range(1, AREA_VISIBILITY_SAMPLES + 1):
+            t = k / (AREA_VISIBILITY_SAMPLES + 1.0)
+            px = a[0] + (b[0] - a[0]) * t
+            py = a[1] + (b[1] - a[1]) * t
+            if not point_in_ring(px, py, ring_xy):
+                return False
+            for rxy in inner_xy:
+                if point_in_ring(px, py, rxy):
+                    return False
+        return not any(segments_cross(a, b, e[0], e[1]) for e in edges)
+
+    ids = list(idx)
+    made = 0
+    tags = {"highway": "footway", "foot": "yes",
+            "kora:area_cross": "yes", "kora:source": area["osm"]}
+    if area["tags"].get("level"):
+        tags["level"] = area["tags"]["level"]
+    for a in range(len(ids)):
+        for b in range(a + 1, len(ids)):
+            pa, pb = idx[ids[a]], idx[ids[b]]
+            if math.dist(pa, pb) < AREA_MIN_CROSS_M:
+                continue
+            if not visible(pa, pb):
+                stats["area_edges_blocked"] += 1
+                continue
+            overlay.way([ids[a], ids[b]], tags)
+            made += 1
+    stats["area_edges"] += made
+    if made:
+        stats["areas_crossed"] += 1
 
 
 # ----------------------------------------------------------------- anchors
@@ -825,6 +1010,7 @@ def main() -> None:
     print(f"  platform areas {len(reader.platforms):,}  "
           f"open platform ways {len(reader.open_platforms):,}  "
           f"lift shafts {len(reader.lifts):,}  "
+          f"pedestrian areas {len(reader.areas):,}  "
           f"pedestrian nodes {len(reader.ped_nodes):,}")
 
     overlay = Overlay()
@@ -835,6 +1021,12 @@ def main() -> None:
     print(f"  welds {stats['welds']:,}  "
           f"unwelded platforms {stats['orphans']:,}")
     print(f"  lift hubs {stats['lifts']:,}  lift links {stats['lift_links']:,}")
+    print(f"  pedestrian areas {stats['areas_seen']:,}: "
+          f"crossed {stats['areas_crossed']:,}, "
+          f"no entry points {stats['areas_no_entry']:,}, "
+          f"too large {stats['areas_too_large']:,}")
+    print(f"  crossing edges {stats['area_edges']:,}  "
+          f"(rejected as obstructed {stats['area_edges_blocked']:,})")
 
     write_overlay(overlay, OVERLAY_PBF)
     print(f"→ {OVERLAY_PBF}  "

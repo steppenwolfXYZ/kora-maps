@@ -238,7 +238,13 @@ def build_path_layers(cfg, modes=None):
     if modes is None:
         modes = ["tunnel", "normal", "bridge"]
 
-    path_filter_base = class_filter(PATH_CLASSES)
+    # Polygons in this class are pedestrian areas, painted by
+    # build_pedestrian_area_layer as a fill. A line layer would render them
+    # as their outline, which looks exactly like a footway and isn't one.
+    path_filter_base = ["all",
+        class_filter(PATH_CLASSES),
+        ["!=", ["geometry-type"], "Polygon"],
+    ]
 
     for mode in modes:
         bf = brunnel_filter(mode)
@@ -374,3 +380,27 @@ def _build_walkability_width_expression(w):
         ], mz["width_mid"],
         mz["width_low"]
     ]
+
+
+def build_pedestrian_area_layer(cfg):
+    """Pedestrian squares and plazas as a surface fill.
+
+    These come through as Polygons in the `transportation` layer's
+    `class=path` bucket, mixed in with ordinary footway lines. Painted with
+    the landuse block rather than with the paths so that every street, rail
+    and path line draws on top — the square is ground the others cross, not
+    a feature that covers them.
+    """
+    pc = cfg["paths"]
+    return {
+        "id": "pedestrian-area",
+        "type": "fill",
+        "source": "openmaptiles",
+        "source-layer": "transportation",
+        "minzoom": pc["area_min_zoom"],
+        "filter": ["all",
+            class_filter(PATH_CLASSES),
+            ["==", ["geometry-type"], "Polygon"],
+        ],
+        "paint": {"fill-color": pc["area_color"]},
+    }
