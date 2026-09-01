@@ -17,6 +17,10 @@ import {
 	enterRouteOverlay, exitRouteOverlay, disposeRouteOverlay,
 	focusRouteLeg, frameItinerary
 } from '../routing/routeOverlay';
+import {
+	enterDirectRouteOverlay, exitDirectRouteOverlay, disposeDirectRouteOverlay,
+	directOverlayActive, frameDirectRoutes
+} from '../routing/directRouteOverlay';
 import type { Endpoint, Itinerary, Leg } from '../routing/types';
 import { installClickPopups, type RouteEndpointRequest } from './popups/handlers';
 import { lineDetailState } from '../linedetail/state.svelte';
@@ -62,6 +66,7 @@ export function enterLineDetail(
 	//      effect doesn't fire mid-entry and tear us back down.
 	if (routingState.open) {
 		if (routingState.selectedItinerary) exitRouteOverlay(map);
+		if (directOverlayActive()) exitDirectRouteOverlay(map);
 		routingState.closePanel();
 	}
 
@@ -82,6 +87,10 @@ export const focusSelectedLeg = (leg: Leg) =>
  * entry and the reset to the overview after a leg focus zoomed in. */
 export const frameSelectedItinerary = (it: Itinerary) =>
 	frameItinerary(() => mapUi.mapRef, it, routeColorIndex, routeStationIndex);
+
+/** Frame all shown direct cycling / walking alternatives — the direct
+ * modes' map-mode entry / reframe (pedestrian-bicycle-routing.md). */
+export const frameShownDirectRoutes = () => frameDirectRoutes(() => mapUi.mapRef);
 
 /** Popup Route from/to button → routing endpoint. Station endpoints
  * need the feed's parent stop id (`pid`, SLOID scheme) for the MOTIS
@@ -144,6 +153,25 @@ export function setupMapOrchestration() {
 		if (!map || !map.isStyleLoaded()) return;
 		if (it) enterRouteOverlay(map, it, routeColorIndex, routeStationIndex);
 		else exitRouteOverlay(map);
+	});
+
+	// Direct cycling / walking overlay (pedestrian-bicycle-routing.md
+	// § Query & alternatives): all alternatives on the map while the
+	// panel is open on a direct tab; selection changes re-tag which one
+	// wears the full color. Closing the panel keeps the routes in state
+	// (restore-on-reopen) but takes them off the map, so the effect
+	// gates on `open` — unlike the transit overlay, whose selection is
+	// cleared by closePanel.
+	$effect(() => {
+		const routes = routingState.directRoutes;
+		const sel = routingState.directSelected;
+		const active = routingState.open
+			&& routingState.travelMode !== 'transit'
+			&& routes.length > 0;
+		const map = mapUi.mapRef;
+		if (!map || !map.isStyleLoaded()) return;
+		if (active) enterDirectRouteOverlay(map, routes, sel);
+		else exitDirectRouteOverlay(map);
 	});
 
 	// Browser back / forward ↔ route selection. The pushed history entry
@@ -226,6 +254,15 @@ export function wireMapFeatures(map: maplibregl.Map) {
 			enterRouteOverlay(map, routingState.selectedItinerary,
 				routeColorIndex, routeStationIndex);
 		}
+
+		// Same replay for the direct cycling / walking overlay — its
+		// reactive $effect may equally have fired against an unloaded
+		// style during a cold-load restore.
+		if (routingState.open && routingState.travelMode !== 'transit'
+			&& routingState.directRoutes.length > 0) {
+			enterDirectRouteOverlay(map,
+				routingState.directRoutes, routingState.directSelected);
+		}
 	});
 }
 
@@ -234,5 +271,6 @@ export function wireMapFeatures(map: maplibregl.Map) {
 export function resetMapFeatures() {
 	lineDetailState.reset();
 	disposeRouteOverlay();
+	disposeDirectRouteOverlay();
 	closingRouteViaBack = false;
 }

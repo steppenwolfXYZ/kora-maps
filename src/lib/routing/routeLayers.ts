@@ -475,7 +475,7 @@ export function removeRouteLayers(
 // Start icon: teardrop pin with a play triangle inside. Brand red with a
 // lighter-red glyph. Anchored at bottom so the pin's tip plants on the
 // start coordinate.
-function makeStartIconElement(): HTMLDivElement {
+export function makeStartIconElement(): HTMLDivElement {
 	const wrap = document.createElement('div');
 	wrap.className = 'route-start-icon';
 	wrap.style.cssText = [
@@ -517,7 +517,7 @@ function makeViaIconElement(): HTMLDivElement {
 // Goal icon: teardrop pin with a stop square inside. Same pin shape and
 // palette as the start icon; the glyph distinguishes the two. Anchor is
 // bottom so the pin's tip plants on the goal coordinate.
-function makeGoalIconElement(): HTMLDivElement {
+export function makeGoalIconElement(): HTMLDivElement {
 	const wrap = document.createElement('div');
 	wrap.className = 'route-goal-icon';
 	wrap.style.cssText = [

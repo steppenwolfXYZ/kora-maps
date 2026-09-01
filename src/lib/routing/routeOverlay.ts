@@ -99,29 +99,26 @@ export function frameItinerary(
 	void frameRouteBounds(getMap, geo.bbox, 15);
 }
 
-export function enterRouteOverlay(
-	map: maplibregl.Map,
-	it: Itinerary,
-	colorIndex: Map<string, string> | null,
-	stationIndex: Map<string, StationEntry> | null
+/** Deferred whole-bbox framing with the route padding — shared with the
+ * direct cycling / walking overlay (directRouteOverlay.ts). */
+export function frameDirectBounds(
+	getMap: () => maplibregl.Map | null,
+	bb: [number, number, number, number] | null,
+	maxZoom: number
 ) {
-	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex, viaUics());
+	void frameRouteBounds(getMap, bb, maxZoom);
+}
 
-	// Auto-frame the route bbox. Desktop frames immediately; on narrow
-	// screens the full-width list hides the map anyway, so framing is
-	// deferred to the map-mode entry (entering fullscreen map mode
-	// reframes against the summary-header padding).
-	if (geo.bbox && !isNarrow()) {
-		map.fitBounds(
-			[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
-			{
-				padding: routeFramePadding(),
-				maxZoom: 15,
-				duration: 900
-			}
-		);
-	}
+/** The "route is the primary content" basemap treatment, shared by the
+ * transit route overlay and the direct cycling / walking overlay
+ * (pedestrian-bicycle-routing.md): dim veil, desaturated transit lines,
+ * hidden stop symbology. Idempotent; `restoreBasemapFocus` reverts. The
+ * two overlays are mutually exclusive, so they share the saved-state
+ * bookkeeping. */
+let focusOwner: 'route' | 'direct' | null = null;
 
+export function applyBasemapFocus(map: maplibregl.Map, owner: 'route' | 'direct' = 'route') {
+	focusOwner = owner;
 	// Dim veil — same construction as line-detail but on its own source
 	// so the two features never race for layer ownership. Sits just
 	// below the transit block so the basemap darkens without pulling
@@ -202,20 +199,16 @@ export function enterRouteOverlay(
 		if (!map.getLayer(id)) continue;
 		map.setLayoutProperty(id, 'visibility', 'none');
 	}
-
-	// Insert route layers below the first close-zoom pill-arrow layer
-	// so pill-arrows always render on top of the route (their platform
-	// / line info is finer-grained than the route polyline can show).
-	const styleLayers = map.getStyle().layers ?? [];
-	const pillArrowBeforeId = styleLayers.find(
-		(l) => l.id.startsWith('close-zoom-pill-')
-	)?.id;
-	routeMarkers = installRouteLayers(map, geo, routeMarkers, pillArrowBeforeId);
 }
 
-export function exitRouteOverlay(map: maplibregl.Map) {
-	removeRouteLayers(map, routeMarkers);
-	routeMarkers = null;
+/** Revert everything `applyBasemapFocus` changed. Safe to call when the
+ * focus treatment isn't active. `owner` guards the handover between the
+ * two overlays: a stale exit (its reactive teardown firing after the
+ * other overlay has already taken the focus over) must not strip the
+ * new owner's treatment. */
+export function restoreBasemapFocus(map: maplibregl.Map, owner: 'route' | 'direct' = 'route') {
+	if (focusOwner !== null && focusOwner !== owner) return;
+	focusOwner = null;
 	if (map.getLayer(ROUTE_DIM_LAYER)) {
 		map.setLayoutProperty(ROUTE_DIM_LAYER, 'visibility', 'none');
 	}
@@ -236,6 +229,47 @@ export function exitRouteOverlay(map: maplibregl.Map) {
 	}
 }
 
+export function enterRouteOverlay(
+	map: maplibregl.Map,
+	it: Itinerary,
+	colorIndex: Map<string, string> | null,
+	stationIndex: Map<string, StationEntry> | null
+) {
+	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex, viaUics());
+
+	// Auto-frame the route bbox. Desktop frames immediately; on narrow
+	// screens the full-width list hides the map anyway, so framing is
+	// deferred to the map-mode entry (entering fullscreen map mode
+	// reframes against the summary-header padding).
+	if (geo.bbox && !isNarrow()) {
+		map.fitBounds(
+			[[geo.bbox[0], geo.bbox[1]], [geo.bbox[2], geo.bbox[3]]],
+			{
+				padding: routeFramePadding(),
+				maxZoom: 15,
+				duration: 900
+			}
+		);
+	}
+
+	applyBasemapFocus(map);
+
+	// Insert route layers below the first close-zoom pill-arrow layer
+	// so pill-arrows always render on top of the route (their platform
+	// / line info is finer-grained than the route polyline can show).
+	const styleLayers = map.getStyle().layers ?? [];
+	const pillArrowBeforeId = styleLayers.find(
+		(l) => l.id.startsWith('close-zoom-pill-')
+	)?.id;
+	routeMarkers = installRouteLayers(map, geo, routeMarkers, pillArrowBeforeId);
+}
+
+export function exitRouteOverlay(map: maplibregl.Map) {
+	removeRouteLayers(map, routeMarkers);
+	routeMarkers = null;
+	restoreBasemapFocus(map);
+}
+
 /** Unmount path: the map (and its layers) are being destroyed — remove
  * the DOM markers and drop the bookkeeping without touching the map. */
 export function disposeRouteOverlay() {
@@ -244,4 +278,5 @@ export function disposeRouteOverlay() {
 	routeMarkers = null;
 	savedRouteLinePaints = null;
 	savedRouteStopVisibilities = null;
+	focusOwner = null;
 }
