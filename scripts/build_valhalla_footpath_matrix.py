@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import http.client
 import json
 import math
 import os
@@ -106,6 +107,20 @@ BISECT_FLOOR_PAIRS = 16
 MATRIX_WORKERS = int(os.environ.get("MATRIX_WORKERS", "8"))
 
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "http://localhost:8002")
+
+# How long a worker waits for Valhalla to answer again after a request
+# dies mid-flight. The container is memory-capped and restarts on its
+# own (`mem_limit` + `restart: unless-stopped` in valhalla/docker-
+# compose.yml), so the expected outage is a few seconds of tile
+# remapping. Generous enough to cover a cold start, short enough that a
+# genuinely dead service still aborts the run — which costs little,
+# since the checkpoint resumes at the last completed source.
+VALHALLA_RESTART_WAIT_S = float(os.environ.get("VALHALLA_RESTART_WAIT_S", "300"))
+
+# Attempts per matrix request before the failure propagates. Higher than
+# it looks: each attempt is preceded by a wait for the service, so the
+# budget covers several restarts rather than three quick retries.
+MATRIX_CALL_ATTEMPTS = 5
 
 COSTING_JSON = {
     "costing": "pedestrian",
@@ -285,6 +300,47 @@ def _candidates(
     return out
 
 
+_valhalla_wait_lock = threading.Lock()
+
+
+def _wait_for_valhalla(timeout_s: float = VALHALLA_RESTART_WAIT_S) -> bool:
+    """Block until Valhalla answers `/status` again, up to `timeout_s`.
+
+    A matrix run saturates Valhalla for an hour, and its per-request
+    memory can spike far past the steady state (30 GB anon-RSS observed
+    on a 24-thread run). The container is capped so that spike gets the
+    container OOM-killed instead of the host, and docker restarts it —
+    but every in-flight request dies with it. Without this wait, one
+    such blip ends a run that has already computed millions of pairs.
+
+    Only one thread polls; the rest queue on the lock and typically find
+    the service back by the time they get it. Returns False on timeout,
+    which lets the caller give up and abort the run.
+    """
+    with _valhalla_wait_lock:
+        deadline = time.monotonic() + timeout_s
+        announced = False
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"{VALHALLA_URL}/status", timeout=10
+                ) as resp:
+                    resp.read()
+                if announced:
+                    print("  Valhalla is serving again — resuming.", flush=True)
+                return True
+            except Exception:
+                if not announced:
+                    announced = True
+                    print(
+                        "  Valhalla unreachable (restarting?) — waiting up to "
+                        f"{int(timeout_s)}s for it to serve again.",
+                        flush=True,
+                    )
+                time.sleep(2.0)
+    return False
+
+
 def _matrix_call(
     sources: list[tuple[float, float]],
     targets: list[tuple[float, float]],
@@ -302,7 +358,7 @@ def _matrix_call(
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    for attempt in range(3):
+    for attempt in range(MATRIX_CALL_ATTEMPTS):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 payload = json.loads(resp.read())
@@ -314,10 +370,24 @@ def _matrix_call(
             # attempt: HTTP 4xx will not fix itself on retry.
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Valhalla {e.code}: {body}") from e
-        except (urllib.error.URLError, TimeoutError):
-            if attempt == 2:
+        except (
+            urllib.error.URLError,
+            http.client.HTTPException,
+            TimeoutError,
+            OSError,
+        ):
+            # Everything here means the request never produced an HTTP
+            # response: connection refused (service down), or the server
+            # closing mid-request (http.client.RemoteDisconnected — what
+            # an OOM kill looks like from the client side; it is neither
+            # a URLError nor caught by urllib's own wrapping, so it used
+            # to escape this loop and end the run).
+            if attempt == MATRIX_CALL_ATTEMPTS - 1:
                 raise
-            time.sleep(2 ** attempt)
+            # Cheap when the service is healthy (one /status probe), so
+            # it costs nothing on an ordinary transient failure.
+            _wait_for_valhalla()
+            time.sleep(min(2 ** attempt, 8))
     return []
 
 
