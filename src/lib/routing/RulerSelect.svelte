@@ -1,9 +1,10 @@
 <script lang="ts">
 	// Ruler-style discrete selector (routing-options.md § UI): a draggable
-	// handle snapping to evenly spaced stops on a track; while dragging,
-	// the description line below previews the hovered stop and the change
-	// commits on release. Clicking the track jumps straight to the nearest
-	// stop; arrow keys move one stop.
+	// handle riding the track freely under the pointer, magnetically eased
+	// toward nearby stops, committing to the nearest one on release. While
+	// dragging, the description line below previews that nearest stop.
+	// Clicking the track jumps straight to the nearest stop; arrow keys
+	// move one stop.
 
 	interface Stop {
 		id: string;
@@ -25,31 +26,69 @@
 
 	let trackEl: HTMLDivElement | null = $state(null);
 	let dragging = $state(false);
-	let dragIndex = $state(0);
+	/** Pointer position along the track, 0..1 — continuous while dragging. */
+	let dragFrac = $state(0);
 
 	let valueIndex = $derived(Math.max(0, stops.findIndex((s) => s.id === value)));
-	let shownIndex = $derived(dragging ? dragIndex : valueIndex);
+	let shownIndex = $derived(dragging ? nearestIndex(dragFrac) : valueIndex);
 	let shown = $derived(stops[shownIndex]);
+	/** Where the handle actually sits, in percent of the track. Free (but
+	 * magnetised) under the pointer while dragging, exactly on the stop
+	 * otherwise. */
+	let shownPct = $derived(dragging ? magnetPct(dragFrac) : pct(valueIndex));
 
 	function pct(i: number): number {
 		return stops.length > 1 ? (i / (stops.length - 1)) * 100 : 0;
 	}
 
+	function nearestIndex(frac: number): number {
+		return Math.round(frac * (stops.length - 1));
+	}
+
+	// Magnetism: express the pointer as a stop index plus an offset within
+	// the step (±0.5), then compress that offset quadratically. At the
+	// midpoint between two stops the handle sits exactly under the pointer;
+	// the closer it gets to a stop the harder it is pulled onto it, so the
+	// ruler feels notched without ever refusing to follow the finger.
+	function magnetPct(frac: number): number {
+		if (stops.length < 2) return 0;
+		const d = stepOffset(frac);
+		const i = Math.round(frac * (stops.length - 1));
+		return ((i + d * Math.abs(2 * d)) / (stops.length - 1)) * 100;
+	}
+
+	/** Signed distance from the nearest stop, in steps: 0 on a stop, ±0.5
+	 * at the midpoint between two. */
+	function stepOffset(frac: number): number {
+		if (stops.length < 2) return 0;
+		const u = frac * (stops.length - 1);
+		return u - Math.round(u);
+	}
+
 	// Handle fill = the track gradient sampled at the handle's position.
 	// The ramp is piecewise (calm -> neutral -> intense, see the CSS
 	// custom props), so the mix runs against the matching half.
-	function handleColor(i: number): string {
-		const t = pct(i);
+	function handleColor(t: number): string {
 		return t <= 50
 			? `color-mix(in srgb, var(--ruler-cm) ${t * 2}%, var(--ruler-c0))`
 			: `color-mix(in srgb, var(--ruler-c1) ${(t - 50) * 2}%, var(--ruler-cm))`;
 	}
 
-	function indexFromX(clientX: number): number {
-		if (!trackEl) return valueIndex;
+	// Fill and ring in one background shorthand: the sampled fill on
+	// padding-box, the ring on border-box behind a permanently transparent
+	// 2px border (the same padding-box/border-box trick the gradient focus
+	// rings use — this keeps the geometry fixed when the ring changes).
+	// Grabbed, the white ring darkens to a light gray.
+	function handleBackground(t: number, active: boolean): string {
+		const c = handleColor(t);
+		const ring = active ? 'var(--gray-250)' : 'var(--white)';
+		return `linear-gradient(${c}, ${c}) padding-box, linear-gradient(${ring}, ${ring}) border-box`;
+	}
+
+	function fracFromX(clientX: number): number {
+		if (!trackEl) return pct(valueIndex) / 100;
 		const r = trackEl.getBoundingClientRect();
-		const frac = (clientX - r.left) / r.width;
-		return Math.min(stops.length - 1, Math.max(0, Math.round(frac * (stops.length - 1))));
+		return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
 	}
 
 	function commit(i: number) {
@@ -57,19 +96,28 @@
 	}
 
 	function onPointerDown(e: PointerEvent) {
-		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		// Suppress the browser's own drag/select gesture — without it a
+		// drag across the row paints a text selection over the label,
+		// the leading icon or the description. Focus is restored by hand
+		// (preventDefault would otherwise swallow it) so the keyboard
+		// path keeps working; :focus-visible keeps the ring off for
+		// pointer focus.
+		e.preventDefault();
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+		el.focus();
 		dragging = true;
-		dragIndex = indexFromX(e.clientX);
+		dragFrac = fracFromX(e.clientX);
 	}
 
 	function onPointerMove(e: PointerEvent) {
-		if (dragging) dragIndex = indexFromX(e.clientX);
+		if (dragging) dragFrac = fracFromX(e.clientX);
 	}
 
 	function onPointerUp(e: PointerEvent) {
 		if (!dragging) return;
 		dragging = false;
-		commit(indexFromX(e.clientX));
+		commit(nearestIndex(fracFromX(e.clientX)));
 	}
 
 	function onKey(e: KeyboardEvent) {
@@ -116,8 +164,8 @@
 		<div
 			class="ruler-handle"
 			class:dragging
-			style:left="{pct(shownIndex)}%"
-			style:background={handleColor(shownIndex)}
+			style:left="{shownPct}%"
+			style:background={handleBackground(shownPct, dragging)}
 		>
 			{#if shown?.icon}<span class="material-symbols-outlined ruler-handle-icon" aria-hidden="true">{shown.icon}</span>{/if}
 		</div>
@@ -133,6 +181,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.15rem;
+		/* Nothing in a ruler is selectable text — dragging the handle must
+		   never highlight the label, the icon glyph or the description. */
+		user-select: none;
+		-webkit-user-select: none;
+		-webkit-tap-highlight-color: transparent;
 		/* Calm→neutral→intense track ramp; the handle's fill samples the
 		   same ramp at its position (color-mix inline). The neutral middle
 		   is a medium gray — dark enough to carry the handle's white
@@ -211,16 +264,18 @@
 	.ruler-handle {
 		position: absolute;
 		top: 50%;
-		width: 1.65rem;
-		height: 1.65rem;
+		width: 1.9rem;
+		height: 1.9rem;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		transform: translate(-50%, -50%);
 		border-radius: 50%;
 		box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-		border: 2px solid var(--white);
-		transition: left 0.12s ease-out, background 0.12s ease-out;
+		/* Transparent so the border-box layer of the inline background
+		   shows through as the ring — see handleBackground(). */
+		border: 2px solid transparent;
+		transition: left 0.12s ease-out;
 		pointer-events: none;
 	}
 	.ruler-handle :global(.ruler-handle-icon) {
@@ -228,9 +283,11 @@
 		line-height: 1;
 		color: var(--white);
 	}
+	/* Grabbed state: the disc keeps its size (it is always at what used to
+	   be the dragging size) and swaps its white ring for the brand gradient
+	   — a size change would make the handle jump under the finger. */
 	.ruler-handle.dragging {
 		transition: none;
-		transform: translate(-50%, -50%) scale(1.15);
 	}
 	.ruler-desc {
 		display: flex;

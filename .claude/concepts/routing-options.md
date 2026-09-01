@@ -13,6 +13,23 @@ all, and some users would always trade a few minutes of travel time for
 less walking. None of this is expressible today, and tight transfers
 are shown without any warning about how tight they actually are.
 
+## Implementation status
+
+Shipped: the five walking-speed tiers, the Cautious / Balanced / Daring
+safety modes, the connection-warning ladder including both exceptions,
+minimize walking (client ranking + server-side candidate generation),
+and the "more options" UI with persistence and URL round-trip.
+
+Open:
+
+- **Reckless** (§ 2, safety stop 4) — the ruler ships with three stops.
+  Still needs the routing core to accept negative transfer slack.
+- **Step-free mode** (§ 5) — not built; the toggle is absent. Still
+  needs the second, step-free footpath matrix.
+- **The `> 40 min` standard walk-point class** (§ Constraints) — still
+  ships as +9; correcting it to the intended +8 remains a separate
+  deliberate decision.
+
 ## Requirements
 
 ### 1. Walking speed (5 tiers)
@@ -53,8 +70,8 @@ based on the **selected walking speed**.
 
 - Cautious maps to +5 min additional transfer time; Daring maps to a
   0.5 transfer-time factor (both already supported by the routing API).
-- Reckless requires the routing core to accept negative transfer
-  slack (−60 s). This is the one backend-risky piece and is
+- **Reckless is not implemented yet.** It requires the routing core to
+  accept negative transfer slack (−60 s). This is the one backend-risky piece and is
   **separately shippable**: the other three modes must not depend on it.
   Until it ships, the ruler shows only three stops.
 - Safety modes never suppress warnings — Balanced still shows the
@@ -67,10 +84,23 @@ Per transfer, compute spare time = (next departure − arrival at stop)
 
 | Warning | Condition |
 |---|---|
-| Tight | less than 2 min to spare (but ≥ 20 s) |
-| Very tight | less than 20 s to spare, down to needing up to 20 % faster walking |
+| Tight | less than 20 s to spare (but still makeable) |
+| Very tight | spare below zero, needing up to 20 % faster walking |
 | Extremely tight | needs 20–50 % faster walking |
 | If you're lucky | needs more than 50 % faster walking, or is outright infeasible (Reckless connections) — visually distinct from the tight ladder |
+
+The ladder is pitched so the tier reads as a safety-mode signal.
+Balanced only returns transfers the set speed makes, so it can reach
+**Tight and nothing above** — and only inside the last 20 s of margin,
+which makes a warning there the exception. Every higher tier requires a
+negative spare, which only Daring's halved transfer times produce, and
+Cautious (spare ≥ 5 min by construction) never warns at all. Accepted
+loss: a 20 s–2 min buffer in Balanced gets no heads-up even though a
+delayed feeder would break it.
+
+Thresholds are calibrated on Switzerland, where a positive spare on the
+Valhalla matrix genuinely means makeable. Other countries will need
+their own values.
 
 - Each affected transfer is marked in the itinerary detail; the
   connection card carries the worst warning among its transfers.
@@ -177,12 +207,25 @@ candidates is the ranking's job, below.)
   cannot provide this bound once walk costs are uncapped.
   Pareto-dominating pairs stay in the overlapping rule (Case 1), so
   mutual drops are impossible.
-- Badges and auto-select use an **additive effective time**
-  (duration + penalty score) instead of the multiplicative comfort
-  factor — the multiplicative walking malus saturates, letting a few
-  minutes of duration outvote a larger walking difference between two
-  walk-heavy options. Auto-select picks the effective-time best
-  (crown) connection instead of the chronological edge.
+- The overlapping dominance rule (Case 1) gains a **walking
+  exception**: when the Pareto-dominated connection walks meaningfully
+  less (> 60 s) than its dominator, the 9-minute marginality window is
+  skipped and the comfort test alone decides its fate. Case 1's time
+  window is a pure time argument, and applying it unconditionally
+  deleted exactly the connections this mode exists to surface — a
+  low-walk option arriving at the same minute as a walk-heavier one
+  that departs a few minutes later. Mutual drops stay impossible: the
+  exception only widens who reaches the comfort test, and Pareto
+  dominance still runs in one direction only.
+- Badges use an **additive effective time** (duration + penalty score)
+  instead of the multiplicative comfort factor — the multiplicative
+  walking malus saturates, letting a few minutes of duration outvote a
+  larger walking difference between two walk-heavy options.
+- Auto-select is NOT re-weighted: it stays on the chronological edge
+  (leave-at first, arrive-by last) in every mode. Picking the crown
+  here made the selection unpredictable — after an option change the
+  list reloads and the marked connection jumped to an arbitrary
+  position.
 
 **Suppression rule while active:**
 
@@ -195,6 +238,8 @@ candidate generation afterwards if the re-ranked results aren't
 walking-friendly enough.
 
 ### 5. Step-free mode (wheelchair / stroller)
+
+**Not implemented yet** — nothing of this section ships today.
 
 One toggle ("Step-free"). It **composes with** walking speed and
 safety — it does not replace them (electric vs. hand-driven wheelchairs

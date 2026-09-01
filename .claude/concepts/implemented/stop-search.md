@@ -9,6 +9,7 @@ There is no way to jump to a specific transit stop by name. Finding a known stop
 ### Visibility and scope
 - The search input is visible **only in transit-focus view**. It disappears (or is hidden/removed from the DOM) in standard view. Uses the existing view-mode toggle; no new view mode is introduced.
 - The input is prominently placed in the transit UI, easily discoverable without covering the primary map area.
+- The bar searches **stations, POIs and addresses** in one list — the same merged result set as the routing panel's From / To fields (`geocoding-search.md`). Stations come from the local index below; POIs and addresses come from the geocoding proxy, under the same 2-character gate, rate limit and single-slot request queue. Station matches rank first as a block, geocoder matches follow under a divider; both search UIs share one station-ranking implementation so they order the same stations the same way.
 
 ### Search index
 - The searchable set is every stop that appears on a drawn transit line — the same stops that render as dots / pills / pill-arrows on the map. Stops filtered out upstream (excluded agencies, EV-prefix routes, non-drawable trips, foreign termini) do not appear in results.
@@ -67,15 +68,19 @@ Results are sorted by a weighted score. All signals are normalised to 0–100, t
 - Selection is the only action that moves the map. Two ways to select:
   - **Enter** selects the top (highest-ranked) result.
   - **Click** on any list entry selects that entry.
-- Selection triggers a `flyTo` on the map to the selected stop's coordinates at a zoom level where the stop's pill / pill-arrow is legible (roughly z16, exact value a design choice).
+- Selection triggers a `flyTo` on the map to the selected entry's coordinates at a zoom level where the target is legible: roughly z16 for a stop (its pill / pill-arrow is readable there) and for a POI / address; a wider zoom for a geocoded *place* (village, suburb — an area, not a point).
+- **Selection opens the target's popup** once the camera has settled, so the moved-to location identifies itself instead of leaving the user to find it among its neighbours:
+  - a station opens the ordinary **station popup** (`popups.md`), with content read off the rendered stop feature at the destination — line badges and departures/h included. When no feature for that station is rendered there, the popup degrades to name + route buttons.
+  - a POI or address opens the **place popup** (`popups.md` § Place popup).
+- The popup occupies the same single popup slot as click popups: opening one closes whatever was open, and a later map click closes it.
 - After selection: the dropdown closes. Whether the input clears or keeps the selected name is a UX detail, not a hard requirement.
 
 ### Highlight after flyTo (deferred)
-- After the map settles on the selected stop, the stop should be visually highlighted (flash, ring, or similar) so the user can spot it among neighbouring stops. This is a **second step**, deferred to a later iteration. The initial implementation ships without it; the index carries the merged-UIC so this can be added later without a data-model change.
+- After the map settles on the selected stop, the stop should be visually highlighted (flash, ring, or similar) so the user can spot it among neighbouring stops. This is a **second step**, deferred to a later iteration. The initial implementation ships without it; the index carries the merged-UIC so this can be added later without a data-model change. The popup opened on selection (see § Selection) covers most of the need; a highlight would still help where the popup's tip is ambiguous.
 
 ## Constraints
 
 - The index is derived from the transit pipeline's output — it is regenerated whenever the pipeline runs, not maintained separately.
-- Search is entirely client-side. No external geocoder, no API call.
+- **Station** search is entirely client-side against that index — no request, no geocoder. Only the POI / address half of the list talks to the geocoding proxy, under `geocoding-search.md`'s rules.
 - Nothing outside transit-focus view depends on this feature. Standard view is unchanged.
 - Ranking uses map view center, not browser geolocation. Geolocation is not requested.

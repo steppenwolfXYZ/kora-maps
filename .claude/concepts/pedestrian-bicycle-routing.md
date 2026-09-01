@@ -23,6 +23,12 @@ not reachable from the client and has no UI.
   visits (persisted locally); a deep link's mode overrides the
   persisted choice for that visit.
 - Endpoint inputs (from / to, swap) are shared across all three modes.
+- **Endpoint search ranking is mode-dependent:** on the transit tab,
+  stations keep today's dedicated area at the top. On cycling and
+  walking, stations are **mixed into** the result list, ranked by
+  plain match quality with no category boost — but each station row
+  keeps its existing structure (mode icon, styling), so stations stay
+  findable as landmarks without dominating the list.
 - The date/time controls (leave-at / arrive-by, time selector) and the
   transit "more options" area appear **only** on the transit tab —
   cycling and walking have no time controls.

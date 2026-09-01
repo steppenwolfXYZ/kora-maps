@@ -138,7 +138,9 @@ fi
 if want 3; then
 # ── Step 3: preprocessed OSM PBFs ───────────────────────────────────
 # foot=yes patch on access=agricultural/forestry ways so alp / forest
-# roads route for pedestrians (see scripts/preprocess_osm_for_motis.py).
+# roads route for pedestrians (see scripts/preprocess_osm_for_motis.py),
+# plus the synthetic station walk network merged into the Valhalla input
+# (see .claude/concepts/station-walk-network.md).
 echo ""
 echo "▶ Step 3 — Patch OSM PBFs"
 if [[ $FORCE_OSM -eq 0 && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf ]]; then
@@ -146,7 +148,16 @@ if [[ $FORCE_OSM -eq 0 && data/osm/switzerland-motis.osm.pbf -nt data/osm/switze
 else
   time python3 scripts/preprocess_osm_for_motis.py
 fi
-if [[ $FORCE_OSM -eq 0 && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf ]]; then
+# Platform walk lines + quay anchors. Must precede the --valhalla patch
+# (which merges the overlay) and step 5 (which reads the anchors).
+if [[ $FORCE_OSM -eq 0 && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf ]]; then
+  echo "  station_walk_network.osm.pbf up to date — skipped"
+else
+  time python3 scripts/build_station_walk_network.py --force-extract
+fi
+if [[ $FORCE_OSM -eq 0 \
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf ]]; then
   echo "  ch_pfaedle_walkable.osm.pbf up to date — skipped"
 else
   time python3 scripts/preprocess_osm_for_motis.py --valhalla
@@ -180,7 +191,7 @@ fi
 if want 5; then
 # ── Step 5: GTFS sidecar for MOTIS ──────────────────────────────────
 echo ""
-echo "▶ Step 5 — Preprocess GTFS for MOTIS (platform-snapped stops.txt)"
+echo "▶ Step 5 — Preprocess GTFS for MOTIS (platform-anchored stops.txt)"
 time python3 scripts/preprocess_gtfs_for_motis.py
 fi
 

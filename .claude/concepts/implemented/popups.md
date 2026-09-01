@@ -1,6 +1,6 @@
 # Popups
 
-Click-popups on the map give a short human-readable summary of what was clicked. Three popups exist: **station popup** (a stop dot or pill), **line popup** (a transit line), and **close-zoom departures popup** (at z17+, showing scheduled departures for a stop). This document defines what each contains.
+Click-popups on the map give a short human-readable summary of what was clicked. Popups exist for the **station** (a stop dot or pill), the **line** (a transit line), the **pill-arrow** (z17+), the **place** (a POI or address reached from the search bar), and the **close-zoom departures popup** (at z17+, showing scheduled departures for a stop). This document defines what each contains.
 
 ## Shared conventions
 
@@ -9,6 +9,8 @@ Click-popups on the map give a short human-readable summary of what was clicked.
 - Clicking a line badge (station popup or line popup) closes the popup and enters the line detail view for that line — see `line-detail-view.md`.
 - Click priority when features overlap: station > line. The close-zoom departures popup is triggered only in its own zoom band.
 - Stop names appear in full — no shortening, even where the base map style abbreviates them for space.
+- Only one popup is open at a time. Popups are opened by clicking the map and — for the station and place popups — by picking a result in the main search bar (`stop-search.md` § Selection); either path replaces whatever was open.
+- **Route from / to buttons.** The station, pill-arrow and place popups all end in the same row, which sets the routing panel's From / To to this location (`transit-routing.md` § Entry points). The whole control is one light-gray group pill: a larger `directions` route icon in anthracite, then a brand-red segmented pill whose two halves are split by a white hairline — no labels, wording in the tooltip only; hover darkens only the hovered half. The disc glyphs are the **play triangle** (from) and the **stop square** (to), the same pair the map's start and goal pins carry, so one start / stop iconography runs through map pins, popups and the map context menu.
 - Line lists have a bounded height. The vertical badge / terminus list in the line popup and the expanded state of the station popup capped so a very busy station or corridor doesn't push the popup off-screen — the list itself scrolls, while the popup header (station name, departures per hour, chevron) stays in place.
 
 ## Station popup
@@ -81,6 +83,16 @@ Two sections stacked:
 Data flow: pill-arrow features carry `stop_name` (from the parent station's dot), `first_terminus_name` / `last_terminus_name` (from `line_lookup[osm_id]`), and the line-detail-view identity + camera fit (`line_key`, `line_bbox`) all baked at emission time. No client-side joins. Clicking the badge closes the popup and enters the line detail view for that line — same behaviour as the badges in the station / line popups.
 
 Click priority at z17+: station-label click → full station popup (label bbox check). Pill-arrow click (outside any station-label text) → pill-arrow popup. Everything else → line popup.
+
+## Place popup
+
+Opened when the main search bar moves the map to a geocoded result — a POI or an address (`stop-search.md` § Selection). Deliberately minimal; there is no line or departure data to show.
+
+Contents, stacked:
+
+1. **Title** — the POI's name, or the address itself for an address hit. Preceded by a small kind icon (POI vs address), matching the icons the search list and the routing endpoint rows use.
+2. **Address line** — the street address of the place. For an address hit the title already *is* the address, so no second line is drawn. For a POI the address is not part of the forward-search result: it is fetched by a reverse lookup at the POI's coordinate and filled in when it returns, so the popup appears immediately and gains the line a moment later. The reverse lookup follows `geocoding-search.md` § Reverse geocoding, which never yields a POI name — so the second line can never repeat the title.
+3. **Route from / to buttons** — as described under Shared conventions. The endpoint they set is a `point` endpoint carrying the popup's title as its display name (no UIC — this is not a station).
 
 ## Close-zoom departures popup
 

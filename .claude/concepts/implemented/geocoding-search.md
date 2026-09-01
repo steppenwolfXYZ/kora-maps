@@ -18,6 +18,7 @@ The routing endpoint inputs currently offer "point on map" as their only non-tra
 
 ### Forward search (autocomplete)
 
+- Used by the routing panel's From / To fields and by the map's main search bar (`stop-search.md`), with identical behaviour on both.
 - Fires from **≥2 characters** of input. Below that, no request.
 - Uses the **CH+neighbours bbox as a hard filter** (same bbox as the OSM pipeline — CH, LI, plus border margins into DE, FR, IT, AT). No `location_bias_scale` — Photon's soft bias over-biases toward the anchor for queries that explicitly name another city (e.g. "Bahnhofstrasse 10 Zürich" biased to Bern returned Ostermundigen buildings first).
 - Returns up to **8 results**.
@@ -26,7 +27,7 @@ The routing endpoint inputs currently offer "point on map" as their only non-tra
 
 ### Reverse geocoding (map click)
 
-- Triggered by clicking on the map while a routing endpoint is being set via pin.
+- Triggered by clicking on the map while a routing endpoint is being set via pin, and by the place popup filling in a POI's address (`popups.md` § Place popup).
 - The endpoint is set only once the reverse lookup has returned (name attached in the same write), so routing fires a single query. A 2 s timeout falls back to a nameless coordinate endpoint.
 - Queries Photon's reverse endpoint with `lon`/`lat` only. No `lang`.
 - **Never resolves to a POI name**, even if the top result is a POI (`osm_key` = `amenity`, `shop`, `tourism`, `leisure`, …). "Rather no POI than the wrong POI." If the top result is a POI but carries a street, use only its street/city context (drop the POI name). If it carries no street either, treat it like the no-address fallback.

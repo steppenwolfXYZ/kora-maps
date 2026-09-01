@@ -131,14 +131,6 @@ const MINIMIZE_WALK_MULT = 4;
 export interface RankOptions {
 	/** Weight walking ~5x heavier in pruning, badges and comfort. */
 	minimizeWalking?: boolean;
-	/** Multiplier recovering set-speed transfer walking from reported
-	 * walk-leg durations (2 in daring mode, else 1) — used only by the
-	 * tight-transfer warning math. */
-	transferWalkUnscale?: number;
-	/** Cautious-mode slack seconds baked into each reported transfer walk
-	 * leg (nigiri's additionalTransferTime) — subtracted before judging
-	 * the transfer. */
-	transferWalkSlackSec?: number;
 	/** Route ids of "continuous" gondolas (short frequencies.txt headways,
 	 * from route_color_index.json via loadHfGondolaRoutes) — boarding them
 	 * never warns: missing one departure means taking the next a minute
@@ -595,9 +587,9 @@ function longestTransferWait(it: Itinerary): number {
 }
 
 // Tight-transfer ladder (routing-options.md § Connection warnings). All
-// feasibility math runs at the user's SET walking speed: the reported
-// transfer walk durations already carry the speed scaling from the
-// backend; only daring's extra halving must be undone (transferWalkUnscale).
+// feasibility math runs at the user's SET walking speed — transfer walk
+// legs arrive already restated at that speed (client.ts
+// § normalizeTransferWalks), so leg durations can be taken at face value.
 export type TransferTier = 'tight' | 'very-tight' | 'extremely-tight' | 'lucky';
 export interface TransferAssessment {
 	/** Index (into it.legs) of the transit leg BOARDED at this transfer —
@@ -609,8 +601,15 @@ export interface TransferAssessment {
 	spare: number;
 }
 
-const TIGHT_SPARE_SEC = 120;
-const VERY_TIGHT_SPARE_SEC = 20;
+// The ladder is deliberately pitched so the tier maps onto the safety
+// mode (routing-options.md § Connection warnings). Balanced only ever
+// returns transfers the set speed makes (spare >= 0), so it can reach
+// no tier above "tight" — and that one only inside the last 20 s of
+// margin, i.e. rarely. Everything above needs a NEGATIVE spare, which
+// only daring's halved transfer times produce. Calibrated on CH, where
+// a positive spare on the Valhalla matrix genuinely means makeable;
+// other countries will want their own thresholds.
+const TIGHT_SPARE_SEC = 20;
 const EXTREMELY_TIGHT_SPEEDUP = 1.2;  // needs > 20% faster walking
 const LUCKY_SPEEDUP = 1.5;            // needs > 50% faster walking
 
@@ -646,8 +645,6 @@ function stripDatasetPrefix(routeId: string): string {
  * walk legs (MOTIS renders the change-time buffer as a stop-to-itself
  * WALK) count as waiting, not walking — identical to walkSeconds(). */
 export function assessTransfers(it: Itinerary, opts?: RankOptions): TransferAssessment[] {
-	const unscale = opts?.transferWalkUnscale ?? 1;
-	const slack = opts?.transferWalkSlackSec ?? 0;
 	const hf = opts?.hfGondolaRoutes;
 	const out: TransferAssessment[] = [];
 	let prevTransitEnd: number | null = null;
@@ -664,14 +661,14 @@ export function assessTransfers(it: Itinerary, opts?: RankOptions): TransferAsse
 		}
 		if (prevTransitEnd !== null) {
 			const available = (Date.parse(l.startTime) - prevTransitEnd) / 1000;
-			const needed = Math.max(0, walkBetween - (walkBetween > 0 ? slack : 0)) * unscale;
+			const needed = walkBetween;
 			const spare = available - needed;
 			let tier: TransferTier | null = null;
 			if (available <= 0 || (needed > 0 && needed > available * LUCKY_SPEEDUP)) {
 				tier = 'lucky';
 			} else if (needed > available * EXTREMELY_TIGHT_SPEEDUP) {
 				tier = 'extremely-tight';
-			} else if (spare < VERY_TIGHT_SPARE_SEC) {
+			} else if (spare < 0) {
 				tier = 'very-tight';
 			} else if (spare < TIGHT_SPARE_SEC) {
 				tier = 'tight';

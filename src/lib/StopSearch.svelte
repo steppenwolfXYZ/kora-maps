@@ -1,13 +1,18 @@
 <script lang="ts">
 	import type maplibregl from 'maplibre-gl';
+	import { loadStationIndex } from '$lib/routing/stationIndex';
+	import { indexStations, searchStations, type IndexedStation } from '$lib/routing/stationSearch';
+	import { searchPlaces, type GeocodeResult } from '$lib/geocoding/client';
+	import { AutocompleteScheduler } from '$lib/geocoding/scheduler';
+	import { openStationPopup, openPlacePopup } from '$lib/map/popups/handlers';
 
 	let { map }: { map: maplibregl.Map | null } = $props();
 
-	type Entry = { n: string; u: string; c: [number, number]; m?: string; t?: string };
-	type Indexed = Entry & { fold: string; words: string[] };
-
-	const MAX_RESULTS = 10;
+	const MAX_STATIONS = 8;
 	const FLYTO_ZOOM = 16;
+	// Geocoded hits: a POI / house number wants a close look; a named
+	// place (village, suburb) is an area, so stay wider.
+	const FLYTO_ZOOM_PLACE = 13;
 
 	const MODE_ICON: Record<string, string> = {
 		train:        'train',
@@ -18,185 +23,103 @@
 		ferry:        'directions_boat',
 		mountain:     'gondola_lift',
 	};
+	const STATION_FALLBACK_ICON = 'directions_transit_filled';
+	const POI_ICON = 'place';
+	const ADDRESS_ICON = 'home_work';
 
-	// Mirrors MODE_RANK in scripts/transit/_state.py.
-	const MODE_RANK: Record<string, number> = {
-		train:        0,
-		metro:        1,
-		tram:         2,
-		bus:          3,
-		mountain:     4,
-		ferry:        5,
-		regional_bus: 6,
-	};
-	const MODE_RANK_MAX = 6;
-
-	// Mirrors LABEL_TIER_RANK in scripts/transit/stops/pipeline_render.py.
-	const STOP_TIER_RANK: Record<string, number> = {
-		major_train:      0,
-		main_train:       1,
-		important_train:  2,
-		train_station:    3,
-		small_train:      4,
-		major_mountain:   5,
-		ferry_stop:       6,
-		mountain_stop:    7,
-		major_hub:        8,
-		big_station:      9,
-		normal_stop:     10,
-		small_bus:       11,
-	};
-	const STOP_TIER_RANK_MAX = 11;
-
-	// Ranking weights (stop-search.md § Ranking). Starting values.
-	const W_MATCH    = 5;
-	const W_MODE     = 1;
-	const W_TIER     = 1;
-	const W_DISTANCE = 1;
-
-	// Distance decay characteristic length in km (100 * exp(-d / DIST_DECAY_KM)).
-	const DIST_DECAY_KM = 30;
-	const EARTH_KM = 6371;
-
-	// Match tiers (stop-search.md § Ranking): 8-tier cascade, evaluated
-	// top-down, first condition that holds wins. Multi-word queries are
-	// token-based and order-insensitive; every token must match at least
-	// as substring for the stop to be a hit at all.
-	function matchTierScore(name: string, words: string[], tokens: string[]): number {
-		// Per-token match strength: 3 = full word, 2 = word prefix,
-		// 1 = substring, 0 = no match (kills the whole hit).
-		let allFull = true;
-		let anyFull = false;
-		let allPrefix = true;
-		let anyPrefix = false;
-		const fullMatched = new Set<number>();
-		for (const t of tokens) {
-			let strength = 0;
-			for (let wi = 0; wi < words.length; wi++) {
-				const w = words[wi];
-				if (w === t) {
-					strength = 3;
-					fullMatched.add(wi);
-					break;
-				}
-				if (strength < 2 && w.startsWith(t)) strength = 2;
-			}
-			if (strength < 2 && name.includes(t)) strength = 1;
-			if (strength === 0) return 0;
-			if (strength === 3) anyFull = true; else allFull = false;
-			if (strength >= 2) anyPrefix = true; else allPrefix = false;
-		}
-
-		// 1. Exact: all tokens full words AND every name word matched.
-		if (allFull && fullMatched.size === words.length) return 100;
-		// 2. Name-prefix start: all tokens word-prefixes AND the name's
-		//    first word fully matched by some token.
-		if (allPrefix && fullMatched.has(0)) return 80;
-		// 3. Contains name prefix: some token is a prefix of the name's
-		//    first word (rest already known ≥ substring).
-		if (words.length > 0 && tokens.some(t => words[0].startsWith(t))) return 70;
-		// 4. All words full match.
-		if (allFull) return 50;
-		// 5. Some words full match.
-		if (anyFull) return 40;
-		// 6. All word-prefix.
-		if (allPrefix) return 30;
-		// 7. Some word-prefix.
-		if (anyPrefix) return 20;
-		// 8. Substring only.
-		return 10;
-	}
-
-	function modeScore(mode: string | undefined): number {
-		const r = MODE_RANK[mode ?? ''];
-		if (r === undefined) return 0;
-		return ((MODE_RANK_MAX - r) / MODE_RANK_MAX) * 100;
-	}
-
-	function tierScore(tier: string | undefined): number {
-		const r = STOP_TIER_RANK[tier ?? ''];
-		if (r === undefined) return 0;
-		return ((STOP_TIER_RANK_MAX - r) / STOP_TIER_RANK_MAX) * 100;
-	}
-
-	function distanceScore(dLon: number, dLat: number, cosLat: number): number {
-		const x = dLon * cosLat * Math.PI / 180;
-		const y = dLat * Math.PI / 180;
-		const distKm = EARTH_KM * Math.sqrt(x * x + y * y);
-		return 100 * Math.exp(-distKm / DIST_DECAY_KM);
-	}
-
-	let index = $state<Indexed[]>([]);
+	let index = $state<IndexedStation[]>([]);
 	let indexError = $state<string | null>(null);
 	let query = $state('');
 	let open = $state(false);
 	let highlighted = $state(0);
+	let geoResults = $state<GeocodeResult[]>([]);
 	let inputEl: HTMLInputElement | null = $state(null);
-	let listEl: HTMLUListElement | null = $state(null);
 
-	function fold(s: string): string {
-		return s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
-	}
+	// Same rate-limit + single-slot pending queue as the routing endpoint
+	// inputs (geocoding-search.md § Rate limiting and request coalescing).
+	const scheduler = new AutocompleteScheduler<GeocodeResult[]>({
+		minIntervalMs: 100,
+		fetcher: (q, signal) => searchPlaces(q, signal),
+		onResult: (results, q) => {
+			if (q === query.trim()) geoResults = results;
+		}
+	});
 
 	$effect(() => {
 		let cancelled = false;
-		fetch('/map-assets/stop_search_index.json')
-			.then(r => {
-				if (!r.ok) throw new Error(`HTTP ${r.status}`);
-				return r.json() as Promise<Entry[]>;
-			})
-			.then(data => {
-				if (cancelled) return;
-				index = data.map(e => {
-					const f = fold(e.n);
-					// Words split on any non-alphanumeric run: commas, parens,
-					// slashes, dots, hyphens are separators, not word content.
-					return { ...e, fold: f, words: f.split(/[^\p{L}\p{N}]+/u).filter(Boolean) };
-				});
-			})
-			.catch(err => {
-				if (cancelled) return;
-				indexError = String(err);
-			});
+		loadStationIndex().then((m) => {
+			if (cancelled) return;
+			if (!m) { indexError = 'index unavailable'; return; }
+			index = indexStations(m.values());
+		});
 		return () => { cancelled = true; };
 	});
 
-	const results = $derived.by<Indexed[]>(() => {
-		const q = fold(query.trim());
-		if (!q) return [];
-		const tokens = q.split(/\s+/).filter(Boolean);
-		if (!tokens.length) return [];
-		const c = map?.getCenter();
-		const cLon = c?.lng ?? 0;
-		const cLat = c?.lat ?? 0;
-		const cosLat = c ? Math.cos((cLat * Math.PI) / 180) : 1;
-		const scored: { e: Indexed; score: number }[] = [];
-		for (const e of index) {
-			const match = matchTierScore(e.fold, e.words, tokens);
-			if (match === 0) continue;
-			const mode = modeScore(e.m);
-			const tier = tierScore(e.t);
-			const dist = c ? distanceScore(e.c[0] - cLon, e.c[1] - cLat, cosLat) : 0;
-			const score = W_MATCH * match + W_MODE * mode + W_TIER * tier + W_DISTANCE * dist;
-			scored.push({ e, score });
+	$effect(() => () => scheduler.dispose());
+
+	// Below 2 chars, clear stale results and skip the network (matches the
+	// proxy's own gate).
+	$effect(() => {
+		const q = query.trim();
+		if (q.length < 2) {
+			geoResults = [];
+			return;
 		}
-		scored.sort((a, b) => b.score - a.score);
-		return scored.slice(0, MAX_RESULTS).map(s => s.e);
+		scheduler.request(q);
 	});
 
+	const mapCenter = $derived.by<[number, number] | null>(() => {
+		void query;
+		const c = map?.getCenter();
+		return c ? [c.lng, c.lat] : null;
+	});
+
+	const stationResults = $derived(
+		searchStations(index, query, MAX_STATIONS, mapCenter)
+	);
+
+	type Row =
+		| { kind: 'station'; station: IndexedStation }
+		| { kind: 'geo'; result: GeocodeResult };
+
+	const rows = $derived<Row[]>([
+		...stationResults.map((s) => ({ kind: 'station' as const, station: s })),
+		...geoResults.map((r) => ({ kind: 'geo' as const, result: r }))
+	]);
+
 	$effect(() => {
-		void results;
+		void rows;
 		highlighted = 0;
 	});
 
-	function select(entry: Indexed) {
+	function selectStation(e: IndexedStation) {
+		if (!map) return;
+		map.flyTo({ center: e.c, zoom: FLYTO_ZOOM, speed: 4.8, essential: true });
+		// Popup opens once the camera has settled — the station popup's
+		// content is read off the rendered stop feature (stop-search.md
+		// § Selection).
+		openStationPopup(map, { name: e.n, uic: e.u, coord: e.c });
+		close();
+	}
+
+	function selectGeo(r: GeocodeResult) {
 		if (!map) return;
 		map.flyTo({
-			center: entry.c,
-			zoom: FLYTO_ZOOM,
+			center: r.coord,
+			zoom: r.kind === 'place' ? FLYTO_ZOOM_PLACE : FLYTO_ZOOM,
 			speed: 4.8,
-			essential: true,
+			essential: true
 		});
+		openPlacePopup(map, r);
+		close();
+	}
+
+	function selectRow(row: Row) {
+		if (row.kind === 'station') selectStation(row.station);
+		else selectGeo(row.result);
+	}
+
+	function close() {
 		open = false;
 		inputEl?.blur();
 	}
@@ -207,18 +130,17 @@
 		}
 		if (e.key === 'Enter') {
 			e.preventDefault();
-			const pick = results[highlighted] ?? results[0];
-			if (pick) select(pick);
+			const pick = rows[highlighted] ?? rows[0];
+			if (pick) selectRow(pick);
 			return;
 		}
 		if (e.key === 'Escape') {
-			open = false;
-			inputEl?.blur();
+			close();
 			return;
 		}
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
-			highlighted = Math.min(highlighted + 1, results.length - 1);
+			highlighted = Math.min(highlighted + 1, rows.length - 1);
 			return;
 		}
 		if (e.key === 'ArrowUp') {
@@ -234,7 +156,7 @@
 		bind:this={inputEl}
 		type="search"
 		autocomplete="off"
-		placeholder="Search stops"
+		placeholder="Search stops, places, addresses"
 		bind:value={query}
 		onfocus={(e) => {
 			open = true;
@@ -246,13 +168,16 @@
 		onkeydown={onKey}
 	/>
 	{#if open && query.trim().length > 0}
-		<ul bind:this={listEl} class="results" role="listbox">
-			{#if indexError}
+		<ul class="results" role="listbox">
+			{#if indexError && rows.length === 0}
 				<li class="empty">Index unavailable</li>
-			{:else if results.length === 0}
+			{:else if rows.length === 0}
 				<li class="empty">No matches</li>
 			{:else}
-				{#each results as r, i (r.u)}
+				{#each rows as row, i (row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
+					{#if row.kind === 'geo' && i === stationResults.length && stationResults.length > 0}
+						<li class="divider" aria-hidden="true"></li>
+					{/if}
 					<li
 						class="result"
 						class:highlighted={i === highlighted}
@@ -260,16 +185,20 @@
 						aria-selected={i === highlighted}
 						onmousedown={(e) => {
 							e.preventDefault();
-							select(r);
+							selectRow(row);
 						}}
 						onmouseenter={() => (highlighted = i)}
 					>
-						{#if r.m && MODE_ICON[r.m]}
-							<span class="mode-icon material-symbols-outlined" aria-hidden="true">{MODE_ICON[r.m]}</span>
-						{:else}
-							<span class="mode-icon" aria-hidden="true"></span>
-						{/if}
-						<span class="stop-name">{r.n}</span>
+						<span class="mode-icon material-symbols-outlined" aria-hidden="true">
+							{#if row.kind === 'station'}
+								{(row.station.m && MODE_ICON[row.station.m]) || STATION_FALLBACK_ICON}
+							{:else}
+								{row.result.kind === 'address' ? ADDRESS_ICON : POI_ICON}
+							{/if}
+						</span>
+						<span class="stop-name">
+							{row.kind === 'station' ? row.station.n : row.result.displayName}
+						</span>
 					</li>
 				{/each}
 			{/if}
@@ -357,11 +286,20 @@
 	.stop-name {
 		flex: 1 1 auto;
 		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.empty {
 		padding: 0.35rem 0.7rem;
 		font-size: 0.85rem;
 		color: var(--gray-400);
 		font-style: italic;
+	}
+	.divider {
+		height: 1px;
+		margin: 0.2rem 0.7rem;
+		background: var(--gray-200);
+		list-style: none;
 	}
 </style>

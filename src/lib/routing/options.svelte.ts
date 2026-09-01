@@ -116,18 +116,12 @@ export const routingOptions = {
 	},
 
 	/** Multiplier that recovers set-speed transfer walking from the
-	 * (daring-halved) walk-leg durations the backend reports — the
-	 * client-side warning math must judge transfers at the SET speed. */
+	 * (daring-halved) walk-leg durations the backend reports. Passed to
+	 * the plan call, which restates transfer legs at the set speed on
+	 * arrival (client.ts § normalizeTransferWalks) — cautious's slack is
+	 * taken off there via `additionalTransferMin`. */
 	get transferWalkUnscale(): number {
 		return values.safety === 'daring' ? 2 : 1;
-	},
-
-	/** Seconds of cautious-mode slack baked INTO each reported transfer
-	 * walk leg (nigiri adds `additionalTransferTime` to the footpath
-	 * duration) — the warning math subtracts it to recover the real
-	 * walking time. */
-	get transferWalkSlackSec(): number {
-		return values.safety === 'cautious' ? 5 * 60 : 0;
 	},
 
 	/** Minimize-walking server params (routing-options.md § Minimize

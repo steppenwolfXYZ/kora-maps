@@ -19,9 +19,13 @@ import {
 	buildDebugStopPopupHtml,
 	buildStationPopupHtml,
 	buildPillArrowPopupHtml,
+	buildPlacePopupHtml,
 	buildLinePopupHtml,
-	type LinePopupGroup
+	type LinePopupGroup,
+	type StationPopupData
 } from './html';
+import { reverseAddress } from '$lib/geocoding/client';
+import type { GeocodeResult } from '$lib/geocoding/client';
 import type { LineDetailSelection } from '../../linedetail/lineIndex';
 
 /** Parsed payload of a popup's Route from/to button. `uic` / `name`
@@ -76,52 +80,141 @@ export function installHoverCursor(map: maplibregl.Map) {
 	});
 }
 
+// ── Popup ownership ─────────────────────────────────────────────────────
+// One popup at a time, held in module scope so the programmatic openers
+// (search-bar selection — see openStationPopup / openPlacePopup below)
+// share it with the click path: opening either closes whatever was open.
+
+let popup: maplibregl.Popup | null = null;
+let callbacks: PopupCallbacks | null = null;
+
+function closePopup() {
+	if (popup) { popup.remove(); popup = null; }
+}
+
+/** Open a popup, replacing any current one, with both delegated click
+ * handlers wired. Handlers are no-ops on popups whose HTML carries no
+ * matching elements. */
+function showPopup(
+	map: maplibregl.Map,
+	lngLat: maplibregl.LngLatLike,
+	html: string,
+	maxWidth = '320px'
+): maplibregl.Popup {
+	closePopup();
+	const p = new maplibregl.Popup({ maxWidth })
+		.setLngLat(lngLat)
+		.setHTML(html)
+		.addTo(map);
+	wireLineDetailClicks(p);
+	wirePopupRouteClicks(p);
+	popup = p;
+	return p;
+}
+
+/** Delegated click handler for `[data-line-detail]` badges inside a
+ * popup: parses the encoded selection payload and enters the view. */
+function wireLineDetailClicks(p: maplibregl.Popup) {
+	const el = p.getElement();
+	if (!el) return;
+	el.addEventListener('click', (ev) => {
+		const target = (ev.target as HTMLElement | null)?.closest?.('[data-line-detail]');
+		if (!target) return;
+		// Badges live inside <summary> — stop the details toggle.
+		ev.preventDefault();
+		ev.stopPropagation();
+		try {
+			const sel = JSON.parse(decodeURIComponent(
+				target.getAttribute('data-line-detail') || ''));
+			closePopup();
+			callbacks?.onEnterLineDetail(sel);
+		} catch { /* malformed payload — ignore */ }
+	});
+}
+
+/** Delegated click handler for the station popup's Route from/to
+ * buttons — hands the parsed endpoint payload to the callback and
+ * closes the popup. See transit-routing.md § Entry points / Station
+ * popup buttons. */
+function wirePopupRouteClicks(p: maplibregl.Popup) {
+	const el = p.getElement();
+	if (!el) return;
+	el.addEventListener('click', (ev) => {
+		const target = (ev.target as HTMLElement | null)?.closest?.('[data-route-endpoint]') as HTMLElement | null;
+		if (!target) return;
+		ev.preventDefault();
+		ev.stopPropagation();
+		try {
+			const payload = JSON.parse(decodeURIComponent(
+				target.getAttribute('data-route-endpoint') || ''));
+			const side = target.getAttribute('data-route-side') === 'to' ? 'to' : 'from';
+			callbacks?.onRouteEndpoint(side, payload);
+			closePopup();
+		} catch { /* malformed payload — ignore */ }
+	});
+}
+
+/** Representative coord of a stop feature. Stop dots, pills and
+ * connectors are LineStrings — dots are zero-length `[pos, pos]` lines,
+ * a pill body runs along the stop's line position (project.md § Transit
+ * stop architecture) — so a Point-only extraction would leave every
+ * non-label hit without route buttons. Lines collapse to the midpoint of
+ * their two ends: exact for a dot, the pill's centre for a pill body. */
+function featureCoord(geometry: unknown): [number, number] | null {
+	const g = geometry as { type?: string; coordinates?: unknown } | null;
+	if (!g || !g.coordinates) return null;
+	const pt = (c: unknown): [number, number] | null =>
+		Array.isArray(c) && typeof c[0] === 'number' && typeof c[1] === 'number'
+			? [c[0], c[1]] : null;
+	if (g.type === 'Point') return pt(g.coordinates);
+	let line: unknown[] | null = null;
+	if (g.type === 'LineString') line = g.coordinates as unknown[];
+	else if (g.type === 'MultiLineString') {
+		const first = (g.coordinates as unknown[])[0];
+		line = Array.isArray(first) ? first : null;
+	}
+	if (!line || !line.length) return null;
+	const a = pt(line[0]);
+	const b = pt(line[line.length - 1]);
+	if (!a) return null;
+	if (!b) return a;
+	return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+}
+
+/** Station popup payload for one stop feature. UIC comes from
+ * `parent_station` (bare UIC) or the un-suffixed `stop_id`; the coord is
+ * the feature's own geometry, never the click position. Far-zoom
+ * absorbers carry per-zoom `lines_json_zN` / `dep_hr_zN` reflecting what
+ * they fold in at that zoom (stops-far-zoom-dot-redesign.md, popups.md);
+ * pills (z ≥ 14) use the base fields. */
+function stationPopupData(
+	map: maplibregl.Map,
+	f: maplibregl.MapGeoJSONFeature
+): StationPopupData {
+	const p = f.properties as Record<string, unknown>;
+	const coord = featureCoord(f.geometry);
+	const zoomFloor = Math.max(7, Math.min(12, Math.floor(map.getZoom())));
+	const depHrAtZoom = p[`dep_hr_z${zoomFloor}`];
+	return {
+		stopName: String(p.stop_name ?? ''),
+		uic: stationUic(p),
+		coord,
+		depHr: typeof depHrAtZoom === 'number'
+			? depHrAtZoom
+			: (typeof p.dep_hr === 'number' ? p.dep_hr as number : null),
+		linesRaw: p[`lines_json_z${zoomFloor}`] ?? p.lines_json
+	};
+}
+
+function stationUic(p: Record<string, unknown>): string {
+	return String(p.parent_station ?? String(p.stop_id ?? '').split(':')[0] ?? '');
+}
+
+/** Wire the map's click popups. Registers the feature-action callbacks
+ * used by every popup this module opens, including the programmatic
+ * openers below. */
 export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
-	let popup: maplibregl.Popup | null = null;
-	const closePopup = () => { if (popup) { popup.remove(); popup = null; } };
-
-	/** Delegated click handler for `[data-line-detail]` badges inside a
-	 * popup: parses the encoded selection payload and enters the view. */
-	function wireLineDetailClicks(p: maplibregl.Popup) {
-		const el = p.getElement();
-		if (!el) return;
-		el.addEventListener('click', (ev) => {
-			const target = (ev.target as HTMLElement | null)?.closest?.('[data-line-detail]');
-			if (!target) return;
-			// Badges live inside <summary> — stop the details toggle.
-			ev.preventDefault();
-			ev.stopPropagation();
-			try {
-				const sel = JSON.parse(decodeURIComponent(
-					target.getAttribute('data-line-detail') || ''));
-				closePopup();
-				cb.onEnterLineDetail(sel);
-			} catch { /* malformed payload — ignore */ }
-		});
-	}
-
-	/** Delegated click handler for the station popup's Route from/to
-	 * buttons — hands the parsed endpoint payload to the callback and
-	 * closes the popup. See transit-routing.md § Entry points / Station
-	 * popup buttons. */
-	function wirePopupRouteClicks(p: maplibregl.Popup) {
-		const el = p.getElement();
-		if (!el) return;
-		el.addEventListener('click', (ev) => {
-			const target = (ev.target as HTMLElement | null)?.closest?.('[data-route-endpoint]') as HTMLElement | null;
-			if (!target) return;
-			ev.preventDefault();
-			ev.stopPropagation();
-			try {
-				const payload = JSON.parse(decodeURIComponent(
-					target.getAttribute('data-route-endpoint') || ''));
-				const side = target.getAttribute('data-route-side') === 'to' ? 'to' : 'from';
-				cb.onRouteEndpoint(side, payload);
-				closePopup();
-			} catch { /* malformed payload — ignore */ }
-		});
-	}
-
+	callbacks = cb;
 	map.on('click', (e) => {
 		closePopup();
 
@@ -139,10 +232,7 @@ export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
 				linesJson: p.lines_json,
 				currentOsmId: p.current_osm_id != null ? String(p.current_osm_id) : ''
 			});
-			popup = new maplibregl.Popup({ maxWidth: '320px' })
-				.setLngLat(e.lngLat)
-				.setHTML(html)
-				.addTo(map);
+			showPopup(map, e.lngLat, html);
 			return;
 		}
 
@@ -183,47 +273,8 @@ export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
 			break;
 		}
 		if (stopFeature) {
-			const p = stopFeature.properties as Record<string, unknown>;
-
-			// UIC comes from `parent_station` (bare UIC) or the
-			// un-suffixed `stop_id`; coord from the feature's own
-			// geometry (not the click position).
-			const stopGeom = stopFeature.geometry as {
-				type: string; coordinates?: [number, number]
-			} | null;
-			const stopCoord: [number, number] | null =
-				stopGeom?.type === 'Point' && stopGeom.coordinates
-					? [stopGeom.coordinates[0], stopGeom.coordinates[1]]
-					: null;
-			const stopUic = String(
-				p.parent_station ?? String(p.stop_id ?? '').split(':')[0] ?? ''
-			);
-
-			// Per-zoom lookup: far-zoom absorbers carry lines_json_zN
-			// and dep_hr_zN reflecting the lines / departures folded in
-			// at that zoom (see stops-far-zoom-dot-redesign.md and
-			// popups.md). Pills (z ≥ 14) use the base fields.
-			const zoomFloor = Math.max(7, Math.min(12, Math.floor(map.getZoom())));
-			const linesRaw = (p as Record<string, unknown>)[`lines_json_z${zoomFloor}`]
-				?? p.lines_json;
-			const depHrAtZoom = (p as Record<string, unknown>)[`dep_hr_z${zoomFloor}`];
-			const depHr = typeof depHrAtZoom === 'number'
-				? depHrAtZoom
-				: (typeof p.dep_hr === 'number' ? p.dep_hr as number : null);
-
-			const html = buildStationPopupHtml({
-				stopName: String(p.stop_name ?? ''),
-				uic: stopUic,
-				coord: stopCoord,
-				depHr,
-				linesRaw
-			});
-			popup = new maplibregl.Popup({ maxWidth: '320px' })
-				.setLngLat(e.lngLat)
-				.setHTML(html)
-				.addTo(map);
-			wireLineDetailClicks(popup);
-			wirePopupRouteClicks(popup);
+			showPopup(map, e.lngLat,
+				buildStationPopupHtml(stationPopupData(map, stopFeature)));
 			return;
 		}
 
@@ -257,12 +308,7 @@ export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
 				lineKey: String(pa.line_key ?? ''),
 				lineBbox: String(pa.line_bbox ?? '')
 			});
-			popup = new maplibregl.Popup({ maxWidth: '360px' })
-				.setLngLat(e.lngLat)
-				.setHTML(html)
-				.addTo(map);
-			wireLineDetailClicks(popup);
-			wirePopupRouteClicks(popup);
+			showPopup(map, e.lngLat, html, '360px');
 			return;
 		}
 
@@ -341,10 +387,92 @@ export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
 				bbox: g.bbox
 			}));
 
-		popup = new maplibregl.Popup({ maxWidth: '360px' })
-			.setLngLat(e.lngLat)
-			.setHTML(buildLinePopupHtml(lines))
-			.addTo(map);
-		wireLineDetailClicks(popup);
+		showPopup(map, e.lngLat, buildLinePopupHtml(lines), '360px');
+	});
+}
+
+// ── Programmatic openers (search-bar selection) ─────────────────────────
+// The main search bar flies the map to the picked result and then opens
+// its popup — see stop-search.md § Selection. Both openers reuse the
+// module's single popup slot, so a search popup and a click popup can
+// never coexist.
+
+/** Run `fn` once the camera has settled and tiles are loaded, so a
+ * feature query right after a flyTo sees the destination. Falls back to
+ * a timeout when `idle` never arrives (continuous user interaction). */
+function afterCameraSettles(map: maplibregl.Map, fn: () => void) {
+	if (!map.isMoving() && map.areTilesLoaded()) { fn(); return; }
+	let done = false;
+	const finish = () => {
+		if (done) return;
+		done = true;
+		clearTimeout(timer);
+		map.off('idle', finish);
+		fn();
+	};
+	const timer = setTimeout(finish, 2500);
+	map.on('idle', finish);
+}
+
+/** Open the station popup for a search hit. The popup content comes from
+ * the rendered stop feature (line badges, departures/h) when one is
+ * found at the station's coord; without a hit — the station is filtered
+ * out at this zoom, or the transit layers are hidden — it degrades to
+ * name + route buttons. */
+export function openStationPopup(
+	map: maplibregl.Map,
+	station: { name: string; uic: string; coord: [number, number] }
+) {
+	afterCameraSettles(map, () => {
+		const layers = [
+			...TRANSIT_STOP_PILL_LAYERS,
+			...TRANSIT_STOP_DOT_LAYERS
+		].filter((id) => !!map.getLayer(id));
+		const pt = map.project(station.coord);
+		const R = 40;
+		let feats: maplibregl.MapGeoJSONFeature[] = [];
+		if (layers.length) {
+			feats = map.queryRenderedFeatures(
+				[[pt.x - R, pt.y - R], [pt.x + R, pt.y + R]], { layers });
+		}
+		// Only the station's own feature may supply content — a
+		// neighbour's badges would be plain wrong.
+		let hit: maplibregl.MapGeoJSONFeature | null = null;
+		for (const f of feats) {
+			const p = f.properties as Record<string, unknown> | null;
+			if (!p) continue;
+			if (!(p.lines_json || p.dep_hr !== undefined)) continue;
+			if (stationUic(p) !== station.uic) continue;
+			hit = f;
+			break;
+		}
+		const data: StationPopupData = hit
+			? stationPopupData(map, hit)
+			: { stopName: station.name, uic: station.uic, coord: station.coord,
+			    depHr: null, linesRaw: null };
+		showPopup(map, data.coord ?? station.coord, buildStationPopupHtml(data));
+	});
+}
+
+/** Open the place popup for a geocoded search hit (POI / address).
+ * Addresses are their own label, so they render immediately; a POI's
+ * street address is not part of the forward-search result and is filled
+ * in by a reverse lookup once it returns (popups.md § Place popup). */
+export function openPlacePopup(map: maplibregl.Map, place: GeocodeResult) {
+	const kind = place.kind;
+	const data = {
+		title: place.displayName,
+		address: null as string | null,
+		kind,
+		coord: place.coord
+	};
+	const p = showPopup(map, place.coord, buildPlacePopupHtml(data));
+	if (kind === 'address') return;
+	void reverseAddress(place.coord[0], place.coord[1]).then((addr) => {
+		// Superseded by another popup in the meantime — drop it.
+		if (!addr || popup !== p) return;
+		// The container element (and its delegated listeners) survives
+		// setHTML; only the content node is replaced.
+		p.setHTML(buildPlacePopupHtml({ ...data, address: addr }));
 	});
 }

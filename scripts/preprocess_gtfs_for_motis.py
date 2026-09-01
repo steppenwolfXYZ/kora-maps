@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Snap GTFS stop coords to OSM platforms — MOTIS-only sidecar.
+"""Snap GTFS stop coords onto walkable platform geometry — MOTIS sidecar.
 
 Reads `data/gtfs_routed/` (the pfaedle output that the map pipeline also
 consumes) and writes `data/gtfs_motis/` with a modified `stops.txt` in
@@ -26,7 +26,19 @@ Scoped to the MOTIS-only sidecar directory so map rendering (which reads
 `data/gtfs_routed/`) is untouched — the pipeline's stop-dot / pill-arrow
 placement is unaffected. Only MOTIS sees the shift.
 
-Match rule: exact (uic_ref, local_ref) equality between the GTFS stop's
+Two tiers, best first:
+
+1. **Quay anchors** (`data/osm/quay_anchors.json`, written by
+   `build_station_walk_network.py`): the point on the platform's routable
+   walk line nearest the published coord. This is the tier that matters
+   for walking legs — Valhalla snaps a requested coord to the nearest
+   edge in plan view, so unless the stop sits *on* routable platform
+   geometry the walk can end on a deck two levels up (Bern tracks 9/10).
+   See `.claude/concepts/station-walk-network.md`.
+2. **Platform-code snap** (below): the original tier, kept for stops the
+   walk network does not cover — notably platforms with no mapped body.
+
+Match rule for tier 2: exact (uic_ref, local_ref) equality between the GTFS stop's
 `(parent-UIC, platform_code)` and an OSM platform way's tags. Nearest-in-
 space isn't good enough — at Eigerplatz platform :C sits 3 m farther from
 the GTFS centroid than :D, so nearest-wins snaps to the wrong direction.
@@ -109,6 +121,22 @@ def _snap_stop(index, uic: str, ref: str, anchor_lon: float, anchor_lat: float):
     return best_pt
 
 
+ANCHORS_JSON = ROOT / "data" / "osm" / "quay_anchors.json"
+
+
+def _load_anchors() -> dict:
+    """Quay anchors from the station walk network, if it has been built.
+
+    A missing file is a soft absence: the platform-code snap below still
+    runs, and every stop keeps a usable coord. It only means walks into
+    stacked stations stay as wrong as they were."""
+    if not ANCHORS_JSON.exists():
+        print(f"note: {ANCHORS_JSON.name} absent — "
+              "run scripts/build_station_walk_network.py for platform anchors")
+        return {}
+    return json.loads(ANCHORS_JSON.read_text())
+
+
 IDENTITY_JSON = ROOT / "data" / "gtfs_filtered" / "stop_identity.json"
 
 
@@ -126,6 +154,7 @@ def main() -> None:
         sys.exit(f"missing {GTFS_IN} — run pipeline steps 1–5 first")
     index = _load_platforms()
     identity = _load_identity()
+    anchors = _load_anchors()
 
     # Read stops.txt into memory, indexed by stop_id for parent lookup.
     stops_path = GTFS_IN / "stops.txt"
@@ -148,10 +177,34 @@ def main() -> None:
                 continue
 
     n_snapped = 0
+    n_anchored = 0
     n_no_code = 0
     n_no_match = 0
     max_shift_m = 0.0
+
+    def apply_shift(row, lon, lat):
+        """Overwrite the row's coord, returning the distance moved."""
+        nonlocal max_shift_m
+        try:
+            old_lon = float(row["stop_lon"])
+            old_lat = float(row["stop_lat"])
+            cos_lat = cos(radians(old_lat))
+            dx = (old_lon - lon) * 111320.0 * cos_lat
+            dy = (old_lat - lat) * 111320.0
+            shift = (dx * dx + dy * dy) ** 0.5
+            if shift > max_shift_m:
+                max_shift_m = shift
+        except (KeyError, TypeError, ValueError):
+            pass
+        row["stop_lon"] = f"{lon:.6f}"
+        row["stop_lat"] = f"{lat:.6f}"
+
     for row in rows:
+        anchor_rec = anchors.get(row["stop_id"])
+        if anchor_rec is not None:
+            apply_shift(row, anchor_rec["lon"], anchor_rec["lat"])
+            n_anchored += 1
+            continue
         ident = identity.get(row["stop_id"]) or {}
         uic = ident.get("uic", "")
         # Sector variants try their sector-range code first (a matching
@@ -180,20 +233,7 @@ def main() -> None:
         if snap is None:
             n_no_match += 1
             continue
-        # Measure shift for the log line before overwriting.
-        try:
-            old_lon = float(row["stop_lon"])
-            old_lat = float(row["stop_lat"])
-            cos_lat = cos(radians(old_lat))
-            dx = (old_lon - snap[0]) * 111320.0 * cos_lat
-            dy = (old_lat - snap[1]) * 111320.0
-            shift = (dx * dx + dy * dy) ** 0.5
-            if shift > max_shift_m:
-                max_shift_m = shift
-        except (KeyError, TypeError, ValueError):
-            pass
-        row["stop_lon"] = f"{snap[0]:.6f}"
-        row["stop_lat"] = f"{snap[1]:.6f}"
+        apply_shift(row, snap[0], snap[1])
         n_snapped += 1
 
     # Rebuild the output dir from scratch — cheap because everything except
@@ -234,7 +274,8 @@ def main() -> None:
         n_hardlinked += 1
 
     print(
-        f"stops.txt: {n_snapped} snapped to OSM platforms, "
+        f"stops.txt: {n_anchored} anchored on platform walk lines, "
+        f"{n_snapped} snapped to OSM platforms, "
         f"{n_no_match} skipped (platform_code set but no OSM match), "
         f"{n_no_code} skipped (no platform_code / not a child stop). "
         f"Max shift {max_shift_m:.0f} m."

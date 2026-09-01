@@ -172,12 +172,16 @@ wait_all osm_extract gtfs_prep
 # slow-to-fetch elevation and admin data) and let the routing prep
 # rebuild them. The tiles are owned by the container's user, hence the
 # docker-side rm.
+# The station walk network is checked too: it is baked into the same
+# walkable PBF, so a rebuilt overlay invalidates the tiles even when the
+# OSM extract itself has not moved.
 OSM_EXTRACT=data/osm/ch_pfaedle.osm.pbf
+WALK_OVERLAY=data/osm/station_walk_network.osm.pbf
 TILES_TAR=valhalla/data/valhalla_tiles.tar
 if [[ ! -f "$TILES_TAR" ]]; then
   echo "  Valhalla: no tiles yet — routing prep will build them"
-elif [[ "$OSM_EXTRACT" -nt "$TILES_TAR" ]]; then
-  echo "  Valhalla: OSM extract is newer than the tiles — rebuilding tiles"
+elif [[ "$OSM_EXTRACT" -nt "$TILES_TAR" || "$WALK_OVERLAY" -nt "$TILES_TAR" ]]; then
+  echo "  Valhalla: inputs are newer than the tiles — rebuilding tiles"
   (cd valhalla && docker compose down) >/dev/null 2>&1 || true
   docker run --rm -v "$PWD/valhalla/data:/d" alpine \
     sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt'

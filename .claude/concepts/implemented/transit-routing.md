@@ -15,7 +15,7 @@ Kora Maps visualises the transit network but does not yet answer the question "h
 - Query modes: `leave-at` (default, time = now) and `arrive-by`.
 - **Direct walking** is always attempted regardless of distance. A multi-hour walk still surfaces when it beats every transit option; MOTIS's `direct` walk-only itineraries are merged into the same list as transit itineraries.
 - **No artificial time-of-day cutoff.** A query at 00:30 must surface the first morning departures; a weekend query must surface the Monday-morning departures. The search expands progressively until either the target of 5 results is reached or the timetable is exhausted.
-- **Walking budget cascade.** First/last-mile walking budget starts narrow (2 h) for query speed and escalates to the server ceiling (8 h) when any of three signals fires: the initial search returns nothing; any returned itinerary contains a wait of more than 1 h at the start or between transit legs; or the narrow search — including empty hops during the time-advance cascade — reveals a ≥ 4 h stretch of local daytime (06–21) with no service (measured across query time, every result's anchor time, and the current search frontier). The escalation redoes the full narrow flow with the wide budget (the wider candidate set is not merge-comparable with the narrow one). Escalation is invisible to the user and adds latency only on the queries that need it.
+- **Walking budget cascade.** First/last-mile walking budget starts narrow (2 h) for query speed and escalates to the server ceiling (8 h) when any of three signals fires: the initial search returns nothing; any returned itinerary contains a wait of more than 1 h at the start or between transit legs; or the narrow search — including empty hops during the time-advance cascade — reveals a ≥ 4 h stretch of local daytime (06–21) with no service (measured across query time, every result's anchor time, and the current search frontier). The escalation redoes the full narrow flow with the wide budget (the wider candidate set is not merge-comparable with the narrow one). It adds latency only on the queries that need it, and the loader says so while it runs — see § Loader progress line.
 
 ### Routing panel
 
@@ -54,9 +54,9 @@ The `c` / `cw` split exists so `c` never has to change semantics; any consumer t
 
 Three ways to enter routing state:
 
-1. **Station popup buttons** — every station popup gains two buttons, **Route from here** and **Route to here**. Clicking opens the routing panel (if not already open) with that station set as the corresponding endpoint; if the panel is already open, it overwrites the corresponding endpoint.
+1. **Popup buttons** — the station, pill-arrow and place popups all carry the same pair of **Route from here** / **Route to here** buttons. Clicking opens the routing panel (if not already open) with that location set as the corresponding endpoint; if the panel is already open, it overwrites the corresponding endpoint. A station resolves to a `station` endpoint, a POI / address to a `point` endpoint carrying the popup's title as display name. Their look is defined in `popups.md` § Shared conventions.
 2. **Search-bar route icon** — a routing icon in the search bar opens the routing panel with an empty **To** and **From** prefilled to `current`.
-3. **Map context menu** — right-click (desktop) or long-press (touch) on any map location opens a small context menu at the click point with two items, **Route from here** and **Route to here**. Selection opens the routing panel (if not already open) with a `point` endpoint at the click coord; if the panel is already open, overwrites the corresponding endpoint.
+3. **Map context menu** — right-click (desktop) or long-press (touch) on any map location opens a small context menu at the click point with two items, **Route from here** and **Route to here**. Selection opens the routing panel (if not already open) with a `point` endpoint at the click coord; if the panel is already open, overwrites the corresponding endpoint. Uses the same play / stop glyphs as the popup buttons and the map's start / goal pins.
 
 ### Results
 
@@ -71,6 +71,12 @@ Three ways to enter routing state:
 - Before any query is issued for the current inputs: the results list is absent (not "no results shown").
 - No route found: a message row appears in place of cards.
 - **Hop merges never split a same-minute group.** The time-advance cascade caps how many of a hop's results merge at once, and the next hop anchors one minute past the last merged departure (arrival for arrive-by) — so if two connections share that minute and only one fits under the cap, the other would sit behind every later hop window and vanish permanently. The merge therefore always extends past the cap to include every result sharing the last-included anchor minute.
+- **Loader progress line.** A slow query must explain itself rather than sitting on a generic spinner label. The loader's default wording is the neutral "route options are loading"; it is replaced by a specific line whenever the cascade does something beyond the plain first query:
+  - each walking-budget escalation names its own trigger (no transit found in normal mode / only a long walk / long waits / long gap without service), so the user learns why the wait got longer;
+  - every hop of the time-advance cascade reports how many options are on screen and which way the search continues ("2 options found, looking for more options later on");
+  - share-link verification (which goes wide from the start) says it is looking up the shared connection.
+  Wording is user-facing and names no internal parameter (no seconds, no budget figures). The earlier/later load-more loaders keep their bare pill — the progress line belongs to the initial search only.
+- **Retroactive-pruning notice.** The published count is the *pruned* list, and pruning runs across the whole accumulated set, so a hop can retire more connections than it adds and the loader's option count can tick backwards. When that happens the loader shows "Bad route options were removed" above the progress line, so the dip reads as a decision rather than a glitch. The notice stays for the rest of that query.
 - **Loading-edge suppression.** The card at the time-advancing edge (last for leave-at, first for arrive-by) is hidden while it carries a very-slow warning: it is exactly the card that retroactive pruning may remove once the next batch loads its dominators, which would make it visibly vanish mid-scroll. Hidden, the next batch either prunes it (nothing changes on screen) or keeps it, at which point it is no longer the edge card and appears. Never applied to a sole result, the shared view, or the currently selected connection.
 
 ### Walk elevation
@@ -169,6 +175,8 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
   If either fails, A is dropped — no gap-scaled allowance applies here. Rationale: an overlapping worse option is only worth surfacing when it's essentially the same trip. "Leave 6 h earlier and walk 3 h more, arriving 40 min later" is not a near-tie; the user gains nothing chronologically by considering A and pays real time on both ends.
 
+  **Minimize-walking exception.** With the option active, the time test is skipped for an A that walks meaningfully less than B (> 60 s, the same jitter slack as Rules 0b / 0c), and the comfort test alone decides. The time test is a pure time argument — "A costs more of your day for no time benefit" — and applying it unconditionally overrides the one axis this mode exists to weigh: an A departing 13 min earlier, arriving at the same minute, walking 33 min less was being deleted by the walk-heavier B. The comfort test still removes a genuinely bad A, since minimize-walking's effective time prices walking linearly (see `routing-options.md` § Minimize walking). Off the option, Case 1 is unchanged.
+
 - **Case 2 — non-overlapping: gap-scaled comfort tolerance.** When neither option Pareto-dominates the other in time, A is dropped when there exists another non-overlapping B such that:
 
   - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**
@@ -197,6 +205,7 @@ The two cases exist because they warrant fundamentally different treatment. An o
   - overlapping, leaves 6 h earlier + arrives 40 min later (much worse comfort) → dropped by Case 1 (time test: 40 min > 9 min, comfort irrelevant).
   - overlapping, leaves 3 min earlier + arrives 5 min later, 30% worse effective time → dropped by Case 1 (comfort test: 30% > 20%).
   - overlapping, leaves 3 min earlier + arrives 5 min later, 10% worse effective time → survives Case 1 (both marginal).
+  - overlapping, leaves 13 min earlier + arrives at the same minute, 33 min less walking, minimize-walking active → survives Case 1 (time test skipped for the lower-walk option; comfort test passes). Same pair without the option → dropped (13 min > 9 min).
   - non-overlapping, both endpoints within slack (essentially the same time), somewhat worse comfort → both survive Case 2 (the floor keeps the allowance at the 2-min value; dropped only if ≥ ~15 min extra walking / ≥ 3 boardings worse).
   - non-overlapping, later start + later arrival by 30 min each, ≈ 30 min extra walking → survives Case 2 (comfort penalty within allowance).
   - non-overlapping, a rare fast option surrounded by regular options with ~15 min more walking → the neighbours all survive Case 2 from ~2 min gap onward. (Neighbours that the rare fast Pareto-dominates in time — i.e. it leaves later AND arrives earlier than a specific neighbour — fall into Case 1 for that pair and are dropped there.)
