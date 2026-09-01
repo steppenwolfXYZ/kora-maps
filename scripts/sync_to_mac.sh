@@ -11,7 +11,7 @@
 #   assets    static/map-assets/     ~470 MB  pmtiles, style, indexes, glyphs
 #   motis     motis/data/            ~4.5 GB  prebuilt nigiri/OSR/shapes indexes
 #   valhalla  valhalla/data/         ~1.0 GB  tile extract + admins
-#   lookup    data/ (derived only)   ~150 MB  diagnostic + identity tables
+#   lookup    data/ (derived only)   ~160 MB  diagnostic + identity tables
 #   routed    data/gtfs_routed/      ~6.2 GB  opt-in, only to run steps 6-8 there
 #
 # MOTIS indexes are architecture-portable — this machine imports on amd64
@@ -178,8 +178,17 @@ if want lookup; then
 			"$ROOT/data/gtfs_filtered/stop_identity.json"
 	fi
 
+	# The MOTIS sidecar's one non-hardlinked file: the platform-snapped
+	# stops the router actually sees. The rest of data/gtfs_motis/ is
+	# hardlinked from data/gtfs_routed/ and is not lookup material.
+	if [ -f "$ROOT/data/gtfs_motis/stops.txt" ]; then
+		push "MOTIS stops → data/gtfs_motis/" "data/gtfs_motis/" -z \
+			"$ROOT/data/gtfs_motis/stops.txt"
+	fi
+
 	OSM_EXTRACTS=()
-	OSM_WANTED=(rail_ways.geojson tram_ways.geojson platform_ways.geojson builtup_grid_100m.json)
+	OSM_WANTED=(rail_ways.geojson tram_ways.geojson platform_ways.geojson
+	            builtup_grid_100m.json quay_anchors.json)
 	# 152 MB; only worth it if you inspect bus geometry regularly.
 	if [ "$STREET_WAYS" -eq 1 ]; then OSM_WANTED+=(street_ways.geojson); fi
 	for f in "${OSM_WANTED[@]}"; do

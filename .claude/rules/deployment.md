@@ -9,6 +9,8 @@ Four deliberately separate deploy channels:
 
 `scripts/update_map.sh` is the data-refresh machine's whole routine, scheduled as a DAG rather than a line: GTFS ∥ OSM downloads → OSM extracts ∥ GTFS preprocess → pfaedle (sharded over `PFAEDLE_JOBS` containers) ∥ routing prep (`setup_routing.sh --steps 1,2,3,4`: network, image, OSM patch, Valhalla tiles — with a tile wipe first when the OSM extract is newer than the tiles) → footpath matrix ∥ map emission (`rebuild_transit.sh --only 6,7,8`) → MOTIS import + local smoke test → the three deploys (`deploy_motis.sh --data-only`: indexes only, never this machine's amd64 image) → production smoke test. Any failing stage aborts before the deploy phase, so a broken local import never reaches the server; per-stage wall times print at the end. Sizing env: `PFAEDLE_JOBS`, `TIPPECANOE_JOBS`, `VALHALLA_THREADS`, `MATRIX_WORKERS`. The app deploy stays separate (git push from the dev Mac).
 
+Separate from all four, `scripts/sync_to_mac.sh` pushes a finished run sideways from the data machine to the dev Mac so the Mac stays current without re-running the pipeline — see § Dev-machine sync.
+
 The split exists because map assets are large generated artifacts (~470 MB, gitignored) while the app is small committed code. It also maps cleanly onto the future setup where a dedicated pipeline server runs nightly rebuilds and pushes assets itself — the GitHub Actions side never changes.
 
 ## Production environment
@@ -54,6 +56,89 @@ Ships `valhalla/data/` (Valhalla tiles + SRTM elevation + admin polygons, ~500-8
 The app does NOT call Valhalla — all walking is computed server-side inside the MOTIS fork, so the browser makes exactly one request per query (to `/routing/`). There is no `PUBLIC_VALHALLA_URL` env var. The nginx `location /valhalla/` → `http://127.0.0.1:8002/` proxy is optional, for direct debugging/smoke tests only; the production system works without it (MOTIS reaches Valhalla over the internal `koramaps` docker network).
 
 One-time server prep: create `/var/www/koramaps.app/valhalla/` (owned by `ga_koramaps`), `docker network create koramaps`, optionally add the nginx debug location, keep 8002 closed in the cloud firewall, confirm ~1 GB free disk. The tiles are built from `ch_pfaedle_walkable.osm.pbf`, which carries the synthetic station walk network merged in by `preprocess_osm_for_motis.py --valhalla` (see `station-walk-network.md`) — changing that overlay means rebuilding tiles *and* the footpath matrix, since both describe the same walking. Local tile build (one-off, ~20-40 min): `cd valhalla && docker compose up -d valhalla` — the gis-ops image downloads SRTM elevation, builds admins, then routing tiles. First-time bring-up order: Valhalla tiles → matrix build → MOTIS import → deploy both (Valhalla first — the forked MOTIS refuses to serve without it).
+
+## Dev-machine sync (`scripts/sync_to_mac.sh`)
+
+Sideways, not a deploy channel: this pushes a finished pipeline run from the
+**data machine** (Linux, amd64 — the box that runs `update_map.sh`) to the
+**dev Mac**, so the Mac's local map and routing stack are current without
+re-running the pipeline there. It never touches production, and it only ever
+flows data-machine → Mac.
+
+**Why it exists.** The Mac is where code is written, so every pipeline or fork
+change lands there long before the data machine runs. What the Mac lacks is
+fresh *data* — and it cannot practically build the footpath matrix. Re-running
+the whole pipeline on the Mac just to catch up costs hours for artifacts the
+data machine already produced.
+
+**Two-machine roles.** The data machine imports MOTIS and builds Valhalla
+tiles + the matrix; the Mac develops the app and the fork. This supersedes the
+assumption in deploy channel 3 above that the Mac is the importing machine —
+`update_map.sh` on the data machine now does that, and `deploy_motis.sh
+--data-only` ships its indexes to the VPS.
+
+**Groups** (all but `routed` run by default; `--only a,b` selects):
+
+| Group | Source | Size | Contents |
+|---|---|---|---|
+| `assets` | `static/map-assets/` | ~470 MB | pmtiles, style.json, search/line/color indexes, glyph fonts |
+| `motis` | `motis/data/` | ~4.5 GB | prebuilt nigiri / OSR / shapes indexes |
+| `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
+| `lookup` | `data/` (derived only) | ~160 MB | diagnostic + identity tables |
+| `routed` | `data/gtfs_routed/` | ~6.2 GB | opt-in (`--with-routed`) |
+
+**The matrix does not ship.** MOTIS indexes are architecture-portable — the
+data machine imports on amd64 and those same indexes serve on the VPS's arm64
+and on the Mac — so shipping the finished indexes makes the 1.8 GB
+`valhalla_footpath_matrix.csv` unnecessary. `--with-matrix` adds it, and is
+only wanted when re-importing MOTIS on the Mac (i.e. changing the fork's
+*import* path rather than its query path). Because the CSV is `--exclude`d
+rather than absent, `--delete` never removes a copy already on the Mac.
+
+**Raw inputs do not ship.** The country PBFs (12.7 GB, unreadable without
+osmium) and the bulk GTFS tables (`stop_times.txt`, `trips.txt`,
+`calendar_dates.txt`) are pipeline fuel, not lookup material. The `lookup`
+group instead carries the small derived tables that are actually worth
+grepping while debugging: `data/transit/*.json` (`gtfs_groups_full.json` above
+all), `stop_identity.json`, `data/gtfs_motis/stops.txt` (the platform-snapped
+stops the router sees — the sidecar's one non-hardlinked file), the small GTFS
+tables (`stops`, `routes`, `agency`, `calendar`, `frequencies`), and the OSM
+extracts (`rail_ways`, `tram_ways`, `platform_ways`, `builtup_grid_100m`,
+`quay_anchors`). `--street-ways` adds `street_ways.geojson` (152 MB).
+`--with-routed` adds `data/gtfs_routed/`, which is what the Mac needs to run
+`rebuild_transit.sh --start 6` against fresh data without redoing pfaedle.
+
+**Safety rails.** Two, both learned the hard way:
+
+- The script **refuses to run while `update_map.sh` is alive**. Mid-run,
+  artifacts are being rewritten — pfaedle is producing a partial feed, and the
+  Valhalla tile wipe that precedes a rebuild leaves `valhalla/data/` with no
+  tiles at all. Syncing that with `--delete` would replace good data on the Mac
+  with an empty directory. `--force` overrides.
+- Every `--delete` group is gated on a sentinel that exists only once that
+  group's build finished (`style.json`, `tt.bin`, `valhalla_tiles.tar`,
+  `shapes.txt`). A missing sentinel skips the group with a warning instead of
+  mirroring an interrupted run. The `lookup` group never uses `--delete` at
+  all — its files land inside the Mac's own 40+ GB `data/` tree.
+
+**Transfer details.** `-z` is applied per group: on for the text payloads
+(JSON / CSV / GeoJSON compress 9–20×), off for pmtiles and the binary indexes,
+where it only burns CPU on an already-fast link. `--partial` is kept
+throughout because the Mac is on WiFi — a dropped connection resumes mid-file
+instead of restarting a 1.4 GB index. macOS ships openrsync (protocol 29);
+`-a -v --partial --delete` and the `--include`/`--exclude` filter chain all
+negotiate correctly with GNU rsync on the sending side.
+
+**Target.** SSH alias `mac` from `~/.ssh/config`, repo at
+`~/Documents/prog/newmap` (the Mac's folder name predates the Kora rename).
+Override with `MAC_REMOTE` / `MAC_PATH`. Preflight prints the Mac's free disk,
+which is worth watching — its data volume runs near full and the default sync
+is ~6 GB, mostly overwriting in place.
+
+**Typical cycle.** Finish a change on the Mac → push code → run
+`./scripts/update_map.sh` on the data machine (which deploys to production on
+success) → `./scripts/sync_to_mac.sh` to bring the Mac's data back in line.
+Run it with `--dry-run` first when in doubt.
 
 ## SSR constraints (deployment-driven)
 
