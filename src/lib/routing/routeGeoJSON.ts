@@ -85,6 +85,10 @@ export interface RouteGeoJSONResult {
 	 * appear anywhere on the route — used to filter the map's own stop
 	 * symbology so route members stay visible while non-members hide. */
 	memberUics: string[];
+	/** [lon, lat] of each via stop on this route, in journey order — DOM
+	 * pin markers, same treatment as start / goal (via-stops.md). Empty
+	 * when the query has no vias. */
+	viaCoords: [number, number][];
 }
 
 // Reverse lookup parent-stop-id ("Parentch:1:sloid:7000") → merged UIC,
@@ -184,15 +188,16 @@ export function buildRouteGeoJSON(
 	itinerary: Itinerary,
 	routeColorIndex: Map<string, string> | null,
 	stationIndex: Map<string, StationEntry> | null,
-	/** Merged UICs of the query's via stops (via-stops.md). Discs and
-	 * pass-through dots at these stations are tagged `is_via`, which
-	 * routeLayers rings so a stop the traveller chose reads apart from the
-	 * ones the route merely passes. */
+	/** Merged UICs of the query's via stops, in journey order
+	 * (via-stops.md). Each one that appears on the route contributes a
+	 * coordinate to `viaCoords`, which routeLayers plants a pin on — the
+	 * same treatment start and goal get. */
 	viaUics?: Set<string> | null
 ): RouteGeoJSONResult {
 	const features: Feature[] = [];
 	let bbox: [number, number, number, number] | null = null;
 	const memberUicSet = new Set<string>();
+	const viaPassCoord = new Map<string, [number, number]>();
 	const byParentId = uicByParentId(stationIndex);
 	let featureId = 0;
 
@@ -225,6 +230,11 @@ export function buildRouteGeoJSON(
 				bbox = updateBBox(bbox, c);
 				const uic = stationKeyFrom(st, byParentId);
 				if (uic) memberUicSet.add(uic);
+				// A via ridden past on board has no leg boundary, so its pin
+				// hangs off the intermediate stop instead of off a disc.
+				if (uic && viaUics?.has(uic) && !viaPassCoord.has(uic)) {
+					viaPassCoord.set(uic, c);
+				}
 				const tier = uic ? stationIndex?.get(uic)?.t : undefined;
 				// Fallback tier so unknown-tier stops still get a size + Regular
 				// font from the map's tier-based label expression, rather than
@@ -239,8 +249,7 @@ export function buildRouteGeoJSON(
 						leg_index: i,
 						stop_name: st.name ?? '',
 						stop_tier: normalizedTier,
-						stop_min_zoom: minZoomFor(tier),
-						is_via: uic && viaUics?.has(uic) ? 1 : 0
+						stop_min_zoom: minZoomFor(tier)
 					}
 				});
 			}
@@ -398,15 +407,24 @@ export function buildRouteGeoJSON(
 		}
 	}
 
-	// Tag every disc that sits at a via station. Done in one sweep rather
-	// than at each of the four disc-emitting sites — the rule is purely
-	// "which station is this", independent of why the disc exists.
+	// Pin coordinate for every via. Taken in one sweep rather than at each
+	// of the four disc-emitting sites — the rule is purely "which station
+	// is this", independent of why the disc exists. A disc wins over an
+	// intermediate stop: at a via the traveller alights at, the disc sits
+	// on the actual platform the legs use.
+	const viaDiscCoord = new Map<string, [number, number]>();
 	if (viaUics?.size) {
 		for (const f of features) {
 			if (f.properties?.role !== 'disc') continue;
 			const uic = f.properties.parent_uic as string | undefined;
-			f.properties.is_via = uic && viaUics.has(uic) ? 1 : 0;
+			if (!uic || !viaUics.has(uic) || viaDiscCoord.has(uic)) continue;
+			viaDiscCoord.set(uic, (f.geometry as Point).coordinates as [number, number]);
 		}
+	}
+	const viaCoords: [number, number][] = [];
+	for (const uic of viaUics ?? []) {
+		const c = viaDiscCoord.get(uic) ?? viaPassCoord.get(uic);
+		if (c) viaCoords.push(c);
 	}
 
 	// Dedup discs by proximity. Every disc is its own candidate — station
@@ -497,6 +515,7 @@ export function buildRouteGeoJSON(
 		startCoord,
 		goalCoord,
 		bbox,
-		memberUics: Array.from(memberUicSet)
+		memberUics: Array.from(memberUicSet),
+		viaCoords
 	};
 }

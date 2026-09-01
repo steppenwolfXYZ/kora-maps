@@ -24,7 +24,6 @@ export const ROUTE_CONNECTOR_CASING_LAYER = 'route-connector-casing';
 export const ROUTE_CONNECTOR_FILL_LAYER = 'route-connector-fill';
 export const ROUTE_WALK_LAYER = 'route-walk';
 export const ROUTE_PASSTHROUGH_LAYER = 'route-passthrough';
-export const ROUTE_VIA_RING_LAYER = 'route-via-ring';
 export const ROUTE_DISC_LAYER = 'route-disc';
 export const ROUTE_LABEL_LAYER = 'route-label';
 
@@ -35,7 +34,6 @@ const ROUTE_LAYER_IDS = [
 	ROUTE_CONNECTOR_FILL_LAYER,
 	ROUTE_WALK_LAYER,
 	ROUTE_PASSTHROUGH_LAYER,
-	ROUTE_VIA_RING_LAYER,
 	ROUTE_DISC_LAYER,
 	ROUTE_LABEL_LAYER
 ];
@@ -49,11 +47,6 @@ const STOP_STROKE_WIDTH = 1.0;
 const NEUTRAL_DARK = '#1a1a1a';
 const NEUTRAL_LIGHT = '#ffffff';
 const PIN_FILL = '#1a1a1a';
-// Via ring: the brand red as a semantic accent (ux-guidelines.md) — a
-// stop the traveller asked for, told apart from the stops the route just
-// happens to pass.
-const VIA_RING_COLOR = '#740013';
-const VIA_RING_WIDTH = 2;
 const ICON_FILL = '#ff6b7a';
 
 // Label font weights per tier, mirroring scripts/style/transit_stations.py.
@@ -185,11 +178,6 @@ function fineDiscZoomStep(
 const DISC_RADIUS_ANCHORS: [number, number][] = [
 	[4, 5], [8, 7], [12, 9], [14, 10], [18, 13]
 ];
-// Pass-through dot radii per zoom, mirroring the step table of the
-// passthrough layer — used only to size the via ring around one.
-const VIA_PASSTHROUGH_ANCHORS: [number, number][] = [
-	[7, 2.2], [10, 2.8], [12, 3.2], [13, 3.5], [16, 4.5]
-];
 const CONNECTOR_CASING_ANCHORS: [number, number][] = [
 	[4, 6], [8, 8], [12, 10], [16, 14]
 ];
@@ -200,6 +188,8 @@ const CONNECTOR_FILL_ANCHORS: [number, number][] = [
 export interface RouteMarkerHandles {
 	start: maplibregl.Marker | null;
 	goal: maplibregl.Marker | null;
+	/** One pin per via stop, in journey order (via-stops.md). */
+	vias: maplibregl.Marker[];
 }
 
 /** Add all route layers + source above the topmost transit layer, so the
@@ -338,39 +328,6 @@ export function installRouteLayers(
 		});
 	}
 
-	// Via ring (via-stops.md § Result display): a brand-red ring just
-	// outside the dot at every via stop. Sits below the disc layer so the
-	// white disc keeps its own edge; the radius follows whichever dot the
-	// via happens to be — a transfer disc or a pass-through dot — and
-	// inherits that dot's own visibility gate, so a ring never floats
-	// alone at a zoom where its dot is hidden.
-	if (!map.getLayer(ROUTE_VIA_RING_LAYER)) {
-		const steps: any[] = [0];
-		for (let z = 4; z <= 18; z++) {
-			const discR = Math.round(
-				(lerpOverAnchors(DISC_RADIUS_ANCHORS, z) + 3) * 100) / 100;
-			const passR = Math.round(
-				(lerpOverAnchors(VIA_PASSTHROUGH_ANCHORS, z) + 3) * 100) / 100;
-			steps.push(z, ['case',
-				['==', ['get', 'role'], 'disc'],
-				['case', ['<=', ['get', 'disc_min_zoom'], z], discR, 0],
-				['case', ['<=', ['get', 'stop_min_zoom'], z], passR, 0]
-			]);
-		}
-		map.addLayer({
-			id: ROUTE_VIA_RING_LAYER,
-			type: 'circle',
-			source: ROUTE_SOURCE_ID,
-			filter: ['==', ['get', 'is_via'], 1],
-			paint: {
-				'circle-radius': ['step', ['zoom'], ...steps] as any,
-				'circle-color': 'rgba(0,0,0,0)',
-				'circle-stroke-color': VIA_RING_COLOR,
-				'circle-stroke-width': VIA_RING_WIDTH
-			}
-		});
-	}
-
 	// Discs: bigger version of the same white/black stop dot. One layer,
 	// not casing+fill — matches the map's own dot construction. Discs
 	// with a non-zero disc_min_zoom (dedup: a higher-ranked station is
@@ -469,8 +426,9 @@ export function installRouteLayers(
 	if (prevMarkers) {
 		prevMarkers.start?.remove();
 		prevMarkers.goal?.remove();
+		for (const m of prevMarkers.vias ?? []) m.remove();
 	}
-	const markers: RouteMarkerHandles = { start: null, goal: null };
+	const markers: RouteMarkerHandles = { start: null, goal: null, vias: [] };
 	if (geo.startCoord) {
 		markers.start = new maplibregl.Marker({
 			element: makeStartIconElement(),
@@ -487,6 +445,13 @@ export function installRouteLayers(
 			.setLngLat(geo.goalCoord)
 			.addTo(map);
 	}
+	for (const coord of geo.viaCoords ?? []) {
+		markers.vias.push(
+			new maplibregl.Marker({ element: makeViaIconElement(), anchor: 'bottom' })
+				.setLngLat(coord)
+				.addTo(map)
+		);
+	}
 	return markers;
 }
 
@@ -499,6 +464,7 @@ export function removeRouteLayers(
 	if (markers) {
 		markers.start?.remove();
 		markers.goal?.remove();
+		for (const m of markers.vias ?? []) m.remove();
 	}
 	for (const id of ROUTE_LAYER_IDS) {
 		if (map.getLayer(id)) map.removeLayer(id);
@@ -521,6 +487,28 @@ function makeStartIconElement(): HTMLDivElement {
 			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
 			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
 			<path d="M9.5 5 L16.5 9 L9.5 13 Z" fill="${ICON_FILL}"/>
+		</svg>
+	`;
+	return wrap;
+}
+
+// Via icon: teardrop pin with a skip-next glyph (play triangle against a
+// bar) inside — the stop the traveller chose to route through, drawn as a
+// sibling of the start / goal pins rather than as its own kind of marker.
+// Same pin shape and palette; the glyph is what distinguishes the three.
+function makeViaIconElement(): HTMLDivElement {
+	const wrap = document.createElement('div');
+	wrap.className = 'route-via-icon';
+	wrap.style.cssText = [
+		'width: 38px', 'height: 42px', 'pointer-events: none',
+		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
+	].join(';');
+	wrap.innerHTML = `
+		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
+			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
+			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
+			<path d="M8.3 5 L14.2 9 L8.3 13 Z" fill="${ICON_FILL}"/>
+			<rect x="15" y="5" width="1.7" height="8" fill="${ICON_FILL}"/>
 		</svg>
 	`;
 	return wrap;
