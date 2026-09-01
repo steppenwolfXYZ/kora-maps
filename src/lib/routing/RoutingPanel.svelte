@@ -488,6 +488,16 @@
 	}
 </script>
 
+{#snippet addStop(enabled: boolean, onClick: () => void, title: string)}
+	<!-- The column is always reserved, so every field keeps the same width
+	     whether or not another stop may be added. -->
+	{#if enabled}
+		<button class="rp-add icon-btn" onclick={onClick} aria-label={title} {title}>+</button>
+	{:else}
+		<span class="rp-add-spacer" aria-hidden="true"></span>
+	{/if}
+{/snippet}
+
 <div class="routing-panel" role="dialog" aria-label="Route planning">
 	<div class="rp-head">
 		<span class="rp-title">
@@ -507,8 +517,12 @@
 		>×</button>
 	</div>
 
+	<!-- Endpoint rows (via-stops.md § Panel UI). The "+" of each row sits
+	     in its own column right of the field, not inside it: it acts on the
+	     row rather than on the field's value, and the column is the one the
+	     swap button used to occupy before moving down to the timing row. -->
 	<div class="rp-endpoints">
-		<div class="rp-inputs">
+		<div class="rp-row">
 			<EndpointInput
 				bind:this={fromInput}
 				label="From"
@@ -522,14 +536,15 @@
 				}}
 				otherIsCurrent={routingState.to?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
-				onAddAfter={routingState.from && routingState.canAddVia
-					? () => addViaAt(0)
-					: undefined}
 			/>
-			<!-- Via rows (via-stops.md § Panel UI). Each row's `+` inserts a
-			     stop AFTER it, so the chain reads top to bottom in travel
-			     order; the last-inserted row takes the cursor. -->
-			{#each routingState.vias as v, i}
+			{@render addStop(
+				routingState.from !== null && routingState.canAddVia,
+				() => addViaAt(0),
+				'Add a stop after the start'
+			)}
+		</div>
+		{#each routingState.vias as v, i}
+			<div class="rp-row">
 				<EndpointInput
 					bind:this={viaInputs[i]}
 					via
@@ -542,11 +557,15 @@
 						else routingState.removeVia(i);
 					}}
 					onWait={(m) => routingState.setViaWait(i, m)}
-					onAddAfter={v.station && routingState.canAddVia
-						? () => addViaAt(i + 1)
-						: undefined}
 				/>
-			{/each}
+				{@render addStop(
+					v.station !== null && routingState.canAddVia,
+					() => addViaAt(i + 1),
+					'Add a stop after this one'
+				)}
+			</div>
+		{/each}
+		<div class="rp-row">
 			<EndpointInput
 				bind:this={toInput}
 				label="To"
@@ -555,16 +574,13 @@
 				onChange={(ep) => routingState.setTo(ep)}
 				otherIsCurrent={routingState.from?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
-				onAddAfter={canSplitDestination ? splitDestination : undefined}
 			/>
+			{@render addStop(
+				canSplitDestination,
+				splitDestination,
+				'Continue past the destination — it becomes a stop on the way'
+			)}
 		</div>
-		<button
-			class="rp-swap icon-btn"
-			onclick={() => routingState.swap()}
-			aria-label="Swap start and destination"
-		>
-			<span class="material-symbols-outlined">swap_vert</span>
-		</button>
 	</div>
 
 	<div class="rp-when">
@@ -578,6 +594,16 @@
 			onToggleOptions={() => (optionsOpen = !optionsOpen)}
 		>
 			{#snippet options()}<RoutingOptions />{/snippet}
+			{#snippet swap()}
+				<button
+					class="rp-swap icon-btn"
+					onclick={() => routingState.swap()}
+					aria-label="Reverse the route"
+					title="Reverse the route"
+				>
+					<span class="material-symbols-outlined">swap_vert</span>
+				</button>
+			{/snippet}
 		</TimeSelector>
 	</div>
 
@@ -853,25 +879,43 @@
 
 	.rp-endpoints {
 		display: flex;
+		flex-direction: column;
+		gap: 0.2rem;
+		position: relative;
+	}
+	/* One endpoint field plus its trailing "+" column. */
+	.rp-row {
+		display: flex;
 		flex-direction: row;
 		align-items: center;
 		gap: 0.35rem;
-		position: relative;
+		min-width: 0;
 	}
-	.rp-inputs {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
+	.rp-row > :global(.ep-row) {
 		flex: 1 1 auto;
 		min-width: 0;
 	}
-	/* Base look + hover from .icon-btn (app.css); sizing only here. */
-	.rp-swap {
+	/* Base look + hover from .icon-btn (app.css); sizing only here. The
+	   spacer holds the same width when no "+" is offered, so all fields
+	   stay flush regardless of how many stops the chain already has. */
+	.rp-add {
 		flex: 0 0 auto;
-		padding: 0.25rem 0;
+		width: var(--rp-tail-col);
+		font-size: 1.15rem;
+		line-height: 1;
+		padding: 0.15rem 0;
+	}
+	.rp-add-spacer {
+		flex: 0 0 auto;
 		width: var(--rp-tail-col);
 	}
-	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
+	/* Base look + hover from .icon-btn (app.css); sizing only here. Lives
+	   in the timing row now (TimeSelector's `swap` snippet). */
+	.rp-swap {
+		flex: 0 0 auto;
+		padding: 0 0.35rem;
+	}
+	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; display: block; }
 
 	/* Hairline + extra air separates the suggestions block from the
 	   search criteria above (same line style as .rp-results-sep). */

@@ -17,12 +17,18 @@
 		optionsModified?: boolean;
 		onToggleOptions?: () => void;
 		options?: Snippet;
+		/** Swap-direction control (via-stops.md § Panel UI). It lives in
+		 * this row rather than beside the endpoint fields: with up to four
+		 * endpoint rows there is no single row it belongs to, and the
+		 * trailing column beside the fields is needed for their own
+		 * per-row "+" buttons. */
+		swap?: Snippet;
 	}
 
 	let {
 		mode, time, onMode, onTime,
 		optionsOpen = false, optionsModified = false, onToggleOptions,
-		options
+		options, swap
 	}: Props = $props();
 
 	// Local tick so the displayed wall clock re-evaluates on every refresh
@@ -178,6 +184,9 @@
 			<button class:active={mode === 'leave'} onclick={() => onMode('leave')}>Leave at</button>
 			<button class:active={mode === 'arrive'} onclick={() => onMode('arrive')}>Arrive by</button>
 		</div>
+		{#if swap}
+			<div class="ts-swap">{@render swap()}</div>
+		{/if}
 		{#if onToggleOptions}
 			<button
 				class="ts-options icon-btn"
@@ -286,6 +295,17 @@
 		width: fit-content;
 		height: var(--ts-row-h);
 	}
+	/* Swap sits immediately right of the mode toggle, sharing the row
+	   height; `margin-right: auto` keeps the Options button pinned to the
+	   far end instead of letting space-between centre the swap. */
+	.ts-swap {
+		flex: 0 0 auto;
+		display: flex;
+		align-items: center;
+		height: var(--ts-row-h);
+		margin-right: auto;
+	}
+
 	/* Base look + hover from .icon-btn (app.css); sizing only here. Icon
 	   plus a "Options" label — the bare glyph was hard to spot and a
 	   small target on touch, so the button is a labelled pill with a

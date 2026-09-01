@@ -53,16 +53,12 @@
 		/** Requested minimum stay in minutes; via rows only. */
 		wait?: number;
 		onWait?: (minutes: number) => void;
-		/** "Insert a stop after this row" — rendered as a `+` at the row's
-		 * right end whenever the row carries a value and another via still
-		 * fits. */
-		onAddAfter?: () => void;
 	}
 
 	let {
 		label, endpoint, placeholder, onChange,
 		otherIsCurrent = false, onRefreshCurrent,
-		via = false, wait = 0, onWait, onAddAfter
+		via = false, wait = 0, onWait
 	}: Props = $props();
 
 	let index = $state<IndexedStation[]>([]);
@@ -424,14 +420,6 @@
 			onclick={clear}
 			aria-label={via ? `Remove via ${labelFor(endpoint)}` : `Clear ${label.toLowerCase()}`}
 		>×</button>
-		{#if onAddAfter}
-			<button
-				class="ep-add icon-btn"
-				onclick={onAddAfter}
-				aria-label="Add a stop after {labelFor(endpoint)}"
-				title="Add a stop after this one"
-			>+</button>
-		{/if}
 	{/if}
 </div>
 
@@ -502,14 +490,6 @@
 	.ep-refresh {
 		flex: 0 0 auto;
 		padding: 0.15rem 0.25rem;
-	}
-	/* Same backgroundless icon button as the clear ×; the glyph is a plain
-	   "+" so no new Material Symbol has to enter the subset. */
-	.ep-add {
-		flex: 0 0 auto;
-		font-size: 1.05rem;
-		line-height: 1;
-		padding: 0.15rem 0.3rem;
 	}
 	.ep-refresh :global(.material-symbols-outlined) {
 		font-size: 1rem;

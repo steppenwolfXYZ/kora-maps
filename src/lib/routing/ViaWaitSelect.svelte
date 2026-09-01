@@ -96,9 +96,9 @@
 		aria-label="Wait time{stationName ? ` at ${stationName}` : ''}: {label(wait)}"
 		onclick={toggle}
 	>
-		{#if wait > 0}
-			<span class="material-symbols-outlined vw-icon" aria-hidden="true">hourglass_top</span>
-		{/if}
+		<!-- The glyph shows at rest too, so a via row reads as carrying a
+		     wait control rather than a stray grey label. -->
+		<span class="material-symbols-outlined vw-icon" aria-hidden="true">hourglass_top</span>
 		<span class="vw-text">{label(wait)}</span>
 	</button>
 	{#if open}
@@ -147,23 +147,23 @@
 		align-items: center;
 		gap: 0.15rem;
 		border: none;
-		background: transparent;
+		background: var(--gray-100);
 		font-family: inherit;
 		font-size: 0.72rem;
 		line-height: 1.2;
-		color: var(--gray-400);
-		padding: 0.15rem 0.35rem;
+		color: var(--gray-500);
+		padding: 0.15rem 0.4rem 0.15rem 0.3rem;
 		border-radius: var(--radius-pill);
 		cursor: pointer;
 		white-space: nowrap;
 	}
 	.vw-chip:hover { color: var(--brand); }
 	.vw-chip.set {
-		background: var(--gray-100);
-		color: var(--anthracite);
+		background: var(--anthracite);
+		color: var(--white);
 		font-weight: 600;
 	}
-	.vw-chip.set:hover { color: var(--brand); }
+	.vw-chip.set:hover { background: var(--brand); color: var(--white); }
 	.vw-icon {
 		font-size: 0.85rem;
 		line-height: 1;
