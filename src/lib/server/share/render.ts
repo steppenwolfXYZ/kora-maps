@@ -4,8 +4,8 @@ import { read } from '$app/server';
 import { initWasm, Resvg } from '@resvg/resvg-wasm';
 import type { Itinerary, Leg } from '$lib/routing/types';
 import type { ShareData } from '$lib/routing/share';
-import { badgeTextColor, fmtDuration, isTransitMode } from '$lib/routing/itineraryFormat';
-import { transferCount, walkSeconds } from '$lib/routing/ranking';
+import { badgeTextColor, fmtDistance, fmtDuration, isTransitMode } from '$lib/routing/itineraryFormat';
+import { transferCount, walkMetres, walkSeconds } from '$lib/routing/ranking';
 import saira400 from './fonts/saira-latin-400.ttf';
 import saira700 from './fonts/saira-latin-700.ttf';
 import saira800 from './fonts/saira-latin-800.ttf';
@@ -57,6 +57,13 @@ function fitSize(text: string, maxWidth: number, size: number, min = 22): number
 function estWidth(text: string, size: number): number {
 	return text.length * AVG_EM * size;
 }
+/** Hard-truncate at a width the type can't shrink into. U+2026 is inside
+ * the Saira latin subset the static instances carry. */
+function ellipsize(text: string, maxWidth: number, size: number): string {
+	if (estWidth(text, size) <= maxWidth) return text;
+	const keep = Math.max(1, Math.floor(maxWidth / (AVG_EM * size)) - 1);
+	return `${text.slice(0, keep).trimEnd()}…`;
+}
 
 /** First/last transit station + times — mirrors ResultCard's summary line. */
 function transitEndpoints(it: Itinerary): { fromName: string; fromTime: string; toName: string; toTime: string } | null {
@@ -70,6 +77,14 @@ function transitEndpoints(it: Itinerary): { fromName: string; fromTime: string; 
 		toName: last.to?.name ?? '',
 		toTime: last.endTime
 	};
+}
+
+/** "6 min 541 m walking" — the card's meta wording (transit-routing.md
+ * § Results). Distance omitted when nothing is walked. */
+function walkSummary(it: Itinerary): string {
+	const m = walkMetres(it);
+	const dist = m > 0 ? ` ${fmtDistance(m)}` : '';
+	return `${fmtDuration(walkSeconds(it))}${dist} walking`;
 }
 
 /** og:title — "Bern 09:34 – Vounetse 11:28" (falls back to bare times for
@@ -87,7 +102,7 @@ export function shareDescription(share: ShareData): string {
 	const transfers = transferCount(it);
 	return `${dateFmt.format(new Date(it.startTime))} · ${fmtDuration(it.duration)} · ` +
 		`${transfers} transfer${transfers === 1 ? '' : 's'} · ` +
-		`${fmtDuration(walkSeconds(it))} walking`;
+		`${walkSummary(it)}`;
 }
 
 interface BadgeSpec {
@@ -173,30 +188,68 @@ function buildSvg(share: ShareData): string {
 
 	const logoData = `data:image/svg+xml;base64,${Buffer.from(logoSvg).toString('base64')}`;
 
-	const timeRange = `${t(it.startTime)} – ${t(it.endTime)}`;
+	// Same hierarchy as the result card (transit-routing.md § Results):
+	// the ride's boarding / alighting times carry the large type with the
+	// station names small beneath them, while the door-to-door pair sits
+	// small above as "leave … · there …". A walk-only share has no ride to
+	// name and keeps the plain big time range instead.
+	const ep = transitEndpoints(it);
 	const durText = fmtDuration(it.duration);
 	const durSize = 38;
-	const timeSize = fitSize(timeRange, TW - estWidth(durText, durSize) - 40, 58);
+	const TOP_Y = ep ? 175 : 200;
 
-	const ep = transitEndpoints(it);
+	let topLine: string;
+	if (ep) {
+		topLine = `<text x="${TX}" y="${TOP_Y}" font-size="34" fill="#777777">` +
+			`leave <tspan font-weight="700" fill="#333333">${t(it.startTime)}</tspan>` +
+			` · there <tspan font-weight="700" fill="#333333">${t(it.endTime)}</tspan></text>`;
+	} else {
+		const timeRange = `${t(it.startTime)} – ${t(it.endTime)}`;
+		const timeSize = fitSize(timeRange, TW - estWidth(durText, durSize) - 40, 58);
+		topLine = `<text x="${TX}" y="${TOP_Y}" font-size="${timeSize}" font-weight="700" fill="#1a1a1a">${esc(timeRange)}</text>`;
+	}
+
+	// Title block: two equal columns, arrow in the gutter. The arrow is a
+	// drawn chevron, not "→" — U+2192 is outside the Saira latin subset the
+	// static instances carry, and resvg has no system-font fallback.
 	let routeLine = '';
 	if (ep) {
-		const full = `${ep.fromName} ${t(ep.fromTime)} – ${ep.toName} ${t(ep.toTime)}`;
-		const size = fitSize(full, TW, 40);
-		routeLine = `<text x="${TX}" y="290" font-size="${size}" fill="#444444">` +
-			`<tspan font-weight="700" fill="#1a1a1a">${esc(ep.fromName)}</tspan> ${t(ep.fromTime)}` +
-			` – <tspan font-weight="700" fill="#1a1a1a">${esc(ep.toName)}</tspan> ${t(ep.toTime)}</text>`;
+		const GUTTER = 70;
+		const COL_W = (TW - GUTTER) / 2;
+		const col2X = TX + COL_W + GUTTER;
+		const TIME_SIZE = 56;
+		const NAME_SIZE = 30;
+		const TIME_Y = 278;
+		const NAME_Y = 322;
+		const chevX = TX + COL_W + 18;
+		const chevY = TIME_Y - TIME_SIZE * 0.34;
+		// The name row sits below the chevron, so the departure name may run
+		// across the gutter; the arrival name is walled in by the logo.
+		// One shared size for both, shrunk before anything gets clipped.
+		const fromW = COL_W + GUTTER - 16;
+		const nameSize = Math.min(
+			fitSize(ep.fromName, fromW, NAME_SIZE, 24),
+			fitSize(ep.toName, COL_W, NAME_SIZE, 24)
+		);
+		const col = (x: number, time: string, name: string, nameW: number) =>
+			`<text x="${x}" y="${TIME_Y}" font-size="${TIME_SIZE}" font-weight="700" fill="#1a1a1a">${esc(time)}</text>` +
+			(name
+				? `<text x="${x}" y="${NAME_Y}" font-size="${nameSize}" fill="#666666">${esc(ellipsize(name, nameW, nameSize))}</text>`
+				: '');
+		routeLine = col(TX, t(ep.fromTime), ep.fromName, fromW) +
+			`<polyline points="${chevX + 3},${chevY - 14} ${chevX + 17},${chevY} ${chevX + 3},${chevY + 14}" fill="none" stroke="#bbbbbb" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>` +
+			col(col2X, t(ep.toTime), ep.toName, COL_W);
 	}
 
 	const specs = badgeSpecs(share);
 	const badges = specs.length
-		? badgeRow(specs, TX, 330, TW)
+		? badgeRow(specs, TX, 360, TW)
 		: `<text x="${TX}" y="375" font-size="40" font-weight="700" fill="#444444">Walk</text>`;
 
 	const transfers = transferCount(it);
 	const meta = `${dateFmt.format(new Date(it.startTime))} · ` +
 		`${transfers} transfer${transfers === 1 ? '' : 's'} · ` +
-		`${fmtDuration(walkSeconds(it))} walking`;
+		`${walkSummary(it)}`;
 
 	return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="Saira">
 	<defs>
@@ -211,8 +264,8 @@ function buildSvg(share: ShareData): string {
 	<rect width="${W}" height="${H}" fill="url(#bg)"/>
 	<rect x="${CX + 4}" y="${CY + 12}" width="${CW}" height="${CH}" rx="${R}" fill="#000000" opacity="0.25" filter="url(#shadow)"/>
 	<rect x="${CX}" y="${CY}" width="${CW}" height="${CH}" rx="${R}" fill="#ffffff"/>
-	<text x="${TX}" y="200" font-size="${timeSize}" font-weight="700" fill="#1a1a1a">${esc(timeRange)}</text>
-	<text x="${TR}" y="200" font-size="${durSize}" fill="#555555" text-anchor="end">${esc(durText)}</text>
+	${topLine}
+	<text x="${TR}" y="${TOP_Y}" font-size="${durSize}" fill="#555555" text-anchor="end">${esc(durText)}</text>
 	${routeLine}
 	${badges}
 	<text x="${TX}" y="490" font-size="34" fill="#777777">${esc(meta)}</text>

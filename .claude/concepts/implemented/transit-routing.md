@@ -64,12 +64,23 @@ Three ways to enter routing state:
 - **Sort** — chronological ascending in both modes: earliest arrival first for `leave-at`, earliest departure first for `arrive-by`. Not by duration; the fastest ride that departs late correctly ranks below an earlier departure that arrives sooner. Walking-heavy itineraries surface at the top when they arrive sooner than any bus. Ascending order keeps the "Earlier connections" (top) / "Later connections" (bottom) load-more buttons aligned with the direction they load in both modes; the list is never inverted. Auto-select compensates by picking the most relevant end — the first for `leave-at`, the last for `arrive-by` (the latest departure).
 - **Quality filter** — itineraries are pruned by a time-dominance rule against a quality score before slicing to 5. See § Ranking.
 - The MOTIS response's `direct` walk-only options merge into the same list — walking is offered whenever it competes with transit.
-- Each result card shows: departure time and arrival time (HH:MM), total duration, transfer count, total walking time, and a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index).
+- Each result card shows, top to bottom: a small meta line `leave HH:MM · there HH:MM` (door-to-door) with the total duration right-aligned; the **card title** — the first boarding and last alighting time in large bold type, each with its station name small alongside (`08:20 Zürich HB → 08:56 Bern`); a horizontal strip of mode icons for the transit legs with line-color badges (colour comes from `route_color_index.json`, mirroring what the map draws — see § Route color index); and the transfer count with walking time and distance. See § Walk elevation.
+- **Why the ride times, not the door-to-door times, carry the title.** At a glance the question is "when does my bus go", not "when does the app want me to leave". The door-to-door pair stays on the card — it is what you need to decide when to leave the house — but demoted to the small line. Words (`leave` / `there`), not brackets, keep the two pairs apart.
+- The title row collapses together with the icon strip when the card is expanded: the leg list then shows the same stops in full detail (time, name, platform), so keeping the title would print them twice. A walk-only itinerary has no ride to name: it drops the title row entirely and puts its own endpoint times in the head line in the same large type, so the card keeps the shape it had before the title rework.
 - Each card also carries **at most one quality badge** and **zero or more warning icons** — see § Badges and § Warnings.
 - Before any query is issued for the current inputs: the results list is absent (not "no results shown").
 - No route found: a message row appears in place of cards.
 - **Hop merges never split a same-minute group.** The time-advance cascade caps how many of a hop's results merge at once, and the next hop anchors one minute past the last merged departure (arrival for arrive-by) — so if two connections share that minute and only one fits under the cap, the other would sit behind every later hop window and vanish permanently. The merge therefore always extends past the cap to include every result sharing the last-included anchor minute.
 - **Loading-edge suppression.** The card at the time-advancing edge (last for leave-at, first for arrive-by) is hidden while it carries a very-slow warning: it is exactly the card that retroactive pruning may remove once the next batch loads its dominators, which would make it visibly vanish mid-scroll. Hidden, the next batch either prunes it (nothing changes on screen) or keeps it, at which point it is no longer the edge card and appears. Never applied to a sole result, the shared view, or the currently selected connection.
+
+### Walk elevation
+
+Walking legs carry an ascent / descent profile, so a flat 2 km stroll and a 2 km climb are distinguishable before the connection is opened.
+
+- The router supplies each WALK leg's ascent and descent in metres (`elevationUp` / `elevationDown` on the leg). They come from the elevation profile sampled along the walk, filtered so that terrain-model jitter never accumulates into invented climb; a leg with no elevation data available simply omits both fields, and every display below then falls back to showing nothing.
+- **Summary line** (the transfers · walking row of every card): walking time (bold) and the walked distance (plain), separated by a space — the same pairing the walk rows of the leg list use. The itinerary's summed ascent / descent is deliberately **not** printed here; it lives in a tooltip on the distance (`53 m ascent · 2 m descent`), so the row never grows. Format: `1 transfer · **12 min** 950 m walking`.
+- **Per-leg walk rows** in the expanded leg list: ascent / descent renders on walks **longer than 10 minutes** only — the walks where the profile changes how the leg feels. Time bold, distance plain, single spaces throughout. Format: `35 min 2.9 km (↑ 53m ↓ 2m)`.
+- Both halves of the pair always render together, so a genuinely flat long walk reads as an explicit `↑ 0m ↓ 0m` rather than looking like missing data.
 
 ### Badges
 
@@ -203,10 +214,12 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
 Routing state is serialised into the URL query string, following the existing `?line=` deep-link precedent from `line-detail-view.md`:
 
-- Query parameters: `from`, `to`, `mode` (`leave` or `arrive`), `time` (ISO 8601 or `now`), and `fromName` / `toName` when the paired endpoint is a `point` with a display label (`geocoding-search.md` § URL persistence).
+- Query parameters: `from`, `to`, `mode` (`leave` or `arrive`), `time` (ISO 8601), and `fromName` / `toName` when the paired endpoint is a `point` with a display label (`geocoding-search.md` § URL persistence).
+- `time` is always concrete once a query has run: a "now" panel time is stamped with the timestamp the query actually ran at, so a shared or reloaded URL reproduces the shown results. A reload never re-resolves to a fresh "now" — the panel's refresh-to-now button is the only way to re-anchor. (The literal `now` still parses, for legacy links.) The panel itself keeps displaying "now"; the stamp lives only in the URL.
+- Routing options (`routing-options.md`) ride along as `walk`, `safety`, `minWalk` — written only when off their defaults, so absent params mean defaults. On cold-load restore they apply **session-only**: the link's options drive the tab's queries but never overwrite the recipient's localStorage prefs.
 - Endpoint serialisation: `station` → UIC; `point` → `lat,lng`; `current` → `me`.
-- The URL is written on any input or time change, and on issuing a query, via SvelteKit's `replaceState`.
-- Opening a route URL on cold load reproduces the panel state and issues the query.
+- The URL is written on any input, time, or option change, and on issuing a query, via SvelteKit's `replaceState`.
+- Opening a route URL on cold load reproduces the panel state (including options) and issues the query.
 - The `?route=<fingerprint>` param carrying a selected itinerary belongs to `route-display.md` and is added by that concept — it coexists with the panel params here.
 
 ## Constraints

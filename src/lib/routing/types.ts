@@ -70,6 +70,11 @@ export interface Leg {
 	duration?: number;
 	/** Metres. Present on non-transit legs (WALK/BIKE/CAR) from MOTIS. */
 	distance?: number;
+	/** Metres climbed / descended along the leg. Kora-fork fields, set on
+	 * WALK legs only (Valhalla elevation profile, noise-filtered — see
+	 * motis/fork/README.md). Absent when the router had no elevation. */
+	elevationUp?: number;
+	elevationDown?: number;
 	from?: LegPlace;
 	to?: LegPlace;
 	routeShortName?: string;

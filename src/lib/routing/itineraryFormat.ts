@@ -28,6 +28,13 @@ export function fmtDistance(metres: number): string {
 	return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
 }
 
+// Ascent / descent of a walk, e.g. "\u2191 53m \u2193 2m". Both halves always
+// render, so a flat walk reads as an explicit "\u2191 0m \u2193 0m" rather than
+// looking like missing data.
+export function fmtElevation(up: number, down: number): string {
+	return `\u2191 ${Math.round(up)}m \u2193 ${Math.round(down)}m`;
+}
+
 // Map MOTIS mode strings to Material Symbols icon names — parallel to
 // StopSearch's MODE_ICON.
 export const MODE_ICON: Record<string, string> = {

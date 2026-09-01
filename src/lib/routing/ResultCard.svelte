@@ -1,11 +1,14 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
 	import type { Itinerary, Leg } from './types';
-	import { legBadgeColor, loadRouteColorIndex } from './legColor';
-	import { legDuration, transferCount, walkSeconds } from './ranking';
-	import type { Badge, Warning, WarningKind } from './ranking';
+	import { legBadgeColor, loadHfGondolaRoutes, loadRouteColorIndex } from './legColor';
 	import {
-		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtTime,
+		assessTransfers, legDuration, transferCount, walkElevation, walkMetres, walkSeconds
+	} from './ranking';
+	import type { Badge, TransferAssessment, Warning, WarningKind } from './ranking';
+	import { routingOptions } from './options.svelte';
+	import {
+		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,
 		iconFor, isTransitMode
 	} from './itineraryFormat';
 	import { isNarrow } from './layout';
@@ -32,24 +35,21 @@
 		return leg.headsign ?? leg.tripHeadsign ?? '';
 	}
 
-	// Primary click (card body): toggle details and, on desktop, select
-	// the itinerary on the map (open implies select — see
-	// routing-map-details-split.md). On mobile the map is only reachable
-	// via the map icon. The chevron uses a separate handler below that
-	// only toggles expansion, so opening via the chevron does NOT select.
+	// Primary click (card body), identical on both platforms
+	// (routing-map-details-split.md § Result card anatomy): the first
+	// click makes the connection the active one (highlight, and on the
+	// map where the map is visible); clicking the already-active card
+	// opens its details, and closes them again on the next click. Double-
+	// clicking a fresh card therefore selects and opens it in one go.
+	// Never enters map mode — that stays on the map icon.
 	function toggleCard() {
-		const willExpand = !expanded;
-		const wasSelected = selected;
-		routingState.toggleExpanded(itinerary);
-		if (!isNarrow() && routingState.expandedFingerprint === fingerprint) {
+		if (!selected) {
 			routingState.selectItinerary(itinerary);
+			return;
 		}
-		// Expanding/collapsing the on-map connection resets the camera to the
-		// route overview — a prior leg focus would otherwise leave the map
-		// zoomed to that segment. A fresh selection reframes via the overlay
-		// effect, so only the already-selected case needs the explicit call.
-		if (!isNarrow() && wasSelected) onFrameRoute?.(itinerary);
-		if (willExpand) scrollIntoViewSoon();
+		// Already active: same as the chevron — open / close the details
+		// (which on desktop also resets the camera to the route overview).
+		toggleExpandOnly();
 	}
 
 	// Chevron-only toggle: open/close details without selecting on the
@@ -111,8 +111,15 @@
 	const WARNING_ICON: Record<WarningKind, string> = {
 		'long-walk':       'directions_walk',
 		'long-wait':       'hourglass_top',
-		'very-slow':       'snail'
+		'very-slow':       'snail',
+		'tight-transfer':  'sprint',
+		'lucky-transfer':  'crisis_alert'
 	};
+	// Sub-minute spares deserve seconds, not a rounded "0 min".
+	function fmtSpare(secs: number): string {
+		const s = Math.abs(secs);
+		return s < 60 ? `${Math.round(s)} s` : fmtDuration(s);
+	}
 	// Tooltip text incorporates the connection's actual measured value
 	// (carried on Warning.value) instead of just naming the threshold tier.
 	function warningLabel(w: Warning): string {
@@ -120,8 +127,63 @@
 			case 'long-walk': return `Includes a ${fmtDuration(w.value)} walk`;
 			case 'long-wait': return `Includes a ${fmtDuration(w.value)} transfer wait`;
 			case 'very-slow': return `${fmtDuration(w.value)} slower than the fastest route`;
+			case 'tight-transfer': return w.value < 0
+				? `Tight transfer — needs slightly faster walking than your set speed`
+				: `Tight transfer — ${fmtSpare(w.value)} to spare at your walking speed`;
+			case 'lucky-transfer':
+				return 'Transfer only works out if you are lucky — not makeable at your walking speed';
 		}
 	}
+	// Per-transfer marks for the expanded leg list (routing-options.md
+	// § Connection warnings): keyed by the boarded transit leg's index.
+	const TRANSFER_MARK_LABEL: Record<TransferAssessment['tier'], string> = {
+		'tight': 'Tight transfer',
+		'very-tight': 'Very tight transfer',
+		'extremely-tight': 'Extremely tight transfer',
+		'lucky': 'Only if you are lucky'
+	};
+	function transferMarkLabel(a: TransferAssessment): string {
+		const base = TRANSFER_MARK_LABEL[a.tier];
+		return a.spare >= 0
+			? `${base} — ${fmtSpare(a.spare)} to spare at your walking speed`
+			: `${base} — ${fmtSpare(a.spare)} short at your walking speed`;
+	}
+	let hfGondolas = $state<Set<string> | null>(null);
+	$effect(() => {
+		void loadHfGondolaRoutes().then((s) => { hfGondolas = s; });
+	});
+	let transferMarks = $derived(new Map(
+		assessTransfers(itinerary, {
+			transferWalkUnscale: routingOptions.transferWalkUnscale,
+			transferWalkSlackSec: routingOptions.transferWalkSlackSec,
+			hfGondolaRoutes: hfGondolas
+		}).map((a) => [a.legIndex, a])
+	));
+
+	// Per-walk-row elevation: shown on long walks only, where the profile
+	// is the difference between a stroll and a climb. The summary line
+	// stays free of it — it only carries the total as a tooltip on the
+	// walked distance, so the row itself doesn't grow.
+	const LEG_ELEVATION_MIN_SEC = 10 * 60;
+	let walkTotalM = $derived(walkMetres(itinerary));
+	let walkElevationLabel = $derived.by(() => {
+		const e = walkElevation(itinerary);
+		return e ? `${Math.round(e.up)} m ascent · ${Math.round(e.down)} m descent` : undefined;
+	});
+	function showLegElevation(leg: Leg): boolean {
+		return (leg.elevationUp != null || leg.elevationDown != null)
+			&& legDuration(leg) > LEG_ELEVATION_MIN_SEC;
+	}
+
+	// Card title (transit-routing.md § Results): the ride's own boarding /
+	// alighting times are what a glance is looking for, so they carry the
+	// large type and the station names ride along small. The door-to-door
+	// times demote to the "leave … · there …" line above. The title row is
+	// collapsed-only: an expanded card shows the same stops in full detail
+	// in its leg list, so keeping it would print them twice. A walk-only
+	// itinerary has no ride to name — it drops the title row entirely and
+	// puts its own endpoint times in the head line instead.
+	let endpoints = $derived(transitEndpoints(itinerary));
 
 	let fingerprint = $derived(itineraryFingerprint(itinerary));
 	let selected = $derived(routingState.selectedFingerprint === fingerprint);
@@ -193,6 +255,18 @@
 	}
 </script>
 
+{#snippet transferWarn(mark: TransferAssessment)}
+	<span
+		class="leg-transfer-warn leg-transfer-warn-{mark.tier}"
+		title={transferMarkLabel(mark)}
+		aria-label={transferMarkLabel(mark)}
+	>
+		<span class="material-symbols-outlined" aria-hidden="true"
+		>{mark.tier === 'lucky' ? 'crisis_alert' : 'sprint'}</span>
+		<span class="leg-transfer-warn-text">{mark.spare >= 0 ? fmtSpare(mark.spare) : `−${fmtSpare(mark.spare)}`}</span>
+	</span>
+{/snippet}
+
 <div
 	bind:this={cardEl}
 	class="card"
@@ -213,12 +287,12 @@
 			<span class="material-symbols-outlined" aria-hidden="true">{BADGE_ICON[badge]}</span>
 		</span>
 	{/if}
-	<div class="card-head">
+	<div class="card-top">
 		{#if warnings.length}
 			<span class="card-warnings">
 				{#each warnings as w}
 					<span
-					class="card-warning card-warning-{w.severity}"
+					class="card-warning card-warning-{w.severity} card-warning-kind-{w.kind}"
 					title={warningLabel(w)}
 					aria-label={warningLabel(w)}
 					>
@@ -227,28 +301,50 @@
 				{/each}
 			</span>
 		{/if}
-		<span class="card-time">{fmtTime(itinerary.startTime)} – {fmtTime(itinerary.endTime)}</span>
-		<span class="card-dur">{fmtDuration(itinerary.duration)}</span>
-		{#if selected}
-			<button
-				class="card-clear"
-				type="button"
-				aria-label="Clear route from map"
-				onclick={(e) => {
-					e.stopPropagation();
-					routingState.dismissSelectedItinerary();
-				}}
-			>×</button>
-		{/if}
+		<div class="card-top-body">
+			<div class="card-head">
+				{#if endpoints}
+					<span class="card-time">leave <strong>{fmtTime(itinerary.startTime)}</strong> · there <strong>{fmtTime(itinerary.endTime)}</strong></span>
+				{:else}
+					<!-- Walk-only: no ride to name, so the big times ARE the head
+					     line — a separate title row below would leave the head
+					     holding nothing but the duration. -->
+					<span class="card-walk-times">
+						<span class="cr-time">{fmtTime(itinerary.startTime)}</span>
+						<span class="cr-arrow" aria-hidden="true">→</span>
+						<span class="cr-time">{fmtTime(itinerary.endTime)}</span>
+					</span>
+				{/if}
+				<span class="card-dur">{fmtDuration(itinerary.duration)}</span>
+				{#if selected}
+					<button
+						class="card-clear"
+						type="button"
+						aria-label="Clear route from map"
+						onclick={(e) => {
+							e.stopPropagation();
+							routingState.dismissSelectedItinerary();
+						}}
+					>×</button>
+				{/if}
+			</div>
+			{#if endpoints && !expanded}
+				<div class="card-route" transition:slide>
+					<span class="cr-stop">
+						<span class="cr-time">{fmtTime(endpoints.fromTime)}</span>
+						{#if endpoints.fromName}<span class="cr-name">{endpoints.fromName}</span>{/if}
+					</span>
+					<span class="cr-arrow" aria-hidden="true">→</span>
+					<span class="cr-stop">
+						<span class="cr-time">{fmtTime(endpoints.toTime)}</span>
+						{#if endpoints.toName}<span class="cr-name">{endpoints.toName}</span>{/if}
+					</span>
+				</div>
+			{/if}
+		</div>
 	</div>
 	{#if !expanded}
 		<div class="card-summary" transition:slide>
-			{#if transitEndpoints(itinerary)}
-				{@const endpoints = transitEndpoints(itinerary)!}
-				<div class="card-route">
-					<strong>{endpoints.fromName}</strong> {fmtTime(endpoints.fromTime)} – <strong>{endpoints.toName}</strong> {fmtTime(endpoints.toTime)}
-				</div>
-			{/if}
 			<div class="card-legs">
 				{#each displayLegs(itinerary) as { leg, dur, isWalk }, i}
 					{#if i > 0}<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>{/if}
@@ -273,7 +369,10 @@
 	<div class="card-meta">
 		<span class="card-meta-text">
 			{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}
-			· {fmtDuration(walkSeconds(itinerary))} walking
+			· <strong>{fmtDuration(walkSeconds(itinerary))}</strong>{#if walkTotalM > 0}{' '}<span
+				class="card-meta-dist"
+				title={walkElevationLabel}
+			>{fmtDistance(walkTotalM)}</span>{/if} walking
 		</span>
 		<span class="card-actions">
 			<button
@@ -311,6 +410,12 @@
 							<span class="leg-time">{fmtTime(leg.startTime)}</span>
 							<span class="leg-stop-name">{leg.from?.name ?? ''}</span>
 							{#if leg.from?.track}<span class="leg-pf">Pl. {leg.from.track}</span>{/if}
+							{#if transferMarks.has(i) && itinerary.legs[i - 1]?.mode !== 'WALK'}
+								<!-- Fallback only: normally the chip renders on the
+								     transfer walk row above; without one (direct
+								     interline) it stays on the boarding row. -->
+								{@render transferWarn(transferMarks.get(i)!)}
+							{/if}
 						</span>
 						<span class="leg-line-row">
 							{#if leg.routeShortName}
@@ -334,7 +439,14 @@
 				{:else}
 					<button class="leg-item walk" type="button" onclick={(e) => focusLeg(e, leg)}>
 						<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-						<span class="leg-walk-dur"><strong>{fmtDuration(legDuration(leg))}</strong>{#if leg.distance != null} · {fmtDistance(leg.distance)}{/if}</span>
+						<span class="leg-walk-dur"><strong>{fmtDuration(legDuration(leg))}</strong>{#if leg.distance != null}{' '}{fmtDistance(leg.distance)}{/if}{#if showLegElevation(leg)}{' '}({fmtElevation(leg.elevationUp ?? 0, leg.elevationDown ?? 0)}){/if}</span>
+						{#if transferMarks.has(i + 1)}
+							<!-- The tightness belongs to the transfer itself, so the
+							     chip sits on the transfer walk row, not on the
+							     boarding row below (where it would collide with the
+							     platform info). -->
+							{@render transferWarn(transferMarks.get(i + 1)!)}
+						{/if}
 					</button>
 				{/if}
 			{/each}
@@ -445,11 +557,28 @@
 	.card-badge-good { color: #2f7a2f; border-color: #cde7cd; background: #f1faf1; }
 	.card-badge-bad  { color: #a33; border-color: #eecdcd; background: #fbf1f1; }
 
+	/* Warning marks are a COLUMN down the card's left edge; the head line
+	   and the title row sit in their own column beside it, so both are
+	   indented by exactly the same amount and stay flush with each other.
+	   Extra warnings grow downwards instead of shoving the times right. */
+	.card-top {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.35rem;
+	}
+	.card-top-body {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		flex: 1 1 auto;
+		min-width: 0;
+	}
 	.card-warnings {
 		display: inline-flex;
+		flex-direction: column;
 		align-items: center;
 		gap: 0.15rem;
-		margin-right: 0.15rem;
+		padding-top: 0.1rem;
 		flex: 0 0 auto;
 	}
 	.card-warning {
@@ -475,6 +604,9 @@
 	.card-warning-strong { background: var(--warn); }
 	.card-warning-medium :global(.material-symbols-outlined),
 	.card-warning-strong :global(.material-symbols-outlined) { font-size: 0.85rem; }
+	/* "If you're lucky" stands apart from the red tight ladder: dark
+	   anthracite disc (routing-options.md § Connection warnings). */
+	.card-warning-kind-lucky-transfer { background: var(--anthracite); }
 	.card:hover { border-color: var(--gray-250); background: #fafafa; }
 	.card.selected {
 		border-color: transparent;
@@ -526,7 +658,14 @@
 		align-items: baseline;
 		gap: 0.5rem;
 	}
-	.card-time { font-weight: 700; font-size: 0.95rem; color: var(--gray-850); flex: 0 0 auto; }
+	.card-time { font-size: 0.75rem; color: var(--gray-600); flex: 0 0 auto; }
+	.card-time strong { font-weight: 700; color: var(--gray-800); }
+	.card-walk-times {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 0.35rem;
+		flex: 0 0 auto;
+	}
 	.card-dur  { font-size: 0.85rem; color: var(--gray-600); flex: 0 0 auto; margin-left: auto; }
 
 	.card-summary {
@@ -534,9 +673,50 @@
 		flex-direction: column;
 		gap: 0.25rem;
 	}
+	/* Card title. Times large and bold, station names small alongside —
+	   the pair wraps as a unit so a long name never splits off its time. */
 	.card-route {
-		font-size: 0.8rem;
-		color: var(--gray-700);
+		display: flex;
+		align-items: baseline;
+		gap: 0 0.4rem;
+		min-width: 0;
+		/* Separates the title from the line-badge strip below; the card's
+		   own 0.25rem gap alone read as cramped. */
+		margin-bottom: 0.2rem;
+	}
+	/* Time over name, so the two stops sit side by side instead of the
+	   pair wrapping onto a second line. A column flex item takes its
+	   baseline from its first line, so the arrow still lines up with the
+	   times. */
+	/* flex: 1 1 0 — both stops claim the same width, so the arrival column
+	   starts at a fixed x on every card (departure-board alignment) and a
+	   long name ellipsizes instead of stealing the other stop's room. */
+	.cr-stop {
+		display: inline-flex;
+		flex-direction: column;
+		gap: 0.05rem;
+		min-width: 0;
+		flex: 1 1 0;
+	}
+	.cr-time {
+		font-size: 0.95rem;
+		font-weight: 700;
+		line-height: 1.15;
+		color: var(--gray-850);
+		flex: 0 0 auto;
+	}
+	.cr-name {
+		font-size: 0.78rem;
+		line-height: 1.15;
+		color: var(--gray-600);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.cr-arrow {
+		font-size: 0.9rem;
+		color: var(--gray-400);
+		flex: 0 0 auto;
 	}
 
 	.card-legs {
@@ -573,6 +753,12 @@
 		white-space: nowrap;
 	}
 	.card-sep { font-size: 0.9rem; color: var(--gray-250); }
+
+	/* Walking time / distance in the meta row read like the walk rows of
+	   the leg list: duration bold and a shade darker, distance plain.
+	   The distance carries the ascent / descent tooltip. */
+	.card-meta-text strong { font-weight: 600; color: var(--gray-700); }
+	.card-meta-dist { cursor: help; }
 
 	.card-meta {
 		display: flex;
@@ -699,4 +885,30 @@
 		color: var(--gray-500);
 		white-space: nowrap;
 	}
+
+	/* Tight-transfer mark on the boarding row (routing-options.md):
+	   compact icon + spare-time chip, escalating with the tier. The
+	   "lucky" tier is deliberately NOT part of the red ladder — dark
+	   anthracite chip, distinct glyph. */
+	.leg-transfer-warn {
+		flex: 0 0 auto;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.15rem;
+		align-self: center;
+		font-size: 0.68rem;
+		font-weight: 600;
+		line-height: 1;
+		padding: 0.12rem 0.3rem;
+		border-radius: var(--radius-pill);
+		white-space: nowrap;
+	}
+	.leg-transfer-warn :global(.material-symbols-outlined) {
+		font-size: 0.85rem;
+		line-height: 1;
+	}
+	.leg-transfer-warn-tight { color: var(--warn); background: transparent; }
+	.leg-transfer-warn-very-tight { color: var(--white); background: #d9a400; }
+	.leg-transfer-warn-extremely-tight { color: var(--white); background: var(--warn); }
+	.leg-transfer-warn-lucky { color: var(--white); background: var(--anthracite); }
 </style>

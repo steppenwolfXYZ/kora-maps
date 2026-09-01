@@ -77,15 +77,117 @@ Per transfer, compute spare time = (next departure − arrival at stop)
 - Warnings are pure client-side math from leg times — no backend
   involvement.
 
+**Exceptions** (transfers that look tight but aren't):
+
+- **Timed feeders (train → bus/tram/regional bus, tram → bus):**
+  these transfers are typically Anschluss-timed in CH — the receiving
+  vehicle waits for a late feeder. The tight ladder is suppressed as
+  long as the spare at the set walking speed is ≥ 0 seconds; a
+  negative spare (physically unmakeable walk) still warns with the
+  normal ladder, and the "if you're lucky" tier is unaffected.
+  tram → bus is an interim blanket rule (city buses don't actually
+  wait for city trams); the per-line/per-station refinement is
+  planned — see `regio-tram-timed-transfers.md`. tram → tram is not
+  exempt. Accepted trade-off: genuinely tight transfers at large
+  city stations (where nothing waits) also lose their warning until
+  that refinement lands.
+- **Continuous gondolas:** mountain routes whose GTFS service is
+  frequencies-based with short headways (≤ 5 min) run continuously —
+  their per-minute timetable departures are an artifact, and missing
+  one just means taking the next. The pipeline flags such routes as
+  `hf_gondolas` inside `route_color_index.json` (file shape becomes
+  `{ colors, hf_gondolas }`); boarding a flagged route never produces
+  any tight-transfer warning. Scheduled (rare-departure) gondolas are
+  not flagged and warn normally.
+
 ### 4. Minimize walking
 
-A checkbox below the walking-speed ruler ("Minimize walking"). When
-active, the result ranking shifts its relative importance from today's
-roughly timing 80 % / transfers 10 % / walking 10 % to
+A toggle below the rulers ("Minimize walking").
+
+**Goal.** The target is the 10–30 minute walk band: prevent
+connections that walk 10–30 minutes when an option with less walking
+exists — even when that option is clearly slower. Canonical cases: a
+detour bus to a different train station beats walking all the way to
+the train; a worse-timed connection from/to a closer bus stop beats a
+long walk to the better-timed one. Multi-hour walking marathons are
+NOT the focus — they simply must not be offered while the toggle is
+on, but the search does not need to reason about them.
+
+**Client-side ranking** (unchanged from the original requirement):
+the result ranking shifts its relative importance from today's roughly
+timing 80 % / transfers 10 % / walking 10 % to
 **timing 40 % / transfers 10 % / walking 50 %** — walking becomes the
 dominant cost after feasibility. (The ranking is penalty-based, not
 literal percentages; the requirement is the relative-importance shift,
 mapped onto the existing penalty constants.)
+
+**Server-side candidate generation.** Re-ranking can only choose among
+what the server returns, and a walking-light connection that is slower
+is often Pareto-dominated and never emitted. Therefore, when the
+toggle is active:
+
+- The plan request carries a new fork-only parameter
+  `koraWalkPoints=minwalk`. It switches the walk-weighted transfer
+  points (the fork's second RAPTOR Pareto criterion) to a steeper
+  per-query class table, so walking-light journeys survive as their
+  own Pareto points:
+
+  | walk | standard | minwalk |
+  |---|---|---|
+  | ≤ 5 min | +0 | +0 |
+  | ≤ 10 min | +1 | +2 |
+  | ≤ 20 min | +2 | +3 |
+  | ≤ 40 min | +4 | +6 |
+  | > 40 min | +8 | +6 |
+
+  Rationale: 0–5 min walks are fine; avoiding a 5–10 min walk is
+  worth an extra transfer; the 10–30 min band has the most potential
+  and is priced steepest relative to boardings. No extra class above
+  40 min: long walks are not this mode's search concern — wide-budget
+  candidates with long walks may exist (see Escalation below), and
+  demoting them is the client ranking's job.
+
+  The table applies everywhere the standard one does: transfer walks,
+  access/egress seeds, reconstruction, alternates pricing.
+- The ε-alternates knobs widen from 540 s / 3 to **900 s / 5**, so
+  more low-walk endpoint variants (closer stop, slightly later
+  arrival) come back for the ranking to choose from.
+
+**Escalation.** The wide walking-budget escalation applies normally
+under this toggle. (An earlier version of this concept suppressed it;
+that was wrong — on rural routes the low-walk connections themselves
+only exist in the wide candidate set, so minimize-walking NEEDS wide
+as a candidate source. Selecting low-walk options among the
+candidates is the ranking's job, below.)
+
+**Ranking (client), beyond the weight shift:**
+
+- The walking cost is **not soft-capped** in this mode (full linear
+  rate at any length) — discounting long walking is exactly what the
+  mode must not do; capped costs made walk-heavy-vs-low-walk prunes
+  hover at the allowance boundary, so near-identical connections fell
+  on opposite sides of it.
+- The non-overlapping dominance rule (Case 2) becomes
+  **direction-blind**: the score-vs-allowance test applies regardless
+  of which connection is faster, so a much-lower-walk connection can
+  displace a faster walk-heavy one. The reverse direction (slower
+  displaces faster) carries a **hard ceiling of 3 hours** on the
+  primary axis: a low-walk alternative further away than that never
+  displaces the only fast option — the cube-root allowance alone
+  cannot provide this bound once walk costs are uncapped.
+  Pareto-dominating pairs stay in the overlapping rule (Case 1), so
+  mutual drops are impossible.
+- Badges and auto-select use an **additive effective time**
+  (duration + penalty score) instead of the multiplicative comfort
+  factor — the multiplicative walking malus saturates, letting a few
+  minutes of duration outvote a larger walking difference between two
+  walk-heavy options. Auto-select picks the effective-time best
+  (crown) connection instead of the chronological edge.
+
+**Suppression rule while active:**
+
+- Direct walk itineraries with more than 30 minutes of walking are
+  never shown.
 
 Related: `walking-optimized-routing.md` is not a prerequisite — try
 the re-weighting on its own first, and implement walking-optimized
@@ -120,6 +222,10 @@ differ wildly in speed; you can run with a stroller).
 - Settings persist in localStorage under a single key
   (`kora_routing_prefs`) once the user changes anything; defaults are
   Normal / Balanced / both toggles off.
+- Non-default settings also ride in the routing URL (`walk`, `safety`,
+  `minWalk` — see `transit-routing.md` § Deep link), so a shared link
+  reproduces the results. Restoring from a URL applies them
+  session-only, never into the recipient's localStorage.
 - Labels English only; i18n is out of scope.
 
 ## Constraints
@@ -137,3 +243,12 @@ differ wildly in speed; you can run with a stroller).
   "if you're lucky" warning is mandatory on every one of them.
 - The browser still makes exactly one request per query; no direct
   Valhalla calls from the client.
+- The minwalk point table must stay moderate: RAPTOR's journey cap is
+  45 points, and a steeper table consumes it faster — long multi-leg
+  journeys with several long walks must remain representable.
+- Minimize walking must never fake a different walking speed toward
+  the server — that would drop connections a normal-pace walker can
+  make and distort every displayed time.
+- The standard table's `> 40 min` class ships as +9 in the current
+  code; the intended value is +8 (typo). Correcting it changes default
+  routing behavior slightly and is a deliberate, separate decision.

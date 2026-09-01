@@ -5,11 +5,13 @@
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
 	import ConnectGrid from './ConnectGrid.svelte';
+	import RoutingOptions from './RoutingOptions.svelte';
 	import { computeCardStates } from './ranking';
+	import { routingOptions } from './options.svelte';
 	import { routingState } from './state.svelte';
 	import { recentRoutes, endpointLabel, type RecentRoute } from './recents.svelte';
 	import { loadStationIndex, type StationEntry } from './stationIndex';
-	import { modeMidColor } from './legColor';
+	import { loadHfGondolaRoutes, modeMidColor } from './legColor';
 	import { itineraryFingerprint } from './fingerprint';
 	import type { Endpoint, Itinerary, Leg } from './types';
 
@@ -24,7 +26,18 @@
 	// verified shared connection; ranking badges are suppressed there — a
 	// single card comparing against itself would always wear the crown.
 	let displayed = $derived(routingState.displayedResults);
-	let cardStates = $derived(computeCardStates(displayed));
+	// Continuous-gondola routes (routing-options.md § Connection
+	// warnings) — loaded once, warnings recompute when it arrives.
+	let hfGondolas = $state<Set<string> | null>(null);
+	$effect(() => {
+		void loadHfGondolaRoutes().then((s) => { hfGondolas = s; });
+	});
+	let cardStates = $derived(computeCardStates(displayed, {
+		minimizeWalking: routingOptions.minimizeWalking,
+		transferWalkUnscale: routingOptions.transferWalkUnscale,
+		transferWalkSlackSec: routingOptions.transferWalkSlackSec,
+		hfGondolaRoutes: hfGondolas
+	}));
 	// Loading-edge suppression: the card at the time-advancing edge (last
 	// for leave-at, first for arrive-by) is hidden while it carries a
 	// very-slow warning — that is exactly the card retroactive pruning
@@ -164,15 +177,8 @@
 	$effect(() => {
 		const isLoading = routingState.loading;
 		if (wasLoading && !isLoading && resultsEl) {
-			// Fresh result set: reset the autoscroll edge state before any
-			// programmatic scrolling below fires scroll events.
-			hasScrolledDown = false;
-			armedEarlier = true;
-			armedLater = true;
-			// The scrollIntoView below can land the list at the bottom edge
-			// (arrive-by selects the last card) — briefly suppress the edge
-			// sentinels so that placement doesn't auto-load later results.
-			suppressAutoUntil = performance.now() + 400;
+			// Fresh result set: drop any half-open pull band.
+			resetPull();
 			const fp = untrack(() => routingState.selectedFingerprint);
 			if (fp) {
 				const results = untrack(() => routingState.displayedResults);
@@ -186,30 +192,31 @@
 		wasLoading = isLoading;
 	});
 
-	// ── Autoscroll (replaces the earlier/later load-more buttons) ──────
-	// Bottom edge: reaching it by scrolling loads later connections.
-	// Top edge: starts gesture-gated (an upward wheel/touch gesture that
-	// BEGINS while resting at the top loads earlier connections); once
-	// the user has scrolled down, arriving back at the top behaves like
-	// the bottom edge and triggers on its own. A direction that returned
-	// nothing new is disarmed for position-based triggers and only a
-	// fresh gesture retries it. Wheel/touch gestures also work when the
-	// content is too short to scroll (e.g. the shared-connection view).
+	// ── Pull-to-load at the list edges (touch only) ────────────────────
+	// Overscrolling past an edge opens a rubber-band band carrying an
+	// arrow that turns around once the pull passes the threshold; the
+	// load fires only on RELEASE while past it. Pulling back before
+	// releasing cancels, so merely arriving at an edge — or flinging into
+	// one — can never load anything. Pointer devices have no release
+	// event and get the .rp-more-btn buttons instead (which are also the
+	// only path a keyboard or screen reader has to extend the list), so
+	// there is deliberately no wheel handling here at all.
+	const PULL_THRESHOLD = 52; // damped px that arm the load
+	const PULL_MAX = 84; // asymptotic rubber-band limit
+	const RELEASE_MS = 260; // spring-back duration (matches the CSS)
 	const EDGE_EPS = 2;
-	const GESTURE_GAP_MS = 300;
-	const TOUCH_THRESHOLD = 12;
 
-	let hasScrolledDown = false;
-	let armedEarlier = true;
-	let armedLater = true;
-	let suppressAutoUntil = 0;
-	let lastWheelT = 0;
-	let wheelFromTop = false;
-	let wheelFromBottom = false;
-	let touchStartY = 0;
+	let pullDir = $state<'earlier' | 'later' | null>(null);
+	let pull = $state(0);
+	let releasing = $state(false);
+	let pullArmed = $derived(pull >= PULL_THRESHOLD);
+	let pullOffset = $derived(pullDir === 'later' ? -pull : pull);
+
+	let rawPull = 0;
+	let releaseTimer: ReturnType<typeof setTimeout> | null = null;
+	let touchLastY = 0;
 	let touchFromTop = false;
 	let touchFromBottom = false;
-	let touchFired = false;
 
 	function atTop(el: HTMLElement): boolean {
 		return el.scrollTop <= EDGE_EPS;
@@ -223,78 +230,112 @@
 	function canExtend(): boolean {
 		return routingState.hasQueried && displayed.length > 0;
 	}
-
-	function onScroll() {
-		const el = resultsEl;
-		if (!el || !canExtend()) return;
-		if (el.scrollTop > EDGE_EPS) hasScrolledDown = true;
-		if (inFlight() || performance.now() < suppressAutoUntil) return;
-		if (armedLater && atBottom(el) && el.scrollHeight > el.clientHeight + EDGE_EPS) {
-			void triggerLater();
-		} else if (armedEarlier && hasScrolledDown && atTop(el)) {
-			void triggerEarlier();
-		}
+	// Diminishing returns: unbounded raw travel maps onto 0..PULL_MAX, so
+	// the band always feels like it is resisting.
+	function damp(x: number): number {
+		return PULL_MAX * (1 - Math.exp(-x / PULL_MAX));
 	}
 
-	function onWheel(e: WheelEvent) {
-		const el = resultsEl;
-		if (!el || !canExtend()) return;
-		const now = performance.now();
-		// A pause between wheel events starts a new gesture; momentum
-		// events of a fling arrive faster and stay in the old one, so a
-		// fling that merely arrives at an edge cannot trigger.
-		if (now - lastWheelT > GESTURE_GAP_MS) {
-			wheelFromTop = atTop(el);
-			wheelFromBottom = atBottom(el);
+	function addPull(dir: 'earlier' | 'later', delta: number) {
+		if (releaseTimer) {
+			clearTimeout(releaseTimer);
+			releaseTimer = null;
+			releasing = false;
 		}
-		lastWheelT = now;
-		if (inFlight()) return;
-		if (e.deltaY < 0 && wheelFromTop && atTop(el)) {
-			wheelFromTop = false; // one trigger per gesture
-			void triggerEarlier();
-		} else if (e.deltaY > 0 && wheelFromBottom && atBottom(el)) {
-			wheelFromBottom = false;
-			void triggerLater();
-		}
+		if (pullDir !== dir) rawPull = 0;
+		rawPull = Math.max(0, rawPull + delta);
+		pull = damp(rawPull);
+		pullDir = rawPull > 0 ? dir : null;
+	}
+
+	/** End the open pull. Loads only when released past the threshold. */
+	function endPull(fire: boolean) {
+		if (!pullDir) return;
+		const dir = pullDir;
+		const go = fire && pullArmed && !inFlight() && canExtend();
+		rawPull = 0;
+		pull = 0;
+		releasing = true;
+		if (releaseTimer) clearTimeout(releaseTimer);
+		releaseTimer = setTimeout(() => {
+			releaseTimer = null;
+			releasing = false;
+			pullDir = null;
+		}, RELEASE_MS);
+		if (go) void (dir === 'earlier' ? triggerEarlier() : triggerLater());
+	}
+
+	function resetPull() {
+		if (releaseTimer) clearTimeout(releaseTimer);
+		releaseTimer = null;
+		rawPull = 0;
+		pull = 0;
+		releasing = false;
+		pullDir = null;
 	}
 
 	function onTouchStart(e: TouchEvent) {
 		const el = resultsEl;
 		if (!el) return;
-		touchStartY = e.touches[0].clientY;
-		touchFromTop = atTop(el);
-		touchFromBottom = atBottom(el);
-		touchFired = false;
+		touchLastY = e.touches[0].clientY;
+		const ok = canExtend() && !inFlight();
+		touchFromTop = ok && atTop(el);
+		touchFromBottom = ok && atBottom(el);
 	}
 
 	function onTouchMove(e: TouchEvent) {
 		const el = resultsEl;
-		if (!el || touchFired || !canExtend() || inFlight()) return;
-		const dy = e.touches[0].clientY - touchStartY;
-		// Finger moving down = scrolling up (earlier); up = later.
-		if (dy > TOUCH_THRESHOLD && touchFromTop && atTop(el)) {
-			touchFired = true;
-			void triggerEarlier();
-		} else if (dy < -TOUCH_THRESHOLD && touchFromBottom && atBottom(el)) {
-			touchFired = true;
-			void triggerLater();
+		if (!el) return;
+		const y = e.touches[0].clientY;
+		const dy = y - touchLastY;
+		touchLastY = y;
+		// Finger moving down = pulling the top edge (earlier); up = later.
+		// The browser can have committed the gesture to a scroll before
+		// our first preventDefault, which makes the following moves
+		// non-cancelable — harmless at an edge (there is nothing left to
+		// scroll), but calling preventDefault anyway logs an
+		// intervention warning, so ask first.
+		if (pullDir) {
+			if (e.cancelable) e.preventDefault();
+			addPull(pullDir, pullDir === 'earlier' ? dy : -dy);
+		} else if (dy > 0 && touchFromTop && atTop(el)) {
+			if (e.cancelable) e.preventDefault();
+			addPull('earlier', dy);
+		} else if (dy < 0 && touchFromBottom && atBottom(el)) {
+			if (e.cancelable) e.preventDefault();
+			addPull('later', -dy);
 		}
 	}
 
+	// Registered by hand rather than as markup handlers: an open band has
+	// to swallow the gesture (preventDefault), which needs listeners that
+	// are explicitly non-passive.
+	$effect(() => {
+		const el = resultsEl;
+		if (!el) return;
+		const end = () => endPull(true);
+		const cancel = () => endPull(false);
+		el.addEventListener('touchstart', onTouchStart, { passive: true });
+		el.addEventListener('touchmove', onTouchMove, { passive: false });
+		el.addEventListener('touchend', end, { passive: true });
+		el.addEventListener('touchcancel', cancel, { passive: true });
+		return () => {
+			el.removeEventListener('touchstart', onTouchStart);
+			el.removeEventListener('touchmove', onTouchMove);
+			el.removeEventListener('touchend', end);
+			el.removeEventListener('touchcancel', cancel);
+		};
+	});
+
 	async function triggerLater() {
 		if (inFlight() || !canExtend()) return;
-		armedLater = false;
 		routingState.exitSharedOnly();
-		const prevCount = displayed.length;
 		await routingState.loadMoreLater();
-		if (displayed.length > prevCount) armedLater = true;
 	}
 
 	async function triggerEarlier() {
 		if (inFlight() || !canExtend()) return;
-		armedEarlier = false;
 		routingState.exitSharedOnly();
-		const prevCount = displayed.length;
 		const p = routingState.loadMoreEarlier();
 		// Let the top loader row enter the DOM uncompensated (it nudges
 		// the cards down as visible feedback), then compensate every
@@ -309,7 +350,6 @@
 		} finally {
 			compensateTop = false;
 		}
-		if (displayed.length > prevCount) armedEarlier = true;
 	}
 
 	// Scroll-position preservation while earlier results stream in: the
@@ -338,17 +378,28 @@
 		if (delta !== 0) resultsEl.scrollTop = topPreTop + delta;
 	});
 
+	// More-options expander (routing-options.md § UI). Session-local —
+	// the persisted values are in options.svelte.ts, only the open/closed
+	// state resets with the panel.
+	let optionsOpen = $state(false);
+
 	// Main routing shell. Replaces the map menu / stop search top-controls
 	// while open (Map.svelte decides visibility). Runs a query whenever
 	// both endpoints are set and any input changes. Dedup lives in the
 	// store (see `lastQueryKey` in state.svelte.ts) so a bare remount —
-	// e.g. exiting mobile map mode — doesn't refetch.
+	// e.g. exiting mobile map mode — doesn't refetch. All three routing
+	// options are query params (minimize walking drives the fork's
+	// walk-point table — routing-options.md § Minimize walking), so
+	// they re-trigger too.
 	$effect(() => {
 		const from = routingState.from;
 		const to = routingState.to;
 		void routingState.mode;
 		void routingState.time;
 		void routingState.timeVersion;
+		void routingOptions.walkSpeed;
+		void routingOptions.safety;
+		void routingOptions.minimizeWalking;
 		if (!from || !to) return;
 		void routingState.runQuery();
 	});
@@ -452,7 +503,12 @@
 			time={routingState.time}
 			onMode={(m) => routingState.setMode(m)}
 			onTime={(t) => routingState.setTime(t)}
-		/>
+			{optionsOpen}
+			optionsModified={!routingOptions.isDefault}
+			onToggleOptions={() => (optionsOpen = !optionsOpen)}
+		>
+			{#snippet options()}<RoutingOptions />{/snippet}
+		</TimeSelector>
 	</div>
 
 	{#if !routeSet}
@@ -517,16 +573,34 @@
 
 	{#if routingState.hasQueried || routingState.sharedExpired}
 	<div class="rp-results-sep" aria-hidden="true"></div>
-	<!-- Touch handlers only extend the scroll gesture (autoscroll edge
-	     triggers), they add no interactive semantics. -->
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<!-- The wrapper clips the rubber-band travel of .rp-results and hosts
+	     the pull bands the travel uncovers. Touch handlers are attached
+	     to .rp-results in script (non-passive). -->
+	<!-- The transform is applied only while a band is open: a permanent
+	     one would turn .rp-results into the containing block of every
+	     position:fixed popup rendered from a card. -->
+	<div class="rp-results-wrap">
+	{#if pullDir}
+		<div
+			class="rp-pull rp-pull-{pullDir}"
+			class:armed={pullArmed}
+			class:releasing
+			style="height: {pull}px"
+			aria-hidden="true"
+		>
+			<div class="rp-pull-row">
+				<span class="material-symbols-outlined rp-pull-arrow">
+					{pullDir === 'earlier' ? 'arrow_upward' : 'arrow_downward'}
+				</span>
+				<span>{pullDir === 'earlier' ? 'Earlier' : 'Later'} connections</span>
+			</div>
+		</div>
+	{/if}
 	<div
 		class="rp-results"
+		class:releasing
 		bind:this={resultsEl}
-		onscroll={onScroll}
-		onwheel={onWheel}
-		ontouchstart={onTouchStart}
-		ontouchmove={onTouchMove}
+		style={pullDir ? `transform: translateY(${pullOffset}px)` : ''}
 	>
 			{#if routingState.sharedExpired}
 				<div class="rp-status rp-error">
@@ -535,7 +609,13 @@
 				</div>
 			{/if}
 			{#if routingState.loading}
-				<div class="rp-loading" role="status" aria-label="Searching for connections">
+				<div class="rp-loading" role="status">
+					<div class="rp-loading-head">
+						<img class="rp-loading-mark" src="/icon.svg" alt="" draggable="false" />
+						<span class="rp-loading-text">
+							{routingState.loadingStatus ?? 'Route options are loading...'}
+						</span>
+					</div>
 					<div class="loading-track"><div class="loading-ball"></div></div>
 				</div>
 			{:else if routingState.error}
@@ -554,6 +634,11 @@
 					<div class="rp-inline-loader" role="status" aria-label="Loading earlier connections">
 						<div class="loading-track loading-track-inline"><div class="loading-ball"></div></div>
 					</div>
+				{:else}
+					<button class="rp-more-btn" onclick={() => void triggerEarlier()}>
+						<span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span>
+						Earlier connections
+					</button>
 				{/if}
 				{#each cards as { it, state }, i (i)}
 					{@const prevIso = i === 0 ? baselineIso() : cards[i - 1].it.startTime}
@@ -573,9 +658,15 @@
 					<div class="rp-inline-loader" role="status" aria-label="Loading later connections">
 						<div class="loading-track loading-track-inline"><div class="loading-ball"></div></div>
 					</div>
+				{:else}
+					<button class="rp-more-btn" onclick={() => void triggerLater()}>
+						<span class="material-symbols-outlined" aria-hidden="true">arrow_downward</span>
+						Later connections
+					</button>
 				{/if}
 			{/if}
 		</div>
+	</div>
 	{/if}
 </div>
 
@@ -869,19 +960,93 @@
 		   when the line was a border-top on .rp-results with padding-top. */
 		margin-bottom: -0.25rem;
 	}
+	.rp-results-wrap {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		min-height: 0;
+		/* Clips the rubber-band travel of .rp-results (which is moved by
+		   a transform, so it never changes the scroll metrics) and the
+		   part of a pull band that is not uncovered yet. */
+		overflow: hidden;
+		/* Pull the scroll container into the panel's right padding so the
+		   overlay scrollbar paints there instead of over the cards; the
+		   matching padding on .rp-results insets the cards again so their
+		   right edge stays aligned with the panel content box (symmetric
+		   with the left) and the card width is unchanged. The negative
+		   margin lives here, on the clipping box, so the scrollbar is not
+		   clipped away. */
+		margin-right: -0.75rem;
+	}
 	.rp-results {
 		display: flex;
 		flex-direction: column;
 		gap: 0.4rem;
 		overflow-y: auto;
-		/* Pull the scroll container into the panel's right padding so the
-		   overlay scrollbar paints there instead of over the cards, then
-		   inset the cards by the same amount so their right edge stays
-		   aligned with the panel content box (symmetric with the left).
-		   Negative margin + matching padding keeps the card width
-		   unchanged. */
-		margin-right: -0.75rem;
+		/* No native overscroll bounce or scroll chaining — the pull band
+		   below is the app's own overscroll affordance. */
+		overscroll-behavior-y: none;
+		flex: 1 1 auto;
+		min-height: 0;
 		padding-right: 0.75rem;
+	}
+	.rp-results.releasing {
+		transition: transform 0.26s ease-out;
+	}
+
+	/* Pull-to-load bands. They sit at the very top / bottom of the
+	   wrapper, under the scroll container, and are uncovered as it is
+	   pushed away by the pull. The arrow points along the finger's pull
+	   direction until the threshold is passed, then turns around — an up
+	   arrow at the top edge, a down arrow at the bottom edge — and the
+	   row lights up as a gradient pill: release now and the connections
+	   load. Deliberately not brand red, which reads as an error. */
+	.rp-pull {
+		position: absolute;
+		left: 0;
+		right: 0.75rem;
+		display: flex;
+		justify-content: center;
+		overflow: hidden;
+		color: var(--gray-500);
+		pointer-events: none;
+	}
+	.rp-pull.releasing {
+		transition: height 0.26s ease-out;
+	}
+	.rp-pull-earlier {
+		top: 0;
+		align-items: flex-end;
+	}
+	.rp-pull-later {
+		bottom: 0;
+		align-items: flex-start;
+	}
+	.rp-pull-row {
+		display: flex;
+		align-items: center;
+		gap: 0.3rem;
+		height: 1.8rem;
+		padding: 0 0.7rem;
+		border-radius: var(--radius-pill);
+		font-size: 0.78rem;
+		font-weight: 600;
+		white-space: nowrap;
+	}
+	/* Armed: the house treatment for an active state — gradient fill,
+	   white glyph and label (ux-guidelines.md § Usage rules). */
+	.armed .rp-pull-row {
+		background: var(--gradient-brand);
+		color: var(--white);
+	}
+	.rp-pull-arrow {
+		font-size: 1.15rem;
+		/* Turned around while the pull is still short of the threshold. */
+		transform: rotate(180deg);
+		transition: transform 0.22s ease;
+	}
+	.armed .rp-pull-arrow {
+		transform: rotate(0deg);
 	}
 	.rp-status {
 		font-size: 0.85rem;
@@ -892,6 +1057,27 @@
 
 	.rp-loading {
 		padding: 0.5rem 0.15rem;
+	}
+	/* Only the initial search is announced with the mark + wording; the
+	   in-list earlier/later loaders stay bare pills. */
+	.rp-loading-head {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.5rem;
+		margin-bottom: 0.7rem;
+	}
+	.rp-loading-mark {
+		height: 4.5rem;
+		width: auto;
+	}
+	.rp-loading-text {
+		font-size: 0.85rem;
+		color: var(--gray-600);
+		letter-spacing: 0.02em;
+		text-align: center;
+		text-wrap: balance;
+		padding: 0 0.5rem;
 	}
 	/* Bouncing-ball loader (Ogoy-style): a full-width anthracite pill
 	   with a gradient border; the ball swings side-to-side and fades
@@ -931,6 +1117,52 @@
 		to {
 			left: calc(100% - var(--loader-h, 2.2rem) + 6px);
 			background-color: var(--kora-brown);
+		}
+	}
+
+	/* Earlier / later load buttons. Pointer devices have no release
+	   event, so they get an explicit click target instead of the pull
+	   band; the same button is the only way a keyboard or screen reader
+	   can extend the list, so it is always in the DOM. On coarse
+	   pointers the pull band covers the job and a permanent button would
+	   read as an end-of-list wall, so it is visually hidden there —
+	   except while focused, since an invisible focus target is worse
+	   than a visible button. Brand red per ux-guidelines.md § Usage
+	   rules: red glyph at rest, red fill on hover. */
+	.rp-more-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.3rem;
+		width: 100%;
+		padding: 0.3rem 0.5rem;
+		border: none;
+		border-radius: var(--radius-pill);
+		background: none;
+		color: var(--brand);
+		font-family: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.rp-more-btn .material-symbols-outlined {
+		font-size: 1.15rem;
+	}
+	.rp-more-btn:hover,
+	.rp-more-btn:focus-visible {
+		background: var(--brand);
+		color: var(--white);
+	}
+	@media (hover: none), (pointer: coarse) {
+		.rp-more-btn:not(:focus-visible) {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			margin: -1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
 		}
 	}
 

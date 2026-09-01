@@ -6,15 +6,46 @@
 
 const INDEX_URL = '/map-assets/route_color_index.json';
 
-let promise: Promise<Map<string, string> | null> | null = null;
-export function loadRouteColorIndex(): Promise<Map<string, string> | null> {
+// Current file shape: { colors: {route_id: color}, hf_gondolas: [route_id] }.
+// The legacy shape (flat route_id → color) is still parsed so the app
+// works against a not-yet-regenerated index (hf set empty then).
+// `hf_gondolas` = mountain routes running on short frequencies.txt
+// headways — "continuous" gondolas whose per-minute timetable departures
+// are an artifact; the tight-transfer warnings skip them
+// (routing-options.md § Connection warnings).
+interface RouteIndex {
+	colors: Map<string, string>;
+	hfGondolas: Set<string>;
+}
+
+let promise: Promise<RouteIndex | null> | null = null;
+function loadIndex(): Promise<RouteIndex | null> {
 	if (!promise) {
 		promise = fetch(INDEX_URL)
-			.then((r) => (r.ok ? r.json() as Promise<Record<string, string>> : Promise.reject(new Error(`HTTP ${r.status}`))))
-			.then((obj) => new Map(Object.entries(obj)))
+			.then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+			.then((obj: Record<string, unknown>) => {
+				if (obj && typeof obj.colors === 'object' && obj.colors !== null) {
+					return {
+						colors: new Map(Object.entries(obj.colors as Record<string, string>)),
+						hfGondolas: new Set(Array.isArray(obj.hf_gondolas) ? obj.hf_gondolas as string[] : [])
+					};
+				}
+				return {
+					colors: new Map(Object.entries(obj as Record<string, string>)),
+					hfGondolas: new Set<string>()
+				};
+			})
 			.catch(() => null);
 	}
 	return promise;
+}
+
+export function loadRouteColorIndex(): Promise<Map<string, string> | null> {
+	return loadIndex().then((i) => i?.colors ?? null);
+}
+
+export function loadHfGondolaRoutes(): Promise<Set<string> | null> {
+	return loadIndex().then((i) => i?.hfGondolas ?? null);
 }
 
 // MapMenu legend mid-tones (mode.color, per bucket). Kept parallel to

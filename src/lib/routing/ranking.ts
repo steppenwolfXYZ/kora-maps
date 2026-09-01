@@ -48,6 +48,11 @@ const PENALTY_K = 430;
 // direct walk vs. a walk + one-stop bus hybrid) mutually dropped each
 // other, leaving neither.
 const GAP_FLOOR_SEC = 120;
+// Minimize-walking reverse displacement (a slower low-walk connection
+// dropping a faster walk-heavy one) only fires within this primary-axis
+// distance — beyond it, the faster option is "the only one around" and
+// stays regardless of walking.
+const REVERSE_DISPLACE_MAX_GAP_MS = 3 * 3600 * 1000;
 
 export function legDuration(leg: Leg): number {
 	return leg.duration ?? Math.max(0, (Date.parse(leg.endTime) - Date.parse(leg.startTime)) / 1000);
@@ -68,6 +73,36 @@ export function walkSeconds(it: Itinerary): number {
 	return s;
 }
 
+/** Metres walked across the same legs `walkSeconds` counts. Legs whose
+ * distance MOTIS omitted contribute 0. */
+export function walkMetres(it: Itinerary): number {
+	let m = 0;
+	for (const l of it.legs) {
+		if (l.mode !== 'WALK') continue;
+		if (l.from?.stopId != null && l.from.stopId === l.to?.stopId) continue;
+		m += l.distance ?? 0;
+	}
+	return m;
+}
+
+/** Ascent / descent in metres across the same legs `walkSeconds` counts.
+ * `null` when no walk leg carried elevation (older MOTIS build, or no
+ * elevation data on the Valhalla side). */
+export function walkElevation(it: Itinerary): { up: number; down: number } | null {
+	let up = 0;
+	let down = 0;
+	let any = false;
+	for (const l of it.legs) {
+		if (l.mode !== 'WALK') continue;
+		if (l.from?.stopId != null && l.from.stopId === l.to?.stopId) continue;
+		if (l.elevationUp == null && l.elevationDown == null) continue;
+		any = true;
+		up += l.elevationUp ?? 0;
+		down += l.elevationDown ?? 0;
+	}
+	return any ? { up, down } : null;
+}
+
 /** Number of transit legs − 1 (same count the result card shows). */
 export function transferCount(it: Itinerary): number {
 	if (typeof it.transfers === 'number') return it.transfers;
@@ -85,10 +120,44 @@ export function boardingCount(it: Itinerary): number {
 	return transit;
 }
 
+// Minimize-walking mode (routing-options.md § Minimize walking): the
+// relative importance shifts from ~timing 80 / transfers 10 / walking 10
+// to ~timing 40 / transfers 10 / walking 50 — expressed here as a flat
+// multiplier on the walking cost terms (transfer terms untouched).
+const MINIMIZE_WALK_MULT = 4;
+
+/** Ranking knobs derived from the user's routing options. All optional —
+ * absent means today's behavior. */
+export interface RankOptions {
+	/** Weight walking ~5x heavier in pruning, badges and comfort. */
+	minimizeWalking?: boolean;
+	/** Multiplier recovering set-speed transfer walking from reported
+	 * walk-leg durations (2 in daring mode, else 1) — used only by the
+	 * tight-transfer warning math. */
+	transferWalkUnscale?: number;
+	/** Cautious-mode slack seconds baked into each reported transfer walk
+	 * leg (nigiri's additionalTransferTime) — subtracted before judging
+	 * the transfer. */
+	transferWalkSlackSec?: number;
+	/** Route ids of "continuous" gondolas (short frequencies.txt headways,
+	 * from route_color_index.json via loadHfGondolaRoutes) — boarding them
+	 * never warns: missing one departure means taking the next a minute
+	 * later. */
+	hfGondolaRoutes?: Set<string> | null;
+}
+
 /** Walking cost with a soft cap at 30 min: full linear rate below the
  * knee, quarter rate above. Keeps small walking differences meaningful
  * while bounding the score inflation from multi-hour hikes. */
-function walkCost(walkSec: number): number {
+function walkCost(walkSec: number, opts?: RankOptions): number {
+	if (opts?.minimizeWalking) {
+		// No soft cap in minimize-walking: discounting long walking is
+		// exactly what this mode must not do. The capped cost shrank the
+		// walk-heavy-vs-low-walk score gaps to ~the pruning allowance,
+		// so near-identical connections fell on opposite sides of the
+		// boundary (routing-options.md § Minimize walking).
+		return MINIMIZE_WALK_MULT * WALK_PER_SEC * walkSec;
+	}
 	const base = WALK_PER_SEC * Math.min(walkSec, WALK_SOFT_CAP_SEC);
 	const tail = WALK_TAIL_PER_SEC * Math.max(0, walkSec - WALK_SOFT_CAP_SEC);
 	return base + tail;
@@ -96,8 +165,8 @@ function walkCost(walkSec: number): number {
 
 /** Comfort score — lower is better. Only used as the dominance escape
  * hatch, never for sorting. */
-export function itineraryScore(it: Itinerary): number {
-	return TRANSFER_PENALTY_SEC * boardingCount(it) + walkCost(walkSeconds(it));
+export function itineraryScore(it: Itinerary, opts?: RankOptions): number {
+	return TRANSFER_PENALTY_SEC * boardingCount(it) + walkCost(walkSeconds(it), opts);
 }
 
 interface Entry {
@@ -288,11 +357,32 @@ function droppedByOverlap(a: Entry, b: Entry): boolean {
  * a small gap only tolerates a fairly steep comfort difference, and
  * saturates gracefully so a 2 h gap sits around a "dramatic" allowance
  * rather than an absurd one. */
-function droppedByNonOverlap(a: Entry, b: Entry, mode: TimeMode): boolean {
-	const primaryBeats = mode === 'arrive'
+function droppedByNonOverlap(
+	a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions
+): boolean {
+	// Minimize-walking (routing-options.md § Minimize walking): Case 2
+	// becomes direction-blind — the score-vs-allowance test applies even
+	// when A is the FASTER one, so a much-lower-walk B can displace a
+	// fast walk-heavy A. This reverse direction carries a HARD gap
+	// ceiling on the primary axis: with the uncapped minwalk walk costs,
+	// score gaps outgrow the cube-root allowance at any distance, and
+	// without the ceiling next-morning low-walk connections wiped out
+	// every same-day option the moment a "later" load brought them in.
+	// Within the ceiling, drops are decisive (uncapped costs); beyond
+	// it, a slower low-walk option never displaces a faster one.
+	// Mutual drops stay impossible (the score difference has one sign),
+	// and Pareto-dominating pairs never reach this rule (Case 1's
+	// territory).
+	const timeBeats = mode === 'arrive'
 		? b.start >= a.start - T_SLACK_MS
 		: b.end <= a.end + T_SLACK_MS;
-	if (!primaryBeats) return false;
+	if (!timeBeats) {
+		if (!opts?.minimizeWalking) return false;
+		const primaryGapMs = mode === 'arrive'
+			? Math.abs(a.start - b.start)
+			: Math.abs(a.end - b.end);
+		if (primaryGapMs > REVERSE_DISPLACE_MAX_GAP_MS) return false;
+	}
 	const gapSec = Math.max(GAP_FLOOR_SEC, Math.min(
 		Math.abs(a.start - b.start),
 		Math.abs(a.end - b.end)
@@ -316,7 +406,7 @@ function droppedByNonOverlap(a: Entry, b: Entry, mode: TimeMode): boolean {
  * Then: when B Pareto-time-dominates A the pair is overlapping (Case 1).
  * When A dominates B the pair is B's problem, not A's — return false.
  * Otherwise apply Case 2. */
-function droppedBy(a: Entry, b: Entry, mode: TimeMode): boolean {
+function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): boolean {
 	if (paretoTimeDominates(b, a)) {
 		if (vehicleSubset(a, b) && a.walk > b.walk) return true;
 		if (accessDominated(a.it, b.it) || egressDominated(a.it, b.it)) return true;
@@ -331,26 +421,28 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode): boolean {
 		return droppedByOverlap(a, b);
 	}
 	if (paretoTimeDominates(a, b)) return false;
-	return droppedByNonOverlap(a, b, mode);
+	return droppedByNonOverlap(a, b, mode, opts);
 }
 
 /** Drop each itinerary that some other beats under the two-case rule
  * (Case 1 overlapping, Case 2 non-overlapping). Input order is preserved;
  * the caller sorts chronologically afterwards. */
-export function pruneDominated(its: Itinerary[], mode: TimeMode): Itinerary[] {
+export function pruneDominated(
+	its: Itinerary[], mode: TimeMode, opts?: RankOptions
+): Itinerary[] {
 	const entries: Entry[] = its.map((it) => ({
 		it,
 		start: Date.parse(it.startTime),
 		end: Date.parse(it.endTime),
-		score: itineraryScore(it),
-		effTime: it.duration * comfortFactor(it),
+		score: itineraryScore(it, opts),
+		effTime: it.duration * comfortFactor(it, opts),
 		walk: walkSeconds(it),
 		transitKeys: transitLegKeys(it),
 		vehicles: vehicleKeys(it)
 	}));
 	return entries
 		.filter((a, ai) => !entries.some((b, bi) =>
-			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, mode))))
+			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, mode, opts))))
 		.map((e) => e.it);
 }
 
@@ -358,7 +450,8 @@ export function pruneDominated(its: Itinerary[], mode: TimeMode): Itinerary[] {
 // § Warnings.
 
 export type Badge = 'best' | 'good' | 'bad';
-export type WarningKind = 'long-walk' | 'long-wait' | 'very-slow';
+export type WarningKind =
+	'long-walk' | 'long-wait' | 'very-slow' | 'tight-transfer' | 'lucky-transfer';
 // standard = plain red icon; medium = white icon in a yellow circle;
 // strong = white icon in a red circle. One icon per kind, highest
 // severity wins.
@@ -370,7 +463,8 @@ export interface Warning {
 	// tooltip so the user sees the real number, not just the threshold
 	// tier. All kinds carry seconds: long-walk = longest walk leg,
 	// long-wait = longest transfer wait, very-slow = duration gap to the
-	// fastest surviving itinerary.
+	// fastest surviving itinerary, tight-transfer / lucky-transfer =
+	// spare seconds of the worst transfer (may be negative).
 	value: number;
 }
 
@@ -428,11 +522,33 @@ function walkMalus(walkSec: number): number {
 	return (t * t) / (t * t + WALK_HALF_MIN * WALK_HALF_MIN);
 }
 
-/** Multiplier applied to duration to get effective time. In [1.0, 1.2]. */
-export function comfortFactor(it: Itinerary): number {
+// Minimize-walking: the walking malus gets its own, much steeper slope
+// (0.5 instead of 0.1) so walking-heavy connections rate clearly worse;
+// the boarding malus keeps the standard slope. Factor range grows from
+// [1.0, 1.2] to [1.0, 1.6].
+const MINIMIZE_WALK_SLOPE = 0.5;
+
+/** Effective time driving badges and auto-select. Normal mode:
+ * duration x comfortFactor (multiplicative, bounded malus). Minimize
+ * walking: duration + penalty score (additive) — the multiplicative
+ * walk malus SATURATES (t^2 curve), so an 11-min walking difference
+ * between two 80-90-min-walk connections registers as ~1% and a
+ * 3-min duration edge outvotes it; the additive score keeps walking
+ * differences linear (routing-options.md § Minimize walking). */
+export function effectiveTime(it: Itinerary, opts?: RankOptions): number {
+	if (opts?.minimizeWalking) {
+		return it.duration + itineraryScore(it, opts);
+	}
+	return it.duration * comfortFactor(it, opts);
+}
+
+/** Multiplier applied to duration to get effective time. In [1.0, 1.2]
+ * (up to [1.0, 1.6] with minimize-walking). */
+export function comfortFactor(it: Itinerary, opts?: RankOptions): number {
 	const w = walkMalus(walkSeconds(it));
 	const x = transferMalus(boardingCount(it));
-	return 1 + COMFORT_FACTOR_SLOPE * (w + x);
+	const walkSlope = opts?.minimizeWalking ? MINIMIZE_WALK_SLOPE : COMFORT_FACTOR_SLOPE;
+	return 1 + walkSlope * w + COMFORT_FACTOR_SLOPE * x;
 }
 
 /** Longest single WALK leg in seconds. */
@@ -465,14 +581,126 @@ function longestTransferWait(it: Itinerary): number {
 	return maxWait;
 }
 
+// Tight-transfer ladder (routing-options.md § Connection warnings). All
+// feasibility math runs at the user's SET walking speed: the reported
+// transfer walk durations already carry the speed scaling from the
+// backend; only daring's extra halving must be undone (transferWalkUnscale).
+export type TransferTier = 'tight' | 'very-tight' | 'extremely-tight' | 'lucky';
+export interface TransferAssessment {
+	/** Index (into it.legs) of the transit leg BOARDED at this transfer —
+	 * the detail view marks its departure row. */
+	legIndex: number;
+	tier: TransferTier;
+	/** Spare seconds after walking at the set speed (negative = not
+	 * makeable at that speed). */
+	spare: number;
+}
+
+const TIGHT_SPARE_SEC = 120;
+const VERY_TIGHT_SPARE_SEC = 20;
+const EXTREMELY_TIGHT_SPEEDUP = 1.2;  // needs > 20% faster walking
+const LUCKY_SPEEDUP = 1.5;            // needs > 50% faster walking
+
+// Timed-transfer exception (routing-options.md § Connection warnings):
+// train → bus/tram and tram → bus transfers in CH are typically
+// Anschluss-timed — the receiving vehicle waits for a late feeder — so
+// a nominally short buffer is not actually tight. Such pairs only warn
+// when the spare goes NEGATIVE at the set walking speed (even a
+// waiting bus only holds a few minutes); the ladder applies unchanged
+// then. tram → bus is an interim blanket rule — the per-line/
+// per-station refinement is planned (regio-tram-timed-transfers.md);
+// tram → tram is deliberately NOT exempt.
+const RAIL_MODES = new Set([
+	'RAIL', 'HIGHSPEED_RAIL', 'LONG_DISTANCE', 'NIGHT_RAIL',
+	'REGIONAL_RAIL', 'REGIONAL_FAST_RAIL'
+]);
+const BUS_MODES = new Set(['BUS', 'COACH']);
+function isTimedFeederPair(fromMode: string, toMode: string): boolean {
+	if (RAIL_MODES.has(fromMode)) return BUS_MODES.has(toMode) || toMode === 'TRAM';
+	if (fromMode === 'TRAM') return BUS_MODES.has(toMode);
+	return false;
+}
+
+/** Strip the MOTIS dataset prefix ("ch_") so leg route ids match the
+ * pipeline's raw GTFS route_ids (same rule as legColor.ts). */
+function stripDatasetPrefix(routeId: string): string {
+	return routeId.replace(/^[a-z]+_/, '');
+}
+
+/** Judge every transfer of the itinerary: available window = next
+ * departure − previous transit arrival (schedule times, factor-agnostic);
+ * needed = the walking between them at the set speed. Same-stop pseudo
+ * walk legs (MOTIS renders the change-time buffer as a stop-to-itself
+ * WALK) count as waiting, not walking — identical to walkSeconds(). */
+export function assessTransfers(it: Itinerary, opts?: RankOptions): TransferAssessment[] {
+	const unscale = opts?.transferWalkUnscale ?? 1;
+	const slack = opts?.transferWalkSlackSec ?? 0;
+	const hf = opts?.hfGondolaRoutes;
+	const out: TransferAssessment[] = [];
+	let prevTransitEnd: number | null = null;
+	let prevTransitMode: string | null = null;
+	let walkBetween = 0;
+	for (let i = 0; i < it.legs.length; i++) {
+		const l = it.legs[i];
+		if (!isTransitLeg(l)) {
+			if (l.mode === 'WALK' && prevTransitEnd !== null
+				&& !(l.from?.stopId != null && l.from.stopId === l.to?.stopId)) {
+				walkBetween += legDuration(l);
+			}
+			continue;
+		}
+		if (prevTransitEnd !== null) {
+			const available = (Date.parse(l.startTime) - prevTransitEnd) / 1000;
+			const needed = Math.max(0, walkBetween - (walkBetween > 0 ? slack : 0)) * unscale;
+			const spare = available - needed;
+			let tier: TransferTier | null = null;
+			if (available <= 0 || (needed > 0 && needed > available * LUCKY_SPEEDUP)) {
+				tier = 'lucky';
+			} else if (needed > available * EXTREMELY_TIGHT_SPEEDUP) {
+				tier = 'extremely-tight';
+			} else if (spare < VERY_TIGHT_SPARE_SEC) {
+				tier = 'very-tight';
+			} else if (spare < TIGHT_SPARE_SEC) {
+				tier = 'tight';
+			}
+			// Continuous gondolas: no warning at all — a missed departure
+			// just means the next one a minute later.
+			const hfExempt = !!(hf && l.routeId
+				&& (hf.has(l.routeId) || hf.has(stripDatasetPrefix(l.routeId))));
+			// Timed train → bus/tram feeders: a non-negative spare is fine
+			// (the vehicle waits); only a physically unmakeable transfer
+			// still warns.
+			const timedExempt = tier !== 'lucky' && spare >= 0
+				&& prevTransitMode !== null
+				&& isTimedFeederPair(prevTransitMode, l.mode);
+			if (tier && !hfExempt && !timedExempt) {
+				out.push({ legIndex: i, tier, spare: Math.round(spare) });
+			}
+		}
+		prevTransitEnd = Date.parse(l.endTime);
+		prevTransitMode = l.mode;
+		walkBetween = 0;
+	}
+	return out;
+}
+
+const TIGHT_SEVERITY: Record<Exclude<TransferTier, 'lucky'>, WarningSeverity> = {
+	'tight': 'standard',
+	'very-tight': 'medium',
+	'extremely-tight': 'strong'
+};
+const TIER_RANK: Record<TransferTier, number> = {
+	'tight': 0, 'very-tight': 1, 'extremely-tight': 2, 'lucky': 3
+};
+
 /** Rate every itinerary against the best effective time in the set and
  * derive its badge + warnings. Returns one CardState per input in the
  * same order. Thresholds are absolute — adding or removing an itinerary
  * never re-ranks the ones that remain. */
-export function computeCardStates(itins: Itinerary[]): CardState[] {
+export function computeCardStates(itins: Itinerary[], opts?: RankOptions): CardState[] {
 	if (itins.length === 0) return [];
 
-	const effTimes = itins.map((it) => it.duration * comfortFactor(it));
+	const effTimes = itins.map((it) => effectiveTime(it, opts));
 	const minEff = Math.min(...effTimes);
 	const worseness = effTimes.map((e) => (minEff > 0 ? e / minEff - 1 : 0));
 
@@ -508,6 +736,27 @@ export function computeCardStates(itins: Itinerary[]): CardState[] {
 			if (it.duration >= STRONG_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'strong', value: slowGap });
 			else if (it.duration >= MEDIUM_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'medium', value: slowGap });
 			else if (it.duration >= VERY_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'standard', value: slowGap });
+		}
+
+		// Tight-transfer ladder: one icon for the worst tight transfer,
+		// plus the visually distinct "if you're lucky" icon when any
+		// transfer is beyond rescue at 1.5x walking speed. Both carry the
+		// worst transfer's spare seconds for the tooltip.
+		const transfers = assessTransfers(it, opts);
+		const lucky = transfers.filter((t) => t.tier === 'lucky');
+		if (lucky.length) {
+			const worst = lucky.reduce((a, b) => (b.spare < a.spare ? b : a));
+			warnings.push({ kind: 'lucky-transfer', severity: 'strong', value: worst.spare });
+		}
+		const tight = transfers.filter((t) => t.tier !== 'lucky');
+		if (tight.length) {
+			const worst = tight.reduce((a, b) =>
+				TIER_RANK[b.tier] > TIER_RANK[a.tier] || (b.tier === a.tier && b.spare < a.spare) ? b : a);
+			warnings.push({
+				kind: 'tight-transfer',
+				severity: TIGHT_SEVERITY[worst.tier as Exclude<TransferTier, 'lucky'>],
+				value: worst.spare
+			});
 		}
 
 		return { badge, warnings };

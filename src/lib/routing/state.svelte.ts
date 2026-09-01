@@ -6,7 +6,8 @@ import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation,
 	invalidateCurrent, resolveCurrent
 } from './geolocation.svelte';
-import { pruneDominated } from './ranking';
+import { boardingCount, effectiveTime, pruneDominated, walkSeconds } from './ranking';
+import { routingOptions, type RoutingOptionValues } from './options.svelte';
 import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
 import { reportShareExpired, shareFingerprint, type ShareData } from './share';
@@ -36,6 +37,11 @@ let loading = $state(false);
 // Non-null while a loadMoreEarlier / loadMoreLater is in flight; the
 // direction lets the panel disable / label the matching button.
 let loadingMore = $state<'earlier' | 'later' | null>(null);
+// Progress line shown inside the main loader while a query runs. null =
+// the generic "Route options are loading" wording; set to something
+// specific whenever the cascade escalates the walking budget or fires
+// extra hop requests, so long searches explain themselves.
+let loadingStatus = $state<string | null>(null);
 let error = $state<string | null>(null);
 let hasQueried = $state(false);
 
@@ -191,7 +197,14 @@ function currentSortFn() {
 }
 
 function publishResults() {
-	const pruned = pruneDominated(combined, mode).sort(currentSortFn());
+	// Minimize walking: direct walk itineraries beyond 30 min are never
+	// shown (routing-options.md § Minimize walking — suppression rules).
+	const candidates = routingOptions.minimizeWalking
+		? combined.filter((it) => boardingCount(it) > 0 || walkSeconds(it) <= 1800)
+		: combined;
+	const pruned = pruneDominated(candidates, mode, {
+		minimizeWalking: routingOptions.minimizeWalking
+	}).sort(currentSortFn());
 	// The cap must keep the end nearest the query time: leave-at sorts by
 	// arrival ascending and keeps the head (earliest arrivals after the
 	// departure time); arrive-by sorts by departure ascending and must keep
@@ -201,6 +214,18 @@ function publishResults() {
 	results = mode === 'arrive'
 		? pruned.slice(-resultTarget)
 		: pruned.slice(0, resultTarget);
+}
+
+/** Progress wording for one hop iteration of the stage-3 cascade: how many
+ * options are on screen already and which way we keep looking. Only shown
+ * while the main loader is up (loadMore has its own bare inline pill). */
+function setHopStatus(dir: 1 | -1) {
+	if (!loading) return;
+	const n = results.length;
+	const where = dir === 1 ? 'later on' : 'earlier';
+	loadingStatus = n === 0
+		? `No options yet, looking ${dir === 1 ? 'further ahead' : 'further back'}...`
+		: `${n} option${n === 1 ? '' : 's'} found, looking for more options ${where}...`;
 }
 
 /** Hop `time` in `dir` (+1 forward, −1 backward) starting at `startEpoch`
@@ -237,6 +262,7 @@ async function runHopCascade(
 	while (results.length < resultTarget && !ac.signal.aborted) {
 		if (Math.abs(queryEpoch - startEpoch) > MAX_SPAN_MS) break;
 		if (emptyStreak >= MAX_EMPTY_STREAK) break;
+		setHopStatus(dir);
 		const hopTime = new Date(queryEpoch).toISOString();
 		const res = await plan({
 			from: from!, to: to!, mode: hopMode, time: hopTime,
@@ -247,7 +273,13 @@ async function runHopCascade(
 			// Full 2-h transfer table rides along with the wide walking
 			// budget — both mark "sparse service, search exhaustively"
 			// (transfer-point-optimization.md § Two-tier transfer table).
-			fullTransfers: pre === WIDE_PRE_POST_SEC
+			fullTransfers: pre === WIDE_PRE_POST_SEC,
+			pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
+			transferTimeFactor: routingOptions.transferTimeFactor,
+			additionalTransferMin: routingOptions.additionalTransferMin,
+			koraWalkPoints: routingOptions.koraWalkPoints,
+			alternativesEpsilon: routingOptions.alternativesEpsilon,
+			alternativesMax: routingOptions.alternativesMax
 		}, ac.signal);
 		if (ac.signal.aborted) return 'done';
 		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
@@ -387,9 +419,30 @@ function currentUrl(): URL {
 	return new URL(window.location.href);
 }
 
+// The concrete timestamp substituted for a null `time` ("now") in the
+// URL. Stamped by runQuery, so the address always carries the time the
+// shown results were computed for — a shared / reloaded URL reproduces
+// them and never silently re-resolves to a new "now" (refresh-to-now is
+// the panel's explicit button). Reset whenever the panel time changes.
+let resolvedNowTime: string | null = null;
+
+/** Every routing URL write goes through here: substitutes the stamped
+ * query timestamp for a null time and rides the current routing options
+ * along (url.ts writes only their non-default values). */
+function writeUrl(url: URL, q: {
+	from: Endpoint | null; to: Endpoint | null;
+	mode: TimeMode; time: string | null; route?: string | null;
+}) {
+	writeRoutingQuery(url, {
+		...q,
+		time: q.time ?? resolvedNowTime,
+		options: routingOptions.snapshot()
+	});
+}
+
 function syncUrl() {
 	const url = currentUrl();
-	writeRoutingQuery(url, {
+	writeUrl(url, {
 		from, to, mode, time,
 		route: selectedFingerprint
 	});
@@ -465,6 +518,7 @@ export const routingState = {
 	get results() { return results; },
 	get loading() { return loading; },
 	get loadingMore() { return loadingMore; },
+	get loadingStatus() { return loadingStatus; },
 	get error() { return error; },
 	get hasQueried() { return hasQueried; },
 	get selectedItinerary() { return selectedItinerary; },
@@ -535,8 +589,9 @@ export const routingState = {
 		// query re-runs via the panel's query effect on reopen.
 		loading = false;
 		loadingMore = null;
+		loadingStatus = null;
 		const url = currentUrl();
-		writeRoutingQuery(url, {
+		writeUrl(url, {
 			from: null, to: null, mode: 'leave', time: null, route: null
 		});
 		if (url.href !== window.location.href) {
@@ -553,16 +608,18 @@ export const routingState = {
 		to = null;
 		mode = 'leave';
 		time = null;
+		resolvedNowTime = null;
 		results = [];
 		loading = false;
 		loadingMore = null;
+		loadingStatus = null;
 		error = null;
 		hasQueried = false;
 		lastQueryKey = null;
 		resetCascadeState();
 		invalidateSelection();
 		const url = currentUrl();
-		writeRoutingQuery(url, {
+		writeUrl(url, {
 			from: null, to: null, mode: 'leave', time: null, route: null
 		});
 		if (url.href !== window.location.href) {
@@ -627,6 +684,9 @@ export const routingState = {
 	setTime(t: string | null) {
 		abortInFlight();
 		time = t;
+		// A fresh "now" (refresh button / explicit reset) must re-stamp on
+		// the next query rather than reuse the previous run's timestamp.
+		resolvedNowTime = null;
 		timeVersion++;
 		results = [];
 		hasQueried = false;
@@ -661,7 +721,7 @@ export const routingState = {
 		pendingFingerprint = null;
 		selectionInvalid = false;
 		const url = currentUrl();
-		writeRoutingQuery(url, { from, to, mode, time, route: fp });
+		writeUrl(url, { from, to, mode, time, route: fp });
 		if (!wasSelected) {
 			pushState(url, { ...page.state, routeSelection: fp });
 			pushedEntry = true;
@@ -699,7 +759,7 @@ export const routingState = {
 		// filter — the full list is then the only sensible thing to show.
 		sharedOnly = false;
 		const url = currentUrl();
-		writeRoutingQuery(url, { from, to, mode, time, route: null });
+		writeUrl(url, { from, to, mode, time, route: null });
 		if (url.href !== window.location.href) {
 			// Strip routeSelection explicitly — reusing page.state verbatim
 			// would re-stamp the stale fingerprint, and Map.svelte's
@@ -754,16 +814,22 @@ export const routingState = {
 		sharedOnly = false;
 	},
 
-	/** Direct-write initial state from a URL restore. Doesn't re-serialise. */
+	/** Direct-write initial state from a URL restore. Doesn't re-serialise.
+	 * The restored time is always concrete (writes stamp "now" — see
+	 * `resolvedNowTime`), so a reload re-queries the original timestamp,
+	 * never a fresh "now". URL options apply session-only: the link's
+	 * settings drive this tab's queries without touching localStorage. */
 	hydrate(next: {
 		from: Endpoint | null; to: Endpoint | null;
 		mode: TimeMode; time: string | null;
 		route: string | null;
+		options?: RoutingOptionValues;
 	}) {
 		from = next.from;
 		to = next.to;
 		mode = next.mode;
 		time = next.time;
+		if (next.options) routingOptions.applySession(next.options);
 		pendingFingerprint = next.route;
 		selectedFingerprint = next.route;
 		pushedEntry = false;
@@ -780,12 +846,46 @@ export const routingState = {
 		if (from && to) void routingState.runQuery();
 	},
 
+	/** A query-affecting routing option changed (walking speed, safety
+	 * mode, minimize walking — the latter drives the fork's walk-point
+	 * table since routing-options.md § Minimize walking): clear the
+	 * shown results like any other input edit; the panel's query effect
+	 * then re-runs the cascade with the new params. Options ride in the
+	 * URL (non-default values only), so sync it. */
+	optionsChanged() {
+		abortInFlight();
+		results = [];
+		hasQueried = false;
+		error = null;
+		lastQueryKey = null;
+		invalidateSelection();
+		syncUrl();
+	},
+
 	async runQuery() {
 		if (!from || !to) return;
-		const key = JSON.stringify({ from, to, mode, time });
+		const key = JSON.stringify({
+			from, to, mode, time,
+			walkSpeed: routingOptions.walkSpeed,
+			safety: routingOptions.safety,
+			// Minimize walking is a query param since it drives the fork's
+			// walk-point table (routing-options.md § Minimize walking).
+			minWalk: routingOptions.minimizeWalking
+		});
 		if (key === lastQueryKey && !error) return;
+		// A null time means "now" — pin it to a concrete timestamp for this
+		// run and put it on the URL immediately, so the address always
+		// carries the time the results are computed for (even if the query
+		// errors or comes back empty). State `time` stays null: the panel
+		// keeps showing "now" and a later re-run re-stamps.
+		if (!time) {
+			resolvedNowTime = new Date().toISOString();
+			syncUrl();
+		}
+		const queryTime: string = time ?? resolvedNowTime!;
 		error = null;
 		loading = true;
+		loadingStatus = null;
 		hasQueried = true;
 		abortInFlight();
 		const ac = new AbortController();
@@ -811,6 +911,7 @@ export const routingState = {
 			if (pendingShareFingerprint) {
 				pre = WIDE_PRE_POST_SEC;
 				post = WIDE_PRE_POST_SEC;
+				loadingStatus = 'Looking up the shared connection with a high walking limit...';
 			}
 
 			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
@@ -823,7 +924,13 @@ export const routingState = {
 					// Full 2-h transfer table rides along with the wide walking
 					// budget (escalation + share verification) — see
 					// transfer-point-optimization.md § Two-tier transfer table.
-					fullTransfers: pre === WIDE_PRE_POST_SEC
+					fullTransfers: pre === WIDE_PRE_POST_SEC,
+					pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
+					transferTimeFactor: routingOptions.transferTimeFactor,
+					additionalTransferMin: routingOptions.additionalTransferMin,
+					koraWalkPoints: routingOptions.koraWalkPoints,
+					alternativesEpsilon: routingOptions.alternativesEpsilon,
+					alternativesMax: routingOptions.alternativesMax
 				}, ac.signal);
 			};
 
@@ -831,24 +938,58 @@ export const routingState = {
 			// (The old parallel "clean direct walk" fetch is gone: the MOTIS
 			// fork returns Valhalla geometry, whose arrive-by direct-walk
 			// polylines are correct — the loop-back bug was OSR's.)
-			let res = await doQuery(time);
+			let res = await doQuery(queryTime);
 			if (ac.signal.aborted) return;
 			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 
 			// Stage 2 — escalate walking budget on trigger:
-			//   (a) narrow query returned nothing, or
+			//   (a) narrow query returned no TRANSIT itinerary — a direct
+			//       walk alone must not mask "nothing found": MOTIS always
+			//       returns the walk, so testing for emptiness alone let
+			//       walk-only results suppress the wide retry that would
+			//       have found transit (routing-options.md fallout), or
 			//   (b) any returned itinerary has a >1 h wait at start or
-			//       between transit legs.
-			//   (c) — stage 3 discovers a ≥4 h daytime service gap; handled
-			//        via the runHopCascade escalation return below.
+			//       between transit legs, or
+			//   (c) the narrow results leave a ≥4 h daytime service gap
+			//       after the requested time — MOTIS extends its search
+			//       interval until it has 5 itineraries, so a narrow query
+			//       can "succeed" with next-morning connections only; those
+			//       must not suppress the wide retry that finds same-day
+			//       ones. Same hasSparseServiceGap curve as stage 2c below,
+			//       evaluated here on the stage-1 set (stage 2c alone never
+			//       fires when stage 1 already fills the result list, since
+			//       the hop loop doesn't run then), or
+			//   (d) the best option for the requested timing (earliest
+			//       arrival for leave-at, latest departure for arrive-by)
+			//       is a walk-only itinerary of more than 30 min — a long
+			//       walk "winning" is a strong hint that reachable transit
+			//       sits beyond the narrow radius.
 			// Escalation replaces `combined` (different candidate set with
 			// a wider walking radius, not comparable via merge).
-			const needsEscalation = combined.length === 0
-				|| combined.some(hasLongWait);
-			if (needsEscalation) {
+			const initialEpoch = Date.parse(queryTime);
+			const best = combined.length === 0 ? null : combined.reduce((a, b) =>
+				mode === 'arrive'
+					? (Date.parse(b.startTime) > Date.parse(a.startTime) ? b : a)
+					: (Date.parse(b.endTime) < Date.parse(a.endTime) ? b : a));
+			const bestIsLongWalk = best !== null
+				&& boardingCount(best) === 0 && walkSeconds(best) > 1800;
+			// The reason doubles as the loader's progress line — each trigger
+			// gets its own wording so a slow search says what it is doing.
+			const escalationReason =
+				!combined.some((it) => boardingCount(it) > 0)
+					? 'No connections found in normal mode, trying with a higher walking limit...'
+				: bestIsLongWalk
+					? 'Only a long walk found so far, trying with a higher walking limit...'
+				: combined.some(hasLongWait)
+					? 'Found connections with a long wait, trying with a higher walking limit...'
+				: hasSparseServiceGap(combined, initialEpoch, initialEpoch, mode)
+					? 'Long gap without service found, trying with a higher walking limit...'
+				: null;
+			if (escalationReason) {
+				loadingStatus = escalationReason;
 				pre = WIDE_PRE_POST_SEC;
 				post = WIDE_PRE_POST_SEC;
-				res = await doQuery(time);
+				res = await doQuery(queryTime);
 				if (ac.signal.aborted) return;
 				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 			}
@@ -863,7 +1004,6 @@ export const routingState = {
 			// forward by re-querying with `time` bumped past the last known
 			// result. Dedupe by fingerprint; stop at TARGET_RESULT_COUNT,
 			// MAX_SPAN_MS, or MAX_EMPTY_STREAK consecutive empty hops.
-			const initialEpoch = time ? Date.parse(time) : Date.now();
 			const advanceDir: 1 | -1 = mode === 'arrive' ? -1 : 1;
 			// Anchor on the axis the hop mode bounds (see runHopCascade):
 			// departures for forward/leave-at hops, arrivals for
@@ -891,11 +1031,13 @@ export const routingState = {
 			// budget; the wider candidate set is not merge-comparable with
 			// the narrow one.
 			if (outcome === 'escalate') {
+				loadingStatus =
+					'Long gap without service found, searching again with a higher walking limit...';
 				pre = WIDE_PRE_POST_SEC;
 				post = WIDE_PRE_POST_SEC;
 				combined = [];
 				seenFingerprints = new Set();
-				const wideRes = await doQuery(time);
+				const wideRes = await doQuery(queryTime);
 				if (ac.signal.aborted) return;
 				combined = [...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])];
 				seenFingerprints = new Set(combined.map(itineraryFingerprint));
@@ -954,7 +1096,7 @@ export const routingState = {
 					selectedFingerprint = null;
 					selectionInvalid = true;
 					const url = currentUrl();
-					writeRoutingQuery(url, {
+					writeUrl(url, {
 						from, to, mode, time, route: null
 					});
 					if (url.href !== window.location.href) {
@@ -973,12 +1115,20 @@ export const routingState = {
 			// Also skipped right after a share expiry — the error must not be
 			// upstaged by silently putting a different connection on the map.
 			if (!selectedFingerprint && !selectionInvalid && !sharedExpired && results.length > 0) {
-				const it = mode === 'arrive' ? results[results.length - 1] : results[0];
+				// Minimize walking: auto-select the comfort-best (crown)
+				// connection instead of the chronological edge, so the map
+				// immediately shows the low-walk pick
+				// (routing-options.md § Minimize walking).
+				const it = routingOptions.minimizeWalking
+					? results.reduce((a, b) =>
+						effectiveTime(b, { minimizeWalking: true })
+							< effectiveTime(a, { minimizeWalking: true }) ? b : a)
+					: mode === 'arrive' ? results[results.length - 1] : results[0];
 				const fp = itineraryFingerprint(it);
 				selectedItinerary = it;
 				selectedFingerprint = fp;
 				const url = currentUrl();
-				writeRoutingQuery(url, { from, to, mode, time, route: fp });
+				writeUrl(url, { from, to, mode, time, route: fp });
 				if (url.href !== window.location.href) {
 					replaceState(url, { ...page.state, routeSelection: fp });
 				}
@@ -1006,6 +1156,7 @@ export const routingState = {
 			if (pendingAbort === ac) {
 				pendingAbort = null;
 				loading = false;
+				loadingStatus = null;
 			}
 		}
 	},

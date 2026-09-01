@@ -17,19 +17,19 @@ Neither state implies the other as a hard rule; the click behaviors below define
 
 - Each card gains a single **map icon button** at the **bottom right**, in the summary meta row (transfers · walking) — it shares width only with the summary text, which doesn't need it. Icon: the filled Material Symbols `map` glyph in the brand red (`#740013`), the one coloured accent on the otherwise monochrome card. Visible at all times, not hover-only.
 - The existing badge / warning placement is preserved; the map icon must not collide with them.
-- **Primary click on the card always toggles the details expansion**, on both desktop and mobile. It never enters any map mode.
+- **Primary click on the card is a two-step, identical on both platforms** (revised after the first version, which expanded on click and selected only on desktop): the first click makes the connection the **active** one (selected — the highlight, and the map render where the map is visible); clicking the already-active card **toggles its details**, opening and then closing them. Double-clicking a fresh card consequently selects and opens it in one gesture. Rationale for dropping the original expand-on-click: on desktop the map sits beside the list, so a click on a connection means "show me that one" — routing that everyday action through the map icon felt unnatural; a device-split click was tried in between and rejected as more confusing than the shared two-step. It never enters any map mode on either platform.
 
 ### Desktop (wide viewport)
 
-- Clicking a connection: toggles details. **Opening** a card also selects it on the map (open implies select). Collapsing a card does not change the map selection.
-- Clicking the map icon: selects that connection on the map **without** opening or collapsing any card. This enables peeking at several alternatives on the map while a different card stays open.
+- Clicking a connection that is not the active one: selects it on the map, details untouched. Clicking the **already-active** connection: opens its details, and closes them on the next click — the same path as the chevron, which also re-frames the route overview (undoing a prior per-leg zoom).
+- Clicking the map icon: same as clicking the card body (kept for symmetry with mobile and as the explicit affordance).
 - The desktop panel layout is otherwise unchanged.
 - The attribution control is bounded to the space right of the panel, so expanded credits never slide underneath it.
 
 ### Mobile (narrow viewport)
 
 - The routing panel becomes **full-width** — a full-bleed page, not a floating card with margins.
-- Clicking a connection: toggles details only. It does **not** arm or show the map.
+- Clicking a connection: the same two-step as desktop — first click selects (highlight only; the map is not visible here), second click toggles the details. It does **not** enter map mode — the map icon does that.
 - Clicking the map icon: enters **fullscreen map mode** for that connection (selects it and shows the map).
 - **Fullscreen map mode**: the results list / panel is hidden and the map fills the viewport. A **summary header** sits at the top of the map (same visual pattern as the line-detail view's top bar) containing:
   - the connection summary: departure–arrival times, duration, transfers, mode-icon strip with line badges,

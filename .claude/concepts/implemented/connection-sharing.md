@@ -17,9 +17,9 @@ A found connection cannot be shared. Sharing the routing URL re-runs the search 
 - The og:image PNG is rendered once at creation time, not on demand — after deletion the image URL simply stops resolving.
 
 ### Preview image (og:image)
-- Content: the connection header card as rendered in the routing panel — time range, total duration, origin/destination names with times, the leg badge chain with the exact drawn line colors, transfers + walking summary — plus the Kora Maps logo. No map, no map button.
-- Rendered server-side from the committed Saira fonts; social-preview dimensions (1200×630).
-- Per-share meta tags served with the `/s/<id>` page: `og:title` (e.g. "Bern 09:34 → Vounetse 11:28"), `og:description` (duration, transfers), `og:image`.
+- Content: the connection header card as rendered in the routing panel, and it tracks that card's hierarchy (`transit-routing.md` § Results): the small `leave … · there …` line with the total duration, then the first boarding and last alighting times in large type with their station names beneath, the leg badge chain with the exact drawn line colors, and the date + transfers + walking summary (time, distance) — plus the Kora Maps logo. No map, no map button. Walk-only shares keep the plain large time range in place of the two-column title, mirroring the walk-only card.
+- Rendered server-side from the committed Saira fonts; social-preview dimensions (1200×630). Glyphs are limited to what the static Saira latin instances carry — the arrow between the two stops is therefore drawn as a chevron, not typed as `→` (U+2192 is outside the subset and resvg has no system-font fallback).
+- Per-share meta tags served with the `/s/<id>` page: `og:title` (e.g. "Bern 09:34 → Vounetse 11:28"), `og:description` (date, duration, transfers, walking time + distance), `og:image`.
 
 ### Shared view
 - Opening `/s/<id>` shows the map with the routing view open in single-connection mode: only the shared connection is listed.

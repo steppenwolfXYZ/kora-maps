@@ -3,11 +3,11 @@
 	// about page. Files in static/illustration/.
 	let { kind }: { kind: 'transit' | 'walk' | 'car' } = $props();
 
-	const src = {
+	const src = $derived({
 		transit: '/illustration/train.jpeg',
 		walk: '/illustration/walk_cycle.jpeg',
 		car: '/illustration/car_infrastructure.jpeg'
-	}[kind];
+	}[kind]);
 </script>
 
 <div class="art" aria-hidden="true">

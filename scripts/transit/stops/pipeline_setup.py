@@ -5,6 +5,7 @@ file.
 All shared constants (paths, MODE_*, PILL_CFG, ...) come in via
 `from _state import *`; every helper it needs is imported explicitly."""
 import colorsys
+import csv
 import json
 import time
 from collections import defaultdict
@@ -476,6 +477,11 @@ def run():
     # routing result cards so a leg's badge matches the map. Emitted here
     # because the same iteration over line features already carries color
     # per line, and step 06 bakes `route_ids` onto each line feature.
+    # Since routing-options.md § Connection warnings the file also carries
+    # `hf_gondolas`: mountain routes whose service is frequencies.txt-based
+    # with short headways — they run "continuously" (a gondola's per-minute
+    # timetable departures are an artifact), so the client suppresses
+    # tight-transfer warnings when boarding them.
     with _timed("write OUT_ROUTE_COLOR_INDEX"):
         route_color: dict[str, str] = {}
         for feat in lines_data["features"]:
@@ -491,9 +497,38 @@ def run():
                 # both directions), first color wins — they share it since
                 # both directions run the same mode + speed_kmh.
                 route_color.setdefault(str(rid), color)
+
+        HF_GONDOLA_MAX_HEADWAY_SECS = 300
+        MOUNTAIN_ROUTE_TYPES = {"116", "1300", "1303", "1400"}
+        hf_gondolas: set[str] = set()
+        gtfs_dir = ROOT / "data" / "gtfs_routed"
+        freq_path = gtfs_dir / "frequencies.txt"
+        if freq_path.exists():
+            hf_trips: set[str] = set()
+            with freq_path.open(newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        if int(row["headway_secs"]) <= HF_GONDOLA_MAX_HEADWAY_SECS:
+                            hf_trips.add(row["trip_id"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            if hf_trips:
+                mountain_routes: set[str] = set()
+                with (gtfs_dir / "routes.txt").open(newline="", encoding="utf-8-sig") as f:
+                    for row in csv.DictReader(f):
+                        if (row.get("route_type") or "") in MOUNTAIN_ROUTE_TYPES:
+                            mountain_routes.add(row["route_id"])
+                with (gtfs_dir / "trips.txt").open(newline="", encoding="utf-8-sig") as f:
+                    for row in csv.DictReader(f):
+                        if row["trip_id"] in hf_trips and row["route_id"] in mountain_routes:
+                            hf_gondolas.add(row["route_id"])
+
         OUT_ROUTE_COLOR_INDEX.parent.mkdir(parents=True, exist_ok=True)
-        OUT_ROUTE_COLOR_INDEX.write_text(json.dumps(route_color, ensure_ascii=False))
-        print(f"  Route color index: {len(route_color):,} route_ids → {OUT_ROUTE_COLOR_INDEX}")
+        OUT_ROUTE_COLOR_INDEX.write_text(json.dumps(
+            {"colors": route_color, "hf_gondolas": sorted(hf_gondolas)},
+            ensure_ascii=False))
+        print(f"  Route color index: {len(route_color):,} route_ids, "
+              f"{len(hf_gondolas):,} high-frequency gondolas → {OUT_ROUTE_COLOR_INDEX}")
 
     with _timed("compute_terminus_skip_oids"):
         skip_first_oids, skip_last_oids = compute_terminus_skip_oids(

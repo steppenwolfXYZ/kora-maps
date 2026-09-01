@@ -67,6 +67,22 @@ export interface PlanArgs {
 	 * runs with the wide walking budget — the sparse-service situations
 	 * where long transfer-walk connections matter. */
 	fullTransfers?: boolean;
+	/** Routing options (routing-options.md). All three omitted at the
+	 * defaults so a default query stays byte-identical to the pre-options
+	 * behavior. `pedestrianSpeedMs` (m/s) rescales the fork's Valhalla
+	 * walking surfaces (offsets + walk legs); `transferTimeFactor` scales
+	 * the transfer matrix at query time (walking speed x daring);
+	 * `additionalTransferMin` (minutes) is cautious mode's fixed slack. */
+	pedestrianSpeedMs?: number | null;
+	transferTimeFactor?: number | null;
+	additionalTransferMin?: number;
+	/** Minimize-walking (routing-options.md § Minimize walking):
+	 * `koraWalkPoints` ('minwalk') selects the fork's steeper walk-point
+	 * table so walking-light journeys survive as their own Pareto
+	 * points; the ε-alternates knobs widen alongside (see below). */
+	koraWalkPoints?: 'minwalk' | null;
+	alternativesEpsilon?: number;
+	alternativesMax?: number;
 }
 
 export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
@@ -116,13 +132,22 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	// Fork-only ε-alternates (near-optimal-endpoint-alternatives.md):
 	// besides each Pareto-optimal journey, return egress/access-stop
 	// variants arriving within the slack, as ordinary itineraries — the
-	// pruning in ranking.ts decides which survive. 540 s = ranking.ts's
-	// Case-1 overlap window (OVERLAP_TIME_MAX_MS), so the server returns
-	// a slight superset of what layer 2 would ever keep; max 3 alternates
-	// per Pareto point.
-	params.set('alternativesEpsilon', '540');
-	params.set('alternativesMax', '3');
+	// pruning in ranking.ts decides which survive. Default 540 s =
+	// ranking.ts's Case-1 overlap window (OVERLAP_TIME_MAX_MS), so the
+	// server returns a slight superset of what layer 2 would ever keep;
+	// max 3 alternates per Pareto point. Minimize-walking widens both
+	// (state.svelte.ts passes the values from options.svelte.ts).
+	params.set('alternativesEpsilon', String(args.alternativesEpsilon ?? 540));
+	params.set('alternativesMax', String(args.alternativesMax ?? 3));
+	if (args.koraWalkPoints) params.set('koraWalkPoints', args.koraWalkPoints);
 	params.set('searchWindow', String(args.searchWindow ?? 900));
+	// Routing options — only sent off their defaults (see PlanArgs).
+	if (args.pedestrianSpeedMs != null)
+		params.set('pedestrianSpeed', String(args.pedestrianSpeedMs));
+	if (args.transferTimeFactor != null)
+		params.set('transferTimeFactor', String(args.transferTimeFactor));
+	if (args.additionalTransferMin)
+		params.set('additionalTransferTime', String(args.additionalTransferMin));
 
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });

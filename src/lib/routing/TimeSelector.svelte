@@ -1,4 +1,6 @@
 <script lang="ts">
+	import type { Snippet } from 'svelte';
+	import { slide } from 'svelte/transition';
 	import type { TimeMode } from './types';
 
 	interface Props {
@@ -6,9 +8,22 @@
 		time: string | null;
 		onMode: (m: TimeMode) => void;
 		onTime: (t: string | null) => void;
+		/** More-options expander (routing-options.md § UI): the button
+		 * lives right of the leave-at/arrive-by toggle; the expanded area
+		 * (the `options` snippet, provided by RoutingPanel) renders
+		 * between the mode row and the timing row. `optionsModified`
+		 * shows the non-default indicator dot while collapsed. */
+		optionsOpen?: boolean;
+		optionsModified?: boolean;
+		onToggleOptions?: () => void;
+		options?: Snippet;
 	}
 
-	let { mode, time, onMode, onTime }: Props = $props();
+	let {
+		mode, time, onMode, onTime,
+		optionsOpen = false, optionsModified = false, onToggleOptions,
+		options
+	}: Props = $props();
 
 	// Local tick so the displayed wall clock re-evaluates on every refresh
 	// click — including when `time` is already null and the prop doesn't
@@ -158,10 +173,32 @@
 </script>
 
 <div class="ts">
-	<div class="ts-mode" role="group" aria-label="Time mode">
-		<button class:active={mode === 'leave'} onclick={() => onMode('leave')}>Leave at</button>
-		<button class:active={mode === 'arrive'} onclick={() => onMode('arrive')}>Arrive by</button>
+	<div class="ts-mode-row">
+		<div class="ts-mode" role="group" aria-label="Time mode">
+			<button class:active={mode === 'leave'} onclick={() => onMode('leave')}>Leave at</button>
+			<button class:active={mode === 'arrive'} onclick={() => onMode('arrive')}>Arrive by</button>
+		</div>
+		{#if onToggleOptions}
+			<button
+				class="ts-options icon-btn"
+				class:open={optionsOpen}
+				onclick={onToggleOptions}
+				title="More options"
+				aria-label="More options"
+				aria-expanded={optionsOpen}
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">tune</span>
+				{#if !optionsOpen && optionsModified}
+					<span class="ts-options-dot" aria-hidden="true"></span>
+				{/if}
+			</button>
+		{/if}
 	</div>
+	{#if optionsOpen && options}
+		<div class="ts-options-area" transition:slide={{ duration: 180 }}>
+			{@render options()}
+		</div>
+	{/if}
 	<div class="ts-time">
 		<input
 			class="ts-date"
@@ -228,11 +265,42 @@
 		flex-direction: column;
 		gap: 0.4rem;
 	}
+	.ts-mode-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
 	.ts-mode {
 		display: flex;
 		border-radius: 0.55rem;
 		overflow: hidden;
 		width: fit-content;
+	}
+	/* Base look + hover from .icon-btn (app.css); sizing only here. The
+	   open state is the active state — gradient disc, white glyph (per
+	   ux-guidelines.md). */
+	.ts-options {
+		position: relative;
+		flex: 0 0 auto;
+		padding: 0.25rem;
+	}
+	.ts-options :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
+	.ts-options.open {
+		background: var(--gradient-brand);
+	}
+	.ts-options.open :global(.material-symbols-outlined) { color: var(--white); }
+	/* Non-default indicator while collapsed: small gradient dot pinned to
+	   the button's corner. */
+	.ts-options-dot {
+		position: absolute;
+		top: 0.05rem;
+		right: 0.05rem;
+		width: 0.45rem;
+		height: 0.45rem;
+		border-radius: 50%;
+		background: var(--gradient-brand);
+		border: 1px solid var(--white);
 	}
 	.ts-mode button {
 		border: none;

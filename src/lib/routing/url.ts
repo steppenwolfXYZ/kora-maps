@@ -1,3 +1,7 @@
+import {
+	DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
+	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
+} from './options.svelte';
 import type { Endpoint, RoutingQuery, TimeMode } from './types';
 
 // URL query params (transit-routing.md § Deep link, geocoding-search.md § URL persistence):
@@ -8,8 +12,17 @@ import type { Endpoint, RoutingQuery, TimeMode } from './types';
 //   fromKind, toKind — 'address' | 'poi', display hint for the endpoint
 //                     pill's icon. Only carried when the paired from/to is
 //                     a coord AND a kind is known.
-//   mode            — 'leave' | 'arrive'
-//   time            — ISO 8601 or 'now'
+//   mode            — 'leave' | 'arrive' (absent = leave)
+//   time            — ISO 8601. Always present alongside a query: a null
+//                     ("now") panel time is stamped with the concrete
+//                     timestamp the query ran at (state.svelte.ts), so a
+//                     shared / reloaded URL reproduces the shown results
+//                     instead of re-resolving "now" ('now' still parses,
+//                     for legacy links). Refresh-to-now is the panel's
+//                     explicit button, never a reload side effect.
+//   walk, safety, minWalk — routing options (routing-options.md), written
+//                     only off their defaults; absent = defaults. Restores
+//                     apply them session-only, never into localStorage.
 // A `?from=…&to=…` presence is enough to open the routing panel on cold load.
 
 export const URL_FROM = 'from';
@@ -24,6 +37,9 @@ export const URL_TIME = 'time';
  * Independent of the panel query params — presence means one specific
  * itinerary from the current results is being rendered on the map. */
 export const URL_ROUTE = 'route';
+export const URL_WALK = 'walk';
+export const URL_SAFETY = 'safety';
+export const URL_MIN_WALK = 'minWalk';
 
 /** Endpoint serialisation: coord as `lat,lng` (7 fractional digits, ≈1 cm).
  * `station` needs the lookup callback so a UIC round-trips through the
@@ -105,12 +121,27 @@ export function urlHasRoutingQuery(url: URL): boolean {
 	return url.searchParams.has(URL_FROM) || url.searchParams.has(URL_TO);
 }
 
+/** Parse the option params back into a full value set — invalid or
+ * absent params fall back to the defaults. */
+export function paramsToOptions(url: URL): RoutingOptionValues {
+	const walk = url.searchParams.get(URL_WALK);
+	const safety = url.searchParams.get(URL_SAFETY);
+	return {
+		walkSpeed: WALK_SPEED_TIERS.some((t) => t.id === walk)
+			? walk as WalkSpeedTier : DEFAULT_OPTIONS.walkSpeed,
+		safety: SAFETY_MODES.some((m) => m.id === safety)
+			? safety as SafetyMode : DEFAULT_OPTIONS.safety,
+		minimizeWalking: url.searchParams.get(URL_MIN_WALK) === '1'
+	};
+}
+
 export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	from: Endpoint | null;
 	to: Endpoint | null;
 	mode: TimeMode;
 	time: string | null;
 	route: string | null;
+	options: RoutingOptionValues;
 } {
 	return {
 		from: paramToEndpoint(
@@ -127,7 +158,8 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 		),
 		mode: paramToMode(url.searchParams.get(URL_MODE)),
 		time: paramToTime(url.searchParams.get(URL_TIME)),
-		route: url.searchParams.get(URL_ROUTE)
+		route: url.searchParams.get(URL_ROUTE),
+		options: paramsToOptions(url)
 	};
 }
 
@@ -141,15 +173,20 @@ function pointKind(ep: Endpoint | null): string | null {
 	return ep.kind ?? null;
 }
 
-/** Write from/to/mode/time onto a URL — pass a URL to `writeRoutingQuery` so
- * callers can preserve other params (line=…, position hash) already there. */
+/** Write from/to/mode/time/options onto a URL — pass a URL to
+ * `writeRoutingQuery` so callers can preserve other params (line=…,
+ * position hash) already there. time and options only carry meaning
+ * alongside a query, so with both endpoints null (close / clear) they
+ * are dropped too. */
 export function writeRoutingQuery(url: URL, q: {
 	from: Endpoint | null;
 	to: Endpoint | null;
 	mode: TimeMode;
 	time: string | null;
 	route?: string | null;
+	options?: RoutingOptionValues;
 }) {
+	const hasQuery = q.from !== null || q.to !== null;
 	if (q.from) url.searchParams.set(URL_FROM, endpointToParam(q.from));
 	else url.searchParams.delete(URL_FROM);
 	if (q.to) url.searchParams.set(URL_TO, endpointToParam(q.to));
@@ -166,13 +203,23 @@ export function writeRoutingQuery(url: URL, q: {
 	const toKind = pointKind(q.to);
 	if (toKind) url.searchParams.set(URL_TO_KIND, toKind);
 	else url.searchParams.delete(URL_TO_KIND);
-	// mode/time only carried when non-default. `leave` + null time = empty.
+	// mode only carried when non-default (`leave` = absent).
 	if (q.mode === 'arrive') url.searchParams.set(URL_MODE, 'arrive');
 	else url.searchParams.delete(URL_MODE);
-	if (q.time) url.searchParams.set(URL_TIME, q.time);
+	if (q.time && hasQuery) url.searchParams.set(URL_TIME, q.time);
 	else url.searchParams.delete(URL_TIME);
 	if (q.route) url.searchParams.set(URL_ROUTE, q.route);
 	else url.searchParams.delete(URL_ROUTE);
+	// Options: only non-default values, and only alongside a query.
+	const o = hasQuery ? q.options : undefined;
+	if (o && o.walkSpeed !== DEFAULT_OPTIONS.walkSpeed)
+		url.searchParams.set(URL_WALK, o.walkSpeed);
+	else url.searchParams.delete(URL_WALK);
+	if (o && o.safety !== DEFAULT_OPTIONS.safety)
+		url.searchParams.set(URL_SAFETY, o.safety);
+	else url.searchParams.delete(URL_SAFETY);
+	if (o && o.minimizeWalking) url.searchParams.set(URL_MIN_WALK, '1');
+	else url.searchParams.delete(URL_MIN_WALK);
 }
 
 export function clearRoutingQuery(url: URL) {
@@ -185,4 +232,7 @@ export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_MODE);
 	url.searchParams.delete(URL_TIME);
 	url.searchParams.delete(URL_ROUTE);
+	url.searchParams.delete(URL_WALK);
+	url.searchParams.delete(URL_SAFETY);
+	url.searchParams.delete(URL_MIN_WALK);
 }
