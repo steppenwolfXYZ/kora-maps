@@ -83,6 +83,17 @@ function onLineLeave(e: maplibregl.MapLayerMouseEvent) {
 const selCase = (selValue: unknown, altValue: unknown) =>
 	['case', ['==', ['get', 'sel'], 1], selValue, altValue] as unknown;
 
+// MapLibre allows only one zoom-based subexpression per property, and it
+// must be the outermost one — so the zoom interpolate wraps the sel/alt
+// case at each stop, never the other way around.
+const selWidth = (stops: [number, number, number][]) =>
+	[
+		'interpolate',
+		['linear'],
+		['zoom'],
+		...stops.flatMap(([z, sel, alt]) => [z, selCase(sel, alt)])
+	] as any;
+
 function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 	const color = mode === 'bike' ? BIKE_COLOR : WALK_COLOR;
 	const muted = mode === 'bike' ? BIKE_MUTED : WALK_MUTED;
@@ -98,10 +109,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			layout: { 'line-cap': 'round', 'line-join': 'round' },
 			paint: {
 				'line-color': CASING_COLOR,
-				'line-width': selCase(
-					['interpolate', ['linear'], ['zoom'], 6, 7, 12, 12, 16, 18],
-					['interpolate', ['linear'], ['zoom'], 6, 5, 12, 9, 16, 14]
-				) as any,
+				'line-width': selWidth([[6, 7, 5], [12, 12, 9], [16, 18, 14]]),
 				'line-opacity': selCase(1, 0.7) as any
 			}
 		});
@@ -113,10 +121,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 		layout: { 'line-cap': 'round', 'line-join': 'round' },
 		paint: {
 			'line-color': selCase(color, muted) as any,
-			'line-width': selCase(
-				['interpolate', ['linear'], ['zoom'], 6, 5, 12, 8, 16, 13],
-				['interpolate', ['linear'], ['zoom'], 6, 3.5, 12, 6, 16, 10]
-			) as any,
+			'line-width': selWidth([[6, 5, 3.5], [12, 8, 6], [16, 13, 10]]),
 			...(mode === 'walk' ? { 'line-dasharray': [1.4, 1.4] as any } : {}),
 			'line-opacity': mode === 'walk' ? 0.9 : 1
 		}

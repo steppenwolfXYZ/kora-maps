@@ -545,9 +545,9 @@
 	</div>
 
 	<!-- Travel-mode tabs (pedestrian-bicycle-routing.md § Mode tabs):
-	     public transit, cycling, walking. Segmented control per
-	     ux-guidelines.md § Toggles — no container border, gray inactive,
-	     gradient active with white text/icons. -->
+	     public transit, cycling, walking. Real tabs in the house tab style
+	     (same language as the Connect / Recent tabs below), not a
+	     segmented toggle. -->
 	<div class="rp-travel" role="tablist" aria-label="Travel mode">
 		<button
 			role="tab"
@@ -664,14 +664,8 @@
 			</TimeSelector>
 		</div>
 	{:else}
-		<!-- Direct tabs keep only the swap control; the hint names the
-		     costing bias so a surprising route explains itself. -->
+		<!-- Direct tabs keep only the swap control. -->
 		<div class="rp-direct-row">
-			<span class="rp-direct-hint">
-				{routingState.travelMode === 'bike'
-					? 'Cycling routes prefer flat, quiet ways'
-					: 'Walking routes'}
-			</span>
 			{@render swapButton()}
 		</div>
 	{/if}
@@ -960,53 +954,58 @@
 		margin-left: 0;
 	}
 
-	/* Travel-mode segmented control (pedestrian-bicycle-routing.md § Mode
-	   tabs). House toggle treatment per ux-guidelines.md § Toggles: no
-	   container border, gray-100 inactive segments with dark text, the
-	   active segment on the brand gradient with white text/icons. Equal
-	   thirds so the three tabs read as one control. */
+	/* Travel-mode tabs (pedestrian-bicycle-routing.md § Mode tabs). Same
+	   house tab language as .rp-tabs below (baseline rule, active tab on
+	   a gradient underline), plus the mode icon per tab. */
 	.rp-travel {
 		display: flex;
-		border-radius: var(--radius-pill);
-		overflow: hidden;
-		height: 2rem;
+		gap: 1.1rem;
+		border-bottom: 1px solid var(--gray-100);
 	}
 	.rp-travel button {
-		flex: 1 1 0;
+		position: relative;
 		display: inline-flex;
 		align-items: center;
-		justify-content: center;
 		gap: 0.3rem;
 		border: none;
-		background: var(--gray-100);
-		font-family: var(--font-ui);
-		font-size: 0.8rem;
-		color: var(--gray-700);
-		padding: 0 0.4rem;
+		background: transparent;
+		font-family: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		line-height: 1.2;
+		letter-spacing: 0.03em;
+		color: var(--gray-500);
+		padding: 0.25rem 0.1rem 0.4rem;
 		cursor: pointer;
-		min-width: 0;
 	}
 	.rp-travel button :global(.material-symbols-outlined) {
 		font-size: 1.05rem;
 		line-height: 1;
 	}
+	.rp-travel button:hover {
+		color: var(--brand);
+	}
 	.rp-travel button.active {
-		background: var(--gradient-brand);
-		color: var(--white);
+		color: var(--anthracite);
+	}
+	/* Sits on the container's baseline rule (bottom: -1px covers it). */
+	.rp-travel button.active::after {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: -1px;
+		height: 2px;
+		background: var(--gradient-brand-input);
 	}
 
-	/* Slim control row of the direct tabs: costing hint left, the shared
-	   swap button pinned to the tail column. */
+	/* Slim control row of the direct tabs: the shared swap button pinned
+	   to the tail column. */
 	.rp-direct-row {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
-		gap: 0.35rem;
+		justify-content: flex-end;
 		min-height: 2rem;
-	}
-	.rp-direct-hint {
-		font-size: 0.75rem;
-		color: var(--gray-500);
 	}
 
 	.rp-endpoints {

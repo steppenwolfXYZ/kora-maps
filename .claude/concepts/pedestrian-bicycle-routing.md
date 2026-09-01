@@ -61,12 +61,25 @@ One card per route, analogous to the transit connection cards:
 - **Pushed-bike access:** ways where cycling is not permitted but
   walking is (pedestrian-only paths, dismount zones) are usable, at
   walking speed. Sections where the bike must be pushed are visible in
-  the route detail.
+  the route detail. May ship in a follow-up if not achievable with
+  reasonable effort in this step.
 - **Stairs:** heavily penalized, upward more than downward. An
-  **avoid-stairs toggle** removes them entirely. If pushed-bike access
-  or the stairs behavior cannot be achieved with reasonable effort in
-  this step, they may ship in a follow-up — but the concept treats
-  them as part of the target state.
+  **avoid-stairs toggle** removes them entirely. The toggle is
+  **mandatory for V1** — stairs are an absolute no-go for e-bikes,
+  which are increasingly the norm; bicycle routing does not ship
+  without it.
+
+### 4a. Route quality & weighting requirements
+
+The shipping bar: bicycle routing ships only when it decisively beats
+Google Maps and hand-testing consistently yields routes that make
+sense. The current engine defaults are far from that. The
+architecture requirement is **full access to the weighting system
+from the beginning** — request-level knobs on a stock costing are not
+enough (verified: no stock option moves the known bad cases). The
+weighting model itself (quality tiers, plateau principle, crossing
+penalty, cycle-route-relation signal, benchmark set) is specified in
+`bicycle-costing-fork.md`.
 
 ### 5. Pedestrian costing behavior
 
