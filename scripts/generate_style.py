@@ -29,6 +29,7 @@ from style.basemap_landuse import (
 from style.basemap_transport import (
     build_bridge_deck_layer,
     build_path_layers,
+    build_pedestrian_area_layer,
     build_rail_layers,
     build_road_layers,
 )
@@ -120,6 +121,8 @@ def generate_style(cfg) -> dict:
     style["layers"].append(build_background_layer(cfg))
     style["layers"].append(build_hillshade_layer(cfg))
     style["layers"].extend(build_landuse_layers(cfg))
+    # Pedestrian squares sit with landuse, below every line layer.
+    style["layers"].append(build_pedestrian_area_layer(cfg))
     style["layers"].extend(build_water_layers(cfg))
     style["layers"].extend(build_building_layers(cfg))
     style["layers"].extend(build_rail_layers(cfg, modes=["tunnel", "normal"]))

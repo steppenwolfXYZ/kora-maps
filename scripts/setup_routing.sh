@@ -162,6 +162,25 @@ if [[ $FORCE_OSM -eq 0 \
 else
   time python3 scripts/preprocess_osm_for_motis.py --valhalla
 fi
+
+# Valhalla never notices a changed PBF: use_tiles_ignore_pbf=True means it
+# serves whatever tiles exist. So the staleness check belongs here, right
+# after the input is rewritten — deciding it earlier (as update_map.sh used
+# to) reads the walk network's timestamp from before this step regenerated
+# it, and a walk-network change with unchanged OSM data would then never
+# reach the tiles. Tiles are container-owned, hence the docker-side rm; the
+# slow elevation and admin data are kept.
+TILES_TAR=valhalla/data/valhalla_tiles.tar
+if [[ -f "$TILES_TAR" && data/osm/ch_pfaedle_walkable.osm.pbf -nt "$TILES_TAR" ]]; then
+  echo "  Valhalla tiles are older than the walkable PBF — wiping so step 4 rebuilds"
+  (cd valhalla && docker compose down) >/dev/null 2>&1 || true
+  docker run --rm -v "$PWD/valhalla/data:/d" alpine \
+    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt'
+elif [[ ! -f "$TILES_TAR" ]]; then
+  echo "  no Valhalla tiles yet — step 4 will build them"
+else
+  echo "  Valhalla tiles up to date — kept"
+fi
 fi
 
 if want 4; then

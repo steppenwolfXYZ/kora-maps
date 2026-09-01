@@ -165,30 +165,10 @@ run_bg gtfs_prep   ./scripts/rebuild_transit.sh --only 4
 wait_all osm_extract gtfs_prep
 
 # ── Valhalla tile staleness ──────────────────────────────────────────
-# setup_routing.sh re-patches the walkable PBF when the pipeline's OSM
-# extract is newer, but Valhalla itself never notices: with
-# use_tiles_ignore_pbf=True it serves whatever tiles exist. So when the
-# extract is newer than the tile tarball, wipe the tiles (keeping the
-# slow-to-fetch elevation and admin data) and let the routing prep
-# rebuild them. The tiles are owned by the container's user, hence the
-# docker-side rm.
-# The station walk network is checked too: it is baked into the same
-# walkable PBF, so a rebuilt overlay invalidates the tiles even when the
-# OSM extract itself has not moved.
-OSM_EXTRACT=data/osm/ch_pfaedle.osm.pbf
-WALK_OVERLAY=data/osm/station_walk_network.osm.pbf
-TILES_TAR=valhalla/data/valhalla_tiles.tar
-if [[ ! -f "$TILES_TAR" ]]; then
-  echo "  Valhalla: no tiles yet — routing prep will build them"
-elif [[ "$OSM_EXTRACT" -nt "$TILES_TAR" || "$WALK_OVERLAY" -nt "$TILES_TAR" ]]; then
-  echo "  Valhalla: inputs are newer than the tiles — rebuilding tiles"
-  (cd valhalla && docker compose down) >/dev/null 2>&1 || true
-  docker run --rm -v "$PWD/valhalla/data:/d" alpine \
-    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt'
-  echo "  Valhalla: stale tiles removed (elevation + admin data kept)"
-else
-  echo "  Valhalla: tiles up to date — kept"
-fi
+# Owned by setup_routing.sh step 3, which wipes stale tiles immediately
+# after regenerating the walkable PBF. Deciding it here would read the
+# station walk network's timestamp from before step 3 rebuilds it, so a
+# walk-network change with unchanged OSM data would never reach the tiles.
 
 # ── Phase 3: pfaedle ∥ routing prep ──────────────────────────────────
 # pfaedle (sharded across PFAEDLE_JOBS containers) is the long serial

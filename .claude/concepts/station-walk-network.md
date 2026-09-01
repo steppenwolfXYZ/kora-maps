@@ -126,11 +126,37 @@ exactly the large interchanges where transfers are tight.
   connection has to be something the router already prices as a lift,
   or an able walker's route will prefer it over the stairs beside it.
 
+### Pedestrian areas
+
+- Squares, plazas and other pedestrian surfaces mapped as OSM areas are
+  made routable. They are the same defect as platforms in a different
+  guise: the router cannot traverse an area, so a square that people walk
+  across every day is a hole in the graph.
+- Crossings are **direct**, not routed via a central hub. A hub would
+  drag a walk to the middle of a long thin square even when the real
+  route clips a corner.
+- Where a direct line is not possible — a concave outline, or an
+  obstacle inside the area — the crossing bends around the obstruction
+  by the shortest available path, using the area's own corners. It must
+  never pass through a hole, and never leave the area's outline.
+- This requirement is as much about what is drawn as about timing. A walk
+  line that cuts through a building is wrong on the map before it is
+  wrong in the schedule, and it stays wrong under any future aerial
+  imagery. Because the drawn line is the routed geometry, one mechanism
+  has to serve both.
+- Entry points are the area's boundary nodes shared with other walkable
+  ways, subject to the same level compatibility rule as platform welds.
+- An area with fewer than two usable entry points contributes nothing and
+  is skipped rather than connected to something arbitrary.
+- The marker tag introduced for these crossings is `kora:area_cross`.
+
 ### Coverage and diagnostics
 
 - The work produces a coverage record listing, per station, how many
-  quays were anchored and by which tier, and which platforms produced a
-  walk line with no level-compatible connection. This is the artefact
+  quays were anchored and by which tier, which platforms produced a walk
+  line with no level-compatible connection, and how many pedestrian areas
+  were crossed, skipped for want of entry points, or had crossings
+  rejected as obstructed. This is the artefact
   used to judge whether a station is modelled well enough to answer a
   step-free query.
 - Known coverage as measured on the current data: 98% of Swiss rail quay
