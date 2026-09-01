@@ -7,7 +7,11 @@
 #   src/endpoints/routing.cc       — WALK offsets (RAPTOR boarding-stop
 #                                    selection) via Valhalla one-to-many
 #   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
-#                                    transfer) via Valhalla /route
+#                                    transfer) via Valhalla /route;
+#                                    leg.duration is Valhalla's walking
+#                                    time, not the leg's time span
+#                                    (routing-options.md § Connection
+#                                    safety)
 #   include/motis/osr/parameters.h — kora_walk_factor_: query-scoped
 #                                    walking-speed scaling of the
 #                                    Valhalla surfaces (routing-options.md)

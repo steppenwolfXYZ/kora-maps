@@ -1,32 +1,40 @@
 import { browser } from '$app/environment';
+import { endpointLabel } from './recents.svelte';
 import type { StationEntry } from './stationIndex';
 import type { Endpoint } from './types';
 
 // Connect tab data (routing-persistence.md § Connect): the user's most-used
-// stations, localStorage-backed like recents, plus the cold-start suggestion
-// logic that fills the grid while real usage is still thin.
+// places — stations, addresses and POIs alike — localStorage-backed like
+// recents, plus the cold-start suggestion logic that fills the grid while
+// real usage is still thin.
 
 const STORAGE_KEY = 'kora.connect.stations';
 const MAX_ENTRIES = 30;
-// Usage decay half-life-ish constant: an unused station's score halves in
-// ~60 days (decay applied lazily whenever the station is used again).
+// Usage decay half-life-ish constant: an unused place's score halves in
+// ~60 days (decay applied lazily whenever the place is used again).
 const DECAY_DAYS = 90;
 
-export interface ConnectStation {
+export interface ConnectPlace {
+	/** Stable key: the merged UIC for stations, `pt:<lon>,<lat>` for points. */
 	u: string;
 	n: string;
 	c: [number, number];
+	/** Stations only: mode (tile icon) and MOTIS parent stop id. */
 	m?: string;
 	p?: string;
+	/** Points only: endpoint-type marker (absent = station) and the
+	 * address / POI kind that picks the tile icon. */
+	ty?: 'point';
+	k?: 'address' | 'poi';
 	/** Recency-decayed usage score. */
 	score: number;
 	/** Epoch ms of last use. */
 	lastAt: number;
 }
 
-let entries = $state<ConnectStation[]>(browser ? readStorage() : []);
+let entries = $state<ConnectPlace[]>(browser ? readStorage() : []);
 
-function readStorage(): ConnectStation[] {
+function readStorage(): ConnectPlace[] {
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (!raw) return [];
@@ -38,12 +46,27 @@ function readStorage(): ConnectStation[] {
 	}
 }
 
-function isValidEntry(e: unknown): e is ConnectStation {
+function isValidEntry(e: unknown): e is ConnectPlace {
 	if (typeof e !== 'object' || e === null) return false;
 	const r = e as Record<string, unknown>;
 	return typeof r.u === 'string' && typeof r.n === 'string'
 		&& Array.isArray(r.c) && r.c.length === 2
+		&& (r.ty === undefined || r.ty === 'point')
 		&& typeof r.score === 'number' && typeof r.lastAt === 'number';
+}
+
+/** Storage key of a point endpoint, rounded to ~1 m so repeated use of the
+ * same map right-click / geocoder hit lands on the same tile. Never collides
+ * with a station key (those are bare numeric UICs). */
+function pointKey(coord: [number, number]): string {
+	return `pt:${coord[0].toFixed(5)},${coord[1].toFixed(5)}`;
+}
+
+/** The endpoint a stored place routes to. */
+export function placeEndpoint(e: ConnectPlace): Endpoint {
+	return e.ty === 'point'
+		? { type: 'point', coord: e.c, displayName: e.n, kind: e.k }
+		: { type: 'station', uic: e.u, name: e.n, coord: e.c, mode: e.m, pid: e.p };
 }
 
 function writeStorage() {
@@ -56,22 +79,28 @@ function writeStorage() {
 
 export const connectStations = {
 	/** Usage-ranked list, best first. */
-	get list(): ConnectStation[] { return entries; },
+	get list(): ConnectPlace[] { return entries; },
 
-	/** Bump a station's usage (called for each station endpoint of a shown
-	 * route). Older usage decays so the ranking tracks current habits. */
+	/** Bump a place's usage (called for each endpoint of a shown route —
+	 * stations, addresses and POIs alike). A live current-location endpoint
+	 * is materialized into a point by the caller before it gets here.
+	 * Older usage decays so the ranking tracks current habits. */
 	record(ep: Endpoint) {
-		if (ep.type !== 'station') return;
+		if (ep.type === 'current') return;
+		const key = ep.type === 'station' ? ep.uic : pointKey(ep.coord);
 		const now = Date.now();
-		const prev = entries.find((e) => e.u === ep.uic);
+		const prev = entries.find((e) => e.u === key);
 		const decayed = prev
 			? prev.score * Math.exp(-((now - prev.lastAt) / 86_400_000) / DECAY_DAYS)
 			: 0;
-		const next: ConnectStation = {
-			u: ep.uic, n: ep.name, c: ep.coord, m: ep.mode, p: ep.pid,
+		const base = {
+			u: key, n: endpointLabel(ep), c: ep.coord,
 			score: decayed + 1, lastAt: now
 		};
-		entries = [next, ...entries.filter((e) => e.u !== ep.uic)]
+		const next: ConnectPlace = ep.type === 'station'
+			? { ...base, m: ep.mode, p: ep.pid }
+			: { ...base, ty: 'point', k: ep.kind };
+		entries = [next, ...entries.filter((e) => e.u !== key)]
 			.sort((a, b) => b.score - a.score)
 			.slice(0, MAX_ENTRIES);
 		writeStorage();

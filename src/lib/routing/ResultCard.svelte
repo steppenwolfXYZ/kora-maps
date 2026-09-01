@@ -9,7 +9,7 @@
 	import type { Badge, TransferAssessment, Warning, WarningKind } from './ranking';
 	import {
 		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,
-		iconFor, isTransitMode
+		fmtWalkDuration, iconFor, isTransitMode
 	} from './itineraryFormat';
 	import { isNarrow } from './layout';
 	import { itineraryFingerprint } from './fingerprint';
@@ -453,7 +453,7 @@
 					<span class="card-leg" class:walk={isWalk}>
 						{#if isWalk}
 							<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-							<span class="card-leg-dur">{fmtDuration(dur)}</span>
+							<span class="card-leg-dur">{fmtWalkDuration(dur)}</span>
 						{:else if leg.routeShortName}
 							{@const bg = legBadgeColor(colorIndex, leg)}
 							<span
@@ -487,7 +487,7 @@
 	<div class="card-meta">
 		<span class="card-meta-text">
 			{transfers} transfer{transfers === 1 ? '' : 's'}
-			· <strong>{fmtDuration(walkSeconds(itinerary))}</strong>{#if walkTotalM > 0}{' '}<span
+			· <strong>{fmtWalkDuration(walkSeconds(itinerary))}</strong>{#if walkTotalM > 0}{' '}<span
 				class="card-meta-dist"
 				title={walkElevationLabel}
 			>{fmtDistance(walkTotalM)}</span>{/if} walking
@@ -582,7 +582,7 @@
 				{:else}
 					<button class="leg-item walk" type="button" onclick={(e) => focusLeg(e, leg)}>
 						<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-						<span class="leg-walk-dur"><strong>{fmtDuration(legDuration(leg))}</strong>{#if leg.distance != null}{' '}{fmtDistance(leg.distance)}{/if}{#if showLegElevation(leg)}{' '}({fmtElevation(leg.elevationUp ?? 0, leg.elevationDown ?? 0)}){/if}</span>
+						<span class="leg-walk-dur"><strong>{fmtWalkDuration(legDuration(leg))}</strong>{#if leg.distance != null}{' '}{fmtDistance(leg.distance)}{/if}{#if showLegElevation(leg)}{' '}({fmtElevation(leg.elevationUp ?? 0, leg.elevationDown ?? 0)}){/if}</span>
 						{#if transferMarks.has(i + 1)}
 							<!-- The tightness belongs to the transfer itself, so the
 							     chip sits on the transfer walk row, not on the

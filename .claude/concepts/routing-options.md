@@ -70,6 +70,23 @@ based on the **selected walking speed**.
 
 - Cautious maps to +5 min additional transfer time; Daring maps to a
   0.5 transfer-time factor (both already supported by the routing API).
+- **Safety modes never change a walking time shown in the UI.** Walking
+  time is a function of the walking speed alone — the same transfer at
+  the same station must read identically in Cautious, Balanced and
+  Daring, in the leg rows, the strip, the walked total and the
+  ranking. The safety factor is a *search* knob: it decides which
+  connections are offered, never how long a walk is said to take. The
+  tight-transfer math in § 3 follows the same rule — the walk is
+  always measured at the set speed.
+- **Daring never produces a zero-minute transfer.** Alighting and
+  boarding at the same instant is Reckless (mode 4) by definition;
+  Daring may demand a sprint, but the traveller always keeps at least
+  one minute. Every query whose transfer-time factor drops below 1 —
+  Daring, and the Brisk / Running walking tiers on their own — carries
+  a one-minute floor on the transfer time.
+- **Walking times are never rounded down.** A walk shorter than a
+  minute reads `<1 min`; `0 min` must never surface for a walk that
+  covers distance.
 - **Reckless is not implemented yet.** It requires the routing core to
   accept negative transfer slack (−60 s). This is the one backend-risky piece and is
   **separately shippable**: the other three modes must not depend on it.
@@ -284,6 +301,12 @@ differ wildly in speed; you can run with a stroller).
   since matrix durations are opaque single numbers.
 - Warning math and safety feasibility must use the same walking-speed
   value the backend used, or warnings will contradict the results.
+- The transfer table's one-minute resolution must not leak into the
+  UI. A transfer walk's displayed duration comes from the pedestrian
+  router's own seconds, never from the gap between the two transit
+  legs — that gap is minute-quantised and carries the safety scaling,
+  so reading walking time off it makes a sub-minute walk vanish
+  entirely once a factor below 1 truncates it to zero.
 - Reckless connections are real itineraries the user may miss — the
   "if you're lucky" warning is mandatory on every one of them.
 - The browser still makes exactly one request per query; no direct

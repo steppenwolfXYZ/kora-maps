@@ -650,9 +650,10 @@ function longestTransferWait(it: Itinerary, opts?: RankOptions): number {
 }
 
 // Tight-transfer ladder (routing-options.md § Connection warnings). All
-// feasibility math runs at the user's SET walking speed — transfer walk
-// legs arrive already restated at that speed (client.ts
-// § normalizeTransferWalks), so leg durations can be taken at face value.
+// feasibility math runs at the user's SET walking speed — the fork
+// reports every WALK leg's duration as Valhalla's own walking seconds at
+// that speed (never the leg's safety-scaled time span), so leg durations
+// can be taken at face value in every safety mode.
 export type TransferTier = 'tight' | 'very-tight' | 'extremely-tight' | 'lucky';
 export interface TransferAssessment {
 	/** Index (into it.legs) of the transit leg BOARDED at this transfer —

@@ -115,13 +115,17 @@ export const routingOptions = {
 		return values.safety === 'cautious' ? 5 : 0;
 	},
 
-	/** Multiplier that recovers set-speed transfer walking from the
-	 * (daring-halved) walk-leg durations the backend reports. Passed to
-	 * the plan call, which restates transfer legs at the set speed on
-	 * arrival (client.ts § normalizeTransferWalks) — cautious's slack is
-	 * taken off there via `additionalTransferMin`. */
-	get transferWalkUnscale(): number {
-		return values.safety === 'daring' ? 2 : 1;
+	/** `minTransferTime` plan param (MINUTES): a one-minute floor on
+	 * every transfer whenever the transfer-time factor drops below 1
+	 * (daring, and the brisk / running tiers on their own). The transfer
+	 * table is quantised to whole minutes, so a factor below 1 truncates
+	 * a one-minute transfer to ZERO — the engine then offers connections
+	 * where alighting and boarding happen at the same instant. That is
+	 * the reckless tier by definition; daring may demand a sprint but
+	 * always leaves a minute (routing-options.md § Connection safety). */
+	get minTransferMin(): number {
+		const f = this.transferTimeFactor;
+		return f != null && f < 1 ? 1 : 0;
 	},
 
 	/** Minimize-walking server params (routing-options.md § Minimize

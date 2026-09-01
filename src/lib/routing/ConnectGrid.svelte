@@ -1,14 +1,15 @@
 <script lang="ts">
 	// Connect tab (routing-persistence.md § Connect): drag-to-connect
-	// station board. Press a cell, drag — a line follows the pointer —
-	// and release on another cell to make the route (start cell = From,
-	// release cell = To). The bottom row holds the current-location cell
-	// and the two empty half-cells: a connection drawn through "Start"
-	// leaves From empty, through "Stop" leaves To empty (the station on
-	// the other end of the line fills the opposite side).
+	// board of the user's most-used places — stations, addresses and POIs.
+	// Press a cell, drag — a line follows the pointer — and release on
+	// another cell to make the route (start cell = From, release cell =
+	// To). The bottom row holds the current-location cell and the two
+	// empty half-cells: a connection drawn through "Start" leaves From
+	// empty, through "Stop" leaves To empty (the place on the other end
+	// of the line fills the opposite side).
 	import { untrack } from 'svelte';
 	import {
-		connectStations, coldStartSuggestions, type ConnectStation
+		connectStations, coldStartSuggestions, placeEndpoint, type ConnectPlace
 	} from './connect.svelte';
 	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
 	import { loadStationIndex, type StationEntry } from './stationIndex';
@@ -26,7 +27,9 @@
 	const EMPTY_TO = 'empty-to';
 	const CURRENT = 'current';
 
-	// Kept in sync with StopSearch's MODE_ICON.
+	// Kept in sync with StopSearch's MODE_ICON / POI_ICON / ADDRESS_ICON.
+	const POI_ICON = 'place';
+	const ADDRESS_ICON = 'home_work';
 	const MODE_ICON: Record<string, string> = {
 		train:        'train',
 		metro:        'subway',
@@ -57,15 +60,16 @@
 	});
 
 	type Grad = { a: string; b: string };
-	type Tile = { u: string; n: string; m?: string; grad: Grad | null; ep: Endpoint };
+	type Tile = { u: string; n: string; icon: string | null; grad: Grad | null; ep: Endpoint };
 
-	function stationEp(s: { u: string; n: string; c: [number, number]; m?: string; p?: string }): Endpoint {
+	function stationEp(s: StationEntry): Endpoint {
 		return { type: 'station', uic: s.u, name: s.n, coord: s.c, mode: s.m, pid: s.p };
 	}
 
 	/** Tile gradient ends: baked average → dominant color from the index
 	 * when present; else a tint→tone of the mode mid-color; else null
-	 * (CSS anthracite fallback). */
+	 * (CSS anthracite fallback — which is what address / POI tiles wear,
+	 * having no line colors of their own). */
 	function tileGrad(u: string, m?: string): Grad | null {
 		const e = stationIdx?.get(u);
 		if (e?.ca && e?.cd) return { a: e.ca, b: e.cd };
@@ -73,18 +77,26 @@
 		return mid ? { a: `color-mix(in srgb, ${mid} 72%, #fff)`, b: mid } : null;
 	}
 
+	function placeIcon(e: ConnectPlace): string | null {
+		if (e.ty === 'point') return e.k === 'address' ? ADDRESS_ICON : POI_ICON;
+		return (e.m && MODE_ICON[e.m]) ?? null;
+	}
+
 	let tiles = $derived.by<Tile[]>(() => {
 		const real: Tile[] = connectStations.list
 			.slice(0, GRID_CAPACITY)
-			.map((s: ConnectStation) => ({
-				u: s.u, n: s.n, m: s.m, grad: tileGrad(s.u, s.m), ep: stationEp(s)
+			.map((s: ConnectPlace) => ({
+				u: s.u, n: s.n, icon: placeIcon(s),
+				grad: s.ty === 'point' ? null : tileGrad(s.u, s.m),
+				ep: placeEndpoint(s)
 			}));
 		const seen = new Set(real.map((t) => t.u));
 		const fill: Tile[] = suggestions
 			.filter((s) => !seen.has(s.u))
 			.slice(0, GRID_CAPACITY - real.length)
 			.map((s) => ({
-				u: s.u, n: s.n, m: s.m, grad: tileGrad(s.u, s.m), ep: stationEp(s)
+				u: s.u, n: s.n, icon: (s.m && MODE_ICON[s.m]) ?? null,
+				grad: tileGrad(s.u, s.m), ep: stationEp(s)
 			}));
 		return [...real, ...fill];
 	});
@@ -181,8 +193,8 @@
 				data-conn={t.u}
 				onpointerdown={(e) => startDrag(e, t.u)}
 			>
-				{#if t.m && MODE_ICON[t.m]}
-					<span class="material-symbols-outlined cell-icon" aria-hidden="true">{MODE_ICON[t.m]}</span>
+				{#if t.icon}
+					<span class="material-symbols-outlined cell-icon" aria-hidden="true">{t.icon}</span>
 				{/if}
 				<span class="cell-label">{t.n}</span>
 			</div>
@@ -306,8 +318,9 @@
 	   dominant line color, baked into the search index (`ca` / `cd`),
 	   passed inline as --tile-a/--tile-b; with an older index the ends
 	   fall back to a tint→tone of the mode mid-color (computed in
-	   tileGrad). The utility cells and the no-color fallback derive the
-	   same tint→tone shape from a single --tile-c. Hover and drag states
+	   tileGrad). Address / POI tiles have no line colors and keep the
+	   anthracite fallback. The utility cells and the no-color fallback
+	   derive the same tint→tone shape from a single --tile-c. Hover and drag states
 	   deepen the fill rather than swapping to gray. */
 	.cell.filled {
 		--tile-c: var(--anthracite);

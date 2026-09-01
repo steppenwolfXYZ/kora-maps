@@ -313,11 +313,29 @@ api::Itinerary street_routing(osr::ways const& w,
         .endTime_ = deduced_end_time,
         .transfers_ = 0};
 
+    // kora fork: `leg.duration` is the WALKING time, not the leg's time
+    // span (routing-options.md § Connection safety). For a transfer leg
+    // both times come from the journey, so the span is the transfer
+    // table's minute-quantised, transfer-factor-scaled value — a walk
+    // the traveller is *given*, not one they *need*. Reporting the span
+    // made a 63 m walk read "0 min" under `transferTimeFactor=0.5`
+    // (1 min truncated to 0) and made walking times shift with the
+    // safety mode, which they must never do. Valhalla's own seconds,
+    // rescaled to the requested pace, depend on walking speed alone.
+    // Access / egress legs get the same treatment: their span is the
+    // minute-rounded RAPTOR offset, this is the real walk.
+    //
+    // Exception: a stop-to-itself footpath (MOTIS renders a same-platform
+    // change as a WALK leg from a stop to itself) covers no ground — it
+    // IS the change-time buffer, so its span stays its duration rather
+    // than collapsing to Valhalla's zero.
+    auto const walks_anywhere = walk->distance_m_ > 1.0;
     auto& leg = itinerary.legs_.emplace_back(api::Leg{
         .mode_ = api::ModeEnum::WALK,
         .from_ = bwd_compat_lvl_adjust(from_place, api_version),
         .to_ = bwd_compat_lvl_adjust(to_place, api_version),
-        .duration_ = itinerary.duration_,
+        .duration_ =
+            walks_anywhere ? walk_duration.count() : itinerary.duration_,
         .startTime_ = deduced_start_time,
         .endTime_ = deduced_end_time,
         .distance_ = walk->distance_m_,
