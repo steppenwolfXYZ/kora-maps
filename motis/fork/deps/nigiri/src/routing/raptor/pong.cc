@@ -632,6 +632,10 @@ routing_result pong_search_with_dir(
       case 2:
         return pong_with_vias<SearchDir, 2>(tt, rtt, s_state, r_state,
                                             std::move(q), timeout);
+      // kora fork: third via (via-stops.md, kMaxVias = 3).
+      case 3:
+        return pong_with_vias<SearchDir, 3>(tt, rtt, s_state, r_state,
+                                            std::move(q), timeout);
     }
     throw utl::fail("{} vias not supported (max={})", kMaxVias);
   }

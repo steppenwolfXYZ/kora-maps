@@ -15,8 +15,10 @@ wasted travel time.
 
 ### Via stops
 
-- A route may carry up to **two** via stops, ordered between From and To.
-  The engine's own ceiling is two; the UI must never offer a third.
+- A route may carry up to **three** via stops, ordered between From and To.
+  The ceiling is the routing engine's `kMaxVias`, raised from its upstream
+  value of two to three in the Kora fork; the UI must never offer more
+  than the engine's constant allows.
 - A via is always a **transit station** — the same station entity the
   From / To inputs already accept. Addresses, POIs and current location
   are not selectable as vias.
@@ -123,8 +125,11 @@ wasted travel time.
 
 ## Constraints
 
-- Two vias maximum, stations only, minutes only — all three are the
-  routing engine's limits, not preferences.
+- Three vias maximum, stations only, minutes only — all three are the
+  routing engine's limits, not preferences. The via ceiling is a
+  compile-time constant in the engine: raising it further means editing
+  the fork and rebuilding its image, and it costs per-query memory on
+  every search, via-less ones included.
 - A wait ceiling must exist and must be low enough that a chain of maximum
   waits still fits inside the total-travel-time ceiling sent to the
   engine; that ceiling has to grow by the requested dwell sum, otherwise

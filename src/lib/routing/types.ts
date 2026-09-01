@@ -36,8 +36,11 @@ export interface Via {
  * panel (query, URL, ranking, cards) works with. */
 export type FilledVia = Via & { station: StationEndpoint };
 
-/** Engine ceiling: MOTIS accepts at most two via stops per query. */
-export const MAX_VIAS = 2;
+/** Engine ceiling: nigiri's `kMaxVias`, raised from upstream's 2 to 3 in
+ * the Kora MOTIS fork (motis/fork/deps/nigiri/.../limits.h). Keep the two
+ * in step — a query with more vias than the engine's constant is rejected
+ * outright. */
+export const MAX_VIAS = 3;
 
 /** Wait-control presets, in minutes. 0 = pass through. */
 export const VIA_WAIT_PRESETS = [0, 5, 10, 15, 30, 45, 60, 90, 120];

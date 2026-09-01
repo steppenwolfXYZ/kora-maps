@@ -28,6 +28,15 @@
 #                                    finished RAPTOR/PONG state (see
 #                                    near-optimal-endpoint-alternatives.md)
 #   deps/nigiri/include/nigiri/routing/kora_walk_points.h (new)
+#   deps/nigiri/src/routing/raptor_search.cc
+#   deps/nigiri/src/routing/raptor/raptor_state.cc
+#                                  — kMaxVias raised from 2 to 3
+#                                    (via-stops.md). Every site that
+#                                    switches on the via count carries a
+#                                    static_assert on kMaxVias, so all
+#                                    four dispatchers (these two plus
+#                                    reconstruct.cc and pong.cc) are
+#                                    overlaid to add the third case.
 #   deps/nigiri/include/nigiri/routing/limits.h
 #   deps/nigiri/include/nigiri/routing/raptor/raptor.h
 #                                  — walk-weighted transfer points:
@@ -153,7 +162,9 @@ RUN touch -c \
         /src/src/server.cc \
         /src/src/endpoints/routing.cc \
         /src/src/osr/street_routing.cc \
+        /src/deps/nigiri/src/routing/raptor_search.cc \
         /src/deps/nigiri/src/routing/raptor/optimize_footpaths.cc \
+        /src/deps/nigiri/src/routing/raptor/raptor_state.cc \
         /src/deps/nigiri/src/routing/raptor/reconstruct.cc \
         /src/deps/nigiri/src/routing/raptor/pong.cc \
         /src/deps/nigiri/include/nigiri/routing/query.h \
