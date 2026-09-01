@@ -36,7 +36,7 @@ REMOTE_PATH="${MAC_PATH:-/Users/georgbrodbeck/Documents/prog/newmap}"
 REMOTE_PATH="${REMOTE_PATH%/}/"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-GROUPS="assets,motis,valhalla,lookup"
+SYNC_GROUPS="assets,motis,valhalla,lookup"
 WITH_MATRIX=0
 STREET_WAYS=0
 FULL_VALHALLA=0
@@ -45,9 +45,9 @@ RSYNC_ARGS=()
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--only)           GROUPS="$2"; shift 2 ;;
-		--only=*)         GROUPS="${1#*=}"; shift ;;
-		--with-routed)    GROUPS="$GROUPS,routed"; shift ;;
+		--only)           SYNC_GROUPS="$2"; shift 2 ;;
+		--only=*)         SYNC_GROUPS="${1#*=}"; shift ;;
+		--with-routed)    SYNC_GROUPS="$SYNC_GROUPS,routed"; shift ;;
 		--with-matrix)    WITH_MATRIX=1; shift ;;
 		--street-ways)    STREET_WAYS=1; shift ;;
 		--full-valhalla)  FULL_VALHALLA=1; shift ;;
@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-want() { case ",$GROUPS," in *",$1,"*) return 0 ;; esac; return 1; }
+want() { case ",$SYNC_GROUPS," in *",$1,"*) return 0 ;; esac; return 1; }
 banner() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 
 # macOS ships openrsync, which negotiates protocol 29 with GNU rsync here.
@@ -80,7 +80,7 @@ ssh "$REMOTE" "[ -d '${REMOTE_PATH}' ]" \
 	|| { echo "error: ${REMOTE_PATH} not found on $REMOTE" >&2; exit 1; }
 echo -n "free on Mac: "
 ssh "$REMOTE" "df -h '${REMOTE_PATH}' | tail -1 | awk '{print \$4\" (\"\$5\" used)\"}'"
-echo "groups: $GROUPS"
+echo "groups: $SYNC_GROUPS"
 
 # ── assets ───────────────────────────────────────────────────────────
 # Same allowlist as deploy_map_assets.sh, so the Mac's dev server and the
