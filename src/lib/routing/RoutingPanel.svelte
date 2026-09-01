@@ -612,6 +612,9 @@
 				<div class="rp-loading" role="status">
 					<div class="rp-loading-head">
 						<img class="rp-loading-mark" src="/icon.svg" alt="" draggable="false" />
+						{#if routingState.loadingPruned}
+							<span class="rp-loading-note">Bad route options were removed</span>
+						{/if}
 						<span class="rp-loading-text">
 							{routingState.loadingStatus ?? 'Route options are loading...'}
 						</span>
@@ -1070,6 +1073,13 @@
 	.rp-loading-mark {
 		height: 4.5rem;
 		width: auto;
+	}
+	/* Explains a backwards-ticking option count: a later hop found
+	   connections that dominate ones already listed. */
+	.rp-loading-note {
+		font-size: 0.75rem;
+		color: var(--gray-500);
+		text-align: center;
 	}
 	.rp-loading-text {
 		font-size: 0.85rem;

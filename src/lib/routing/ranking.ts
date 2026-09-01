@@ -338,9 +338,22 @@ function paretoTimeDominates(b: Entry, a: Entry): boolean {
 /** Case 1 (overlapping): B Pareto-time-dominates A. A survives only if
  * BOTH the time gap and the comfort gap are marginal. Returns true when
  * A fails either test (i.e. B causes A's drop). */
-function droppedByOverlap(a: Entry, b: Entry): boolean {
+function droppedByOverlap(a: Entry, b: Entry, opts?: RankOptions): boolean {
 	const timeGapMs = Math.max(Math.abs(a.start - b.start), Math.abs(a.end - b.end));
-	if (timeGapMs > OVERLAP_TIME_MAX_MS) return true;
+	// Minimize-walking (routing-options.md § Minimize walking): the
+	// marginality window is a pure TIME rule — past 9 min A is dropped
+	// for "costing more of your day for no time benefit", which ignores
+	// the one axis this mode exists to weigh. An A that walks
+	// meaningfully LESS therefore skips the window and is judged by the
+	// comfort test alone (minimize-walking's effectiveTime already
+	// prices walking linearly, so a genuinely bad A still fails it).
+	// Case 2 has carried the mirror-image exception all along; without
+	// this one a walk-heavier connection departing a few minutes later
+	// silently deleted the low-walk option it happens to dominate in
+	// time (canonical: same 18:32 arrival, 15:35/113 min walking
+	// dropping both 15:22/80 min and 15:25/87 min).
+	const walkExempt = !!opts?.minimizeWalking && b.walk - a.walk > WALK_DOM_SLACK_SEC;
+	if (timeGapMs > OVERLAP_TIME_MAX_MS && !walkExempt) return true;
 	if (b.effTime <= 0) return false;
 	return a.effTime / b.effTime - 1 > OVERLAP_COMFORT_MAX_PCT;
 }
@@ -418,7 +431,7 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 		// falls through to Case 1's marginality.
 		if ((Math.abs(a.end - b.end) <= T_SLACK_MS || Math.abs(a.start - b.start) <= T_SLACK_MS)
 			&& a.walk - b.walk > WALK_DOM_SLACK_SEC) return true;
-		return droppedByOverlap(a, b);
+		return droppedByOverlap(a, b, opts);
 	}
 	if (paretoTimeDominates(a, b)) return false;
 	return droppedByNonOverlap(a, b, mode, opts);

@@ -42,6 +42,11 @@ let loadingMore = $state<'earlier' | 'later' | null>(null);
 // specific whenever the cascade escalates the walking budget or fires
 // extra hop requests, so long searches explain themselves.
 let loadingStatus = $state<string | null>(null);
+// Set once the running query's published list has SHRUNK — a later hop
+// brought in connections that dominate ones already on screen, so the
+// "N options found" counter ticks backwards. The panel explains the dip
+// instead of leaving it looking like a glitch.
+let loadingPruned = $state(false);
 let error = $state<string | null>(null);
 let hasQueried = $state(false);
 
@@ -318,8 +323,12 @@ async function runHopCascade(
 			queryEpoch += dir * HOP_MS;
 		} else {
 			emptyStreak = 0;
+			const publishedBefore = results.length;
 			combined = [...combined, ...fresh];
 			publishResults();
+			// Pruning is global over the whole accumulated set, so a merge
+			// can retire more than it adds.
+			if (loading && results.length < publishedBefore) loadingPruned = true;
 			// Advance along the axis the hop mode bounds: leave-at queries
 			// bound departures (startTime), arrive-by queries bound
 			// arrivals (endTime). Anchoring backward hops on startTime
@@ -519,6 +528,7 @@ export const routingState = {
 	get loading() { return loading; },
 	get loadingMore() { return loadingMore; },
 	get loadingStatus() { return loadingStatus; },
+	get loadingPruned() { return loadingPruned; },
 	get error() { return error; },
 	get hasQueried() { return hasQueried; },
 	get selectedItinerary() { return selectedItinerary; },
@@ -590,6 +600,7 @@ export const routingState = {
 		loading = false;
 		loadingMore = null;
 		loadingStatus = null;
+		loadingPruned = false;
 		const url = currentUrl();
 		writeUrl(url, {
 			from: null, to: null, mode: 'leave', time: null, route: null
@@ -613,6 +624,7 @@ export const routingState = {
 		loading = false;
 		loadingMore = null;
 		loadingStatus = null;
+		loadingPruned = false;
 		error = null;
 		hasQueried = false;
 		lastQueryKey = null;
@@ -886,6 +898,7 @@ export const routingState = {
 		error = null;
 		loading = true;
 		loadingStatus = null;
+		loadingPruned = false;
 		hasQueried = true;
 		abortInFlight();
 		const ac = new AbortController();
@@ -1157,6 +1170,7 @@ export const routingState = {
 				pendingAbort = null;
 				loading = false;
 				loadingStatus = null;
+				loadingPruned = false;
 			}
 		}
 	},
