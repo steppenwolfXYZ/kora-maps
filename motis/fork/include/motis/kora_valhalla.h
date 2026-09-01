@@ -55,6 +55,28 @@ constexpr auto const kElevationIntervalM = 30.0;
 // of metres of climb.
 constexpr auto const kElevationNoiseM = 3.0;
 
+// Speed (km/h) charged for the residual gap between a walk shape's
+// endpoint and the coordinate that was actually asked for. Valhalla
+// snaps a request onto the nearest routable edge, so a stop whose
+// platform has no walkable geometry is "reached" from wherever that
+// edge happens to be. Charging the leftover distance at normal walking
+// pace would understate it — an unmodelled gap is more likely to hide
+// stairs or a detour than a clear straight run — so it is charged
+// slower. Deliberately not punitive: the platform walk network
+// (station-walk-network.md) removes the gap at the stations where it
+// mattered, and this only covers what it could not reach.
+constexpr auto const kGapWalkSpeedKmh = 2.6;
+
+// Gaps below this are snapping noise, not walking.
+constexpr auto const kGapIgnoreM = 1.0;
+
+// Distance (metres) over which the slow gap speed applies. Past it the
+// remainder is charged at normal walking pace: a short gap is plausibly
+// unmodelled stairs or a kink, but a 200 m one means the requested point
+// simply sits off the network — a free-form map click in a field — and
+// penalising all of it would let the gap dominate the leg.
+constexpr auto const kGapPenaltyMaxM = 60.0;
+
 struct walk_route {
   std::chrono::seconds duration_;
   double distance_m_;

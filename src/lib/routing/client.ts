@@ -76,6 +76,10 @@ export interface PlanArgs {
 	pedestrianSpeedMs?: number | null;
 	transferTimeFactor?: number | null;
 	additionalTransferMin?: number;
+	/** Multiplier that undoes daring's extra halving of the transfer
+	 * matrix (2 in daring mode, else 1) — see the response normalization
+	 * at the bottom of `plan()`. */
+	transferWalkUnscale?: number;
 	/** Minimize-walking (routing-options.md § Minimize walking):
 	 * `koraWalkPoints` ('minwalk') selects the fork's steeper walk-point
 	 * table so walking-light journeys survive as their own Pareto
@@ -152,8 +156,46 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
 	const res = await fetch(url, { signal });
 	if (!res.ok) throw new PlanRequestError(res.status, await res.text().catch(() => res.statusText));
-	// Every walking duration/geometry in the response is already
-	// Valhalla-computed server-side by the MOTIS fork (see
-	// valhalla-pedestrian-router.md) — no client-side rewriting.
-	return (await res.json()) as PlanResponse;
+	// Every walking duration/geometry in the response is Valhalla-computed
+	// server-side by the MOTIS fork (see valhalla-pedestrian-router.md).
+	// The one rewrite is the transfer-safety correction below.
+	const json = (await res.json()) as PlanResponse;
+	normalizeTransferWalks(json, args);
+	return json;
+}
+
+/** Restate every transfer walk leg at the user's SET walking speed
+ * (routing-options.md § Connection safety). MOTIS reports transfer legs
+ * as `defaultDuration * transferTimeFactor + additionalTransferTime`;
+ * of that factor only the walking-speed part is a real walking time —
+ * daring's extra halving and cautious's fixed slack are search knobs,
+ * not pace. Left raw, a daring transfer renders as "2 min 310 m" (≈ 9
+ * km/h) and contradicts its own "-1 min" tightness chip. Corrected once
+ * here, every consumer — leg rows, walked totals, ranking, the tight
+ * ladder — speaks the set speed.
+ *
+ * Scope: WALK legs strictly BETWEEN two transit legs (nigiri footpaths).
+ * Access/egress walks come from live Valhalla calls already run at the
+ * set speed, and same-stop pseudo walk legs are change-time buffer, not
+ * walking — both stay untouched. */
+function normalizeTransferWalks(res: PlanResponse, args: PlanArgs): void {
+	const unscale = args.transferWalkUnscale ?? 1;
+	const slack = (args.additionalTransferMin ?? 0) * 60;
+	if (unscale === 1 && slack === 0) return;
+	for (const it of [...(res.itineraries ?? []), ...(res.direct ?? [])]) {
+		const legs = it.legs ?? [];
+		for (let i = 1; i < legs.length - 1; i++) {
+			const l = legs[i];
+			if (l.mode !== 'WALK') continue;
+			if (isWalkMode(legs[i - 1].mode) || isWalkMode(legs[i + 1].mode)) continue;
+			if (l.from?.stopId != null && l.from.stopId === l.to?.stopId) continue;
+			const raw = l.duration
+				?? Math.max(0, (Date.parse(l.endTime) - Date.parse(l.startTime)) / 1000);
+			l.duration = Math.max(0, raw - slack) * unscale;
+		}
+	}
+}
+
+function isWalkMode(m: string): boolean {
+	return m === 'WALK' || m === 'BIKE' || m === 'CAR';
 }

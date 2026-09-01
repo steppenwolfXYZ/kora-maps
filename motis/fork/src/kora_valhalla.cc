@@ -3,6 +3,7 @@
 
 #include "motis/kora_valhalla.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -372,6 +373,39 @@ std::optional<walk_route> route(geo::latlng const& from,
     auto const gain = has_profile
                           ? elevation_gain(profile)
                           : std::optional<std::pair<double, double>>{};
+
+    // Close the residual gap between what Valhalla walked and what was
+    // asked for. Valhalla reports the route between its snapped
+    // endpoints; when the requested coordinate has no routable geometry
+    // on it, the difference is real walking that nobody has accounted
+    // for. Charge it at kGapWalkSpeedKmh and draw it, so the leg neither
+    // under-reports the time nor renders as a floating line that stops
+    // short of the stop. Endpoint order matters: the head gap is
+    // prepended, the tail gap appended.
+    // (get_offsets' one_to_many path cannot do this — the matrix
+    // endpoint returns durations only, with no snapped point to measure
+    // against.)
+    if (!shape.empty()) {
+      auto const gap_mps = kGapWalkSpeedKmh * 1000.0 / 3600.0;
+      auto const close = [&](geo::latlng const& want, bool const head) {
+        auto const have = head ? shape.front() : shape.back();
+        auto const gap = geo::distance(want, have);
+        if (gap < kGapIgnoreM) {
+          return;
+        }
+        auto const slow = std::min(gap, kGapPenaltyMaxM);
+        distance_km += gap / 1000.0;
+        duration += slow / gap_mps
+                    + (gap - slow) / (kWalkSpeedKmh * 1000.0 / 3600.0);
+        if (head) {
+          shape.insert(begin(shape), want);
+        } else {
+          shape.push_back(want);
+        }
+      };
+      close(from, true);
+      close(to, false);
+    }
 
     result = legs.empty()
                  ? std::optional<walk_route>{}

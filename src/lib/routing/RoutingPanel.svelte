@@ -34,8 +34,6 @@
 	});
 	let cardStates = $derived(computeCardStates(displayed, {
 		minimizeWalking: routingOptions.minimizeWalking,
-		transferWalkUnscale: routingOptions.transferWalkUnscale,
-		transferWalkSlackSec: routingOptions.transferWalkSlackSec,
 		hfGondolaRoutes: hfGondolas
 	}));
 	// Loading-edge suppression: the card at the time-advancing edge (last

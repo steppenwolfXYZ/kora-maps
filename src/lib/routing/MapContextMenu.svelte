@@ -56,11 +56,17 @@
 		role="menu"
 	>
 		<button role="menuitem" onclick={() => pickAsPoint('from')}>
-			<span class="mcm-icon material-symbols-outlined">play_arrow</span>
+			<!-- Same play / stop glyphs as the map's start and goal pins
+			     (routeLayers.ts) and the popup route buttons. -->
+			<svg class="mcm-icon" viewBox="0 0 12 12" aria-hidden="true">
+				<path d="M3 1.4 L10.2 6 L3 10.6 Z" />
+			</svg>
 			Route from here
 		</button>
 		<button role="menuitem" onclick={() => pickAsPoint('to')}>
-			<span class="mcm-icon material-symbols-outlined">sports_score</span>
+			<svg class="mcm-icon" viewBox="0 0 12 12" aria-hidden="true">
+				<rect x="2.4" y="2.4" width="7.2" height="7.2" />
+			</svg>
 			Route to here
 		</button>
 	</div>
@@ -94,8 +100,9 @@
 	.mcm button:hover { background: var(--gray-75); }
 
 	.mcm-icon {
-		font-size: 1.1rem;
-		line-height: 1;
-		color: var(--gray-500);
+		width: 0.8rem;
+		height: 0.8rem;
+		flex: 0 0 auto;
+		fill: var(--brand);
 	}
 </style>

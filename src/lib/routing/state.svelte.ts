@@ -6,7 +6,7 @@ import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation,
 	invalidateCurrent, resolveCurrent
 } from './geolocation.svelte';
-import { boardingCount, effectiveTime, pruneDominated, walkSeconds } from './ranking';
+import { boardingCount, pruneDominated, walkSeconds } from './ranking';
 import { routingOptions, type RoutingOptionValues } from './options.svelte';
 import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
@@ -282,6 +282,7 @@ async function runHopCascade(
 			pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
 			transferTimeFactor: routingOptions.transferTimeFactor,
 			additionalTransferMin: routingOptions.additionalTransferMin,
+			transferWalkUnscale: routingOptions.transferWalkUnscale,
 			koraWalkPoints: routingOptions.koraWalkPoints,
 			alternativesEpsilon: routingOptions.alternativesEpsilon,
 			alternativesMax: routingOptions.alternativesMax
@@ -480,6 +481,14 @@ function invalidateSelection() {
 	pushedEntry = false;
 	expandedFingerprint = null;
 	mapModeFlag = false;
+	// Drop the history marker too. syncUrl() preserves page.state verbatim,
+	// so a leftover `routeSelection` would survive the input change and
+	// Map.svelte's back/forward effect would re-select that old connection
+	// the moment a matching itinerary shows up in the new result set —
+	// pre-empting the fresh auto-select (leave-at first / arrive-by last).
+	if (page.state?.routeSelection) {
+		replaceState(currentUrl(), { ...page.state, routeSelection: undefined });
+	}
 }
 
 /** Extend the result set in one chronological direction. Bumps
@@ -941,6 +950,7 @@ export const routingState = {
 					pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
 					transferTimeFactor: routingOptions.transferTimeFactor,
 					additionalTransferMin: routingOptions.additionalTransferMin,
+			transferWalkUnscale: routingOptions.transferWalkUnscale,
 					koraWalkPoints: routingOptions.koraWalkPoints,
 					alternativesEpsilon: routingOptions.alternativesEpsilon,
 					alternativesMax: routingOptions.alternativesMax
@@ -1128,15 +1138,11 @@ export const routingState = {
 			// Also skipped right after a share expiry — the error must not be
 			// upstaged by silently putting a different connection on the map.
 			if (!selectedFingerprint && !selectionInvalid && !sharedExpired && results.length > 0) {
-				// Minimize walking: auto-select the comfort-best (crown)
-				// connection instead of the chronological edge, so the map
-				// immediately shows the low-walk pick
-				// (routing-options.md § Minimize walking).
-				const it = routingOptions.minimizeWalking
-					? results.reduce((a, b) =>
-						effectiveTime(b, { minimizeWalking: true })
-							< effectiveTime(a, { minimizeWalking: true }) ? b : a)
-					: mode === 'arrive' ? results[results.length - 1] : results[0];
+				// Always the chronological edge, minimize-walking included:
+				// the pick has to be predictable from the mode alone, and a
+				// comfort-best (crown) pick reads as an arbitrary jump when
+				// the list reloads after an option change.
+				const it = mode === 'arrive' ? results[results.length - 1] : results[0];
 				const fp = itineraryFingerprint(it);
 				selectedItinerary = it;
 				selectedFingerprint = fp;

@@ -4,6 +4,54 @@
 // Svelte-rendered popups: only the render layer here would be swapped.
 
 const fmt = (v: unknown) => v == null ? '–' : String(v);
+const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// ── Route from / to buttons ─────────────────────────────────────────────
+// Shared by the station, pill-arrow and place popups. One gray group
+// pill holds a route icon plus a brand-red segmented pill whose two
+// halves — split by a white hairline — carry the same play triangle /
+// stop square the map's start and goal pins use (drawn as inline SVG:
+// the icon font's subset has no `stop` glyph, and reusing the pin
+// shapes keeps the pair identical everywhere). Labels live in the
+// tooltip only. Endpoint payload is decoded by handlers.ts §
+// wirePopupRouteClicks.
+
+export interface RouteButtonEndpoint {
+	/** Merged UIC — omitted for non-station places. */
+	uic?: string;
+	name: string;
+	coord: [number, number];
+}
+
+const ROUTE_BTN_CSS = `
+		.popup-route-group { display: inline-flex; align-items: center; gap: 9px; margin-top: 10px; padding: 6px 6px 6px 12px; background: var(--gray-100); border-radius: var(--radius-pill); }
+		.popup-route-lead { font-size: 22px; line-height: 1; color: var(--anthracite); flex: 0 0 auto; }
+		.popup-route-pill { display: inline-flex; background: var(--brand); border-radius: var(--radius-pill); overflow: hidden; }
+		.popup-route-btn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 28px; padding: 0; border: none; background: transparent; color: var(--white); cursor: pointer; transition: background 0.12s ease; }
+		.popup-route-btn + .popup-route-btn { border-left: 1.5px solid var(--white); }
+		.popup-route-btn:hover { background: var(--brand-hover); }
+		.popup-route-btn svg { width: 13px; height: 13px; display: block; fill: currentColor; }`;
+
+// Same shapes as makeStartIconElement / makeGoalIconElement in
+// routing/routeLayers.ts, normalised to a 12×12 box.
+const PLAY_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.4 L10.2 6 L3 10.6 Z"/></svg>';
+const STOP_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.4" y="2.4" width="7.2" height="7.2"/></svg>';
+
+function routeButtonsHtml(ep: RouteButtonEndpoint | null): string {
+	if (!ep) return '';
+	const payload = encodeURIComponent(JSON.stringify({
+		uic: ep.uic || undefined, name: ep.name, coord: ep.coord
+	}));
+	const btn = (side: 'from' | 'to', glyph: string, tip: string) =>
+		`<button class="popup-route-btn" type="button" title="${tip}" aria-label="${tip}"`
+		+ ` data-route-side="${side}" data-route-endpoint="${payload}">${glyph}</button>`;
+	return `<div class="popup-route-group">`
+		+ `<span class="popup-route-lead material-symbols-outlined" aria-hidden="true">directions</span>`
+		+ `<span class="popup-route-pill">`
+		+ btn('from', PLAY_SVG, 'Route from here')
+		+ btn('to', STOP_SVG, 'Route to here')
+		+ `</span></div>`;
+}
 
 // ── Debug stop popup ────────────────────────────────────────────────────
 
@@ -73,18 +121,8 @@ export interface StationPopupData {
 export function buildStationPopupHtml(d: StationPopupData): string {
 	// Station endpoint payload for the popup route buttons — see
 	// transit-routing.md § Entry points / Station popup buttons.
-	const routeBtnHtml = d.coord ? `<div class="popup-route-btns">
-		<button class="popup-route-btn" data-route-side="from" data-route-endpoint="${encodeURIComponent(JSON.stringify({
-			uic: d.uic || undefined, name: d.stopName, coord: d.coord
-		}))}">
-			<span class="material-symbols-outlined" aria-hidden="true">play_arrow</span>Route from here
-		</button>
-		<button class="popup-route-btn" data-route-side="to" data-route-endpoint="${encodeURIComponent(JSON.stringify({
-			uic: d.uic || undefined, name: d.stopName, coord: d.coord
-		}))}">
-			<span class="material-symbols-outlined" aria-hidden="true">sports_score</span>Route to here
-		</button>
-	</div>` : '';
+	const routeBtnHtml = routeButtonsHtml(
+		d.coord ? { uic: d.uic, name: d.stopName, coord: d.coord } : null);
 
 	let depLine = '';
 	if (typeof d.depHr === 'number' && d.depHr > 0) {
@@ -155,10 +193,7 @@ export function buildStationPopupHtml(d: StationPopupData): string {
 		.popup-lines[open] .popup-lines-list { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; row-gap: 3px; align-items: center; max-height: 200px; overflow-y: auto; overflow-x: hidden; }
 		.popup-lines[open] .popup-badge { display: block; }
 		.popup-lines[open] .popup-line-terminus { display: inline; color: var(--gray-700); font-size: 12px; }
-		.popup-route-btns { display: flex; gap: 4px; margin-top: 8px; }
-		.popup-route-btn { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 6px; border: 1px solid var(--gray-200); border-radius: 4px; background: var(--gray-50); color: var(--gray-850); font-family: inherit; font-size: 11px; cursor: pointer; }
-		.popup-route-btn:hover { background: var(--gray-100); }
-		.popup-route-btn .material-symbols-outlined { font-size: 14px; color: var(--gray-500); }
+${ROUTE_BTN_CSS}
 	</style><div style="font-family:var(--font-ui);font-size:13px;line-height:1.4;color:var(--gray-850)">
 		<div style="font-weight:700;font-size:15px">${fmt(d.stopName) || '(no name)'}</div>
 		${linesHtml}
@@ -190,18 +225,8 @@ export interface PillArrowPopupData {
 }
 
 export function buildPillArrowPopupHtml(d: PillArrowPopupData): string {
-	const routeBtnHtml = d.coord ? `<div class="popup-route-btns">
-		<button class="popup-route-btn" data-route-side="from" data-route-endpoint="${encodeURIComponent(JSON.stringify({
-			uic: d.uic || undefined, name: d.stopName, coord: d.coord
-		}))}">
-			<span class="material-symbols-outlined" aria-hidden="true">trip_origin</span>Route from here
-		</button>
-		<button class="popup-route-btn" data-route-side="to" data-route-endpoint="${encodeURIComponent(JSON.stringify({
-			uic: d.uic || undefined, name: d.stopName, coord: d.coord
-		}))}">
-			<span class="material-symbols-outlined" aria-hidden="true">place</span>Route to here
-		</button>
-	</div>` : '';
+	const routeBtnHtml = routeButtonsHtml(
+		d.coord ? { uic: d.uic, name: d.stopName, coord: d.coord } : null);
 	let route = '';
 	if (d.firstTerminus && d.lastTerminus) {
 		route = d.firstTerminus === d.lastTerminus
@@ -235,16 +260,51 @@ export function buildPillArrowPopupHtml(d: PillArrowPopupData): string {
 		.popup-pa-row { display: grid; grid-template-columns: max-content 1fr; column-gap: 8px; align-items: center; }
 		.popup-pa-badge { display: block; border-radius: 3px; padding: 2px 6px; font-size: 11px; font-weight: 800; letter-spacing: 0.02em; text-align: center; }
 		.popup-pa-route { color: var(--gray-700); font-size: 12px; }
-		.popup-route-btns { display: flex; gap: 4px; margin-top: 8px; }
-		.popup-route-btn { flex: 1 1 0; display: inline-flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 6px; border: 1px solid var(--gray-200); border-radius: 4px; background: var(--gray-50); color: var(--gray-850); font-family: inherit; font-size: 11px; cursor: pointer; }
-		.popup-route-btn:hover { background: var(--gray-100); }
-		.popup-route-btn .material-symbols-outlined { font-size: 14px; color: var(--gray-500); }
+${ROUTE_BTN_CSS}
 	</style><div style="font-family:var(--font-ui);font-size:13px;line-height:1.4;color:var(--gray-850)">
 		<div class="popup-pa-title">${fmt(d.stopName) || '(no name)'}</div>
 		<div class="popup-pa-row">
 			<span class="popup-pa-badge"${dataAttr} style="background:${d.color};color:${fg};${cursor}">${label}</span>
 			<span class="popup-pa-route">${routeSafe}</span>
 		</div>
+		${routeBtnHtml}
+	</div>`;
+}
+
+// ── Place popup (POI / address) ─────────────────────────────────────────
+// Opened when the main search bar moves the map to a geocoded result
+// (stop-search.md § Selection). Deliberately minimal: what the place is
+// called, where it is, and the two route buttons.
+
+export interface PlacePopupData {
+	/** POI name, or the address itself for address results. */
+	title: string;
+	/** Second line — the POI's street address; null while the reverse
+	 * lookup is still pending or when there is nothing to add. */
+	address: string | null;
+	/** Drives the leading icon only. */
+	kind: 'poi' | 'address' | 'place';
+	coord: [number, number] | null;
+}
+
+export function buildPlacePopupHtml(d: PlacePopupData): string {
+	const icon = d.kind === 'address' ? 'home_work' : 'place';
+	const routeBtnHtml = routeButtonsHtml(
+		d.coord ? { name: d.title, coord: d.coord } : null);
+	const addressHtml = d.address
+		? `<div class="popup-place-address">${esc(d.address)}</div>`
+		: '';
+	return `<style>
+		.popup-place { font-family: var(--font-ui); font-size: 13px; line-height: 1.4; color: var(--gray-850); }
+		.popup-place-title { display: flex; align-items: flex-start; gap: 5px; font-weight: 700; font-size: 15px; }
+		.popup-place-title .material-symbols-outlined { font-size: 17px; line-height: 1.25; color: var(--gray-500); flex: 0 0 auto; }
+		.popup-place-address { margin-top: 2px; color: var(--gray-700); }${ROUTE_BTN_CSS}
+	</style><div class="popup-place">
+		<div class="popup-place-title">
+			<span class="material-symbols-outlined" aria-hidden="true">${icon}</span>
+			<span>${esc(d.title) || '(no name)'}</span>
+		</div>
+		${addressHtml}
 		${routeBtnHtml}
 	</div>`;
 }

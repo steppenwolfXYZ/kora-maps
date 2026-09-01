@@ -6,7 +6,6 @@
 		assessTransfers, legDuration, transferCount, walkElevation, walkMetres, walkSeconds
 	} from './ranking';
 	import type { Badge, TransferAssessment, Warning, WarningKind } from './ranking';
-	import { routingOptions } from './options.svelte';
 	import {
 		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,
 		iconFor, isTransitMode
@@ -112,9 +111,19 @@
 		'long-walk':       'directions_walk',
 		'long-wait':       'hourglass_top',
 		'very-slow':       'snail',
-		'tight-transfer':  'sprint',
-		'lucky-transfer':  'crisis_alert'
+		'tight-transfer':  'transfer_within_a_station',
+		'lucky-transfer':  'sprint'
 	};
+	// The four transfer tiers escalate glyph-first, colour-second: the
+	// transfer glyph (the same one the safety ruler wears, so the warning
+	// points back at the setting that governs it) for the two tiers that
+	// need no running, the sprint glyph for the two that do; inside each
+	// pair yellow is the milder and red the worse. A runner glyph on the
+	// mild tiers would read as the long-walk warning at this size.
+	function warningIcon(w: Warning): string {
+		if (w.kind === 'tight-transfer' && w.severity === 'strong') return 'sprint';
+		return WARNING_ICON[w.kind];
+	}
 	// Sub-minute spares deserve seconds, not a rounded "0 min".
 	function fmtSpare(secs: number): string {
 		const s = Math.abs(secs);
@@ -142,6 +151,12 @@
 		'extremely-tight': 'Extremely tight transfer',
 		'lucky': 'Only if you are lucky'
 	};
+	const TRANSFER_MARK_ICON: Record<TransferAssessment['tier'], string> = {
+		'tight': 'transfer_within_a_station',
+		'very-tight': 'transfer_within_a_station',
+		'extremely-tight': 'sprint',
+		'lucky': 'sprint'
+	};
 	function transferMarkLabel(a: TransferAssessment): string {
 		const base = TRANSFER_MARK_LABEL[a.tier];
 		return a.spare >= 0
@@ -153,11 +168,8 @@
 		void loadHfGondolaRoutes().then((s) => { hfGondolas = s; });
 	});
 	let transferMarks = $derived(new Map(
-		assessTransfers(itinerary, {
-			transferWalkUnscale: routingOptions.transferWalkUnscale,
-			transferWalkSlackSec: routingOptions.transferWalkSlackSec,
-			hfGondolaRoutes: hfGondolas
-		}).map((a) => [a.legIndex, a])
+		assessTransfers(itinerary, { hfGondolaRoutes: hfGondolas })
+			.map((a) => [a.legIndex, a])
 	));
 
 	// Per-walk-row elevation: shown on long walks only, where the profile
@@ -262,7 +274,7 @@
 		aria-label={transferMarkLabel(mark)}
 	>
 		<span class="material-symbols-outlined" aria-hidden="true"
-		>{mark.tier === 'lucky' ? 'crisis_alert' : 'sprint'}</span>
+		>{TRANSFER_MARK_ICON[mark.tier]}</span>
 		<span class="leg-transfer-warn-text">{mark.spare >= 0 ? fmtSpare(mark.spare) : `−${fmtSpare(mark.spare)}`}</span>
 	</span>
 {/snippet}
@@ -296,7 +308,7 @@
 					title={warningLabel(w)}
 					aria-label={warningLabel(w)}
 					>
-						<span class="material-symbols-outlined" aria-hidden="true">{WARNING_ICON[w.kind]}</span>
+						<span class="material-symbols-outlined" aria-hidden="true">{warningIcon(w)}</span>
 					</span>
 				{/each}
 			</span>
@@ -604,9 +616,22 @@
 	.card-warning-strong { background: var(--warn); }
 	.card-warning-medium :global(.material-symbols-outlined),
 	.card-warning-strong :global(.material-symbols-outlined) { font-size: 0.85rem; }
-	/* "If you're lucky" stands apart from the red tight ladder: dark
-	   anthracite disc (routing-options.md § Connection warnings). */
-	.card-warning-kind-lucky-transfer { background: var(--anthracite); }
+	/* All four transfer tiers are white-on-colour discs, escalating
+	   glyph-first (transfer → sprint) and colour-second (yellow → red)
+	   inside each glyph pair — see warningIcon() above. */
+	.card-warning-kind-tight-transfer,
+	.card-warning-kind-lucky-transfer {
+		width: 1.2rem;
+		height: 1.2rem;
+		border-radius: var(--radius-pill);
+		color: var(--white);
+	}
+	.card-warning-kind-tight-transfer :global(.material-symbols-outlined),
+	.card-warning-kind-lucky-transfer :global(.material-symbols-outlined) { font-size: 0.85rem; }
+	.card-warning-kind-tight-transfer.card-warning-standard,
+	.card-warning-kind-tight-transfer.card-warning-strong { background: #d9a400; }
+	.card-warning-kind-tight-transfer.card-warning-medium,
+	.card-warning-kind-lucky-transfer { background: var(--warn); }
 	.card:hover { border-color: var(--gray-250); background: #fafafa; }
 	.card.selected {
 		border-color: transparent;
@@ -887,9 +912,9 @@
 	}
 
 	/* Tight-transfer mark on the boarding row (routing-options.md):
-	   compact icon + spare-time chip, escalating with the tier. The
-	   "lucky" tier is deliberately NOT part of the red ladder — dark
-	   anthracite chip, distinct glyph. */
+	   compact icon + spare-time chip. Same escalation as the card badge —
+	   glyph says whether you must run, colour says how bad it is inside
+	   that pair. */
 	.leg-transfer-warn {
 		flex: 0 0 auto;
 		display: inline-flex;
@@ -907,8 +932,12 @@
 		font-size: 0.85rem;
 		line-height: 1;
 	}
-	.leg-transfer-warn-tight { color: var(--warn); background: transparent; }
-	.leg-transfer-warn-very-tight { color: var(--white); background: #d9a400; }
-	.leg-transfer-warn-extremely-tight { color: var(--white); background: var(--warn); }
-	.leg-transfer-warn-lucky { color: var(--white); background: var(--anthracite); }
+	.leg-transfer-warn-tight,
+	.leg-transfer-warn-very-tight,
+	.leg-transfer-warn-extremely-tight,
+	.leg-transfer-warn-lucky { color: var(--white); }
+	.leg-transfer-warn-tight,
+	.leg-transfer-warn-extremely-tight { background: #d9a400; }
+	.leg-transfer-warn-very-tight,
+	.leg-transfer-warn-lucky { background: var(--warn); }
 </style>

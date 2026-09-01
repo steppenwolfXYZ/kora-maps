@@ -1,11 +1,11 @@
 import type { StationEntry } from './stationIndex';
 
-// Station search shared by the routing endpoint inputs. Mirrors the ranking
-// used by the map-wide StopSearch so the two search UIs order the same
-// stations the same way (stop-search.md § Ranking): weighted sum of a match
-// tier, a mode-rank score, and a stop-tier score. Distance-from-map-center
-// is skipped here — the routing panel doesn't currently receive the map
-// instance; adding it would just tack a `mapCenter` arg onto searchStations.
+// Station search shared by the routing endpoint inputs and by the map-wide
+// search bar (StopSearch), so both UIs order the same stations the same way
+// (stop-search.md § Ranking): weighted sum of a match tier, a mode-rank
+// score, a stop-tier score and — when the caller passes a map center — a
+// distance-decay score. The routing panel omits the center and simply
+// drops that term.
 
 export interface IndexedStation extends StationEntry {
 	fold: string;
@@ -57,6 +57,11 @@ const STOP_TIER_RANK_MAX = 11;
 const W_MATCH = 5;
 const W_MODE = 1;
 const W_TIER = 1;
+const W_DISTANCE = 1;
+
+// Distance decay characteristic length in km (100 * exp(-d / DIST_DECAY_KM)).
+const DIST_DECAY_KM = 30;
+const EARTH_KM = 6371;
 
 // 8-tier match cascade — first condition that holds wins. Multi-word
 // queries are token-based and order-insensitive; every token must match at
@@ -107,16 +112,35 @@ function tierScore(tier: string | undefined): number {
 	return ((STOP_TIER_RANK_MAX - r) / STOP_TIER_RANK_MAX) * 100;
 }
 
-export function searchStations(index: IndexedStation[], query: string, limit = 8): IndexedStation[] {
+function distanceScore(dLon: number, dLat: number, cosLat: number): number {
+	const x = ((dLon * cosLat) * Math.PI) / 180;
+	const y = (dLat * Math.PI) / 180;
+	const distKm = EARTH_KM * Math.sqrt(x * x + y * y);
+	return 100 * Math.exp(-distKm / DIST_DECAY_KM);
+}
+
+/** `center` is `[lon, lat]` of the current map view; when given, results
+ * near the view are promoted (stop-search.md § Ranking / Distance). */
+export function searchStations(
+	index: IndexedStation[],
+	query: string,
+	limit = 8,
+	center?: [number, number] | null
+): IndexedStation[] {
 	const q = fold(query.trim());
 	if (!q) return [];
 	const tokens = q.split(/\s+/).filter(Boolean);
 	if (!tokens.length) return [];
+	const cosLat = center ? Math.cos((center[1] * Math.PI) / 180) : 1;
 	const scored: { e: IndexedStation; s: number }[] = [];
 	for (const e of index) {
 		const match = matchTierScore(e.fold, e.words, tokens);
 		if (match === 0) continue;
-		const s = W_MATCH * match + W_MODE * modeScore(e.m) + W_TIER * tierScore(e.t);
+		const dist = center
+			? distanceScore(e.c[0] - center[0], e.c[1] - center[1], cosLat)
+			: 0;
+		const s = W_MATCH * match + W_MODE * modeScore(e.m)
+			+ W_TIER * tierScore(e.t) + W_DISTANCE * dist;
 		scored.push({ e, s });
 	}
 	scored.sort((a, b) => b.s - a.s);
