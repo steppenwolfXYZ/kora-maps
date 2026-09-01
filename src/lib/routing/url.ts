@@ -2,7 +2,7 @@ import {
 	DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
 	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
 } from './options.svelte';
-import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type RoutingQuery, type TimeMode, type Via } from './types';
+import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type RoutingQuery, type TimeMode, type TravelMode, type Via } from './types';
 
 // URL query params (transit-routing.md § Deep link, geocoding-search.md § URL persistence):
 //   from, to        — endpoint tokens (uic | lat,lng | 'me')
@@ -16,7 +16,12 @@ import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type Routing
 //                     Only filled rows; empty panel rows are never written.
 //   viaWait         — requested minimum stay per via in minutes, same order
 //                     and length as `via`. Omitted when every wait is 0.
-//   mode            — 'leave' | 'arrive' (absent = leave)
+//   mode            — 'leave' | 'arrive' (absent = leave) for the transit
+//                     tab, or 'bike' | 'walk' for a direct cycling /
+//                     walking query (pedestrian-bicycle-routing.md § Deep
+//                     links; absent = public transit). The direct modes
+//                     have no time controls, so the one param serves both
+//                     meanings without ambiguity.
 //   time            — ISO 8601. Always present alongside a query: a null
 //                     ("now") panel time is stamped with the concrete
 //                     timestamp the query ran at (state.svelte.ts), so a
@@ -145,6 +150,13 @@ export function paramToMode(raw: string | null): TimeMode {
 	return raw === 'arrive' ? 'arrive' : 'leave';
 }
 
+/** Travel mode from the same `mode` param: 'bike' / 'walk' select the
+ * direct tabs, anything else (incl. 'leave' / 'arrive' / absent) means
+ * the transit tab. */
+export function paramToTravelMode(raw: string | null): TravelMode {
+	return raw === 'bike' || raw === 'walk' ? raw : 'transit';
+}
+
 /** True when a routing query is present in the current URL — used on cold
  * load to decide whether to open the panel. */
 export function urlHasRoutingQuery(url: URL): boolean {
@@ -170,11 +182,13 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	to: Endpoint | null;
 	vias: Via[];
 	mode: TimeMode;
+	travel: TravelMode;
 	time: string | null;
 	route: string | null;
 	options: RoutingOptionValues;
 } {
 	return {
+		travel: paramToTravelMode(url.searchParams.get(URL_MODE)),
 		from: paramToEndpoint(
 			url.searchParams.get(URL_FROM) ?? '',
 			lookup,
@@ -216,11 +230,17 @@ export function writeRoutingQuery(url: URL, q: {
 	/** Filled via rows only (via-stops.md § Persistence and sharing). */
 	vias?: FilledVia[];
 	mode: TimeMode;
+	/** Travel mode (pedestrian-bicycle-routing.md § Deep links). 'bike' /
+	 * 'walk' write themselves into the `mode` param and drop every
+	 * transit-only param (time, vias, options, route selection); absent
+	 * or 'transit' keeps today's serialisation. */
+	travel?: TravelMode;
 	time: string | null;
 	route?: string | null;
 	options?: RoutingOptionValues;
 }) {
 	const hasQuery = q.from !== null || q.to !== null;
+	const direct = q.travel === 'bike' || q.travel === 'walk';
 	if (q.from) url.searchParams.set(URL_FROM, endpointToParam(q.from));
 	else url.searchParams.delete(URL_FROM);
 	if (q.to) url.searchParams.set(URL_TO, endpointToParam(q.to));
@@ -239,8 +259,9 @@ export function writeRoutingQuery(url: URL, q: {
 	else url.searchParams.delete(URL_TO_KIND);
 	// Vias ride as two parallel comma-separated lists. `viaWait` is written
 	// only when at least one wait is non-zero, so the pure "route through
-	// here" case leaves the address as short as it was before.
-	const vias = hasQuery ? (q.vias ?? []) : [];
+	// here" case leaves the address as short as it was before. Direct
+	// modes carry no vias — the Valhalla query is point-to-point.
+	const vias = hasQuery && !direct ? (q.vias ?? []) : [];
 	if (vias.length > 0) {
 		url.searchParams.set(URL_VIA, vias.map((v) => v.station.uic).join(','));
 		if (vias.some((v) => v.wait > 0)) {
@@ -252,15 +273,19 @@ export function writeRoutingQuery(url: URL, q: {
 		url.searchParams.delete(URL_VIA);
 		url.searchParams.delete(URL_VIA_WAIT);
 	}
-	// mode only carried when non-default (`leave` = absent).
-	if (q.mode === 'arrive') url.searchParams.set(URL_MODE, 'arrive');
+	// mode: direct travel modes write their own value; on the transit tab
+	// it is only carried when non-default (`leave` = absent).
+	if (direct && hasQuery) url.searchParams.set(URL_MODE, q.travel!);
+	else if (!direct && q.mode === 'arrive') url.searchParams.set(URL_MODE, 'arrive');
 	else url.searchParams.delete(URL_MODE);
-	if (q.time && hasQuery) url.searchParams.set(URL_TIME, q.time);
+	// time / route selection are transit-only concepts — a direct query is
+	// fully reproduced by endpoints + mode alone.
+	if (q.time && hasQuery && !direct) url.searchParams.set(URL_TIME, q.time);
 	else url.searchParams.delete(URL_TIME);
-	if (q.route) url.searchParams.set(URL_ROUTE, q.route);
+	if (q.route && !direct) url.searchParams.set(URL_ROUTE, q.route);
 	else url.searchParams.delete(URL_ROUTE);
-	// Options: only non-default values, and only alongside a query.
-	const o = hasQuery ? q.options : undefined;
+	// Options: only non-default values, and only alongside a transit query.
+	const o = hasQuery && !direct ? q.options : undefined;
 	if (o && o.walkSpeed !== DEFAULT_OPTIONS.walkSpeed)
 		url.searchParams.set(URL_WALK, o.walkSpeed);
 	else url.searchParams.delete(URL_WALK);

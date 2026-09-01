@@ -1,6 +1,8 @@
 import { pushState, replaceState } from '$app/navigation';
+import { browser } from '$app/environment';
 import { page } from '$app/state';
 import { plan, PlanRequestError, stationPlaceId } from './client';
+import { DirectRouteError, fetchDirectRoutes } from './valhalla';
 import { itineraryFingerprint } from './fingerprint';
 import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation,
@@ -14,7 +16,8 @@ import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import { reverseAddress } from '$lib/geocoding/client';
 import {
 	activeVias, MAX_VIAS, MAX_VIA_WAIT_MIN, plannedDwellSec,
-	type Endpoint, type FilledVia, type Itinerary, type TimeMode, type Via
+	type DirectRoute, type Endpoint, type FilledVia, type Itinerary,
+	type TimeMode, type TravelMode, type Via
 } from './types';
 import { writeRoutingQuery } from './url';
 
@@ -34,6 +37,29 @@ let to = $state<Endpoint | null>(null);
 let vias = $state<Via[]>([]);
 let mode = $state<TimeMode>('leave');
 let time = $state<string | null>(null);
+
+// Travel mode of the panel (pedestrian-bicycle-routing.md § Mode tabs):
+// transit (MOTIS connection search) / bike / walk (direct Valhalla
+// routes). The last user choice persists across visits; a deep link's
+// mode overrides it for that visit only (hydrate → session-only).
+const TRAVEL_MODE_KEY = 'kora.routing.travelMode';
+function readStoredTravelMode(): TravelMode {
+	if (!browser) return 'transit';
+	try {
+		const v = localStorage.getItem(TRAVEL_MODE_KEY);
+		return v === 'bike' || v === 'walk' ? v : 'transit';
+	} catch {
+		return 'transit';
+	}
+}
+let travelMode = $state<TravelMode>(readStoredTravelMode());
+
+// Direct cycling / walking results (pedestrian-bicycle-routing.md
+// § Query & alternatives): all alternatives of the latest query, and the
+// index of the selected one (drawn in full color; the others muted).
+// $state.raw — routes are plain immutable data, replaced wholesale.
+let directRoutes = $state.raw<DirectRoute[]>([]);
+let directSelected = $state(0);
 // Bumped on every `setTime` call so consumers re-run even when `time`
 // itself is unchanged (refresh-to-now while already at null — the wall
 // clock has moved but the value hasn't).
@@ -195,6 +221,8 @@ function commitViaEdit(before: string) {
 	}
 	abortInFlight();
 	results = [];
+	directRoutes = [];
+	directSelected = 0;
 	hasQueried = false;
 	error = null;
 	lastQueryKey = null;
@@ -512,6 +540,10 @@ function writeUrl(url: URL, q: {
 }) {
 	writeRoutingQuery(url, {
 		...q,
+		// The travel mode always reflects the panel state — url.ts drops
+		// the transit-only params for bike / walk. A cleared query (both
+		// endpoints null) writes no mode param either way.
+		travel: travelMode,
 		vias: q.vias ?? queryVias(),
 		time: q.time ?? resolvedNowTime,
 		options: routingOptions.snapshot()
@@ -594,6 +626,84 @@ async function loadMoreInDirection(direction: 'earlier' | 'later') {
 	}
 }
 
+/** Map a failed Valhalla request to a short user-facing message —
+ * mirror of userFacingError for the direct modes. */
+function directUserFacingError(e: unknown, m: TravelMode): string {
+	console.error('[routing] direct query failed:', e);
+	const what = m === 'bike' ? 'cycling route' : 'walking route';
+	if (e instanceof DirectRouteError) {
+		// Valhalla 400s when a location can't be matched to the network
+		// (e.g. a point in a lake) or the path exceeds engine limits.
+		if (e.status >= 400 && e.status < 500)
+			return `Sorry — no ${what} could be found between these places.`;
+		return `Sorry — the ${what} search is temporarily unavailable on our side. Please try again later.`;
+	}
+	if (e instanceof TypeError) return `Could not reach the ${what} search. Please check your connection.`;
+	return `Sorry — the ${what} search failed due to an error on our side. Please try again.`;
+}
+
+/** The bike / walk counterpart of the transit cascade: one Valhalla
+ * /route call with alternates (pedestrian-bicycle-routing.md § Query &
+ * alternatives). The primary route auto-selects; recents / Connect
+ * record the pair like any shown route. */
+async function runDirectQuery(key: string) {
+	const m = travelMode as 'bike' | 'walk';
+	error = null;
+	loading = true;
+	loadingStatus = null;
+	loadingPruned = false;
+	hasQueried = true;
+	abortInFlight();
+	const ac = new AbortController();
+	pendingAbort = ac;
+	resetCascadeState();
+	directRoutes = [];
+	directSelected = 0;
+	try {
+		if (from!.type === 'current' || to!.type === 'current') {
+			try { resolvedCurrentCoord = await resolveCurrent(); }
+			catch (e) {
+				if (ac.signal.aborted) return;
+				error = geolocationErrorMessage(e);
+				return;
+			}
+		}
+		const coordOf = (ep: Endpoint): [number, number] =>
+			ep.type === 'current' ? (resolvedCurrentCoord ?? [0, 0]) : ep.coord;
+		const routes = await fetchDirectRoutes({
+			mode: m,
+			from: coordOf(from!),
+			to: coordOf(to!),
+			// Walking pace follows the transit tab's speed tier so the same
+			// walk shows the same duration on both tabs (null at the normal
+			// tier → engine default 5.1 km/h, identical to the transit base).
+			walkSpeedKmh: m === 'walk'
+				? (routingOptions.pedestrianSpeedMs != null ? routingOptions.walkSpeedKmh : null)
+				: null
+		}, ac.signal);
+		if (ac.signal.aborted) return;
+		directRoutes = routes;
+		directSelected = 0;
+		if (routes.length > 0 && from && to) {
+			void recordRecentRoute(from, to, [], mode, null);
+			connectStations.record(from);
+			connectStations.record(to);
+		}
+		lastQueryKey = key;
+	} catch (e) {
+		if ((e as Error).name === 'AbortError') return;
+		error = directUserFacingError(e, m);
+		directRoutes = [];
+	} finally {
+		if (pendingAbort === ac) {
+			pendingAbort = null;
+			loading = false;
+			loadingStatus = null;
+			loadingPruned = false;
+		}
+	}
+}
+
 export const routingState = {
 	get open() { return panelOpen; },
 	get from() { return from; },
@@ -602,6 +712,13 @@ export const routingState = {
 	/** Whether another via row may be added — the engine takes two. */
 	get canAddVia() { return vias.length < MAX_VIAS; },
 	get mode() { return mode; },
+	get travelMode() { return travelMode; },
+	get directRoutes() { return directRoutes; },
+	get directSelected() { return directSelected; },
+	get selectedDirectRoute(): DirectRoute | null {
+		if (travelMode === 'transit') return null;
+		return directRoutes[directSelected] ?? null;
+	},
 	get time() { return time; },
 	get timeVersion() { return timeVersion; },
 	get results() { return results; },
@@ -615,9 +732,15 @@ export const routingState = {
 	get selectedFingerprint() { return selectedFingerprint; },
 	get selectionInvalid() { return selectionInvalid; },
 	get expandedFingerprint() { return expandedFingerprint; },
-	// Effective only while a selection exists — the flag alone never
-	// surfaces map mode on its own.
-	get mapMode() { return mapModeFlag && selectedItinerary !== null; },
+	// Effective only while something is on the map — the flag alone never
+	// surfaces map mode on its own. Direct modes always have a selection
+	// while routes exist (index-based), so they qualify via the routes.
+	get mapMode() {
+		return mapModeFlag && (
+			selectedItinerary !== null ||
+			(travelMode !== 'transit' && directRoutes.length > 0)
+		);
+	},
 	get sharedOnly() { return sharedOnly; },
 	get sharedExpired() { return sharedExpired; },
 	/** What the panel renders: in shared-only mode just the verified shared
@@ -702,6 +825,8 @@ export const routingState = {
 		time = null;
 		resolvedNowTime = null;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		loading = false;
 		loadingMore = null;
 		loadingStatus = null;
@@ -735,6 +860,8 @@ export const routingState = {
 		time = next.time;
 		timeVersion++;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -747,6 +874,8 @@ export const routingState = {
 		abortInFlight();
 		from = ep;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -774,6 +903,8 @@ export const routingState = {
 		vias = [...vias, { station: to, wait: 0 }];
 		to = null;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -815,6 +946,8 @@ export const routingState = {
 		abortInFlight();
 		to = ep;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -822,10 +955,48 @@ export const routingState = {
 		syncUrl();
 	},
 
+	/** Switch the panel's travel mode tab (pedestrian-bicycle-routing.md
+	 * § Mode tabs). Endpoints are shared across the tabs; results are
+	 * mode-specific, so the shown list clears and the panel's query
+	 * effect re-runs for the new mode. `persist: false` is the deep-link
+	 * restore — the link's mode drives this visit without overwriting
+	 * the stored preference. */
+	setTravelMode(m: TravelMode, opts?: { persist?: boolean }) {
+		if (travelMode === m) return;
+		abortInFlight();
+		travelMode = m;
+		if (opts?.persist !== false) {
+			try {
+				localStorage.setItem(TRAVEL_MODE_KEY, m);
+			} catch {
+				// Storage unavailable — the choice still holds this session.
+			}
+		}
+		results = [];
+		directRoutes = [];
+		directSelected = 0;
+		hasQueried = false;
+		error = null;
+		lastQueryKey = null;
+		invalidateSelection();
+		syncUrl();
+	},
+
+	/** Select one of the direct route alternatives — from its card or by
+	 * tapping its (muted) line on the map. No history entry and no URL
+	 * param: the query itself is fully in the URL and re-running it
+	 * restores the primary selection. */
+	selectDirectRoute(index: number) {
+		if (index < 0 || index >= directRoutes.length) return;
+		directSelected = index;
+	},
+
 	setMode(m: TimeMode) {
 		abortInFlight();
 		mode = m;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -841,6 +1012,8 @@ export const routingState = {
 		resolvedNowTime = null;
 		timeVersion++;
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -857,6 +1030,8 @@ export const routingState = {
 		// (via-stops.md § Panel UI).
 		vias = [...vias].reverse();
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -935,6 +1110,7 @@ export const routingState = {
 	 * always selects first. Never armed by auto-select or URL restore. */
 	enterMapMode() {
 		if (selectedItinerary) mapModeFlag = true;
+		else if (travelMode !== 'transit' && directRoutes.length > 0) mapModeFlag = true;
 	},
 
 	exitMapMode() {
@@ -978,7 +1154,7 @@ export const routingState = {
 	 * settings drive this tab's queries without touching localStorage. */
 	hydrate(next: {
 		from: Endpoint | null; to: Endpoint | null; vias?: Via[];
-		mode: TimeMode; time: string | null;
+		mode: TimeMode; travel?: TravelMode; time: string | null;
 		route: string | null;
 		options?: RoutingOptionValues;
 	}) {
@@ -986,6 +1162,10 @@ export const routingState = {
 		to = next.to;
 		vias = next.vias ? next.vias.slice(0, MAX_VIAS) : [];
 		mode = next.mode;
+		// The deep link's travel mode overrides the persisted choice for
+		// this visit only (pedestrian-bicycle-routing.md § Mode tabs) —
+		// direct write, never into localStorage.
+		if (next.travel) travelMode = next.travel;
 		time = next.time;
 		if (next.options) routingOptions.applySession(next.options);
 		pendingFingerprint = next.route;
@@ -1013,6 +1193,8 @@ export const routingState = {
 	optionsChanged() {
 		abortInFlight();
 		results = [];
+		directRoutes = [];
+		directSelected = 0;
 		hasQueried = false;
 		error = null;
 		lastQueryKey = null;
@@ -1022,6 +1204,18 @@ export const routingState = {
 
 	async runQuery() {
 		if (!from || !to) return;
+		// Direct cycling / walking query — its own, much simpler pipeline
+		// (no cascade, no time). Dedup key covers everything the Valhalla
+		// request can see.
+		if (travelMode !== 'transit') {
+			const directKey = JSON.stringify({
+				travel: travelMode, from, to,
+				walkSpeed: travelMode === 'walk' ? routingOptions.walkSpeed : null
+			});
+			if (directKey === lastQueryKey && !error) return;
+			await runDirectQuery(directKey);
+			return;
+		}
 		const key = JSON.stringify({
 			from, to, vias: viaSignature(), mode, time,
 			walkSpeed: routingOptions.walkSpeed,

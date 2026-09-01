@@ -119,6 +119,44 @@ function distanceScore(dLon: number, dLat: number, cosLat: number): number {
 	return 100 * Math.exp(-distKm / DIST_DECAY_KM);
 }
 
+/** Plain match quality of an arbitrary label against a query — the
+ * 8-tier match cascade alone, no mode / tier / distance boosts. Used by
+ * the cycling / walking endpoint search, which mixes stations into the
+ * geocoder results ranked purely by how well the name matches
+ * (pedestrian-bicycle-routing.md § Mode tabs). 0 = no match. */
+export function plainMatchScore(label: string, query: string): number {
+	const q = fold(query.trim());
+	if (!q) return 0;
+	const tokens = q.split(/\s+/).filter(Boolean);
+	if (!tokens.length) return 0;
+	const f = fold(label);
+	const words = f.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+	return matchTierScore(f, words, tokens);
+}
+
+/** Station search ranked by plain match quality only — the cycling /
+ * walking variant of `searchStations` (no category boost; stations are
+ * merged into the geocoder list by the caller). Returns the match score
+ * alongside each hit so the caller can interleave other sources. */
+export function searchStationsPlain(
+	index: IndexedStation[],
+	query: string,
+	limit = 8
+): { station: IndexedStation; score: number }[] {
+	const q = fold(query.trim());
+	if (!q) return [];
+	const tokens = q.split(/\s+/).filter(Boolean);
+	if (!tokens.length) return [];
+	const scored: { station: IndexedStation; score: number }[] = [];
+	for (const e of index) {
+		const match = matchTierScore(e.fold, e.words, tokens);
+		if (match === 0) continue;
+		scored.push({ station: e, score: match });
+	}
+	scored.sort((a, b) => b.score - a.score);
+	return scored.slice(0, limit);
+}
+
 /** `center` is `[lon, lat]` of the current map view; when given, results
  * near the view are promoted (stop-search.md § Ranking / Distance). */
 export function searchStations(

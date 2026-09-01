@@ -17,6 +17,40 @@ export type Endpoint =
 
 export type TimeMode = 'leave' | 'arrive';
 
+/** Travel mode of the routing panel (pedestrian-bicycle-routing.md § Mode
+ * tabs): the transit connection search (MOTIS) or a direct cycling /
+ * walking route (Valhalla). `bike` / `walk` are also the URL `mode`
+ * param values; absent means transit. */
+export type TravelMode = 'transit' | 'bike' | 'walk';
+
+/** One direct cycling / walking route returned by Valhalla — either the
+ * primary route or an alternate (pedestrian-bicycle-routing.md § Query &
+ * alternatives). Elevation-derived fields are null when the Valhalla
+ * instance served no elevation for the route — the cards then simply
+ * omit ascent / descent and the profile graph. */
+export interface DirectRoute {
+	mode: 'bike' | 'walk';
+	/** Seconds. */
+	durationSec: number;
+	/** Metres. */
+	distanceM: number;
+	/** Decoded route shape, [lon, lat] pairs. */
+	coords: [number, number][];
+	/** [minLon, minLat, maxLon, maxLat]. */
+	bbox: [number, number, number, number];
+	/** Metres climbed / descended, jitter-filtered from the elevation
+	 * profile. Null when no elevation came back. */
+	ascentM: number | null;
+	descentM: number | null;
+	/** Elevation samples (metres a.s.l.) at `profileIntervalM` spacing
+	 * along the route — the selected card's profile graph. */
+	profile: number[] | null;
+	profileIntervalM: number;
+	/** Metres of stairs on the route (bike: sections to carry / push the
+	 * bike over; summed from the steps maneuvers). 0 when none. */
+	stairsM: number;
+}
+
 /** The `station` variant of Endpoint, pulled out because via stops can
  * only ever be stations (via-stops.md § Via stops — the routing engine
  * accepts stop ids for vias, never coordinates). */
