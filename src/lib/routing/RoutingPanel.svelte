@@ -4,6 +4,7 @@
 	import EndpointInput from './EndpointInput.svelte';
 	import TimeSelector from './TimeSelector.svelte';
 	import ResultCard from './ResultCard.svelte';
+	import DirectRouteCard from './DirectRouteCard.svelte';
 	import ConnectGrid from './ConnectGrid.svelte';
 	import RoutingOptions from './RoutingOptions.svelte';
 	import { computeCardStates } from './ranking';
@@ -16,12 +17,20 @@
 	import { itineraryFingerprint } from './fingerprint';
 	import type { Endpoint, Itinerary, Leg } from './types';
 
-	let { onFocusLeg, onEnterMapMode, onFrameRoute, getMapCenter = () => null }: {
+	let { onFocusLeg, onEnterMapMode, onFrameRoute, onFrameDirectRoutes, getMapCenter = () => null }: {
 		onFocusLeg?: (leg: Leg) => void;
 		onEnterMapMode?: (it: Itinerary) => void;
 		onFrameRoute?: (it: Itinerary) => void;
+		/** Frame all shown direct cycling / walking alternatives
+		 * (pedestrian-bicycle-routing.md). */
+		onFrameDirectRoutes?: () => void;
 		getMapCenter?: () => [number, number] | null;
 	} = $props();
+
+	// Direct cycling / walking tab active (pedestrian-bicycle-routing.md
+	// § Mode tabs): no time controls, no options, no vias; results are
+	// DirectRouteCards instead of the transit connection cards.
+	let direct = $derived(routingState.travelMode !== 'transit');
 
 	// Shared-only mode (connection-sharing.md § Shared view) renders just the
 	// verified shared connection; ranking badges are suppressed there — a
@@ -247,7 +256,10 @@
 		return routingState.loading || !!routingState.loadingMore;
 	}
 	function canExtend(): boolean {
-		return routingState.hasQueried && displayed.length > 0;
+		// Earlier / later only exist on the transit tab — a direct query
+		// has no time axis to extend along.
+		return routingState.travelMode === 'transit'
+			&& routingState.hasQueried && displayed.length > 0;
 	}
 	// Diminishing returns: unbounded raw travel maps onto 0..PULL_MAX, so
 	// the band always feels like it is resisting.
@@ -414,6 +426,7 @@
 		const from = routingState.from;
 		const to = routingState.to;
 		void routingState.mode;
+		void routingState.travelMode;
 		void routingState.time;
 		void routingState.timeVersion;
 		// Via stops and their waits are query params too (via-stops.md).
@@ -488,6 +501,20 @@
 	}
 </script>
 
+{#snippet swapButton()}
+	<!-- Shared between the transit tab (inside TimeSelector's timing row)
+	     and the direct tabs' slim control row — the endpoints and their
+	     swap are common to all three modes. -->
+	<button
+		class="rp-swap icon-btn"
+		onclick={() => routingState.swap()}
+		aria-label="Reverse the route"
+		title="Reverse the route"
+	>
+		<span class="material-symbols-outlined">swap_vert</span>
+	</button>
+{/snippet}
+
 {#snippet addStop(enabled: boolean, onClick: () => void, title: string)}
 	<!-- The column is always reserved, so every field keeps the same width
 	     whether or not another stop may be added. -->
@@ -517,6 +544,40 @@
 		>×</button>
 	</div>
 
+	<!-- Travel-mode tabs (pedestrian-bicycle-routing.md § Mode tabs):
+	     public transit, cycling, walking. Segmented control per
+	     ux-guidelines.md § Toggles — no container border, gray inactive,
+	     gradient active with white text/icons. -->
+	<div class="rp-travel" role="tablist" aria-label="Travel mode">
+		<button
+			role="tab"
+			class:active={routingState.travelMode === 'transit'}
+			aria-selected={routingState.travelMode === 'transit'}
+			onclick={() => routingState.setTravelMode('transit')}
+		>
+			<span class="material-symbols-outlined" aria-hidden="true">directions_transit</span>
+			Transit
+		</button>
+		<button
+			role="tab"
+			class:active={routingState.travelMode === 'bike'}
+			aria-selected={routingState.travelMode === 'bike'}
+			onclick={() => routingState.setTravelMode('bike')}
+		>
+			<span class="material-symbols-outlined" aria-hidden="true">directions_bike</span>
+			Cycling
+		</button>
+		<button
+			role="tab"
+			class:active={routingState.travelMode === 'walk'}
+			aria-selected={routingState.travelMode === 'walk'}
+			onclick={() => routingState.setTravelMode('walk')}
+		>
+			<span class="material-symbols-outlined" aria-hidden="true">directions_walk</span>
+			Walking
+		</button>
+	</div>
+
 	<!-- Endpoint rows (via-stops.md § Panel UI). The "+" of each row sits
 	     in its own column right of the field, not inside it: it acts on the
 	     row rather than on the field's value, and the column is the one the
@@ -536,14 +597,15 @@
 				}}
 				otherIsCurrent={routingState.to?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
+				mixedRanking={direct}
 			/>
 			{@render addStop(
-				routingState.from !== null && routingState.canAddVia,
+				!direct && routingState.from !== null && routingState.canAddVia,
 				() => addViaAt(0),
 				'Add a stop after the start'
 			)}
 		</div>
-		{#each routingState.vias as v, i}
+		{#each direct ? [] : routingState.vias as v, i}
 			<div class="rp-row">
 				<EndpointInput
 					bind:this={viaInputs[i]}
@@ -574,38 +636,45 @@
 				onChange={(ep) => routingState.setTo(ep)}
 				otherIsCurrent={routingState.from?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
+				mixedRanking={direct}
 			/>
 			{@render addStop(
-				canSplitDestination,
+				!direct && canSplitDestination,
 				splitDestination,
 				'Continue past the destination — it becomes a stop on the way'
 			)}
 		</div>
 	</div>
 
-	<div class="rp-when">
-		<TimeSelector
-			mode={routingState.mode}
-			time={routingState.time}
-			onMode={(m) => routingState.setMode(m)}
-			onTime={(t) => routingState.setTime(t)}
-			{optionsOpen}
-			optionsModified={!routingOptions.isDefault}
-			onToggleOptions={() => (optionsOpen = !optionsOpen)}
-		>
-			{#snippet options()}<RoutingOptions />{/snippet}
-			{#snippet swap()}
-				<button
-					class="rp-swap icon-btn"
-					onclick={() => routingState.swap()}
-					aria-label="Reverse the route"
-					title="Reverse the route"
-				>
-					<span class="material-symbols-outlined">swap_vert</span>
-				</button>
-			{/snippet}
-		</TimeSelector>
-	</div>
+	{#if !direct}
+		<!-- Date/time controls and the more-options area belong to the
+		     transit tab only (pedestrian-bicycle-routing.md § Mode tabs). -->
+		<div class="rp-when">
+			<TimeSelector
+				mode={routingState.mode}
+				time={routingState.time}
+				onMode={(m) => routingState.setMode(m)}
+				onTime={(t) => routingState.setTime(t)}
+				{optionsOpen}
+				optionsModified={!routingOptions.isDefault}
+				onToggleOptions={() => (optionsOpen = !optionsOpen)}
+			>
+				{#snippet options()}<RoutingOptions />{/snippet}
+				{#snippet swap()}{@render swapButton()}{/snippet}
+			</TimeSelector>
+		</div>
+	{:else}
+		<!-- Direct tabs keep only the swap control; the hint names the
+		     costing bias so a surprising route explains itself. -->
+		<div class="rp-direct-row">
+			<span class="rp-direct-hint">
+				{routingState.travelMode === 'bike'
+					? 'Cycling routes prefer flat, quiet ways'
+					: 'Walking routes'}
+			</span>
+			{@render swapButton()}
+		</div>
+	{/if}
 
 	{#if !routeSet}
 		<!-- No-route-set view (routing-persistence.md § Connect): tabbed
@@ -720,6 +789,20 @@
 				</div>
 			{:else if routingState.error}
 				<div class="rp-status rp-error">{routingState.error}</div>
+			{:else if direct}
+				<!-- Direct cycling / walking results: one card per returned
+				     alternative (pedestrian-bicycle-routing.md § Result
+				     cards). No earlier/later — alternatives all come from
+				     the single query. -->
+				{#if routingState.directRoutes.length === 0}
+					{#if routingState.hasQueried}
+						<div class="rp-status">No route found</div>
+					{/if}
+				{:else}
+					{#each routingState.directRoutes as r, i (i)}
+						<DirectRouteCard route={r} index={i} onFrameRoutes={onFrameDirectRoutes} />
+					{/each}
+				{/if}
 			{:else if displayed.length === 0}
 				{#if routingState.hasQueried}
 					<div class="rp-status">No connections found</div>
@@ -875,6 +958,55 @@
 	}
 	.rp-clear + .rp-close {
 		margin-left: 0;
+	}
+
+	/* Travel-mode segmented control (pedestrian-bicycle-routing.md § Mode
+	   tabs). House toggle treatment per ux-guidelines.md § Toggles: no
+	   container border, gray-100 inactive segments with dark text, the
+	   active segment on the brand gradient with white text/icons. Equal
+	   thirds so the three tabs read as one control. */
+	.rp-travel {
+		display: flex;
+		border-radius: var(--radius-pill);
+		overflow: hidden;
+		height: 2rem;
+	}
+	.rp-travel button {
+		flex: 1 1 0;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.3rem;
+		border: none;
+		background: var(--gray-100);
+		font-family: var(--font-ui);
+		font-size: 0.8rem;
+		color: var(--gray-700);
+		padding: 0 0.4rem;
+		cursor: pointer;
+		min-width: 0;
+	}
+	.rp-travel button :global(.material-symbols-outlined) {
+		font-size: 1.05rem;
+		line-height: 1;
+	}
+	.rp-travel button.active {
+		background: var(--gradient-brand);
+		color: var(--white);
+	}
+
+	/* Slim control row of the direct tabs: costing hint left, the shared
+	   swap button pinned to the tail column. */
+	.rp-direct-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.35rem;
+		min-height: 2rem;
+	}
+	.rp-direct-hint {
+		font-size: 0.75rem;
+		color: var(--gray-500);
 	}
 
 	.rp-endpoints {

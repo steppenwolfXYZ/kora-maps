@@ -17,7 +17,8 @@
 	import { isNarrow } from '../routing/layout';
 	import { mapUi } from './uiState.svelte';
 	import {
-		exitLineDetailView, focusSelectedLeg, frameSelectedItinerary
+		exitLineDetailView, focusSelectedLeg, frameSelectedItinerary,
+		frameShownDirectRoutes
 	} from './orchestration.svelte';
 </script>
 
@@ -45,6 +46,7 @@
 			onFocusLeg={focusSelectedLeg}
 			onEnterMapMode={frameSelectedItinerary}
 			onFrameRoute={frameSelectedItinerary}
+			onFrameDirectRoutes={frameShownDirectRoutes}
 			getMapCenter={() => {
 				const c = mapUi.mapRef?.getCenter();
 				return c ? ([c.lng, c.lat] as [number, number]) : null;

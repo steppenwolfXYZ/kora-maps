@@ -1,7 +1,10 @@
 <script lang="ts">
 	import type { Endpoint } from './types';
 	import ViaWaitSelect from './ViaWaitSelect.svelte';
-	import { indexStations, searchStations, type IndexedStation } from './stationSearch';
+	import {
+		indexStations, plainMatchScore, searchStations, searchStationsPlain,
+		type IndexedStation
+	} from './stationSearch';
 	import { loadStationIndex } from './stationIndex';
 	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
 	import { searchPlaces, type GeocodeResult } from '$lib/geocoding/client';
@@ -46,6 +49,12 @@
 		/** Shown as a refresh button while the endpoint is "Current
 		 * location" — re-resolves the position (and re-queries). */
 		onRefreshCurrent?: () => void;
+		/** Cycling / walking tabs (pedestrian-bicycle-routing.md § Mode
+		 * tabs): stations lose their dedicated area at the top of the
+		 * dropdown and are mixed into the geocoder results, ranked by
+		 * plain match quality with no category boost. Station rows keep
+		 * their mode icon and styling either way. */
+		mixedRanking?: boolean;
 		/** Via row (via-stops.md): only stations are offered — the routing
 		 * engine takes stop ids for vias, never coordinates — the clear
 		 * control removes the whole row, and the wait control renders. */
@@ -58,6 +67,7 @@
 	let {
 		label, endpoint, placeholder, onChange,
 		otherIsCurrent = false, onRefreshCurrent,
+		mixedRanking = false,
 		via = false, wait = 0, onWait
 	}: Props = $props();
 
@@ -257,15 +267,44 @@
 		| { kind: 'station'; station: IndexedStation }
 		| { kind: 'geo'; result: GeocodeResult };
 
-	const rows = $derived<Row[]>([
-		...(showCurrent ? [{ kind: 'current' } as Row] : []),
-		...stationResults.map((s) => ({ kind: 'station' as const, station: s })),
-		...geoResults.map((r) => ({ kind: 'geo' as const, result: r }))
-	]);
+	// Cap on the merged mixed-ranking list — roughly the classic list's
+	// size (8 stations + a handful of geo rows).
+	const MIXED_LIMIT = 10;
+
+	const rows = $derived.by<Row[]>(() => {
+		const head: Row[] = showCurrent ? [{ kind: 'current' }] : [];
+		if (!mixedRanking || via) {
+			// Transit tab (and via rows): stations keep their dedicated
+			// area at the top, geocoder results follow below the divider.
+			return [
+				...head,
+				...stationResults.map((s) => ({ kind: 'station' as const, station: s })),
+				...geoResults.map((r) => ({ kind: 'geo' as const, result: r }))
+			];
+		}
+		// Cycling / walking: one merged list ranked by plain match quality
+		// alone — no category boost, no mode/tier/distance terms
+		// (pedestrian-bicycle-routing.md § Mode tabs). Ties keep stations
+		// first (stable sort over the concatenation order), so a station
+		// and a same-named POI don't shuffle between keystrokes.
+		const scored: { row: Row; score: number }[] = [
+			...searchStationsPlain(index, query).map((s) => ({
+				row: { kind: 'station' as const, station: s.station },
+				score: s.score
+			})),
+			...geoResults.map((r) => ({
+				row: { kind: 'geo' as const, result: r },
+				score: plainMatchScore(r.displayName, query)
+			}))
+		];
+		scored.sort((a, b) => b.score - a.score);
+		return [...head, ...scored.slice(0, MIXED_LIMIT).map((x) => x.row)];
+	});
 
 	// Index at which the geo section starts (used for a divider above it).
+	// The mixed list interleaves the two sources, so it has no divider.
 	const geoStartIdx = $derived(
-		(showCurrent ? 1 : 0) + stationResults.length
+		mixedRanking && !via ? -1 : (showCurrent ? 1 : 0) + stationResults.length
 	);
 
 	function pickRow(row: Row) {
