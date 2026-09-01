@@ -1,6 +1,6 @@
 import { pushState, replaceState } from '$app/navigation';
 import { page } from '$app/state';
-import { plan, PlanRequestError } from './client';
+import { plan, PlanRequestError, stationPlaceId } from './client';
 import { itineraryFingerprint } from './fingerprint';
 import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation,
@@ -12,7 +12,10 @@ import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
 import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import { reverseAddress } from '$lib/geocoding/client';
-import type { Endpoint, Itinerary, TimeMode } from './types';
+import {
+	activeVias, MAX_VIAS, MAX_VIA_WAIT_MIN, plannedDwellSec,
+	type Endpoint, type FilledVia, type Itinerary, type TimeMode, type Via
+} from './types';
 import { writeRoutingQuery } from './url';
 
 // Reactive routing state (Svelte 5 runes). One instance shared across the
@@ -25,6 +28,10 @@ let panelOpen = $state(false);
 let focusRequest: 'from' | 'to' | null = null;
 let from = $state<Endpoint | null>(null);
 let to = $state<Endpoint | null>(null);
+// Ordered via stops between From and To (via-stops.md). Rows with a null
+// station exist in the panel but are invisible to the query, the URL and
+// every judgement — filling one is what makes it real.
+let vias = $state<Via[]>([]);
 let mode = $state<TimeMode>('leave');
 let time = $state<string | null>(null);
 // Bumped on every `setTime` call so consumers re-run even when `time`
@@ -144,6 +151,57 @@ function abortInFlight() {
 	pendingAbort = null;
 }
 
+/** The vias a query actually carries (filled rows, capped at the engine
+ * ceiling) and the derived shapes ranking / cards need. */
+function queryVias(): FilledVia[] {
+	return activeVias(vias);
+}
+
+/** via-stops.md § Planned dwell: parent-stop id → requested wait in
+ * seconds, so ranking can tell deliberate stop-time from dead time.
+ * `null` when no via asks for a wait — nothing downstream has to branch. */
+function viaWaitByStop(): Map<string, number> | null {
+	const withWait = queryVias().filter((v) => v.wait > 0);
+	if (withWait.length === 0) return null;
+	return new Map(withWait.map((v) => [stationPlaceId(v.station), v.wait * 60]));
+}
+
+/** Ranking knobs shared by publishResults and the panel's card states. */
+export function rankOptionsFor(): {
+	minimizeWalking: boolean; plannedDwellSec: number;
+	viaWaitByStop: Map<string, number> | null;
+} {
+	return {
+		minimizeWalking: routingOptions.minimizeWalking,
+		plannedDwellSec: plannedDwellSec(vias),
+		viaWaitByStop: viaWaitByStop()
+	};
+}
+
+/** Signature of everything about the vias the query can see — used to
+ * decide whether a via edit actually invalidates the shown results.
+ * Adding or dropping an EMPTY row changes nothing and must not wipe the
+ * result list. */
+function viaSignature(): string {
+	return queryVias().map((v) => `${v.station.uic}:${v.wait}`).join(',');
+}
+
+/** Shared tail of every via edit: only an edit the QUERY can see drops the
+ * shown results — adding or removing an empty row must not. */
+function commitViaEdit(before: string) {
+	if (viaSignature() === before) {
+		syncUrl();
+		return;
+	}
+	abortInFlight();
+	results = [];
+	hasQueried = false;
+	error = null;
+	lastQueryKey = null;
+	invalidateSelection();
+	syncUrl();
+}
+
 function resetCascadeState() {
 	combined = [];
 	seenFingerprints = new Set();
@@ -177,7 +235,8 @@ async function materializeCurrent(
 }
 
 async function recordRecentRoute(
-	from: Endpoint, to: Endpoint, mode: TimeMode, time: string | null
+	from: Endpoint, to: Endpoint, viaList: FilledVia[],
+	mode: TimeMode, time: string | null
 ) {
 	// Snapshot before the awaits — a follow-up query may reset it.
 	const coord = resolvedCurrentCoord;
@@ -187,7 +246,7 @@ async function recordRecentRoute(
 	]);
 	// A current endpoint without a resolved coord can't be reproduced —
 	// skip the entry rather than store a dead one.
-	if (f && t) recentRoutes.record(f, t, mode, time);
+	if (f && t) recentRoutes.record(f, t, viaList, mode, time);
 }
 
 function currentSortFn() {
@@ -207,9 +266,8 @@ function publishResults() {
 	const candidates = routingOptions.minimizeWalking
 		? combined.filter((it) => boardingCount(it) > 0 || walkSeconds(it) <= 1800)
 		: combined;
-	const pruned = pruneDominated(candidates, mode, {
-		minimizeWalking: routingOptions.minimizeWalking
-	}).sort(currentSortFn());
+	const pruned = pruneDominated(candidates, mode, rankOptionsFor())
+		.sort(currentSortFn());
 	// The cap must keep the end nearest the query time: leave-at sorts by
 	// arrival ascending and keeps the head (earliest arrivals after the
 	// departure time); arrive-by sorts by departure ascending and must keep
@@ -270,7 +328,7 @@ async function runHopCascade(
 		setHopStatus(dir);
 		const hopTime = new Date(queryEpoch).toISOString();
 		const res = await plan({
-			from: from!, to: to!, mode: hopMode, time: hopTime,
+			from: from!, to: to!, vias: queryVias(), mode: hopMode, time: hopTime,
 			currentCoord: resolvedCurrentCoord,
 			maxPreTransitTime: pre,
 			maxPostTransitTime: post,
@@ -396,14 +454,20 @@ function hasSparseServiceGap(
  * longer than `LONG_WAIT_THRESHOLD_SEC`. Signals that expanding the
  * walking budget might reach a nearer stop with better-timed service. */
 function hasLongWait(it: Itinerary): boolean {
+	const viaWaits = viaWaitByStop();
 	const legs = it.legs;
 	for (let i = 0; i < legs.length; i++) {
 		const leg = legs[i];
 		if (leg.mode === 'WALK') continue;
-		const prevEnd = i > 0
-			? Date.parse(legs[i - 1].endTime)
-			: Date.parse(it.startTime);
-		const wait = (Date.parse(leg.startTime) - prevEnd) / 1000;
+		const prev = i > 0 ? legs[i - 1] : null;
+		const prevEnd = prev ? Date.parse(prev.endTime) : Date.parse(it.startTime);
+		// A wait the user asked for at a via is not a signal that the
+		// walking radius is too narrow — only its excess is
+		// (via-stops.md § Planned dwell).
+		const planned = viaWaits && prev
+			? (viaWaits.get(prev.to?.parentId ?? '') ?? viaWaits.get(prev.to?.stopId ?? '') ?? 0)
+			: 0;
+		const wait = (Date.parse(leg.startTime) - prevEnd) / 1000 - planned;
 		if (wait > LONG_WAIT_THRESHOLD_SEC) return true;
 	}
 	return false;
@@ -442,9 +506,13 @@ let resolvedNowTime: string | null = null;
 function writeUrl(url: URL, q: {
 	from: Endpoint | null; to: Endpoint | null;
 	mode: TimeMode; time: string | null; route?: string | null;
+	/** Omitted = "the current vias"; pass [] explicitly to clear them
+	 * (close / clear-route, which blank the whole query). */
+	vias?: FilledVia[];
 }) {
 	writeRoutingQuery(url, {
 		...q,
+		vias: q.vias ?? queryVias(),
 		time: q.time ?? resolvedNowTime,
 		options: routingOptions.snapshot()
 	});
@@ -530,6 +598,9 @@ export const routingState = {
 	get open() { return panelOpen; },
 	get from() { return from; },
 	get to() { return to; },
+	get vias() { return vias; },
+	/** Whether another via row may be added — the engine takes two. */
+	get canAddVia() { return vias.length < MAX_VIAS; },
 	get mode() { return mode; },
 	get time() { return time; },
 	get timeVersion() { return timeVersion; },
@@ -612,7 +683,7 @@ export const routingState = {
 		loadingPruned = false;
 		const url = currentUrl();
 		writeUrl(url, {
-			from: null, to: null, mode: 'leave', time: null, route: null
+			from: null, to: null, vias: [], mode: 'leave', time: null, route: null
 		});
 		if (url.href !== window.location.href) {
 			replaceState(url, { ...page.state, routeSelection: undefined });
@@ -626,6 +697,7 @@ export const routingState = {
 		abortInFlight();
 		from = null;
 		to = null;
+		vias = [];
 		mode = 'leave';
 		time = null;
 		resolvedNowTime = null;
@@ -641,7 +713,7 @@ export const routingState = {
 		invalidateSelection();
 		const url = currentUrl();
 		writeUrl(url, {
-			from: null, to: null, mode: 'leave', time: null, route: null
+			from: null, to: null, vias: [], mode: 'leave', time: null, route: null
 		});
 		if (url.href !== window.location.href) {
 			replaceState(url, { ...page.state, routeSelection: undefined });
@@ -652,11 +724,13 @@ export const routingState = {
 	 * routing-persistence.md § Recent routes list). One state write + one
 	 * URL sync; the panel's query effect then runs the query. */
 	loadRoute(next: {
-		from: Endpoint; to: Endpoint; mode: TimeMode; time: string | null;
+		from: Endpoint; to: Endpoint; vias?: Via[];
+		mode: TimeMode; time: string | null;
 	}) {
 		abortInFlight();
 		from = next.from;
 		to = next.to;
+		vias = next.vias ? next.vias.slice(0, MAX_VIAS) : [];
 		mode = next.mode;
 		time = next.time;
 		timeVersion++;
@@ -678,6 +752,63 @@ export const routingState = {
 		lastQueryKey = null;
 		invalidateSelection();
 		syncUrl();
+	},
+
+	/** Insert an empty via row at `index` (via-stops.md § Panel UI: the
+	 * `+` on a row means "insert a stop after this row"). An empty row is
+	 * invisible to the query, so the shown results survive until it is
+	 * filled. */
+	insertViaAt(index: number) {
+		if (vias.length >= MAX_VIAS) return;
+		const i = Math.max(0, Math.min(index, vias.length));
+		vias = [...vias.slice(0, i), { station: null, wait: 0 }, ...vias.slice(i)];
+		syncUrl();
+	},
+
+	/** The To row's `+`: the current destination becomes the last via and
+	 * a fresh empty destination opens below it. Only a station can make
+	 * that move — vias are stations by construction. */
+	promoteToToVia(): boolean {
+		if (!to || to.type !== 'station' || vias.length >= MAX_VIAS) return false;
+		abortInFlight();
+		vias = [...vias, { station: to, wait: 0 }];
+		to = null;
+		results = [];
+		hasQueried = false;
+		error = null;
+		lastQueryKey = null;
+		invalidateSelection();
+		syncUrl();
+		return true;
+	},
+
+	/** Fill (or blank) one via row. Only stations are accepted; anything
+	 * else empties the row rather than silently changing its meaning. */
+	setVia(index: number, ep: Endpoint | null) {
+		const row = vias[index];
+		if (!row) return;
+		const before = viaSignature();
+		const station = ep && ep.type === 'station' ? ep : null;
+		vias = vias.map((v, i) => (i === index ? { ...v, station } : v));
+		commitViaEdit(before);
+	},
+
+	setViaWait(index: number, minutes: number) {
+		const row = vias[index];
+		if (!row) return;
+		const before = viaSignature();
+		const wait = Math.min(MAX_VIA_WAIT_MIN, Math.max(0, Math.round(minutes)));
+		vias = vias.map((v, i) => (i === index ? { ...v, wait } : v));
+		commitViaEdit(before);
+	},
+
+	/** A via row's clear control removes the row outright — unlike From /
+	 * To, whose clear only empties the field (via-stops.md § Panel UI). */
+	removeVia(index: number) {
+		if (!vias[index]) return;
+		const before = viaSignature();
+		vias = vias.filter((_, i) => i !== index);
+		commitViaEdit(before);
 	},
 
 	setTo(ep: Endpoint | null) {
@@ -722,6 +853,9 @@ export const routingState = {
 		const tmp = from;
 		from = to;
 		to = tmp;
+		// The whole chain reverses, waits travelling with their vias
+		// (via-stops.md § Panel UI).
+		vias = [...vias].reverse();
 		results = [];
 		hasQueried = false;
 		error = null;
@@ -820,6 +954,8 @@ export const routingState = {
 		}
 		from = share.from;
 		to = share.to;
+		// Shares created before vias existed simply have none.
+		vias = (share.vias ?? []).slice(0, MAX_VIAS);
 		mode = 'leave';
 		time = share.itinerary.startTime;
 		sharedShare = share;
@@ -841,13 +977,14 @@ export const routingState = {
 	 * never a fresh "now". URL options apply session-only: the link's
 	 * settings drive this tab's queries without touching localStorage. */
 	hydrate(next: {
-		from: Endpoint | null; to: Endpoint | null;
+		from: Endpoint | null; to: Endpoint | null; vias?: Via[];
 		mode: TimeMode; time: string | null;
 		route: string | null;
 		options?: RoutingOptionValues;
 	}) {
 		from = next.from;
 		to = next.to;
+		vias = next.vias ? next.vias.slice(0, MAX_VIAS) : [];
 		mode = next.mode;
 		time = next.time;
 		if (next.options) routingOptions.applySession(next.options);
@@ -886,7 +1023,7 @@ export const routingState = {
 	async runQuery() {
 		if (!from || !to) return;
 		const key = JSON.stringify({
-			from, to, mode, time,
+			from, to, vias: viaSignature(), mode, time,
 			walkSpeed: routingOptions.walkSpeed,
 			safety: routingOptions.safety,
 			// Minimize walking is a query param since it drives the fork's
@@ -938,7 +1075,7 @@ export const routingState = {
 
 			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
 				return await plan({
-					from: from!, to: to!, mode, time: timeArg,
+					from: from!, to: to!, vias: queryVias(), mode, time: timeArg,
 					currentCoord: resolvedCurrentCoord,
 					maxPreTransitTime: pre,
 					maxPostTransitTime: post,
@@ -1158,7 +1295,7 @@ export const routingState = {
 			// remembering. Async fire-and-forget: current-location endpoints
 			// are materialized (reverse geocode) before the entry is stored.
 			if (results.length > 0 && from && to) {
-				void recordRecentRoute(from, to, mode, time);
+				void recordRecentRoute(from, to, queryVias(), mode, time);
 				connectStations.record(from);
 				connectStations.record(to);
 			}

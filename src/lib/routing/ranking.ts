@@ -103,10 +103,15 @@ export function walkElevation(it: Itinerary): { up: number; down: number } | nul
 	return any ? { up, down } : null;
 }
 
-/** Number of transit legs − 1 (same count the result card shows). */
-export function transferCount(it: Itinerary): number {
-	if (typeof it.transfers === 'number') return it.transfers;
-	return Math.max(0, boardingCount(it) - 1);
+/** Number of transit legs − 1 (same count the result card shows). Vehicle
+ * changes forced by a via the traveller asked to wait at are subtracted —
+ * getting off where you meant to get off is not a transfer
+ * (via-stops.md § Planned dwell). */
+export function transferCount(it: Itinerary, opts?: RankOptions): number {
+	const base = typeof it.transfers === 'number'
+		? it.transfers
+		: Math.max(0, boardingCount(it) - 1);
+	return Math.max(0, base - viaForcedChanges(it, opts));
 }
 
 /** Number of transit legs — one boarding per vehicle, walk-only = 0.
@@ -136,6 +141,58 @@ export interface RankOptions {
 	 * never warns: missing one departure means taking the next a minute
 	 * later. */
 	hfGondolaRoutes?: Set<string> | null;
+	/** via-stops.md § Planned dwell: the sum of the REQUESTED via waits in
+	 * seconds. Subtracted from duration before every quality judgement
+	 * (effective time, worseness, very-slow) — time the traveller asked
+	 * for is theirs, not travel time. Deliberately the request, not the
+	 * realised stay: a via where the next departure is an hour out still
+	 * costs real dead time and must stay visible to the comparison. */
+	plannedDwellSec?: number;
+	/** MOTIS parent-station id of each via → its REQUESTED wait in
+	 * seconds. Lets the long-wait warning and the displayed transfer count
+	 * see which stop-time is deliberate. */
+	viaWaitByStop?: Map<string, number> | null;
+}
+
+/** Judged duration: the trip's duration minus the planned via dwell. Every
+ * quality comparison uses this; nothing the user reads as a clock does
+ * (via-stops.md § Planned dwell). Floored at a minute so a dwell that
+ * swallows the whole trip can't produce a zero or negative ratio. */
+export function judgedDuration(it: Itinerary, opts?: RankOptions): number {
+	return Math.max(60, it.duration - (opts?.plannedDwellSec ?? 0));
+}
+
+/** The via wait requested at the station a leg place sits in, in seconds —
+ * 0 when the place is not a via. Legs carry the parent station as
+ * `parentId` (the same id shape a via is sent to the engine as); `stopId`
+ * is a fallback for places the feed gives no parent. */
+function viaWaitAt(place: LegPlace | undefined, opts?: RankOptions): number {
+	const map = opts?.viaWaitByStop;
+	if (!map || !place) return 0;
+	const byParent = place.parentId ? map.get(place.parentId) : undefined;
+	if (byParent != null) return byParent;
+	return (place.stopId ? map.get(place.stopId) : undefined) ?? 0;
+}
+
+/** Vehicle changes the traveller makes only because they asked to stop
+ * there — a junction between two transit legs at a via with a non-zero
+ * requested wait. Not transfers in any sense the traveller cares about
+ * (via-stops.md), so the displayed transfer count excludes them. A change
+ * at a `wait = 0` via is an ordinary transfer and is not counted here. */
+function viaForcedChanges(it: Itinerary, opts?: RankOptions): number {
+	if (!opts?.viaWaitByStop?.size) return 0;
+	let n = 0;
+	let prev: Leg | null = null;
+	for (const l of it.legs) {
+		const isTransit = l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR';
+		if (isTransit) {
+			if (prev && viaWaitAt(prev.to, opts) > 0) n++;
+			prev = l;
+		} else if (l.mode !== 'WALK') {
+			prev = null;
+		}
+	}
+	return n;
 }
 
 /** Walking cost with a soft cap at 30 min: full linear rate below the
@@ -440,7 +497,7 @@ export function pruneDominated(
 		start: Date.parse(it.startTime),
 		end: Date.parse(it.endTime),
 		score: itineraryScore(it, opts),
-		effTime: it.duration * comfortFactor(it, opts),
+		effTime: judgedDuration(it, opts) * comfortFactor(it, opts),
 		walk: walkSeconds(it),
 		transitKeys: transitLegKeys(it),
 		vehicles: vehicleKeys(it)
@@ -542,9 +599,9 @@ const MINIMIZE_WALK_SLOPE = 0.5;
  * differences linear (routing-options.md § Minimize walking). */
 export function effectiveTime(it: Itinerary, opts?: RankOptions): number {
 	if (opts?.minimizeWalking) {
-		return it.duration + itineraryScore(it, opts);
+		return judgedDuration(it, opts) + itineraryScore(it, opts);
 	}
-	return it.duration * comfortFactor(it, opts);
+	return judgedDuration(it, opts) * comfortFactor(it, opts);
 }
 
 /** Multiplier applied to duration to get effective time. In [1.0, 1.2]
@@ -566,18 +623,24 @@ function longestWalkLeg(it: Itinerary): number {
 /** Longest wait between two consecutive transit legs in seconds. Walking
  * time between them is subtracted — a 55 min walk with a 5 min stop
  * counts as a 5 min wait, not 60. */
-function longestTransferWait(it: Itinerary): number {
+function longestTransferWait(it: Itinerary, opts?: RankOptions): number {
 	let prevTransitEnd: number | null = null;
+	let prevTransitTo: LegPlace | undefined;
 	let walkBetween = 0;
 	let maxWait = 0;
 	for (const l of it.legs) {
 		const isTransit = l.mode !== 'WALK' && l.mode !== 'BIKE' && l.mode !== 'CAR';
 		if (isTransit) {
 			if (prevTransitEnd !== null) {
-				const wait = (Date.parse(l.startTime) - prevTransitEnd) / 1000 - walkBetween;
+				// At a via only the EXCESS over the requested wait counts —
+				// a 15 min stay on a 15 min request is the errand, not a
+				// warning (via-stops.md § Planned dwell).
+				const wait = (Date.parse(l.startTime) - prevTransitEnd) / 1000
+					- walkBetween - viaWaitAt(prevTransitTo, opts);
 				if (wait > maxWait) maxWait = wait;
 			}
 			prevTransitEnd = Date.parse(l.endTime);
+			prevTransitTo = l.to;
 			walkBetween = 0;
 		} else if (l.mode === 'WALK' && prevTransitEnd !== null) {
 			walkBetween += legDuration(l);
@@ -721,8 +784,11 @@ export function computeCardStates(itins: Itinerary[], opts?: RankOptions): CardS
 	const isBest = worseness.map((w) => w === bestWorseness);
 
 	// Only needed for the very-slow warnings, which compare raw duration
-	// against the raw fastest — not the comfort-adjusted one.
-	const minDur = Math.min(...itins.map((i) => i.duration));
+	// against the raw fastest — not the comfort-adjusted one. "Raw" still
+	// means minus the planned via dwell: an errand the user asked for must
+	// not make every connection look slow.
+	const durations = itins.map((i) => judgedDuration(i, opts));
+	const minDur = Math.min(...durations);
 
 	return itins.map((it, i) => {
 		let badge: Badge | null = null;
@@ -735,17 +801,18 @@ export function computeCardStates(itins: Itinerary[], opts?: RankOptions): CardS
 		if (walk > STRONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'strong', value: walk });
 		else if (walk > MEDIUM_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'medium', value: walk });
 		else if (walk > LONG_WALK_SEC) warnings.push({ kind: 'long-walk', severity: 'standard', value: walk });
-		const wait = longestTransferWait(it);
+		const wait = longestTransferWait(it, opts);
 		if (wait >= STRONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'strong', value: wait });
 		else if (wait >= MEDIUM_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'medium', value: wait });
 		else if (wait >= LONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'standard', value: wait });
-		const slowGap = it.duration - minDur;
+		const dur = durations[i];
+		const slowGap = dur - minDur;
 		// Gate the whole chain on the minimum absolute difference so the
 		// ratio thresholds don't fire on short trips with small gaps.
 		if (slowGap >= VERY_SLOW_MIN_DIFF_SEC) {
-			if (it.duration >= STRONG_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'strong', value: slowGap });
-			else if (it.duration >= MEDIUM_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'medium', value: slowGap });
-			else if (it.duration >= VERY_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'standard', value: slowGap });
+			if (dur >= STRONG_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'strong', value: slowGap });
+			else if (dur >= MEDIUM_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'medium', value: slowGap });
+			else if (dur >= VERY_SLOW_FACTOR * minDur) warnings.push({ kind: 'very-slow', severity: 'standard', value: slowGap });
 		}
 
 		// Tight-transfer ladder: one icon for the worst tight transfer,

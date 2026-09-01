@@ -1,10 +1,11 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
-	import type { Itinerary, Leg } from './types';
+	import type { FilledVia, Itinerary, Leg } from './types';
 	import { legBadgeColor, loadHfGondolaRoutes, loadRouteColorIndex } from './legColor';
 	import {
 		assessTransfers, legDuration, transferCount, walkElevation, walkMetres, walkSeconds
 	} from './ranking';
+	import { stationPlaceId } from './client';
 	import type { Badge, TransferAssessment, Warning, WarningKind } from './ranking';
 	import {
 		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,
@@ -12,7 +13,7 @@
 	} from './itineraryFormat';
 	import { isNarrow } from './layout';
 	import { itineraryFingerprint } from './fingerprint';
-	import { routingState } from './state.svelte';
+	import { rankOptionsFor, routingState } from './state.svelte';
 	import { buildSharePayload, createShare } from './share';
 	import SharePopup from './SharePopup.svelte';
 
@@ -187,6 +188,89 @@
 			&& legDuration(leg) > LEG_ELEVATION_MIN_SEC;
 	}
 
+	// Via stops of the current query (via-stops.md). A via shows up in the
+	// connection in one of two shapes: as a JUNCTION — the traveller
+	// alights and boards again, which is where a requested wait lands — or
+	// as a PASS-THROUGH, one of a transit leg's intermediate stops, which
+	// is what a 0-wait "route through here" via normally produces.
+	let queryVias = $derived(routingState.vias
+		.filter((v) => v.station !== null)
+		.map((v) => ({
+			id: stationPlaceId(v.station!),
+			name: v.station!.name,
+			wait: v.wait
+		})));
+	let viaById = $derived(new Map(queryVias.map((v) => [v.id, v])));
+
+	function viaFor(place: { parentId?: string; stopId?: string } | undefined) {
+		if (!place || viaById.size === 0) return null;
+		return viaById.get(place.parentId ?? '') ?? viaById.get(place.stopId ?? '') ?? null;
+	}
+
+	interface ViaStay {
+		name: string;
+		/** Requested minimum, in minutes. */
+		wait: number;
+		/** What the timetable actually gives, in seconds. */
+		actual: number;
+	}
+
+	/** Via stays keyed by the index of the transit leg the traveller
+	 * alights from. Only junctions produce a stay — a via passed on board
+	 * has no time to show. */
+	let viaStays = $derived.by(() => {
+		const out = new Map<number, ViaStay>();
+		if (viaById.size === 0) return out;
+		let prevIdx = -1;
+		itinerary.legs.forEach((leg, i) => {
+			const isTransit = isTransitMode(leg.mode);
+			if (!isTransit) return;
+			if (prevIdx >= 0) {
+				const prev = itinerary.legs[prevIdx];
+				const v = viaFor(prev.to);
+				if (v) {
+					out.set(prevIdx, {
+						name: prev.to?.name || v.name,
+						wait: v.wait,
+						actual: Math.max(0,
+							(Date.parse(leg.startTime) - Date.parse(prev.endTime)) / 1000)
+					});
+				}
+			}
+			prevIdx = i;
+		});
+		return out;
+	});
+
+	/** Leg indices a via is passed through on board — the marker rides in
+	 * the strip after that leg, since there is no stop row to hang it on. */
+	let viaPassthroughs = $derived.by(() => {
+		const out = new Map<number, string>();
+		if (viaById.size === 0) return out;
+		itinerary.legs.forEach((leg, i) => {
+			if (!isTransitMode(leg.mode)) return;
+			if (viaStays.has(i)) return;
+			for (const stop of leg.intermediateStops ?? []) {
+				const v = viaFor(stop);
+				if (v) { out.set(i, stop.name || v.name); return; }
+			}
+		});
+		return out;
+	});
+
+	// A change the traveller makes because they wanted to stop there is not
+	// a transfer (via-stops.md § Planned dwell) — rankOptionsFor carries
+	// the via waits that let transferCount see the difference.
+	let transfers = $derived(transferCount(itinerary, rankOptionsFor()));
+
+	/** Marker text for the collapsed legs strip: the requested wait when
+	 * there is one, otherwise just the pin. */
+	function viaChipLabel(idx: number): string | null {
+		const stay = viaStays.get(idx);
+		if (stay) return stay.wait > 0 ? fmtDuration(stay.wait * 60) : '';
+		return viaPassthroughs.has(idx) ? '' : null;
+	}
+
 	// Card title (transit-routing.md § Results): the ride's own boarding /
 	// alighting times are what a glance is looking for, so they carry the
 	// large type and the station names ride along small. The door-to-door
@@ -235,7 +319,13 @@
 		if (shareResetTimer) clearTimeout(shareResetTimer);
 		try {
 			const legColors = itinerary.legs.map((leg) => legBadgeColor(colorIndex, leg));
-			const { url } = await createShare(buildSharePayload(itinerary, from, to, legColors));
+			// The via chain travels with the share — the re-verification
+			// query has to repeat it or a via-forced connection reads as
+			// expired (via-stops.md § Persistence and sharing).
+			const { url } = await createShare(
+				buildSharePayload(itinerary, from, to, legColors,
+					routingState.vias.filter((v) => v.station !== null) as FilledVia[])
+			);
 			shareUrl = url;
 			shareState = 'idle';
 		} catch (err) {
@@ -358,7 +448,7 @@
 	{#if !expanded}
 		<div class="card-summary" transition:slide>
 			<div class="card-legs">
-				{#each displayLegs(itinerary) as { leg, dur, isWalk }, i}
+				{#each displayLegs(itinerary) as { leg, dur, isWalk, index }, i}
 					{#if i > 0}<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>{/if}
 					<span class="card-leg" class:walk={isWalk}>
 						{#if isWalk}
@@ -374,13 +464,29 @@
 							<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
 						{/if}
 					</span>
+					{#if viaChipLabel(index) !== null}
+						{@const stay = viaStays.get(index)}
+						<span class="card-sep material-symbols-outlined" aria-hidden="true">chevron_right</span>
+						<span
+							class="card-via"
+							class:card-via-wait={!!stay && stay.wait > 0}
+							title={stay
+								? (stay.wait > 0
+									? `Stop at ${stay.name} — ${fmtDuration(stay.wait * 60)} planned, ${fmtDuration(stay.actual)} actual`
+									: `Change at ${stay.name} (your stop)`)
+								: `Passes through ${viaPassthroughs.get(index)}`}
+						>
+							<span class="material-symbols-outlined" aria-hidden="true">location_on</span>
+							{#if viaChipLabel(index)}<span>{viaChipLabel(index)}</span>{/if}
+						</span>
+					{/if}
 				{/each}
 			</div>
 		</div>
 	{/if}
 	<div class="card-meta">
 		<span class="card-meta-text">
-			{transferCount(itinerary)} transfer{transferCount(itinerary) === 1 ? '' : 's'}
+			{transfers} transfer{transfers === 1 ? '' : 's'}
 			· <strong>{fmtDuration(walkSeconds(itinerary))}</strong>{#if walkTotalM > 0}{' '}<span
 				class="card-meta-dist"
 				title={walkElevationLabel}
@@ -448,6 +554,31 @@
 							{#if leg.to?.track}<span class="leg-pf">Pl. {leg.to.track}</span>{/if}
 						</span>
 					</button>
+					{#if viaStays.has(i)}
+						{@const stay = viaStays.get(i)!}
+						<!-- The stay the traveller asked for, kept visually apart
+						     from a transfer wait: this time is the point of the
+						     trip, not a cost (via-stops.md § Result display). -->
+						<div class="leg-via">
+							<span class="material-symbols-outlined leg-via-icon" aria-hidden="true">location_on</span>
+							<span class="leg-via-text">
+								Your stop at <strong>{stay.name}</strong>
+								— <strong>{fmtDuration(stay.actual)}</strong>
+								{#if stay.wait > 0}
+									<span class="leg-via-req">({fmtDuration(stay.wait * 60)} asked for)</span>
+								{/if}
+							</span>
+						</div>
+					{:else if viaPassthroughs.has(i)}
+						<!-- A via passed on board: no stop row exists for it in the
+						     leg list, so the ride names it here instead. -->
+						<div class="leg-via leg-via-pass">
+							<span class="material-symbols-outlined leg-via-icon" aria-hidden="true">location_on</span>
+							<span class="leg-via-text">
+								Passes through <strong>{viaPassthroughs.get(i)}</strong>
+							</span>
+						</div>
+					{/if}
 				{:else}
 					<button class="leg-item walk" type="button" onclick={(e) => focusLeg(e, leg)}>
 						<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
@@ -778,6 +909,66 @@
 		white-space: nowrap;
 	}
 	.card-sep { font-size: 0.9rem; color: var(--gray-250); }
+
+	/* Via marker in the collapsed strip (via-stops.md § Result display).
+	   A pass-through via is a quiet pin; one the traveller waits at gets
+	   the anthracite pill with its requested minutes, so a glance tells
+	   the errand stop from a corridor stop. */
+	.card-via {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.1rem;
+		font-size: 0.7rem;
+		font-weight: 600;
+		color: var(--gray-500);
+		white-space: nowrap;
+	}
+	.card-via :global(.material-symbols-outlined) {
+		font-size: 0.95rem;
+		line-height: 1;
+	}
+	.card-via-wait {
+		background: var(--anthracite);
+		color: var(--white);
+		padding: 1px 5px 1px 3px;
+		border-radius: var(--radius-pill);
+	}
+
+	/* The via stay row in the expanded leg list. Deliberately not styled
+	   like a transfer wait: a left gradient rule marks it as a chosen part
+	   of the journey rather than a cost (via-stops.md § Result display). */
+	.leg-via {
+		display: flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.3rem 0.45rem 0.3rem calc(0.45rem + 3px);
+		margin: 0.15rem 0;
+		/* Layered background, not a border-image: the 3px gradient strip
+		   then follows the box exactly (same construction as the selected
+		   connection card's left strip — ux-guidelines.md). */
+		background:
+			var(--gradient-brand) left / 3px 100% no-repeat,
+			var(--gray-50);
+		border-radius: 0.3rem;
+		font-size: 0.8rem;
+		color: var(--gray-850);
+	}
+	/* A via merely passed on board carries no time of its own — quieter. */
+	.leg-via-pass {
+		color: var(--gray-600);
+	}
+	.leg-via-icon {
+		font-size: 1rem;
+		line-height: 1;
+		color: var(--anthracite);
+		flex: 0 0 auto;
+	}
+	.leg-via-text {
+		min-width: 0;
+	}
+	.leg-via-req {
+		color: var(--gray-500);
+	}
 
 	/* Walking time / distance in the meta row read like the walk rows of
 	   the leg list: duration bold and a shade darker, distance plain.

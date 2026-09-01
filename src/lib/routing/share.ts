@@ -1,4 +1,4 @@
-import type { Endpoint, Itinerary, Leg } from './types';
+import type { Endpoint, FilledVia, Itinerary, Leg } from './types';
 import { hash8 } from './fingerprint';
 import { isTransitMode } from './itineraryFormat';
 
@@ -18,6 +18,12 @@ export interface ShareData {
 	/** Never `current` — resolved to a concrete point at share time. */
 	from: Endpoint;
 	to: Endpoint;
+	/** Via stops the shared query carried (via-stops.md). Absent on shares
+	 * created before vias existed — and on any via-less route. The
+	 * re-verification query must repeat them: a via-forced connection is
+	 * not necessarily Pareto-optimal without its vias, and would read as
+	 * expired. */
+	vias?: FilledVia[];
 	/** Stripped itinerary: no legGeometry / intermediateStops (the shared
 	 * view renders the live re-queried itinerary, never this copy). */
 	itinerary: Itinerary;
@@ -91,9 +97,10 @@ export function buildSharePayload(
 	it: Itinerary,
 	from: Endpoint,
 	to: Endpoint,
-	legColors: string[]
+	legColors: string[],
+	vias: FilledVia[] = []
 ): SharePayload {
-	return {
+	const payload: SharePayload = {
 		v: 1,
 		fingerprint: shareFingerprint(it),
 		from: concreteEndpoint(from, it, 'from'),
@@ -101,6 +108,8 @@ export function buildSharePayload(
 		itinerary: stripItinerary(it),
 		legColors
 	};
+	if (vias.length > 0) payload.vias = vias;
+	return payload;
 }
 
 export interface ShareCreateResult {

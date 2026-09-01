@@ -1,6 +1,6 @@
 import { PUBLIC_MOTIS_URL } from '$env/static/public';
 
-import type { Endpoint, PlanResponse, TimeMode } from './types';
+import type { Endpoint, FilledVia, PlanResponse, StationEndpoint, TimeMode } from './types';
 
 // MOTIS base URL — local dev points at the local MOTIS instance
 // (motis/docker-compose.yml, http://localhost:8080), production at the
@@ -33,10 +33,17 @@ export class PlanRequestError extends Error {
 // Side effect: no spurious first/last WALK leg from the station coord
 // to its own platform, which the old stripStationWalks() workaround
 // existed to trim.
-function formatPlace(ep: Endpoint, resolved: [number, number]): string {
+/** MOTIS place id of a station endpoint. Also the id a via stop is sent
+ * as (via-stops.md) and the id an itinerary's leg places carry as
+ * `parentId`, so ranking / card code can match legs against vias. */
+export function stationPlaceId(ep: StationEndpoint): string {
 	// pid carries the feed's parent stop id (SLOID scheme); the legacy
 	// Parent<uic> shape only exists in pre-migration timetables.
-	if (ep.type === 'station') return `ch_${ep.pid ?? `Parent${ep.uic}`}`;
+	return `ch_${ep.pid ?? `Parent${ep.uic}`}`;
+}
+
+function formatPlace(ep: Endpoint, resolved: [number, number]): string {
+	if (ep.type === 'station') return stationPlaceId(ep);
 	if (ep.type === 'point')   return `${ep.coord[1]},${ep.coord[0]}`;
 	return `${resolved[1]},${resolved[0]}`;
 }
@@ -46,6 +53,10 @@ export interface PlanArgs {
 	to: Endpoint;
 	mode: TimeMode;
 	time: string | null;
+	/** Ordered via stops (via-stops.md). Filled rows only — at most two,
+	 * the engine's ceiling. Each carries the REQUESTED minimum stay in
+	 * minutes; 0 lets the traveller stay on board. */
+	vias?: FilledVia[];
 	/** Coords of `current` endpoints, one per side (undefined if not `current`). */
 	currentCoord?: [number, number] | null;
 	/** Walking budget for the walk from FROM to first stop, and last stop
@@ -112,11 +123,23 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	params.set('numItineraries', String(NUM_ITINERARIES));
 	params.set('maxPreTransitTime', String(args.maxPreTransitTime ?? 1800));
 	params.set('maxPostTransitTime', String(args.maxPostTransitTime ?? 1800));
+	// Via stops (via-stops.md). Stop ids only — the engine rejects
+	// coordinates here, which is why vias are always stations. The
+	// per-via minimum stay rides along in the same order; 0 means the
+	// traveller may stay on board (no forced vehicle change).
+	const vias = args.vias ?? [];
+	if (vias.length > 0) {
+		params.set('via', vias.map((v) => stationPlaceId(v.station)).join(','));
+		params.set('viaMinimumStay', vias.map((v) => String(Math.round(v.wait))).join(','));
+	}
 	// `maxTravelTime` is TOTAL itinerary duration (transit + all walking)
 	// in MINUTES — a low value here silently drops Bern↔Lötschental-style
 	// trips where the walking legs alone approach 8 h. 24 h leaves room
 	// for any real cross-CH trip; MOTIS's own limits still cap walking.
-	params.set('maxTravelTime', '1440');
+	// Planned via waits are part of that total, so the ceiling has to grow
+	// by them — otherwise a long errand silently returns nothing at all.
+	const dwellMin = vias.reduce((s, v) => s + Math.round(v.wait), 0);
+	params.set('maxTravelTime', String(1440 + dwellMin));
 	// directModes controls the non-transit fallback that MOTIS returns in
 	// `direct[]`. WALK is the default but set it explicitly so a
 	// walk-only itinerary always comes back for merging.

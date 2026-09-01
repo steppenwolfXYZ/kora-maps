@@ -17,9 +17,53 @@ export type Endpoint =
 
 export type TimeMode = 'leave' | 'arrive';
 
+/** The `station` variant of Endpoint, pulled out because via stops can
+ * only ever be stations (via-stops.md § Via stops — the routing engine
+ * accepts stop ids for vias, never coordinates). */
+export type StationEndpoint = Extract<Endpoint, { type: 'station' }>;
+
+/** One via stop of the route (via-stops.md). `station` is null while the
+ * row exists in the panel but has not been filled yet — such a row is
+ * ignored by the query and never serialised. `wait` is the REQUESTED
+ * minimum stay in whole minutes; 0 means "pass through" (the traveller
+ * may stay on board and no vehicle change is forced). */
+export interface Via {
+	station: StationEndpoint | null;
+	wait: number;
+}
+
+/** A via row whose station is set — the shape everything downstream of the
+ * panel (query, URL, ranking, cards) works with. */
+export type FilledVia = Via & { station: StationEndpoint };
+
+/** Engine ceiling: MOTIS accepts at most two via stops per query. */
+export const MAX_VIAS = 2;
+
+/** Wait-control presets, in minutes. 0 = pass through. */
+export const VIA_WAIT_PRESETS = [0, 5, 10, 15, 30, 45, 60, 90, 120];
+
+/** Ceiling on a custom wait. Low enough that two maxed-out vias still fit
+ * comfortably inside the total-travel-time ceiling the query raises by the
+ * requested dwell sum (via-stops.md § Constraints). */
+export const MAX_VIA_WAIT_MIN = 480;
+
+/** The vias a query actually carries: filled rows only, capped at the
+ * engine ceiling. */
+export function activeVias(vias: Via[]): FilledVia[] {
+	return vias.filter((v): v is FilledVia => v.station !== null).slice(0, MAX_VIAS);
+}
+
+/** Sum of the REQUESTED via waits in seconds — the `plannedDwell` of
+ * via-stops.md § Planned dwell and time judgement. */
+export function plannedDwellSec(vias: Via[]): number {
+	return activeVias(vias).reduce((s, v) => s + v.wait, 0) * 60;
+}
+
 export interface RoutingQuery {
 	from: Endpoint;
 	to: Endpoint;
+	/** Ordered via stops between from and to (via-stops.md). */
+	vias?: Via[];
 	mode: TimeMode;
 	/** ISO-8601 timestamp. `null` means "now". */
 	time: string | null;

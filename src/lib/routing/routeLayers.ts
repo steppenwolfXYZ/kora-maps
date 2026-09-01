@@ -24,6 +24,7 @@ export const ROUTE_CONNECTOR_CASING_LAYER = 'route-connector-casing';
 export const ROUTE_CONNECTOR_FILL_LAYER = 'route-connector-fill';
 export const ROUTE_WALK_LAYER = 'route-walk';
 export const ROUTE_PASSTHROUGH_LAYER = 'route-passthrough';
+export const ROUTE_VIA_RING_LAYER = 'route-via-ring';
 export const ROUTE_DISC_LAYER = 'route-disc';
 export const ROUTE_LABEL_LAYER = 'route-label';
 
@@ -34,6 +35,7 @@ const ROUTE_LAYER_IDS = [
 	ROUTE_CONNECTOR_FILL_LAYER,
 	ROUTE_WALK_LAYER,
 	ROUTE_PASSTHROUGH_LAYER,
+	ROUTE_VIA_RING_LAYER,
 	ROUTE_DISC_LAYER,
 	ROUTE_LABEL_LAYER
 ];
@@ -47,6 +49,11 @@ const STOP_STROKE_WIDTH = 1.0;
 const NEUTRAL_DARK = '#1a1a1a';
 const NEUTRAL_LIGHT = '#ffffff';
 const PIN_FILL = '#1a1a1a';
+// Via ring: the brand red as a semantic accent (ux-guidelines.md) — a
+// stop the traveller asked for, told apart from the stops the route just
+// happens to pass.
+const VIA_RING_COLOR = '#740013';
+const VIA_RING_WIDTH = 2;
 const ICON_FILL = '#ff6b7a';
 
 // Label font weights per tier, mirroring scripts/style/transit_stations.py.
@@ -177,6 +184,11 @@ function fineDiscZoomStep(
 
 const DISC_RADIUS_ANCHORS: [number, number][] = [
 	[4, 5], [8, 7], [12, 9], [14, 10], [18, 13]
+];
+// Pass-through dot radii per zoom, mirroring the step table of the
+// passthrough layer — used only to size the via ring around one.
+const VIA_PASSTHROUGH_ANCHORS: [number, number][] = [
+	[7, 2.2], [10, 2.8], [12, 3.2], [13, 3.5], [16, 4.5]
 ];
 const CONNECTOR_CASING_ANCHORS: [number, number][] = [
 	[4, 6], [8, 8], [12, 10], [16, 14]
@@ -322,6 +334,39 @@ export function installRouteLayers(
 					12, ['case', ['<=', ['get', 'stop_min_zoom'], 12], STOP_STROKE_WIDTH, 0],
 					13, ['case', ['<=', ['get', 'stop_min_zoom'], 13], STOP_STROKE_WIDTH, 0]
 				] as any
+			}
+		});
+	}
+
+	// Via ring (via-stops.md § Result display): a brand-red ring just
+	// outside the dot at every via stop. Sits below the disc layer so the
+	// white disc keeps its own edge; the radius follows whichever dot the
+	// via happens to be — a transfer disc or a pass-through dot — and
+	// inherits that dot's own visibility gate, so a ring never floats
+	// alone at a zoom where its dot is hidden.
+	if (!map.getLayer(ROUTE_VIA_RING_LAYER)) {
+		const steps: any[] = [0];
+		for (let z = 4; z <= 18; z++) {
+			const discR = Math.round(
+				(lerpOverAnchors(DISC_RADIUS_ANCHORS, z) + 3) * 100) / 100;
+			const passR = Math.round(
+				(lerpOverAnchors(VIA_PASSTHROUGH_ANCHORS, z) + 3) * 100) / 100;
+			steps.push(z, ['case',
+				['==', ['get', 'role'], 'disc'],
+				['case', ['<=', ['get', 'disc_min_zoom'], z], discR, 0],
+				['case', ['<=', ['get', 'stop_min_zoom'], z], passR, 0]
+			]);
+		}
+		map.addLayer({
+			id: ROUTE_VIA_RING_LAYER,
+			type: 'circle',
+			source: ROUTE_SOURCE_ID,
+			filter: ['==', ['get', 'is_via'], 1],
+			paint: {
+				'circle-radius': ['step', ['zoom'], ...steps] as any,
+				'circle-color': 'rgba(0,0,0,0)',
+				'circle-stroke-color': VIA_RING_COLOR,
+				'circle-stroke-width': VIA_RING_WIDTH
 			}
 		});
 	}

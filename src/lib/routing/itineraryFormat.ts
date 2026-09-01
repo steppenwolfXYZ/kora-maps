@@ -76,18 +76,23 @@ export function badgeTextColor(hex: string): string {
 // Legs to render in the strip: short inter-transit transfer walks (≤ 6 min
 // between two transit rides) are dropped entirely; first/last-mile walks
 // and longer inter-transit walks are kept, always with their minutes.
-export function displayLegs(it: Itinerary): { leg: Leg; dur: number; isWalk: boolean }[] {
+export function displayLegs(
+	it: Itinerary
+): { leg: Leg; dur: number; isWalk: boolean; index: number }[] {
 	const transitIdx = it.legs
 		.map((l, i) => (isTransitMode(l.mode) ? i : -1))
 		.filter((i) => i >= 0);
 	const firstT = transitIdx[0] ?? -1;
 	const lastT = transitIdx[transitIdx.length - 1] ?? -1;
-	const out: { leg: Leg; dur: number; isWalk: boolean }[] = [];
+	// `index` is the leg's position in `it.legs` — kept because callers
+	// (the via markers of via-stops.md) need to line up strip entries with
+	// per-leg data the strip itself drops.
+	const out: { leg: Leg; dur: number; isWalk: boolean; index: number }[] = [];
 	it.legs.forEach((leg, i) => {
 		const dur = legDuration(leg);
 		const isWalk = leg.mode === 'WALK';
 		if (isWalk && i > firstT && i < lastT && dur <= 6 * 60) return;
-		out.push({ leg, dur, isWalk });
+		out.push({ leg, dur, isWalk, index: i });
 	});
 	return out;
 }

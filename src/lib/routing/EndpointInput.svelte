@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Endpoint } from './types';
+	import ViaWaitSelect from './ViaWaitSelect.svelte';
 	import { indexStations, searchStations, type IndexedStation } from './stationSearch';
 	import { loadStationIndex } from './stationIndex';
 	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
@@ -45,11 +46,23 @@
 		/** Shown as a refresh button while the endpoint is "Current
 		 * location" — re-resolves the position (and re-queries). */
 		onRefreshCurrent?: () => void;
+		/** Via row (via-stops.md): only stations are offered — the routing
+		 * engine takes stop ids for vias, never coordinates — the clear
+		 * control removes the whole row, and the wait control renders. */
+		via?: boolean;
+		/** Requested minimum stay in minutes; via rows only. */
+		wait?: number;
+		onWait?: (minutes: number) => void;
+		/** "Insert a stop after this row" — rendered as a `+` at the row's
+		 * right end whenever the row carries a value and another via still
+		 * fits. */
+		onAddAfter?: () => void;
 	}
 
 	let {
 		label, endpoint, placeholder, onChange,
-		otherIsCurrent = false, onRefreshCurrent
+		otherIsCurrent = false, onRefreshCurrent,
+		via = false, wait = 0, onWait, onAddAfter
 	}: Props = $props();
 
 	let index = $state<IndexedStation[]>([]);
@@ -123,7 +136,8 @@
 	// stale results and skip the network (matches the proxy's own gate).
 	$effect(() => {
 		const q = query.trim();
-		if (q.length < 2) {
+		// Via rows are station-only, so the geocoder is never asked.
+		if (via || q.length < 2) {
 			geoResults = [];
 			return;
 		}
@@ -207,6 +221,16 @@
 	}
 
 	function clear() {
+		if (via) {
+			// A via row's clear removes the row itself (via-stops.md
+			// § Panel UI) — there is nothing left to type into.
+			editing = false;
+			menuOpen = false;
+			query = '';
+			geoResults = [];
+			onChange(null);
+			return;
+		}
 		commit(null);
 		startEdit();
 	}
@@ -229,7 +253,7 @@
 	// other side already uses it. Still offered while this side itself has
 	// it set, so re-picking it is possible after clicking into the field.
 	const showCurrent = $derived(
-		geoAvailable && !geolocationDenied() && !otherIsCurrent && !query.trim()
+		!via && geoAvailable && !geolocationDenied() && !otherIsCurrent && !query.trim()
 	);
 
 	type Row =
@@ -363,6 +387,15 @@
 				{/if}
 			</ul>
 		{/if}
+		{#if via}
+			<!-- An unfilled via row still needs a way out: its × drops the
+			     row, the same as on a filled one. -->
+			<button
+				class="ep-clear icon-btn"
+				onmousedown={(e) => { e.preventDefault(); onChange(null); }}
+				aria-label="Remove this stop"
+			>×</button>
+		{/if}
 	{:else}
 		<button class="ep-value" onclick={startEdit} aria-label="Change {label.toLowerCase()}">
 			<span class="ep-icon material-symbols-outlined" aria-hidden="true">
@@ -379,7 +412,26 @@
 				<span class="material-symbols-outlined">refresh</span>
 			</button>
 		{/if}
-		<button class="ep-clear icon-btn" onclick={clear} aria-label="Clear {label.toLowerCase()}">×</button>
+		{#if via && onWait}
+			<ViaWaitSelect
+				{wait}
+				onChange={onWait}
+				stationName={labelFor(endpoint)}
+			/>
+		{/if}
+		<button
+			class="ep-clear icon-btn"
+			onclick={clear}
+			aria-label={via ? `Remove via ${labelFor(endpoint)}` : `Clear ${label.toLowerCase()}`}
+		>×</button>
+		{#if onAddAfter}
+			<button
+				class="ep-add icon-btn"
+				onclick={onAddAfter}
+				aria-label="Add a stop after {labelFor(endpoint)}"
+				title="Add a stop after this one"
+			>+</button>
+		{/if}
 	{/if}
 </div>
 
@@ -450,6 +502,14 @@
 	.ep-refresh {
 		flex: 0 0 auto;
 		padding: 0.15rem 0.25rem;
+	}
+	/* Same backgroundless icon button as the clear ×; the glyph is a plain
+	   "+" so no new Material Symbol has to enter the subset. */
+	.ep-add {
+		flex: 0 0 auto;
+		font-size: 1.05rem;
+		line-height: 1;
+		padding: 0.15rem 0.3rem;
 	}
 	.ep-refresh :global(.material-symbols-outlined) {
 		font-size: 1rem;

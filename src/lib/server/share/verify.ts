@@ -35,12 +35,20 @@ export async function verifyShare(share: ShareData): Promise<VerifyResult> {
 	} catch {
 		return 'error';
 	}
+	// Repeat the share's via chain — without it a via-forced connection
+	// may not come back at all and the share would read as expired
+	// (via-stops.md § Persistence and sharing).
+	const vias = share.vias ?? [];
+	if (vias.length > 0) {
+		params.set('via', vias.map((v) => `ch_${v.station.pid ?? `Parent${v.station.uic}`}`).join(','));
+		params.set('viaMinimumStay', vias.map((v) => String(Math.round(v.wait))).join(','));
+	}
 	params.set('arriveBy', 'false');
 	params.set('time', share.itinerary.startTime);
 	params.set('numItineraries', '5');
 	params.set('maxPreTransitTime', '28800');
 	params.set('maxPostTransitTime', '28800');
-	params.set('maxTravelTime', '1440');
+	params.set('maxTravelTime', String(1440 + vias.reduce((n, v) => n + Math.round(v.wait), 0)));
 	params.set('directModes', 'WALK');
 	params.set('maxDirectTime', '28800');
 	params.set('searchWindow', '3600');

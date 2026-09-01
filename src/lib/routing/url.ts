@@ -2,7 +2,7 @@ import {
 	DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
 	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
 } from './options.svelte';
-import type { Endpoint, RoutingQuery, TimeMode } from './types';
+import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type RoutingQuery, type TimeMode, type Via } from './types';
 
 // URL query params (transit-routing.md § Deep link, geocoding-search.md § URL persistence):
 //   from, to        — endpoint tokens (uic | lat,lng | 'me')
@@ -12,6 +12,10 @@ import type { Endpoint, RoutingQuery, TimeMode } from './types';
 //   fromKind, toKind — 'address' | 'poi', display hint for the endpoint
 //                     pill's icon. Only carried when the paired from/to is
 //                     a coord AND a kind is known.
+//   via             — ordered via-stop UICs, comma-separated (via-stops.md).
+//                     Only filled rows; empty panel rows are never written.
+//   viaWait         — requested minimum stay per via in minutes, same order
+//                     and length as `via`. Omitted when every wait is 0.
 //   mode            — 'leave' | 'arrive' (absent = leave)
 //   time            — ISO 8601. Always present alongside a query: a null
 //                     ("now") panel time is stamped with the concrete
@@ -31,6 +35,8 @@ export const URL_FROM_NAME = 'fromName';
 export const URL_TO_NAME = 'toName';
 export const URL_FROM_KIND = 'fromKind';
 export const URL_TO_KIND = 'toKind';
+export const URL_VIA = 'via';
+export const URL_VIA_WAIT = 'viaWait';
 export const URL_MODE = 'mode';
 export const URL_TIME = 'time';
 /** Selected itinerary fingerprint (route-display.md § Lifecycle).
@@ -98,6 +104,30 @@ export function paramToEndpoint(
 	return { type: 'station', uic: raw, name: '', coord: [0, 0] };
 }
 
+/** Parse the `via` / `viaWait` pair into ordered via stops. Unknown UICs
+ * are dropped together with their wait (a via the timetable no longer
+ * knows must not silently become a different stop); the list is capped at
+ * the engine's ceiling. Without a `lookup` nothing can be hydrated, so the
+ * caller retries once the station index has loaded. */
+export function paramsToVias(url: URL, lookup?: StationLookup): Via[] {
+	const raw = url.searchParams.get(URL_VIA);
+	if (!raw || !lookup) return [];
+	const waits = (url.searchParams.get(URL_VIA_WAIT) ?? '').split(',');
+	const out: Via[] = [];
+	raw.split(',').forEach((uic, i) => {
+		const token = uic.trim();
+		if (!token) return;
+		const ep = paramToEndpoint(token, lookup);
+		if (!ep || ep.type !== 'station') return;
+		const w = Number(waits[i]);
+		const wait = Number.isFinite(w)
+			? Math.min(MAX_VIA_WAIT_MIN, Math.max(0, Math.round(w)))
+			: 0;
+		out.push({ station: ep, wait });
+	});
+	return out.slice(0, MAX_VIAS);
+}
+
 export function timeToParam(time: string | null): string {
 	return time ?? 'now';
 }
@@ -138,6 +168,7 @@ export function paramsToOptions(url: URL): RoutingOptionValues {
 export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	from: Endpoint | null;
 	to: Endpoint | null;
+	vias: Via[];
 	mode: TimeMode;
 	time: string | null;
 	route: string | null;
@@ -156,6 +187,7 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 			url.searchParams.get(URL_TO_NAME),
 			url.searchParams.get(URL_TO_KIND)
 		),
+		vias: paramsToVias(url, lookup),
 		mode: paramToMode(url.searchParams.get(URL_MODE)),
 		time: paramToTime(url.searchParams.get(URL_TIME)),
 		route: url.searchParams.get(URL_ROUTE),
@@ -181,6 +213,8 @@ function pointKind(ep: Endpoint | null): string | null {
 export function writeRoutingQuery(url: URL, q: {
 	from: Endpoint | null;
 	to: Endpoint | null;
+	/** Filled via rows only (via-stops.md § Persistence and sharing). */
+	vias?: FilledVia[];
 	mode: TimeMode;
 	time: string | null;
 	route?: string | null;
@@ -203,6 +237,21 @@ export function writeRoutingQuery(url: URL, q: {
 	const toKind = pointKind(q.to);
 	if (toKind) url.searchParams.set(URL_TO_KIND, toKind);
 	else url.searchParams.delete(URL_TO_KIND);
+	// Vias ride as two parallel comma-separated lists. `viaWait` is written
+	// only when at least one wait is non-zero, so the pure "route through
+	// here" case leaves the address as short as it was before.
+	const vias = hasQuery ? (q.vias ?? []) : [];
+	if (vias.length > 0) {
+		url.searchParams.set(URL_VIA, vias.map((v) => v.station.uic).join(','));
+		if (vias.some((v) => v.wait > 0)) {
+			url.searchParams.set(URL_VIA_WAIT, vias.map((v) => String(v.wait)).join(','));
+		} else {
+			url.searchParams.delete(URL_VIA_WAIT);
+		}
+	} else {
+		url.searchParams.delete(URL_VIA);
+		url.searchParams.delete(URL_VIA_WAIT);
+	}
 	// mode only carried when non-default (`leave` = absent).
 	if (q.mode === 'arrive') url.searchParams.set(URL_MODE, 'arrive');
 	else url.searchParams.delete(URL_MODE);
@@ -224,6 +273,8 @@ export function writeRoutingQuery(url: URL, q: {
 
 export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_FROM);
+	url.searchParams.delete(URL_VIA);
+	url.searchParams.delete(URL_VIA_WAIT);
 	url.searchParams.delete(URL_TO);
 	url.searchParams.delete(URL_FROM_NAME);
 	url.searchParams.delete(URL_TO_NAME);

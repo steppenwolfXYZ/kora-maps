@@ -7,8 +7,9 @@
 	import ConnectGrid from './ConnectGrid.svelte';
 	import RoutingOptions from './RoutingOptions.svelte';
 	import { computeCardStates } from './ranking';
+	import { fmtDuration } from './itineraryFormat';
 	import { routingOptions } from './options.svelte';
-	import { routingState } from './state.svelte';
+	import { rankOptionsFor, routingState } from './state.svelte';
 	import { recentRoutes, endpointLabel, type RecentRoute } from './recents.svelte';
 	import { loadStationIndex, type StationEntry } from './stationIndex';
 	import { loadHfGondolaRoutes, modeMidColor } from './legColor';
@@ -33,7 +34,7 @@
 		void loadHfGondolaRoutes().then((s) => { hfGondolas = s; });
 	});
 	let cardStates = $derived(computeCardStates(displayed, {
-		minimizeWalking: routingOptions.minimizeWalking,
+		...rankOptionsFor(),
 		hfGondolaRoutes: hfGondolas
 	}));
 	// Loading-edge suppression: the card at the time-advancing edge (last
@@ -156,6 +157,26 @@
 	let resultsEl: HTMLDivElement | null = $state(null);
 	let fromInput: EndpointInput | undefined = $state();
 	let toInput: EndpointInput | undefined = $state();
+	// One entry per via row, in row order (via-stops.md § Panel UI).
+	let viaInputs: (EndpointInput | undefined)[] = $state([]);
+
+	/** Insert an empty via row and put the cursor in it — adding a stop is
+	 * always followed by naming it. */
+	function addViaAt(index: number) {
+		routingState.insertViaAt(index);
+		void tick().then(() => viaInputs[index]?.focusSearch());
+	}
+
+	// The To row's `+` demotes the destination to a via and opens a fresh
+	// one below. Only a station can make that move — vias are stations.
+	let canSplitDestination = $derived(
+		routingState.to?.type === 'station' && routingState.canAddVia
+	);
+
+	function splitDestination() {
+		if (!routingState.promoteToToVia()) return;
+		void tick().then(() => toInput?.focusSearch());
+	}
 
 	// Open-time cursor placement: openPanel records which endpoint field
 	// should receive focus; consume it once when the panel mounts. Remounts
@@ -395,6 +416,10 @@
 		void routingState.mode;
 		void routingState.time;
 		void routingState.timeVersion;
+		// Via stops and their waits are query params too (via-stops.md).
+		// Reading the rows themselves (not just the array) makes a wait
+		// change re-trigger.
+		for (const v of routingState.vias) { void v.station; void v.wait; }
 		void routingOptions.walkSpeed;
 		void routingOptions.safety;
 		void routingOptions.minimizeWalking;
@@ -417,9 +442,31 @@
 		routingState.loadRoute({
 			from: r.from,
 			to: r.to,
+			vias: r.vias,
 			mode: past ? 'leave' : r.mode,
 			time: past ? null : r.time
 		});
+	}
+
+	/** A recent entry's stops in travel order — From, its vias, To
+	 * (via-stops.md § Persistence and sharing). `wait` is null on the two
+	 * endpoints and the requested minutes on a via, which is also what the
+	 * box's tooltip spells out. */
+	function recentChain(r: RecentRoute): {
+		ep: Endpoint; wait: number | null; title: string;
+	}[] {
+		const vias = (r.vias ?? []).map((v) => ({
+			ep: v.station as Endpoint,
+			wait: v.wait,
+			title: v.wait > 0
+				? `Via ${endpointLabel(v.station)} — wait ${fmtDuration(v.wait * 60)}`
+				: `Via ${endpointLabel(v.station)}`
+		}));
+		return [
+			{ ep: r.from, wait: null, title: endpointLabel(r.from) },
+			...vias,
+			{ ep: r.to, wait: null, title: endpointLabel(r.to) }
+		];
 	}
 
 	// Local-calendar day key so day-boundary markers respect the viewer's TZ.
@@ -475,7 +522,31 @@
 				}}
 				otherIsCurrent={routingState.to?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
+				onAddAfter={routingState.from && routingState.canAddVia
+					? () => addViaAt(0)
+					: undefined}
 			/>
+			<!-- Via rows (via-stops.md § Panel UI). Each row's `+` inserts a
+			     stop AFTER it, so the chain reads top to bottom in travel
+			     order; the last-inserted row takes the cursor. -->
+			{#each routingState.vias as v, i}
+				<EndpointInput
+					bind:this={viaInputs[i]}
+					via
+					label="Via"
+					endpoint={v.station}
+					placeholder="Stop on the way"
+					wait={v.wait}
+					onChange={(ep) => {
+						if (ep) routingState.setVia(i, ep);
+						else routingState.removeVia(i);
+					}}
+					onWait={(m) => routingState.setViaWait(i, m)}
+					onAddAfter={v.station && routingState.canAddVia
+						? () => addViaAt(i + 1)
+						: undefined}
+				/>
+			{/each}
 			<EndpointInput
 				bind:this={toInput}
 				label="To"
@@ -484,6 +555,7 @@
 				onChange={(ep) => routingState.setTo(ep)}
 				otherIsCurrent={routingState.from?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
+				onAddAfter={canSplitDestination ? splitDestination : undefined}
 			/>
 		</div>
 		<button
@@ -538,20 +610,21 @@
 				<div class="rp-recents">
 					{#each visibleRecents as r (r.at)}
 						<button class="rr-row" onclick={() => pickRecent(r)}>
-							{#each [r.from, r.to] as ep, i (i)}
-								{#if i === 1}
+							{#each recentChain(r) as step, i (i)}
+								{#if i > 0}
 									<span class="material-symbols-outlined rr-arrow" aria-hidden="true">chevron_right</span>
 								{/if}
-								{@const g = epGrad(ep)}
+								{@const g = epGrad(step.ep)}
 								<span
 									class="rr-ep"
-									class:ep-point={ep.type === 'point'}
+									class:ep-point={step.ep.type === 'point'}
+									class:rr-via={step.wait !== null}
 									style:--tile-a={g?.a}
 									style:--tile-b={g?.b}
-									title={endpointLabel(ep)}
+									title={step.title}
 								>
-									<span class="material-symbols-outlined rr-ep-icon" aria-hidden="true">{epIcon(ep)}</span>
-									<span class="rr-ep-text">{endpointLabel(ep)}</span>
+									<span class="material-symbols-outlined rr-ep-icon" aria-hidden="true">{epIcon(step.ep)}</span>
+									<span class="rr-ep-text">{endpointLabel(step.ep)}</span>
 								</span>
 							{/each}
 						</button>
@@ -915,6 +988,14 @@
 		color: var(--white);
 		padding: 0.28rem 0.55rem;
 		text-align: left;
+	}
+
+	/* A via box in a recent row is a stop on the way, not an endpoint —
+	   same tile, one shade quieter, and it yields row space to the two
+	   endpoints when names are long. */
+	.rr-via {
+		opacity: 0.82;
+		max-width: 32%;
 	}
 	.rr-ep.ep-point { background: #7b7b7b; }
 	.rr-ep-icon {

@@ -8,6 +8,7 @@
 import type maplibregl from 'maplibre-gl';
 import { tick } from 'svelte';
 import { isNarrow } from './layout';
+import { routingState } from './state.svelte';
 import { buildRouteGeoJSON, legBounds } from './routeGeoJSON';
 import {
 	installRouteLayers, removeRouteLayers,
@@ -69,6 +70,17 @@ async function frameRouteBounds(
 /** Camera focus for a clicked leg row in the expanded result card.
  * Frames the leg's bbox, keeping clear of the routing panel on
  * desktop (same framing rule as the whole-route auto-frame). */
+/** Merged UICs of the current query's via stops — the drawn route rings
+ * them so a stop the traveller chose reads apart from the ones the route
+ * merely passes (via-stops.md § Result display). */
+function viaUics(): Set<string> {
+	return new Set(
+		routingState.vias
+			.filter((v) => v.station !== null)
+			.map((v) => v.station!.uic)
+	);
+}
+
 export function focusRouteLeg(getMap: () => maplibregl.Map | null, leg: Leg) {
 	void frameRouteBounds(getMap, legBounds(leg), 17);
 }
@@ -83,7 +95,7 @@ export function frameItinerary(
 	colorIndex: Map<string, string> | null,
 	stationIndex: Map<string, StationEntry> | null
 ) {
-	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex);
+	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex, viaUics());
 	void frameRouteBounds(getMap, geo.bbox, 15);
 }
 
@@ -93,7 +105,7 @@ export function enterRouteOverlay(
 	colorIndex: Map<string, string> | null,
 	stationIndex: Map<string, StationEntry> | null
 ) {
-	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex);
+	const geo = buildRouteGeoJSON(it, colorIndex, stationIndex, viaUics());
 
 	// Auto-frame the route bbox. Desktop frames immediately; on narrow
 	// screens the full-width list hides the map anyway, so framing is

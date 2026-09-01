@@ -5,7 +5,7 @@
 	import {
 		badgeTextColor, displayLegs, fmtDuration, fmtTime, iconFor
 	} from './itineraryFormat';
-	import { routingState } from './state.svelte';
+	import { rankOptionsFor, routingState } from './state.svelte';
 
 	// Summary header for the mobile fullscreen map mode
 	// (routing-map-details-split.md): the connection's times / duration /
@@ -28,7 +28,7 @@
 				<span class="rmh-time">{fmtTime(it.startTime)} – {fmtTime(it.endTime)}</span>
 				<span class="rmh-meta">
 					{fmtDuration(it.duration)}
-					· {transferCount(it)} transfer{transferCount(it) === 1 ? '' : 's'}
+					· {transferCount(it, rankOptionsFor())} transfer{transferCount(it, rankOptionsFor()) === 1 ? '' : 's'}
 				</span>
 			</div>
 			<div class="rmh-legs">

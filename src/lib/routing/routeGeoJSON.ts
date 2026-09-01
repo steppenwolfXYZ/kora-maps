@@ -183,7 +183,12 @@ function minZoomFor(tier: string | undefined): number {
 export function buildRouteGeoJSON(
 	itinerary: Itinerary,
 	routeColorIndex: Map<string, string> | null,
-	stationIndex: Map<string, StationEntry> | null
+	stationIndex: Map<string, StationEntry> | null,
+	/** Merged UICs of the query's via stops (via-stops.md). Discs and
+	 * pass-through dots at these stations are tagged `is_via`, which
+	 * routeLayers rings so a stop the traveller chose reads apart from the
+	 * ones the route merely passes. */
+	viaUics?: Set<string> | null
 ): RouteGeoJSONResult {
 	const features: Feature[] = [];
 	let bbox: [number, number, number, number] | null = null;
@@ -234,7 +239,8 @@ export function buildRouteGeoJSON(
 						leg_index: i,
 						stop_name: st.name ?? '',
 						stop_tier: normalizedTier,
-						stop_min_zoom: minZoomFor(tier)
+						stop_min_zoom: minZoomFor(tier),
+						is_via: uic && viaUics?.has(uic) ? 1 : 0
 					}
 				});
 			}
@@ -389,6 +395,17 @@ export function buildRouteGeoJSON(
 					disc_min_zoom: 0
 				}
 			});
+		}
+	}
+
+	// Tag every disc that sits at a via station. Done in one sweep rather
+	// than at each of the four disc-emitting sites — the rule is purely
+	// "which station is this", independent of why the disc exists.
+	if (viaUics?.size) {
+		for (const f of features) {
+			if (f.properties?.role !== 'disc') continue;
+			const uic = f.properties.parent_uic as string | undefined;
+			f.properties.is_via = uic && viaUics.has(uic) ? 1 : 0;
 		}
 	}
 
