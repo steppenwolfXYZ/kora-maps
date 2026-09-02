@@ -50,7 +50,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # NB: not `GROUPS` — that is a bash special array (the caller's group ids)
 # and assigning to it silently does nothing.
-SYNC_GROUPS="assets,motis,valhalla,lookup"
+SYNC_GROUPS="assets,motis,valhalla,lookup,routed"
 STREET_WAYS=0
 FULL_VALHALLA=0
 FORCE=0
@@ -61,9 +61,10 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--only)           SYNC_GROUPS="$2"; shift 2 ;;
 		--only=*)         SYNC_GROUPS="${1#*=}"; shift ;;
-		--with-routed)    SYNC_GROUPS="$SYNC_GROUPS,routed"; shift ;;
-		# Accepted and ignored: the matrix always ships now. Kept so the
-		# old habit does not fall through to rsync as an unknown option.
+		--no-routed)      SYNC_GROUPS="${SYNC_GROUPS//,routed/}"; shift ;;
+		# Accepted and ignored: both ship by default now. Kept so the old
+		# habits do not fall through to rsync as unknown options.
+		--with-routed)    shift ;;
 		--with-matrix)    shift ;;
 		--street-ways)    STREET_WAYS=1; shift ;;
 		--full-valhalla)  FULL_VALHALLA=1; shift ;;

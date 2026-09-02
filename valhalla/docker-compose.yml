@@ -20,7 +20,21 @@
 # scripts/preprocess_osm_for_motis.py).
 services:
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    # Official upstream image, pinned. The old
+    # ghcr.io/gis-ops/docker-valhalla image was archived in March 2026
+    # ("code moved to upstream") and its `latest` tag had stopped moving
+    # in October 2024 — it reported Valhalla 3.5.1 while missing the
+    # level/elevator support 3.5.0 and 3.5.1 actually shipped, so
+    # `elevator_penalty`, `step_penalty`, `search_filter.level` and the
+    # wheelchair profile were all silently inert: a lift was a free
+    # teleport between levels. The entrypoint moved upstream unchanged,
+    # so the environment interface below is the same.
+    #
+    # PINNED on purpose: `latest` is what let a two-year-old router sit
+    # here unnoticed. Bumping is a deliberate act — it forces a tile
+    # rebuild and, because the transfer table is derived from the graph,
+    # a footpath-matrix rebuild too.
+    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
     container_name: kora-valhalla
     ports:
       - "8002:8002"
