@@ -99,6 +99,22 @@ exactly the large interchanges where transfers are tight.
   (proximity matched), `platform_snap` (pre-existing tier) and
   `unanchored`.
 
+### Quay source
+
+- The quay list is read from the **filtered** feed (step 04's output),
+  not the routed one. The orchestrated pipeline builds this network in
+  parallel with pfaedle, so the routed feed is being rewritten at that
+  moment; reading it anchored against the previous run's quays.
+- Anchors are keyed by stop id, and the source feed renumbers quays
+  between releases. A stale anchor set is therefore not a partial
+  improvement but a silent regression: the renumbered quay matches no
+  anchor, keeps its published coordinate, and — when that coordinate sits
+  off the walkable graph — drops out of the footpath matrix entirely, so
+  trains calling there cannot be boarded at all.
+- Consequently the anchor set must be rebuilt whenever *either* the OSM
+  extract or the filtered stops change. Freshness may not be judged on
+  the OSM side alone.
+
 ### Unanchored quays and residual gaps
 
 - A quay that cannot be anchored keeps its published coordinate. No quay

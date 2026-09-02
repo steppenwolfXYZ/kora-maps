@@ -7,7 +7,9 @@ Four deliberately separate deploy channels:
 3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
 4. **Valhalla pedestrian router** — manual, `scripts/deploy_valhalla.sh`, run only when the tile set should be (re)published. Tile + elevation build runs locally; the server only serves prebuilt tiles.
 
-`scripts/update_map.sh` is the data-refresh machine's whole routine, scheduled as a DAG rather than a line: GTFS ∥ OSM downloads → OSM extracts ∥ GTFS preprocess → pfaedle (sharded over `PFAEDLE_JOBS` containers) ∥ routing prep (`setup_routing.sh --steps 1,2,3,4`: network, image, OSM patch, Valhalla tiles — with a tile wipe first when the OSM extract is newer than the tiles) → footpath matrix ∥ map emission (`rebuild_transit.sh --only 6,7,8`) → MOTIS import + local smoke test → the three deploys (`deploy_motis.sh --data-only`: indexes only, never this machine's amd64 image) → production smoke test. Any failing stage aborts before the deploy phase, so a broken local import never reaches the server; per-stage wall times print at the end. Sizing env: `PFAEDLE_JOBS`, `TIPPECANOE_JOBS`, `VALHALLA_THREADS`, `MATRIX_WORKERS`. The app deploy stays separate (git push from the dev Mac).
+`scripts/update_map.sh` is the data-refresh machine's whole routine, scheduled as a DAG rather than a line: GTFS ∥ OSM downloads → OSM extracts ∥ GTFS preprocess → pfaedle (sharded over `PFAEDLE_JOBS` containers) ∥ routing prep (`setup_routing.sh --steps 1,2,3,4`: network, image, OSM patch, station walk network + quay anchors, Valhalla tiles — with a tile wipe first when the OSM extract is newer than the tiles) → footpath matrix ∥ map emission (`rebuild_transit.sh --only 6,7,8`) → MOTIS import + local smoke test → the three deploys (`deploy_motis.sh --data-only`: indexes only, never this machine's amd64 image) → production smoke test. Any failing stage aborts before the deploy phase, so a broken local import never reaches the server; per-stage wall times print at the end. Sizing env: `PFAEDLE_JOBS`, `TIPPECANOE_JOBS`, `VALHALLA_THREADS`, `MATRIX_WORKERS`. The app deploy stays separate (git push from the dev Mac).
+
+Because that routing-prep branch runs *alongside* pfaedle, anything in it that needs GTFS reads `data/gtfs_filtered/` (final since the previous phase) and never `data/gtfs_routed/`, which pfaedle is rewriting at that moment — see `station-walk-network.md` § Quay source.
 
 Separate from all four, `scripts/sync_to_mac.sh` pushes a finished run sideways from the data machine to the dev Mac so the Mac stays current without re-running the pipeline — see § Dev-machine sync.
 
@@ -49,7 +51,7 @@ The client reaches MOTIS same-origin at `/routing/` (env var `PUBLIC_MOTIS_URL`,
 
 One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Because the transfer table is built at import, both the two-tier split and the minimum-transfer-time floor only exist in indexes produced by an image that carries them — an index imported by an older image silently lacks them (the `koraFullTransfers` profile then degrades to the capped table). After bumping the fork, re-import before judging routing behaviour.
 
-Re-import cycle (all local): `python3 scripts/build_station_walk_network.py` → `python3 scripts/preprocess_gtfs_for_motis.py` → **`python3 scripts/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
+Re-import cycle (all local): `python3 scripts/build_station_walk_network.py` → `python3 scripts/preprocess_gtfs_for_motis.py` → `python3 scripts/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
 
 ## Valhalla deploy (`scripts/deploy_valhalla.sh`)
 
@@ -86,8 +88,8 @@ assumption in deploy channel 3 above that the Mac is the importing machine —
 | `assets` | `static/map-assets/` | ~470 MB | pmtiles, style.json, search/line/color indexes, glyph fonts |
 | `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + the footpath matrix CSV |
 | `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
-| `lookup` | `data/` (derived only) | ~160 MB | diagnostic + identity tables |
-| `routed` | `data/gtfs_routed/` | ~6.2 GB | opt-in (`--with-routed`) |
+| `lookup` | `data/` (raw feed + derived) | ~400 MB | the whole GTFS feed, diagnostics, identity, OSM way extracts |
+| `routed` | `data/gtfs_routed/` + `data/gtfs_motis/stops.txt` | ~6.2 GB | opt-in (`--with-routed`) |
 
 **The matrix ships with the indexes.** It used to be opt-in
 (`--with-matrix`), on the theory that the Mac never re-imports because MOTIS
@@ -103,18 +105,48 @@ The CSV is still `--exclude`d from the index push and sent in a second,
 text that compresses ~8.5× — and that exclude also keeps `--delete` from
 removing the Mac's copy between the two pushes.
 
-**Raw inputs do not ship.** The country PBFs (12.7 GB, unreadable without
-osmium) and the bulk GTFS tables (`stop_times.txt`, `trips.txt`,
-`calendar_dates.txt`) are pipeline fuel, not lookup material. The `lookup`
-group instead carries the small derived tables that are actually worth
-grepping while debugging: `data/transit/*.json` (`gtfs_groups_full.json` above
-all), `stop_identity.json`, `data/gtfs_motis/stops.txt` (the platform-snapped
-stops the router sees — the sidecar's one non-hardlinked file), the small GTFS
-tables (`stops`, `routes`, `agency`, `calendar`, `frequencies`), and the OSM
-extracts (`rail_ways`, `tram_ways`, `platform_ways`, `builtup_grid_100m`,
-`quay_anchors`). `--street-ways` adds `street_ways.geojson` (152 MB).
-`--with-routed` adds `data/gtfs_routed/`, which is what the Mac needs to run
-`rebuild_transit.sh --start 6` against fresh data without redoing pfaedle.
+**Feed directories travel whole or not at all.** This is the rule the sync
+broke for months. `lookup` used to send six small tables out of `data/gtfs/`
+(`stops`, `routes`, `agency`, `calendar`, `frequencies`, `feed_info`) and the
+sidecar's lone `data/gtfs_motis/stops.txt`, holding back `stop_times.txt` /
+`trips.txt` / `calendar_dates.txt` as "pipeline fuel". The result was a Mac
+whose `data/gtfs/feed_info.txt` announced the new release while its big tables
+were the previous one — a directory that lies about its vintage, which is
+worse to debug against than one that is simply absent — and, far worse, a
+`data/gtfs_motis/` carrying this machine's new `stops.txt` over the Mac's own
+old, hardlinked `stop_times.txt`. SBB renumbers quays between releases (Bern
+platform 8 went `ch:1:sloid:7000:0:229097` → `ch:1:sloid:7000:4:8`), so those
+stop references dangle. **MOTIS imports that without complaining**: nigiri
+drops the unresolvable stop, keeps the trip, and reports only a count — the
+IC1 then ran Fribourg → Zürich without ever calling at Bern, invisible to any
+query from Bern while still listed in `/stoptimes` elsewhere.
+
+So: `data/gtfs/` now ships in full (`--delete`, only `gtfs_complete.zip`
+excluded as a duplicate of what was just sent). It is ~3.6 GB on disk but
+overwrites the Mac's existing copy in place, so the disk delta is ~zero, and
+`-z` puts ~240 MB on the wire. That also restores the two lookups you actually
+need — `trips.txt` (trip_id → route / service / headsign, the join for every
+trip id in a MOTIS response) and `calendar_dates.txt` (whether a service runs
+on a given date; in this feed `calendar.txt` alone is a coarse weekday row that
+~50 exception rows then override). `data/gtfs_motis/stops.txt` moved to the
+`routed` group, so the sidecar is never half-updated.
+
+The rest of `lookup` is unchanged: `data/transit/**/*.json`
+(`gtfs_groups_full.json` above all, now including the `diagnostics/`
+subdirectory), `stop_identity.json`, and the OSM extracts (`rail_ways`,
+`tram_ways`, `platform_ways`, `builtup_grid_100m`, `quay_anchors`).
+`--street-ways` adds `street_ways.geojson` (152 MB). The country PBFs
+(12.7 GB, unreadable without osmium) still stay here.
+
+**Re-importing MOTIS on the Mac requires `--with-routed`.** The `motis` group
+already delivers this machine's finished, self-consistent indexes; a local
+re-import throws them away and rebuilds from `data/gtfs_motis/`, which without
+that flag is the Mac's own months-old feed. `--with-routed` sends the routed
+feed and the sidecar's `stops.txt` together, in that order. If you are not
+passing it, do not re-import — just restart MOTIS on the synced indexes.
+`setup_routing.sh` step 7 now runs `scripts/check_gtfs_motis_consistency.py`
+before the importer and refuses a mixed feed, but "old yet internally
+consistent" passes that check by design.
 
 **Safety rails.** Two, both learned the hard way:
 

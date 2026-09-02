@@ -49,7 +49,15 @@ import osmium
 
 ROOT = Path(__file__).resolve().parent.parent
 OSM_DIR = ROOT / "data" / "osm"
-GTFS_IN = ROOT / "data" / "gtfs_routed"
+# Quays are read from step 04's output, NOT from data/gtfs_routed/.
+# update_map.sh runs this script (setup_routing.sh step 3) concurrently
+# with pfaedle, which rewrites data/gtfs_routed/ in place — reading the
+# routed feed here meant anchoring against the *previous* run's stops, so
+# a quay whose id the feed renumbered got no anchor and could keep an
+# unroutable raw coordinate all the way into the footpath matrix. The
+# filtered feed is final before that phase starts and carries the same
+# stop ids, coords, platform codes and parents.
+GTFS_IN = ROOT / "data" / "gtfs_filtered"
 
 SOURCE_PBF = OSM_DIR / "ch_pfaedle.osm.pbf"
 RAW_EXTRACT_PBF = OSM_DIR / "station_infra.raw.osm.pbf"
@@ -995,7 +1003,7 @@ def build_anchors(walk_lines):
     """Project every GTFS quay onto its platform's walk line."""
     stops_path = GTFS_IN / "stops.txt"
     if not stops_path.exists():
-        sys.exit(f"missing {stops_path} — run pipeline step 05 first")
+        sys.exit(f"missing {stops_path} — run pipeline step 04 first")
 
     usable = [w for w in walk_lines if w["connected"] and len(w["line"]) >= 2]
     cell = 0.002

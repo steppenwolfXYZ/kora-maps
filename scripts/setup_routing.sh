@@ -89,10 +89,15 @@ if ! docker info >/dev/null 2>&1; then
   echo "docker is not running — start Docker and retry" >&2
   exit 1
 fi
-# Steps 1-4 (network, image, OSM patch, Valhalla) need only the OSM
-# extracts; the routed GTFS is required from step 5 on. Orchestrators
-# start steps 1-4 while pfaedle is still running.
+# Steps 1-4 (network, image, OSM patch, Valhalla) need the OSM extracts
+# plus — for step 3's quay anchors — step 04's filtered stops; the routed
+# GTFS is required from step 5 on. Orchestrators start steps 1-4 while
+# pfaedle is still running, which is exactly why step 3 reads the filtered
+# feed and never the routed one (see build_station_walk_network.py).
 PREREQS=(data/osm/ch_pfaedle.osm.pbf data/osm/switzerland-latest.osm.pbf)
+for n in 3 4; do
+  if want "$n"; then PREREQS+=(data/gtfs_filtered/stops.txt); break; fi
+done
 for n in 5 6 7 8; do
   if want "$n"; then PREREQS+=(data/gtfs_routed/stops.txt); break; fi
 done
@@ -158,8 +163,15 @@ else
 fi
 # Platform walk lines + quay anchors. Must precede the --valhalla patch
 # (which merges the overlay) and step 5 (which reads the anchors).
+# The freshness test includes the filtered stops: anchors are keyed by
+# stop_id, so a GTFS refresh that renumbers a quay invalidates them even
+# when the OSM extract is untouched. Without that clause the stale anchor
+# file survived, the renumbered quay never got snapped onto its platform,
+# and it dropped out of the footpath matrix — leaving trains that call
+# there visible in /stoptimes but unboardable in /plan.
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
+      && data/osm/station_walk_network.osm.pbf -nt data/gtfs_filtered/stops.txt \
       && data/osm/station_walk_network.osm.pbf -nt scripts/build_station_walk_network.py ]]; then
   echo "  station_walk_network.osm.pbf up to date — skipped"
 else
@@ -260,6 +272,12 @@ echo "▶ Step 7 — MOTIS import"
 if [[ $FORCE_IMPORT -eq 0 && -f motis/data/tt.bin ]]; then
   echo "  index present — skipped (--force-import to re-import)"
 else
+  # Gate the importer on a self-consistent feed. nigiri drops stop ids it
+  # cannot resolve and imports the trip anyway, so a mixed-vintage
+  # data/gtfs_motis/ produces an index that looks healthy and quietly
+  # loses station calls. ~1-2 min against a ~10 min import.
+  echo "  checking data/gtfs_motis/ consistency"
+  python3 scripts/check_gtfs_motis_consistency.py
   # `run --rm` instead of `up` so the import's exit code propagates
   # and no stopped container lingers. On native Linux the container's
   # `motis` user (uid 999) cannot write the bind-mounted ./data, so map
