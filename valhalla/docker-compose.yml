@@ -77,10 +77,18 @@ services:
     # it to come back (see _wait_for_valhalla in
     # scripts/build_valhalla_footpath_matrix.py) instead of losing the
     # run. memswap_limit matches mem_limit so the container cannot buy
-    # extra headroom by thrashing the host's swap. Override per machine:
+    # extra headroom by thrashing the host's swap.
+    #
+    # 40g, not 32g: at 32 the cap itself became the binding constraint —
+    # four cgroup kills in one matrix run, all at 33.4 GB anon-RSS, while
+    # the host still had 30 GB free. The threads keep their largest-ever
+    # matrix allocations, so usage plateaus around 30-35 GB once the run
+    # reaches the dense agglomerations. 40g sits above that plateau and
+    # still leaves ~20 GB for the tippecanoe emit running beside it.
+    # Override per machine:
     # VALHALLA_MEM_LIMIT=12g docker compose up -d valhalla
-    mem_limit: ${VALHALLA_MEM_LIMIT:-32g}
-    memswap_limit: ${VALHALLA_MEM_LIMIT:-32g}
+    mem_limit: ${VALHALLA_MEM_LIMIT:-40g}
+    memswap_limit: ${VALHALLA_MEM_LIMIT:-40g}
     restart: unless-stopped
     # Shared network with the MOTIS fork (query-time WALK routing —
     # MOTIS resolves this container as `kora-valhalla`). One-time:
