@@ -83,7 +83,10 @@ based on the **selected walking speed**.
   Daring may demand a sprint, but the traveller always keeps at least
   one minute. Every query whose transfer-time factor drops below 1 —
   Daring, and the Brisk / Running walking tiers on their own — carries
-  a one-minute floor on the transfer time.
+  a one-minute floor on the transfer time. This is the query-side half
+  of the guarantee; the transfer table carries its own floor at import
+  (`transfer-point-optimization.md` § Minimum transfer time), and the
+  query floor catches what halving that value would truncate away.
 - **Walking times are never rounded down.** A walk shorter than a
   minute reads `<1 min`; `0 min` must never surface for a walk that
   covers distance.

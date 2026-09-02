@@ -110,3 +110,69 @@ transfer walk beyond 30 minutes.
   (until now only MOTIS files were overlaid). The overlay stays a
   patched full-file copy pinned to the nigiri commit MOTIS pins.
 - Wheelchair profile behavior unchanged.
+
+---
+
+# Minimum transfer time
+
+## Problem
+
+The transfer table said only how long the walk takes, never how long a
+change is allowed to take. Two consequences met in the results:
+
+- The Valhalla matrix carries **11,093 zero-second pairs** (quays whose
+  anchors coincide, e.g. the two faces of one island platform). Rounded
+  up to whole minutes that is still zero, so the router offered
+  connections where alighting and boarding happen at the same instant —
+  the Reckless tier (`routing-options.md` § Connection safety), handed
+  out at Balanced.
+- Even a non-zero walk ignores the operator's own rule. Swiss stations
+  publish a minimum change time per quay pair; a 40-second walk across a
+  concourse is not a 40-second transfer.
+
+## Requirements
+
+- **Every quay-to-quay transfer is floored at import**, where the matrix
+  is loaded into the transfer table. The stored duration becomes
+  `max(walking time, minimum transfer time)` — the matrix keeps saying
+  how far it is, the feed says how soon you may go.
+- **The minimum comes from the feed, per pair.** GTFS `transfers.txt`
+  `transfer_type=2` rows carry the operator's own minimum for a directed
+  quay pair (94,035 pairs in the current feed, from 60 s to 600 s).
+  Those values win over any blanket rule.
+- **A flat two minutes applies where the feed is silent.** Two minutes is
+  MOTIS's own `default_transfer_time` for staying at one stop, so a
+  change between two quays is never cheaper than not changing quay at
+  all.
+- **Timed connections are exempt from the flat floor.**
+  `transfer_type=1` marks a guaranteed connection: the vehicles are
+  scheduled to meet, and a one-minute change there is real. Such pairs
+  keep their walking time.
+- **No transfer ever falls below one minute**, timed connections
+  included. Arriving at the instant of departure is Reckless by
+  definition and the search must never produce it unasked.
+- **Displayed and ranked walking is unaffected.** The floor is a
+  scheduling rule, not a walk. Walking times in the leg rows, the walked
+  total and the ranking come from the pedestrian router's own seconds
+  (see `routing-options.md` § Connection safety), so a floored transfer
+  still reports the walk it actually is.
+
+## Constraints
+
+- The minima must be read from `transfers.txt` directly, **not** from
+  nigiri's profile-0 footpaths. Profile 0 mixes `transfers.txt` rows with
+  the loader's geometric `link_stop_distance` links (100 m by default),
+  and a geometric link across an island platform carries a zero-minute
+  duration that would cancel the floor it is supposed to supply.
+- `transfer_type=1` rows are keyed by **trip** pair, which a stop-keyed
+  transfer table cannot express. The exemption therefore widens to every
+  trip over that quay pair. Accepted: the feed carries 281 such rows.
+- Same-stop transfers never pass through the footpath table — no
+  footpath source carries self-entries. They keep using nigiri's
+  `locations_.transfer_time_`, which the feed's same-stop
+  `transfer_type=2` rows already populate.
+- Requires a MOTIS re-import; the Valhalla matrix is NOT recomputed and
+  the CSV stays a pure record of real walking times.
+- The feed's own ids must resolve against the imported `stops.txt`.
+  6,622 rows reference station-level ids the platform-anchored sidecar
+  does not carry as quays; they are counted and skipped.

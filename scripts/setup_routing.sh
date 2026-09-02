@@ -143,21 +143,32 @@ if want 3; then
 # (see .claude/concepts/station-walk-network.md).
 echo ""
 echo "▶ Step 3 — Patch OSM PBFs"
-if [[ $FORCE_OSM -eq 0 && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf ]]; then
+# Each artifact is compared against the script that produces it as well as
+# against its data inputs. A code change moves no file in data/, so a
+# data-only check reports "up to date" and silently serves the old result —
+# which is how a walk-network change once reached neither the overlay nor
+# the tiles. git rewrites a script's mtime only when its content changed,
+# so this triggers on real edits and not on every pull.
+if [[ $FORCE_OSM -eq 0 \
+      && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf \
+      && data/osm/switzerland-motis.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
   echo "  switzerland-motis.osm.pbf up to date — skipped"
 else
   time python3 scripts/preprocess_osm_for_motis.py
 fi
 # Platform walk lines + quay anchors. Must precede the --valhalla patch
 # (which merges the overlay) and step 5 (which reads the anchors).
-if [[ $FORCE_OSM -eq 0 && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf ]]; then
+if [[ $FORCE_OSM -eq 0 \
+      && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
+      && data/osm/station_walk_network.osm.pbf -nt scripts/build_station_walk_network.py ]]; then
   echo "  station_walk_network.osm.pbf up to date — skipped"
 else
   time python3 scripts/build_station_walk_network.py --force-extract
 fi
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
-      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf ]]; then
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf \
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
   echo "  ch_pfaedle_walkable.osm.pbf up to date — skipped"
 else
   time python3 scripts/preprocess_osm_for_motis.py --valhalla
