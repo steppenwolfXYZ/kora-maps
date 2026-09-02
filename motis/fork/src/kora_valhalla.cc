@@ -70,6 +70,13 @@ json::object costing() {
                 {"use_lit", 0.0},
                 {"destination_only_penalty", 0.0},
                 {"driveway_factor", 1.0},
+                // Lifts are not free: Valhalla defaults this to 0, which
+                // priced a ride between levels below the ramp next to it
+                // and sent walks through station underpasses to ride back
+                // up. kElevatorPenaltySec covers wait plus ride. Requires
+                // Valhalla >= 3.8 — on 3.5.1 the option was accepted and
+                // silently ignored.
+                {"elevator_penalty", kElevatorPenaltySec},
             }},
        }},
   };

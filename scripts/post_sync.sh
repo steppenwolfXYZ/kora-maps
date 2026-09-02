@@ -10,11 +10,13 @@
 # What it checks, in order:
 #
 #   1  Sidecar consistency — every stop_id in data/gtfs_motis/stop_times.txt
-#      resolves in its stops.txt. A mismatch means the feed and the
-#      platform-anchored stops came from different GTFS releases; the
-#      sidecar is rebuilt from the routed feed and re-checked. MOTIS would
-#      otherwise import it happily and silently drop the unresolvable
-#      stops, which costs you whole station calls.
+#      resolves in its stops.txt. It routinely will not right after a sync:
+#      that directory is a hardlink farm over data/gtfs_routed/, and rsync
+#      mirrors the feed by writing new inodes, so the links still point at
+#      the feed this machine held before. Rebuilding the farm is the repair,
+#      and it is the reason this script exists — MOTIS would otherwise
+#      import the mismatch happily and silently drop the unresolvable stops,
+#      which costs you whole station calls.
 #
 #   2  Index freshness — whether motis/data/ was built from the feed that
 #      is now on disk. rsync -a preserves mtimes, so the data machine's
@@ -88,34 +90,52 @@ note "Map assets:   $(date -r static/map-assets/style.json '+%Y-%m-%d %H:%M' 2>/
 
 # ── 1. Sidecar consistency ───────────────────────────────────────────
 banner "1 — GTFS sidecar consistency"
-# Report only. It deliberately does NOT try to repair anything: the obvious
-# repair — regenerate stops.txt from data/gtfs_routed/ — would produce a
-# sidecar that is consistent but built from whichever feed happens to be on
-# this machine. That version then passes every later check and, if imported,
-# replaces the data machine's fresh index with an older one. An inconsistent
-# sidecar means the sync was incomplete, and the fix belongs on the sending
-# side. The served index is unaffected either way: it arrived finished.
+# data/gtfs_motis/ is a hardlink farm over data/gtfs_routed/ plus its own
+# platform-anchored stops.txt. rsync mirrors the routed feed by writing NEW
+# inodes, so after a sync the sidecar's links still point at this machine's
+# PREVIOUS feed — the sync can never refresh it, and that old feed stays on
+# disk, held alive by those links. Only preprocess_gtfs_for_motis.py rebuilds
+# the farm, which is why an inconsistent sidecar is repaired here instead of
+# merely reported. Its inputs all arrive with the sync (quay_anchors.json,
+# platform_ways.geojson, stop_identity.json), so the result matches what the
+# data machine produced.
+#
+# The repair cannot mask a stale feed: it makes the sidecar agree with
+# whatever data/gtfs_routed/ holds, and step 2 judges importing from that
+# same feed's timestamp. A stale feed therefore yields "no import", and the
+# synced index keeps serving.
 CONSISTENT=1
 if [ "$SKIP_CHECK" -eq 1 ]; then
 	note "skipped (--skip-check)"
 elif python3 scripts/check_gtfs_motis_consistency.py; then
 	:
 else
-	CONSISTENT=0
 	echo ""
-	warn "data/gtfs_motis/ mixes two GTFS releases — importing here is unsafe."
-	warn "The synced index is fine (the data machine built it), so this only"
-	warn "blocks a local re-import. To repair the feed, re-sync it whole:"
-	warn "    ./scripts/sync_to_mac.sh --only routed      # on the data machine"
+	warn "sidecar out of step with data/gtfs_routed/ — rebuilding the hardlinks"
+	run python3 scripts/preprocess_gtfs_for_motis.py
+	if [ "$DRY_RUN" -eq 0 ]; then
+		if python3 scripts/check_gtfs_motis_consistency.py; then
+			note "sidecar repaired"
+		else
+			CONSISTENT=0
+			echo ""
+			warn "still inconsistent, so data/gtfs_routed/ is itself mixed."
+			warn "The synced index is unaffected — this only blocks a local"
+			warn "re-import. Re-sync the feed whole from the data machine:"
+			warn "    ./scripts/sync_to_mac.sh --only routed"
+		fi
+	fi
 fi
 
 # ── 2. Index freshness ───────────────────────────────────────────────
 banner "2 — MOTIS index"
 NEED_IMPORT=0
-# Compare against the newest input the importer reads. shapes.txt stands in
-# for the routed feed (pfaedle's last write); stops.txt is the sidecar's own
-# file, which the sync delivers separately.
-for input in data/gtfs_routed/shapes.txt data/gtfs_motis/stops.txt \
+# Compare against the importer's real inputs: shapes.txt stands in for the
+# routed feed (pfaedle's last write) and the matrix for the transfer table.
+# NOT the sidecar's stops.txt — step 1 may have just regenerated it, and its
+# fresh mtime would then demand an import of a feed the synced index already
+# describes.
+for input in data/gtfs_routed/shapes.txt \
              motis/data/valhalla_footpath_matrix.csv; do
 	if [ -f "$input" ] && [ "$input" -nt motis/data/tt.bin ]; then
 		note "newer than the index: $input"

@@ -133,10 +133,36 @@ if want 2; then
 # ── Step 2: MOTIS fork image ────────────────────────────────────────
 echo ""
 echo "▶ Step 2 — MOTIS fork image (koramaps/motis:footpath-matrix)"
-if [[ $FORCE_IMAGE -eq 0 ]] && docker image inspect koramaps/motis:footpath-matrix >/dev/null 2>&1; then
-  echo "  image present — skipped (--force-image to rebuild)"
+# Rebuild when the fork sources are newer than the last build, not merely
+# when the image is absent. "Image present" once let a pulled fork change
+# sit unbuilt through a whole update_map.sh run: the import then produced
+# an index without the minimum-transfer-time floor and without the 2-h
+# transfer profile, and nothing said so — the index is only wrong in what
+# it contains. Same shape of check step 3 applies to the OSM patch.
+#
+# The stamp lives outside motis/data/ on purpose: that directory is synced
+# between machines with --delete, so a stamp inside it would carry the
+# other machine's build time and defeat the comparison.
+IMAGE_STAMP=motis/.image_build_stamp
+image_stale() {
+  [[ $FORCE_IMAGE -eq 1 ]] && return 0
+  docker image inspect koramaps/motis:footpath-matrix >/dev/null 2>&1 || return 0
+  [[ -f $IMAGE_STAMP ]] || return 0
+  [[ -n "$(find motis/fork -type f -newer "$IMAGE_STAMP" -print -quit)" ]]
+}
+if ! image_stale; then
+  echo "  image up to date with motis/fork/ — skipped (--force-image to rebuild)"
 else
   time docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
+  touch "$IMAGE_STAMP"
+  # A new binary can build a different transfer table from identical
+  # inputs, but MOTIS's task hash covers only the data (timetable, osm,
+  # matches, way_matches) — never the image. Without dropping this key the
+  # next import reports "running tasks: []" and silently keeps the table
+  # the old binary produced. Only the footpath task is invalidated; osr,
+  # tt and matches are unaffected by the fork.
+  rm -f motis/data/meta/osr_footpath.json
+  echo "  image rebuilt — dropped meta/osr_footpath.json so step 7 redoes the transfer table"
 fi
 fi
 

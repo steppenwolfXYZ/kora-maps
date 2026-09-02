@@ -138,6 +138,15 @@ COSTING_JSON = {
             # fork's query-time calls must describe the same walker.
             "destination_only_penalty": 0.0,
             "driveway_factor": 1.0,
+            # Seconds charged for taking a lift. Valhalla's default is 0,
+            # which makes a lift a free teleport between levels — cheaper
+            # than the ramp beside it, so routes were diving into station
+            # underpasses to ride back up. A minute is roughly the wait
+            # plus the ride, and it is enough to stop the free-ride
+            # detours without banning lifts, which step-free journeys
+            # depend on. Needs Valhalla >= 3.8; on 3.5.1 the option
+            # parsed and did nothing.
+            "elevator_penalty": 60.0,
         },
     },
 }

@@ -49,6 +49,14 @@ constexpr auto const kWalkSpeedKmh = 5.1;
 // elevation tiles — finer sampling would only add interpolation noise.
 constexpr auto const kElevationIntervalM = 30.0;
 
+// Seconds charged for each lift ride, roughly wait plus travel. Valhalla
+// defaults to 0, which makes a lift a free level change and beats the ramp
+// beside it. MUST stay equal to `elevator_penalty` in COSTING_JSON in
+// scripts/build_valhalla_footpath_matrix.py — the transfer matrix and the
+// query-time walks have to describe the same walker. Changing it requires
+// a matrix rebuild.
+constexpr auto const kElevatorPenaltySec = 60.0;
+
 // Reversal threshold (metres) of the ascent / descent accumulator. A
 // direction change smaller than this is DEM noise, not a hill: summing
 // raw sample deltas over a multi-kilometre walk otherwise invents tens
