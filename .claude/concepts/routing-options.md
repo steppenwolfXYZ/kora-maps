@@ -102,21 +102,34 @@ based on the **selected walking speed**.
 Per transfer, compute spare time = (next departure − arrival at stop)
 − walking time at the set speed. Four warning levels:
 
-| Warning | Condition |
-|---|---|
-| Tight | less than 20 s to spare (but still makeable) |
-| Very tight | spare below zero, needing up to 20 % faster walking |
-| Extremely tight | needs 20–50 % faster walking |
-| If you're lucky | needs more than 50 % faster walking, or is outright infeasible (Reckless connections) — visually distinct from the tight ladder |
+| Warning | Condition | Wording |
+|---|---|---|
+| Tight | less than 20 s to spare (but still makeable) | ≥ 30 s: "~1 min to spare"; below that: "no time to spare" |
+| Very tight | spare below −5 s, needing up to 20 % faster walking | "you need to run" |
+| Extremely tight | needs 20–50 % faster walking | "you may not make it" |
+| If you're lucky | needs more than 50 % faster walking, or is outright infeasible (Reckless connections) — visually distinct from the tight ladder | "only if you are lucky" |
+
+**No seconds in the UI.** Walking times are not second-accurate, so
+neither the transfer chip nor the tooltip ever states a spare figure —
+the tier, plus the one band boundary inside Tight, carries the message.
+The "~1 min to spare" band is defined up to 90 s and so only shows
+below the 20 s tight threshold today; it exists so the wording survives
+a future widening of the warning window.
+
+**Rounding guard.** Walk-leg durations arrive as whole seconds while the
+schedule window is exact, so a walk that exactly fills its window can
+report a spare of −1 s. A spare down to −5 s therefore still counts as
+makeable ("no time to spare") and never escalates a tier; the same
+tolerance applies to the timed-feeder exception below.
 
 The ladder is pitched so the tier reads as a safety-mode signal.
 Balanced only returns transfers the set speed makes, so it can reach
 **Tight and nothing above** — and only inside the last 20 s of margin,
 which makes a warning there the exception. Every higher tier requires a
-negative spare, which only Daring's halved transfer times produce, and
-Cautious (spare ≥ 5 min by construction) never warns at all. Accepted
-loss: a 20 s–2 min buffer in Balanced gets no heads-up even though a
-delayed feeder would break it.
+meaningfully negative spare, which only Daring's halved transfer times
+produce, and Cautious (spare ≥ 5 min by construction) never warns at
+all. Accepted loss: a 20 s–2 min buffer in Balanced gets no heads-up
+even though a delayed feeder would break it.
 
 Thresholds are calibrated on Switzerland, where a positive spare on the
 Valhalla matrix genuinely means makeable. Other countries will need
@@ -132,9 +145,10 @@ their own values.
 - **Timed feeders (train → bus/tram/regional bus, tram → bus):**
   these transfers are typically Anschluss-timed in CH — the receiving
   vehicle waits for a late feeder. The tight ladder is suppressed as
-  long as the spare at the set walking speed is ≥ 0 seconds; a
-  negative spare (physically unmakeable walk) still warns with the
-  normal ladder, and the "if you're lucky" tier is unaffected.
+  long as the spare at the set walking speed is ≥ −5 seconds (the
+  rounding guard above); a spare below that (physically unmakeable
+  walk) still warns with the normal ladder, and the "if you're lucky"
+  tier is unaffected.
   tram → bus is an interim blanket rule (city buses don't actually
   wait for city trams); the per-line/per-station refinement is
   planned — see `regio-tram-timed-transfers.md`. tram → tram is not

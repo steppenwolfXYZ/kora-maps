@@ -669,11 +669,17 @@ export interface TransferAssessment {
 // mode (routing-options.md § Connection warnings). Balanced only ever
 // returns transfers the set speed makes (spare >= 0), so it can reach
 // no tier above "tight" — and that one only inside the last 20 s of
-// margin, i.e. rarely. Everything above needs a NEGATIVE spare, which
-// only daring's halved transfer times produce. Calibrated on CH, where
-// a positive spare on the Valhalla matrix genuinely means makeable;
-// other countries will want their own thresholds.
+// margin, i.e. rarely. Everything above needs a MEANINGFULLY negative
+// spare, which only daring's halved transfer times produce. Calibrated
+// on CH, where a positive spare on the Valhalla matrix genuinely means
+// makeable; other countries will want their own thresholds.
 const TIGHT_SPARE_SEC = 20;
+// Rounding guard: walk-leg durations arrive as whole seconds while the
+// schedule window is exact, so a walk that exactly fills its window can
+// come back as a spare of −1 s. Anything inside this band counts as
+// "makeable, no time to spare" rather than escalating a tier — walking
+// times are not second-accurate to begin with.
+const SPARE_EPSILON_SEC = 5;
 const EXTREMELY_TIGHT_SPEEDUP = 1.2;  // needs > 20% faster walking
 const LUCKY_SPEEDUP = 1.5;            // needs > 50% faster walking
 
@@ -681,8 +687,9 @@ const LUCKY_SPEEDUP = 1.5;            // needs > 50% faster walking
 // train → bus/tram and tram → bus transfers in CH are typically
 // Anschluss-timed — the receiving vehicle waits for a late feeder — so
 // a nominally short buffer is not actually tight. Such pairs only warn
-// when the spare goes NEGATIVE at the set walking speed (even a
-// waiting bus only holds a few minutes); the ladder applies unchanged
+// when the spare goes negative beyond the rounding guard at the set
+// walking speed (even a waiting bus only holds a few minutes); the
+// ladder applies unchanged
 // then. tram → bus is an interim blanket rule — the per-line/
 // per-station refinement is planned (regio-tram-timed-transfers.md);
 // tram → tram is deliberately NOT exempt.
@@ -728,14 +735,15 @@ export function assessTransfers(it: Itinerary, opts?: RankOptions): TransferAsse
 			const needed = walkBetween;
 			const spare = available - needed;
 			let tier: TransferTier | null = null;
-			if (available <= 0 || (needed > 0 && needed > available * LUCKY_SPEEDUP)) {
+			if (spare >= -SPARE_EPSILON_SEC) {
+				// Makeable (or short by rounding noise only).
+				if (spare < TIGHT_SPARE_SEC) tier = 'tight';
+			} else if (available <= 0 || (needed > 0 && needed > available * LUCKY_SPEEDUP)) {
 				tier = 'lucky';
 			} else if (needed > available * EXTREMELY_TIGHT_SPEEDUP) {
 				tier = 'extremely-tight';
-			} else if (spare < 0) {
+			} else {
 				tier = 'very-tight';
-			} else if (spare < TIGHT_SPARE_SEC) {
-				tier = 'tight';
 			}
 			// Continuous gondolas: no warning at all — a missed departure
 			// just means the next one a minute later.
@@ -744,7 +752,7 @@ export function assessTransfers(it: Itinerary, opts?: RankOptions): TransferAsse
 			// Timed train → bus/tram feeders: a non-negative spare is fine
 			// (the vehicle waits); only a physically unmakeable transfer
 			// still warns.
-			const timedExempt = tier !== 'lucky' && spare >= 0
+			const timedExempt = tier !== 'lucky' && spare >= -SPARE_EPSILON_SEC
 				&& prevTransitMode !== null
 				&& isTimedFeederPair(prevTransitMode, l.mode);
 			if (tier && !hfExempt && !timedExempt) {

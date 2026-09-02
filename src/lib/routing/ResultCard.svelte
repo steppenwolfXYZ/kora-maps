@@ -6,7 +6,7 @@
 		assessTransfers, legDuration, transferCount, walkElevation, walkMetres, walkSeconds
 	} from './ranking';
 	import { stationPlaceId } from './client';
-	import type { Badge, TransferAssessment, Warning, WarningKind } from './ranking';
+	import type { Badge, TransferAssessment, TransferTier, Warning, WarningKind, WarningSeverity } from './ranking';
 	import {
 		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,
 		fmtWalkDuration, iconFor, isTransitMode
@@ -125,11 +125,41 @@
 		if (w.kind === 'tight-transfer' && w.severity === 'strong') return 'sprint';
 		return WARNING_ICON[w.kind];
 	}
-	// Sub-minute spares deserve seconds, not a rounded "0 min".
-	function fmtSpare(secs: number): string {
-		const s = Math.abs(secs);
-		return s < 60 ? `${Math.round(s)} s` : fmtDuration(s);
+	// Spare time is never shown as a number: pedestrian routing is not
+	// second-accurate, so a figure would claim a precision we don't have.
+	// The tier plus one band boundary inside "tight" carries the message
+	// instead (routing-options.md § Connection warnings).
+	const SPARE_ONE_MIN_SEC = 30;
+	function sparePhrase(tier: TransferTier, spare: number): string {
+		switch (tier) {
+			case 'tight':
+				return spare >= SPARE_ONE_MIN_SEC ? '~1 min to spare' : 'no time to spare';
+			case 'very-tight': return 'you need to run';
+			case 'extremely-tight': return 'you may not make it';
+			case 'lucky': return 'only if you are lucky';
+		}
 	}
+	function spareTooltip(tier: TransferTier, spare: number): string {
+		switch (tier) {
+			case 'tight':
+				return spare >= SPARE_ONE_MIN_SEC
+					? 'Tight transfer — only about a minute to spare at your walking speed'
+					: 'Tight transfer — no time to spare at your walking speed';
+			case 'very-tight':
+				return 'Very tight transfer — you need to run to make it';
+			case 'extremely-tight':
+				return 'Extremely tight transfer — you may not have enough time';
+			case 'lucky':
+				return 'Transfer only works out if you are lucky — not makeable at your walking speed';
+		}
+	}
+	// The card badge carries no tier of its own; its severity is the
+	// tier's mapping (standard/medium/strong), so read it back off that.
+	const SEVERITY_TIER: Record<WarningSeverity, TransferTier> = {
+		'standard': 'tight',
+		'medium': 'very-tight',
+		'strong': 'extremely-tight'
+	};
 	// Tooltip text incorporates the connection's actual measured value
 	// (carried on Warning.value) instead of just naming the threshold tier.
 	function warningLabel(w: Warning): string {
@@ -137,21 +167,12 @@
 			case 'long-walk': return `Includes a ${fmtDuration(w.value)} walk`;
 			case 'long-wait': return `Includes a ${fmtDuration(w.value)} transfer wait`;
 			case 'very-slow': return `${fmtDuration(w.value)} slower than the fastest route`;
-			case 'tight-transfer': return w.value < 0
-				? `Tight transfer — needs slightly faster walking than your set speed`
-				: `Tight transfer — ${fmtSpare(w.value)} to spare at your walking speed`;
-			case 'lucky-transfer':
-				return 'Transfer only works out if you are lucky — not makeable at your walking speed';
+			case 'tight-transfer': return spareTooltip(SEVERITY_TIER[w.severity], w.value);
+			case 'lucky-transfer': return spareTooltip('lucky', w.value);
 		}
 	}
 	// Per-transfer marks for the expanded leg list (routing-options.md
 	// § Connection warnings): keyed by the boarded transit leg's index.
-	const TRANSFER_MARK_LABEL: Record<TransferAssessment['tier'], string> = {
-		'tight': 'Tight transfer',
-		'very-tight': 'Very tight transfer',
-		'extremely-tight': 'Extremely tight transfer',
-		'lucky': 'Only if you are lucky'
-	};
 	const TRANSFER_MARK_ICON: Record<TransferAssessment['tier'], string> = {
 		'tight': 'transfer_within_a_station',
 		'very-tight': 'transfer_within_a_station',
@@ -159,10 +180,7 @@
 		'lucky': 'sprint'
 	};
 	function transferMarkLabel(a: TransferAssessment): string {
-		const base = TRANSFER_MARK_LABEL[a.tier];
-		return a.spare >= 0
-			? `${base} — ${fmtSpare(a.spare)} to spare at your walking speed`
-			: `${base} — ${fmtSpare(a.spare)} short at your walking speed`;
+		return spareTooltip(a.tier, a.spare);
 	}
 	let hfGondolas = $state<Set<string> | null>(null);
 	$effect(() => {
@@ -365,7 +383,7 @@
 	>
 		<span class="material-symbols-outlined" aria-hidden="true"
 		>{TRANSFER_MARK_ICON[mark.tier]}</span>
-		<span class="leg-transfer-warn-text">{mark.spare >= 0 ? fmtSpare(mark.spare) : `−${fmtSpare(mark.spare)}`}</span>
+		<span class="leg-transfer-warn-text">{sparePhrase(mark.tier, mark.spare)}</span>
 	</span>
 {/snippet}
 
@@ -1103,7 +1121,7 @@
 	}
 
 	/* Tight-transfer mark on the boarding row (routing-options.md):
-	   compact icon + spare-time chip. Same escalation as the card badge —
+	   compact icon + spare-time phrase. Same escalation as the card badge —
 	   glyph says whether you must run, colour says how bad it is inside
 	   that pair. */
 	.leg-transfer-warn {
