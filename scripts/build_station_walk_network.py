@@ -114,6 +114,11 @@ ANCHOR_MAX_M = 25.0
 AREA_MAX_GRAPH_NODES = 60
 # Crossings shorter than this are already covered by the ring itself.
 AREA_MIN_CROSS_M = 2.0
+# Longest seam weld between two abutting platform areas. Their walk lines
+# meet near the shared boundary, so the join is a few metres; anything
+# longer means the areas only touch at a corner and joining them would
+# invent a shortcut across whatever lies between.
+SEAM_MAX_M = 15.0
 # Points sampled along a candidate crossing to prove it stays on walkable
 # ground. Nine catches the sliver holes that defeated a single midpoint
 # test, at no measurable build cost.
@@ -512,13 +517,17 @@ class Reader:
                 rings = []
                 for outer in obj.outer_rings():
                     pts = [(n.lon, n.lat) for n in outer]
+                    ids = [n.ref for n in outer]
                     if len(pts) >= 4:
-                        rings.append(pts)
+                        rings.append((pts, ids))
                 if not rings:
                     continue
-                ring = max(rings, key=ring_area)
+                ring, ring_ids = max(rings, key=lambda r: ring_area(r[0]))
                 rec = {
                     "ring": ring,
+                    # Boundary node ids, kept so abutting platform areas can
+                    # be recognised by the nodes they share (see _weld_seams).
+                    "ring_ids": ring_ids,
                     "tags": tags,
                     "levels": level_set(tags),
                     "osm": f"{'w' if obj.from_way() else 'r'}{obj.orig_id()}",
@@ -531,9 +540,10 @@ class Reader:
                 if is_platform(tags) and tags.get("area") != "yes":
                     pts = [(n.location.lon, n.location.lat)
                            for n in obj.nodes if n.location.valid()]
+                    ids = [n.ref for n in obj.nodes if n.location.valid()]
                     if len(pts) >= 2 and pts[0] != pts[-1]:
                         self.open_platforms.append({
-                            "line": pts, "tags": tags,
+                            "line": pts, "ring_ids": ids, "tags": tags,
                             "levels": level_set(tags),
                             # A platform way is only part of the routing
                             # graph if it also carries a highway value
@@ -660,8 +670,10 @@ def build(reader: Reader, overlay: Overlay):
                 yield from grid.get((cx + dx, cy + dy), ())
 
     walk_lines = []   # dicts: line(lonlat), refs, levels, connected, osm
+    emitted = []      # synthetic walk lines, kept for seam welding
     stats = {"platforms": 0, "welds": 0, "orphans": 0, "lifts": 0,
              "lift_links": 0, "open_platforms": 0, "open_synthesised": 0,
+             "seams_welded": 0, "seams_level_blocked": 0, "seams_too_far": 0,
              "areas_seen": 0, "areas_crossed": 0, "areas_no_entry": 0,
              "areas_too_large": 0, "area_edges": 0, "area_edges_blocked": 0}
 
@@ -759,6 +771,11 @@ def build(reader: Reader, overlay: Overlay):
             "connected": bool(junctions),
             "osm": plat["osm"],
         })
+        emitted.append({
+            "ids": ids, "xy": line_xy, "levels": plat["levels"],
+            "ring_ids": set(plat.get("ring_ids") or ()), "osm": plat["osm"],
+            "walk_line": walk_lines[-1],
+        })
 
     # --- platforms already routable as open ways: usable as they stand
     for plat in reader.open_platforms:
@@ -810,11 +827,72 @@ def build(reader: Reader, overlay: Overlay):
             })
         stats["lift_links"] += len(touching)
 
+    _weld_seams(emitted, overlay, stats, kx, ky)
+
     # --- pedestrian squares: direct crossings between their entry points
     for area in reader.areas:
         _cross_area(area, reader, overlay, stats)
 
     return walk_lines, stats
+
+
+def _weld_seams(emitted, overlay, stats, kx, ky) -> None:
+    """Join platform walk lines that belong to the same physical surface.
+
+    A long platform is regularly mapped as two abutting OSM areas laid end
+    to end — at Bern every platform is, with the Welle's stairs landing on
+    the western polygon and the underpass on the eastern one. Each area
+    gets its own walk line, and welding only ever attaches a walk line to
+    real pedestrian ways, never to another walk line. The two halves of one
+    platform therefore end up severed at the seam, and a passenger arriving
+    on one half cannot reach a boarding point on the other: the router
+    sends them down and around instead, silently, because the walk it
+    returns is legal — just not the one anybody takes.
+
+    Abutting areas are recognised by the boundary nodes they share, which
+    is exact rather than a proximity guess: two platforms either side of a
+    track can pass within metres of each other in plan view without sharing
+    anything. Level compatibility still applies, so a surface stacked above
+    another is never joined to it.
+    """
+    by_node = defaultdict(list)
+    for i, e in enumerate(emitted):
+        for nid in e["ring_ids"]:
+            by_node[nid].append(i)
+
+    pairs = set()
+    for members in by_node.values():
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                i, j = members[a], members[b]
+                if i != j:
+                    pairs.add((min(i, j), max(i, j)))
+
+    for i, j in sorted(pairs):
+        ea, eb = emitted[i], emitted[j]
+        if ea["osm"] == eb["osm"]:
+            continue
+        if not levels_compatible(ea["levels"], eb["levels"]):
+            stats["seams_level_blocked"] += 1
+            continue
+        best = None
+        for ai, pa in enumerate(ea["xy"]):
+            for bi, pb in enumerate(eb["xy"]):
+                d = math.dist(pa, pb)
+                if best is None or d < best[0]:
+                    best = (d, ai, bi)
+        if best is None or best[0] > SEAM_MAX_M:
+            stats["seams_too_far"] += 1
+            continue
+        _, ai, bi = best
+        overlay.way([ea["ids"][ai], eb["ids"][bi]], {
+            "highway": "footway", "foot": "yes",
+            "kora:platform_seam": "yes",
+            "kora:source": f"{ea['osm']}+{eb['osm']}",
+        })
+        stats["seams_welded"] += 1
+        ea["walk_line"]["connected"] = True
+        eb["walk_line"]["connected"] = True
 
 
 def _cross_area(area, reader, overlay, stats) -> None:
@@ -1020,6 +1098,9 @@ def main() -> None:
           f"({stats['open_platforms']:,} ways already routable)")
     print(f"  welds {stats['welds']:,}  "
           f"unwelded platforms {stats['orphans']:,}")
+    print(f"  platform seams welded {stats['seams_welded']:,} "
+          f"(level-blocked {stats['seams_level_blocked']:,}, "
+          f"too far {stats['seams_too_far']:,})")
     print(f"  lift hubs {stats['lifts']:,}  lift links {stats['lift_links']:,}")
     print(f"  pedestrian areas {stats['areas_seen']:,}: "
           f"crossed {stats['areas_crossed']:,}, "
