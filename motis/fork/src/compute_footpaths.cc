@@ -143,11 +143,13 @@ std::vector<std::string_view> split_csv(std::string_view line) {
   return out;
 }
 
-// Key for a directed pair of locations.
+// Key for a directed pair of locations. `to_idx` lives in cista (the
+// strong-type header), reached by ADL on location_idx_t — nigiri does
+// not re-export it under its own namespace.
 constexpr std::uint64_t pair_key(n::location_idx_t const from,
                                  n::location_idx_t const to) {
-  return (static_cast<std::uint64_t>(n::to_idx(from)) << 32U) |
-         static_cast<std::uint64_t>(n::to_idx(to));
+  return (static_cast<std::uint64_t>(to_idx(from)) << 32U) |
+         static_cast<std::uint64_t>(to_idx(to));
 }
 
 // The operator's own minimum transfer time per directed quay pair, in

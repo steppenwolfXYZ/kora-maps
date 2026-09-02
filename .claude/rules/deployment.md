@@ -84,18 +84,24 @@ assumption in deploy channel 3 above that the Mac is the importing machine —
 | Group | Source | Size | Contents |
 |---|---|---|---|
 | `assets` | `static/map-assets/` | ~470 MB | pmtiles, style.json, search/line/color indexes, glyph fonts |
-| `motis` | `motis/data/` | ~4.5 GB | prebuilt nigiri / OSR / shapes indexes |
+| `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + the footpath matrix CSV |
 | `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
 | `lookup` | `data/` (derived only) | ~160 MB | diagnostic + identity tables |
 | `routed` | `data/gtfs_routed/` | ~6.2 GB | opt-in (`--with-routed`) |
 
-**The matrix does not ship.** MOTIS indexes are architecture-portable — the
-data machine imports on amd64 and those same indexes serve on the VPS's arm64
-and on the Mac — so shipping the finished indexes makes the 1.8 GB
-`valhalla_footpath_matrix.csv` unnecessary. `--with-matrix` adds it, and is
-only wanted when re-importing MOTIS on the Mac (i.e. changing the fork's
-*import* path rather than its query path). Because the CSV is `--exclude`d
-rather than absent, `--delete` never removes a copy already on the Mac.
+**The matrix ships with the indexes.** It used to be opt-in
+(`--with-matrix`), on the theory that the Mac never re-imports because MOTIS
+indexes are architecture-portable. That failed in practice: the Mac re-imports
+whenever the fork's *import* path changes, and the `valhalla` group meanwhile
+replaces its tiles — leaving a fresh tile set beside a months-old matrix. The
+two describe the same walking, so the mismatch produces transfers the tiles
+cannot draw (cancelled walk legs, no geometry) and transfers priced against a
+walk surface that no longer exists. Nothing warns you: the import only reports
+the unresolvable stop ids as a count. The flag is now accepted and ignored.
+The CSV is still `--exclude`d from the index push and sent in a second,
+`-z` push of its own — the indexes are incompressible binaries, the CSV is
+text that compresses ~8.5× — and that exclude also keeps `--delete` from
+removing the Mac's copy between the two pushes.
 
 **Raw inputs do not ship.** The country PBFs (12.7 GB, unreadable without
 osmium) and the bulk GTFS tables (`stop_times.txt`, `trips.txt`,

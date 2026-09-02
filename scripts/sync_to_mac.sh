@@ -14,11 +14,14 @@
 #   lookup    data/ (derived only)   ~160 MB  diagnostic + identity tables
 #   routed    data/gtfs_routed/      ~6.2 GB  opt-in, only to run steps 6-8 there
 #
-# MOTIS indexes are architecture-portable — this machine imports on amd64
-# and update_map.sh already ships those same indexes to the arm64 VPS — so
-# the Mac gets finished indexes and never needs the 1.8 GB matrix CSV. Pass
-# --with-matrix only to re-import MOTIS on the Mac (i.e. when changing the
-# fork's import path rather than its query path).
+# The `motis` group ships the finished indexes AND the 1.8 GB footpath
+# matrix CSV. The matrix used to be opt-in (--with-matrix), on the theory
+# that the Mac never re-imports because MOTIS indexes are architecture-
+# portable. In practice the Mac re-imports whenever the fork's import path
+# changes, and a Mac holding tiles from this machine next to its own months-
+# old matrix produces transfers the tiles cannot walk — silently, since the
+# import only counts the unresolvable ids. The matrix and the Valhalla tiles
+# describe the same walking and must travel together.
 #
 # Usage:
 #   ./scripts/sync_to_mac.sh                      # assets, motis, valhalla, lookup
@@ -38,7 +41,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # NB: not `GROUPS` — that is a bash special array (the caller's group ids)
 # and assigning to it silently does nothing.
 SYNC_GROUPS="assets,motis,valhalla,lookup"
-WITH_MATRIX=0
 STREET_WAYS=0
 FULL_VALHALLA=0
 FORCE=0
@@ -50,7 +52,9 @@ while [ $# -gt 0 ]; do
 		--only)           SYNC_GROUPS="$2"; shift 2 ;;
 		--only=*)         SYNC_GROUPS="${1#*=}"; shift ;;
 		--with-routed)    SYNC_GROUPS="$SYNC_GROUPS,routed"; shift ;;
-		--with-matrix)    WITH_MATRIX=1; shift ;;
+		# Accepted and ignored: the matrix always ships now. Kept so the
+		# old habit does not fall through to rsync as an unknown option.
+		--with-matrix)    shift ;;
 		--street-ways)    STREET_WAYS=1; shift ;;
 		--full-valhalla)  FULL_VALHALLA=1; shift ;;
 		--force)          FORCE=1; shift ;;
@@ -124,15 +128,21 @@ if want assets && have assets "static/map-assets/style.json"; then
 fi
 
 # ── motis ────────────────────────────────────────────────────────────
-# The matrix CSV is an import-time input only. Excluding it also protects
-# any copy already on the Mac from --delete (rsync never deletes excluded
-# files unless --delete-excluded is given).
+# Two pushes, because -z is worth it for exactly one file here: the indexes
+# are binary and incompressible, the matrix is text and compresses ~8.5x.
+# The CSV is therefore excluded from the index push and sent on its own.
+# The exclude also keeps --delete from removing the Mac's copy in the gap
+# between the two pushes (rsync never deletes excluded files unless
+# --delete-excluded is given).
 if want motis && have motis "motis/data/tt.bin"; then
 	push "MOTIS indexes → motis/data/" "motis/data/" \
 		--delete --exclude 'valhalla_footpath_matrix.csv' \
 		"$ROOT/motis/data/"
 
-	if [ "$WITH_MATRIX" -eq 1 ]; then
+	# Always ships — see the header note. Guarded by its own sentinel: a
+	# missing matrix means an incomplete run, and skipping it leaves the
+	# Mac's copy alone rather than aborting the whole sync.
+	if have motis "motis/data/valhalla_footpath_matrix.csv"; then
 		push "footpath matrix → motis/data/ (1.8 GB text, compressed in flight)" \
 			"motis/data/" -z \
 			"$ROOT/motis/data/valhalla_footpath_matrix.csv"
