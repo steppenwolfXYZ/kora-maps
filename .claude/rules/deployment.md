@@ -81,7 +81,11 @@ assumption in deploy channel 3 above that the Mac is the importing machine —
 `update_map.sh` on the data machine now does that, and `deploy_motis.sh
 --data-only` ships its indexes to the VPS.
 
-**Groups** (all but `routed` run by default; `--only a,b` selects):
+**Groups** (all run by default; `--only a,b` selects, `--no-routed` drops the
+big one). Nothing relevant is opt-in: the script's job is to leave the Mac able
+to run *and* debug everything, and a flag you have to remember is a flag that
+gets forgotten — which is exactly how the Mac ended up importing a feed it had
+never been sent.
 
 | Group | Source | Size | Contents |
 |---|---|---|---|
@@ -89,7 +93,7 @@ assumption in deploy channel 3 above that the Mac is the importing machine —
 | `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + the footpath matrix CSV |
 | `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
 | `lookup` | `data/` (raw feed + derived) | ~400 MB | the whole GTFS feed, diagnostics, identity, OSM way extracts |
-| `routed` | `data/gtfs_routed/` + `data/gtfs_motis/stops.txt` | ~6.2 GB | opt-in (`--with-routed`) |
+| `routed` | `data/gtfs_routed/` + `data/gtfs_motis/stops.txt` | ~6.2 GB | pfaedle's feed — input to `--start 6` and to a Mac re-import |
 
 **The matrix ships with the indexes.** It used to be opt-in
 (`--with-matrix`), on the theory that the Mac never re-imports because MOTIS
@@ -138,13 +142,14 @@ subdirectory), `stop_identity.json`, and the OSM extracts (`rail_ways`,
 `--street-ways` adds `street_ways.geojson` (152 MB). The country PBFs
 (12.7 GB, unreadable without osmium) still stay here.
 
-**Re-importing MOTIS on the Mac requires `--with-routed`.** The `motis` group
+**Re-importing MOTIS on the Mac is normally unnecessary.** The `motis` group
 already delivers this machine's finished, self-consistent indexes; a local
-re-import throws them away and rebuilds from `data/gtfs_motis/`, which without
-that flag is the Mac's own months-old feed. `--with-routed` sends the routed
-feed and the sidecar's `stops.txt` together, in that order. If you are not
-passing it, do not re-import — just restart MOTIS on the synced indexes.
-`setup_routing.sh` step 7 now runs `scripts/check_gtfs_motis_consistency.py`
+re-import throws them away and rebuilds the same thing from
+`data/gtfs_motis/`. Do it only to test a change to the fork's *import* path.
+A default sync makes that safe — the `routed` group sends the routed feed and
+the sidecar's `stops.txt` together, in that order — but after `--no-routed`
+the Mac's feed is stale, so don't re-import; just restart MOTIS on the synced
+indexes. `setup_routing.sh` step 7 runs `scripts/check_gtfs_motis_consistency.py`
 before the importer and refuses a mixed feed, but "old yet internally
 consistent" passes that check by design.
 
@@ -175,10 +180,33 @@ Override with `MAC_REMOTE` / `MAC_PATH`. Preflight prints the Mac's free disk,
 which is worth watching — its data volume runs near full and the default sync
 is ~6 GB, mostly overwriting in place.
 
+**The Mac side is `scripts/post_sync.sh`.** The sync copies files; it cannot
+restart anything on the receiving end, and it does not know whether what it
+delivered still matches. This script closes that gap and is the only thing to
+run on the Mac afterwards. It reports the feed version and artifact ages, then:
+verifies the sidecar is self-consistent (report only — see below), decides
+whether the index needs re-importing by comparing `motis/data/tt.bin` against
+`shapes.txt` / the sidecar `stops.txt` / the matrix (rsync `-a` preserves
+mtimes, so the data machine's "index newer than feed" ordering survives the
+trip), stops both services, imports only if needed, brings Valhalla up before
+MOTIS, and finishes with a Bern→Chur query — a station-to-station one, because
+a walk-only smoke test cannot tell you whether a quay has matrix rows at all.
+`--dry-run` prints the decisions; `--force-import` after a fork import-path
+change; `--no-import` to restart on what is already there.
+
+It deliberately never *repairs* an inconsistent sidecar. The obvious repair —
+regenerate `stops.txt` from `data/gtfs_routed/` — yields a sidecar that is
+consistent but built from whatever feed the Mac happens to hold; it then
+passes every later check and, if imported, replaces the data machine's fresh
+index with an older one. An inconsistent sidecar means the sync was
+incomplete, so the script blocks the import, keeps serving the synced index,
+and points at the sending side.
+
 **Typical cycle.** Finish a change on the Mac → push code → run
 `./scripts/update_map.sh` on the data machine (which deploys to production on
-success) → `./scripts/sync_to_mac.sh` to bring the Mac's data back in line.
-Run it with `--dry-run` first when in doubt.
+success) → `./scripts/sync_to_mac.sh` to bring the Mac's data back in line →
+`./scripts/post_sync.sh` on the Mac to restart the stack on it. Run either
+with `--dry-run` first when in doubt.
 
 ## SSR constraints (deployment-driven)
 

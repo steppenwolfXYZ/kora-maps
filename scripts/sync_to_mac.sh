@@ -7,7 +7,9 @@
 # here therefore flows data-machine → Mac. Nothing here touches tracked
 # repo files — only generated artifacts.
 #
-# Groups (all but `routed` run by default):
+# Groups (all run by default — the script's job is to leave the Mac able to
+# run and debug everything, so nothing relevant is opt-in; `--no-routed`
+# drops the one big group when you only want the app current):
 #   assets    static/map-assets/     ~470 MB  pmtiles, style, indexes, glyphs
 #   motis     motis/data/            ~4.5 GB  prebuilt nigiri/OSR/shapes indexes
 #   valhalla  valhalla/data/         ~1.0 GB  tile extract + admins
@@ -34,9 +36,9 @@
 # describe the same walking and must travel together.
 #
 # Usage:
-#   ./scripts/sync_to_mac.sh                      # assets, motis, valhalla, lookup
+#   ./scripts/sync_to_mac.sh                      # everything (all five groups)
 #   ./scripts/sync_to_mac.sh --only assets,lookup
-#   ./scripts/sync_to_mac.sh --with-routed        # + gtfs_routed (steps 6-8 there)
+#   ./scripts/sync_to_mac.sh --no-routed          # skip the 6.2 GB routed feed
 #   ./scripts/sync_to_mac.sh --dry-run
 #
 # Extra arguments are passed through to rsync.
@@ -235,19 +237,20 @@ if want lookup; then
 	fi
 fi
 
-# ── routed (opt-in) ──────────────────────────────────────────────────
-# Needed for two things on the Mac: running rebuild_transit.sh --start 6
-# against fresh data without re-running pfaedle, and re-importing MOTIS
-# there at all. The MOTIS sidecar rides along, because it is only
-# meaningful next to the routed feed it is hardlinked from — shipping its
-# stops.txt alone is what produced a mixed-vintage import (see the lookup
-# group). Send both or neither.
+# ── routed ───────────────────────────────────────────────────────────
+# The feed the router actually consumed: pfaedle's output, and the input
+# to both `rebuild_transit.sh --start 6` and a MOTIS re-import on the Mac.
+# The sidecar's stops.txt rides along, because it is only meaningful next
+# to the routed feed it is hardlinked from — shipping it alone is what
+# produced a mixed-vintage import (see the lookup group). Both or neither.
 #
-# If you do NOT pass this flag, do not re-import MOTIS on the Mac: the
-# `motis` group already delivered this machine's finished, self-consistent
-# indexes, and a local import would replace them with one built from a
-# months-old data/gtfs_motis/. setup_routing.sh step 7 refuses the
-# obviously-broken case, but "old but internally consistent" passes.
+# 6.2 GB, the largest group, but it overwrites the Mac's copy in place so
+# the disk does not grow, and -z puts far less than that on the wire.
+# `--no-routed` skips it — after which do NOT re-import MOTIS on the Mac:
+# the `motis` group already delivered this machine's finished indexes, and
+# a local import would rebuild them from a stale data/gtfs_motis/.
+# setup_routing.sh step 7 refuses the obviously-broken case, but "old yet
+# internally consistent" passes by design.
 if want routed && have routed "data/gtfs_routed/shapes.txt"; then
 	push "routed GTFS → data/gtfs_routed/ (steps 6-8 + MOTIS import input)" \
 		"data/gtfs_routed/" -z --delete "$ROOT/data/gtfs_routed/"

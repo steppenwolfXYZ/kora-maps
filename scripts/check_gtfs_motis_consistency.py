@@ -121,10 +121,11 @@ def check(gtfs_dir: Path) -> int:
         "  stops.txt, so the usual cause is a stops.txt that arrived on its\n"
         "  own — check mtimes:\n"
         f"      ls -la {gtfs_dir}\n"
-        "  Fix by regenerating the sidecar from one feed:\n"
+        "  On the data machine, regenerate the sidecar from one feed:\n"
         "      python3 scripts/preprocess_gtfs_for_motis.py\n"
-        "  If data/gtfs_routed/ is itself stale, re-run the pipeline from\n"
-        "  the download (or sync it with ./scripts/sync_to_mac.sh --with-routed).",
+        "  On the dev Mac, re-sync the feed whole instead — rebuilding here\n"
+        "  only makes the sidecar agree with whatever old feed is present:\n"
+        "      ./scripts/sync_to_mac.sh --only routed",
         file=sys.stderr,
     )
     return 1
