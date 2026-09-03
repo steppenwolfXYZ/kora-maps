@@ -144,6 +144,14 @@ let combined: Itinerary[] = [];
 let seenFingerprints = new Set<string>();
 let resolvedCurrentCoord: [number, number] | null = null;
 let resultTarget = TARGET_RESULT_COUNT;
+// Walking budget the current cascade has settled on. loadMore extends the
+// list with the same reach the visible results were built with — it used
+// to hardcode the wide budget, which (via the pre === WIDE derivation in
+// runHopCascade) also forced the full 2-h transfer table onto every
+// later/earlier click, a slower exhaustive search that dense routes never
+// need. Narrow-budget loadMore hops keep the sparse-gap escalation as a
+// safety net, mirroring the initial cascade's stage 2c.
+let activePrePostSec = NARROW_PRE_POST_SEC;
 
 function abortInFlight() {
 	if (!pendingAbort) return;
@@ -207,6 +215,7 @@ function resetCascadeState() {
 	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
 	resultTarget = TARGET_RESULT_COUNT;
+	activePrePostSec = NARROW_PRE_POST_SEC;
 }
 
 // Recents never store a live "current location" endpoint — it can't
