@@ -148,6 +148,19 @@ routes.
   version (knobs don't move the case; stairs not excludable). If a
   claim no longer holds, the concept is corrected before work starts.
 
+**Recorded 2026-09-03** against the pinned upstream 3.8.3 image, hybrid
+bike, hill avoidance 0.1, Eichmattweg 7 (7.4301984, 46.9406065) →
+Viktoriastrasse (7.45191, 46.9544477), with the road-preference knob
+at 0, 0.25 and 1:
+
+- Primary, identical for all three knob values: 3.17 km / 11 min via
+  Tscharnerstrasse › Schwarztorstrasse › Belpstrasse › Bahnhofplatz ›
+  Spitalgasse › Waisenhausplatz › Kornhausplatz › Viktoriaplatz.
+- Alternates: Eigerstrasse › Aegertenstrasse › Casinoplatz ›
+  Theaterplatz (3.3 km), and a 4.8 km outlier over Thunplatz.
+- Neither Mühlematt nor Monbijou appears in any returned route. The
+  knob does not move the case; the § Problem claims stand on 3.8.3.
+
 ### Benchmark set
 
 - A curated, versioned set of origin–destination pairs, each with a
