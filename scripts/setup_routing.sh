@@ -9,7 +9,8 @@
 #
 # Steps:
 #   1  Create docker network `koramaps`                 (instant; skipped if present)
-#   2  Build the MOTIS fork image                       (~30-60 min compile; skipped if present)
+#   2  Build the MOTIS + Valhalla fork images           (~30-60 min compile each; skipped if
+#                                                        up to date with motis/fork, valhalla/fork)
 #   3  Patch OSM PBFs (foot=yes on alp/forest roads)    (~minutes each; skipped if up to date)
 #   4  Start Valhalla (first run builds tiles)          (first run ~20-40 min, later instant)
 #   5  Preprocess GTFS for MOTIS (platform snap)        (~1 min; always runs, cheap)
@@ -20,7 +21,7 @@
 #
 # Force flags (redo a step whose output already exists):
 #
-#   --force-image     rebuild the MOTIS fork docker image
+#   --force-image     rebuild the MOTIS and Valhalla fork docker images
 #   --force-osm       re-patch both preprocessed OSM PBFs
 #   --force-matrix    delete matrix CSV + checkpoint, recompute from scratch
 #   --force-import    re-run the MOTIS import
@@ -164,6 +165,31 @@ else
   rm -f motis/data/meta/osr_footpath.json
   echo "  image rebuilt — dropped meta/osr_footpath.json so step 7 redoes the transfer table"
 fi
+
+# ── Step 2b: Valhalla fork image ────────────────────────────────────
+# Kora bicycle costing on pinned upstream (valhalla/fork/, see
+# .claude/concepts/bicycle-costing-fork.md). Same staleness rule as the
+# MOTIS image: rebuild when anything under valhalla/fork/ is newer than the
+# last build, not merely when the image is absent. Costing is query-time,
+# so a rebuilt image needs a container restart (step 4's `up -d` recreates
+# it) and nothing else — the tiles stay. The stamp lives outside
+# valhalla/data/ for the same reason as the MOTIS one: that directory is
+# synced between machines with --delete.
+echo ""
+echo "▶ Step 2b — Valhalla fork image (koramaps/valhalla:bicycle-costing)"
+VALHALLA_IMAGE_STAMP=valhalla/.image_build_stamp
+valhalla_image_stale() {
+  [[ $FORCE_IMAGE -eq 1 ]] && return 0
+  docker image inspect koramaps/valhalla:bicycle-costing >/dev/null 2>&1 || return 0
+  [[ -f $VALHALLA_IMAGE_STAMP ]] || return 0
+  [[ -n "$(find valhalla/fork -type f -newer "$VALHALLA_IMAGE_STAMP" -print -quit)" ]]
+}
+if ! valhalla_image_stale; then
+  echo "  image up to date with valhalla/fork/ — skipped (--force-image to rebuild)"
+else
+  time docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
+  touch "$VALHALLA_IMAGE_STAMP"
+fi
 fi
 
 if want 3; then
@@ -219,16 +245,46 @@ fi
 # it, and a walk-network change with unchanged OSM data would then never
 # reach the tiles. Tiles are container-owned, hence the docker-side rm; the
 # slow elevation and admin data are kept.
-# The compose file counts as an input too: it pins the Valhalla image, and
-# a version bump changes what the tiles mean without touching any data
-# file. Left out, an image bump would serve the previous version's tiles
-# and the upgrade would look like it had landed when it had not — the same
-# silent skip that data-only guards produced for code changes.
+# The upstream Valhalla version counts as an input too: a version bump
+# changes what the tiles mean without touching any data file. Left out, an
+# image bump would serve the previous version's tiles and the upgrade would
+# look like it had landed when it had not — the same silent skip that
+# data-only guards produced for code changes. The version is the
+# VALHALLA_REF pinned in the fork's Dockerfile — NOT the compose file's
+# mtime, which used to stand in for it: the compose now names the fork
+# image, and a fork iteration that only changes costing must leave the
+# tiles alone (bicycle-costing-fork.md). The tiles remember which version
+# built them in a stamp next to them; tiles without a stamp predate the
+# stamp and were built with the version pinned today, so they get one
+# instead of a rebuild.
 TILES_TAR=valhalla/data/valhalla_tiles.tar
+TILES_VERSION_STAMP=valhalla/data/.tiles_valhalla_version
+VALHALLA_PIN="$(sed -n 's/^ARG VALHALLA_REF=//p' valhalla/fork/Dockerfile | head -1)"
+if [[ -z "$VALHALLA_PIN" ]]; then
+  echo "cannot read VALHALLA_REF from valhalla/fork/Dockerfile" >&2
+  exit 1
+fi
+# Written through docker like the wipe below: valhalla/data/ is
+# container-owned, so a host-side write fails on Linux.
+stamp_tiles_version() {
+  docker run --rm -v "$PWD/valhalla/data:/d" alpine \
+    sh -c "echo '$VALHALLA_PIN' > /d/.tiles_valhalla_version"
+}
+if [[ -f "$TILES_TAR" && ! -f "$TILES_VERSION_STAMP" ]]; then
+  stamp_tiles_version
+  echo "  stamped existing tiles as built with Valhalla $VALHALLA_PIN"
+fi
+tiles_version_stale() {
+  [[ -f "$TILES_VERSION_STAMP" ]] || return 1
+  [[ "$(cat "$TILES_VERSION_STAMP")" != "$VALHALLA_PIN" ]]
+}
 if [[ -f "$TILES_TAR" ]] \
-   && { [[ data/osm/ch_pfaedle_walkable.osm.pbf -nt "$TILES_TAR" ]] \
-        || [[ valhalla/docker-compose.yml -nt "$TILES_TAR" ]]; }; then
-  echo "  Valhalla tiles are older than their inputs — wiping so step 4 rebuilds"
+   && { [[ data/osm/ch_pfaedle_walkable.osm.pbf -nt "$TILES_TAR" ]] || tiles_version_stale; }; then
+  if tiles_version_stale; then
+    echo "  Valhalla tiles were built with $(cat "$TILES_VERSION_STAMP"), pin is $VALHALLA_PIN — wiping so step 4 rebuilds"
+  else
+    echo "  Valhalla tiles are older than their inputs — wiping so step 4 rebuilds"
+  fi
   (cd valhalla && docker compose down) >/dev/null 2>&1 || true
   # valhalla.json goes with them: it is generated by the image, and a
   # config written by an older Valhalla can silently lack keys the new one
@@ -236,7 +292,7 @@ if [[ -f "$TILES_TAR" ]] \
   # nothing hand-tuned to lose. Elevation and admin data are kept — they
   # are slow to fetch and version-independent.
   docker run --rm -v "$PWD/valhalla/data:/d" alpine \
-    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt /d/valhalla.json'
+    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt /d/valhalla.json /d/.tiles_valhalla_version'
 elif [[ ! -f "$TILES_TAR" ]]; then
   echo "  no Valhalla tiles yet — step 4 will build them"
 else
@@ -266,6 +322,15 @@ if [[ $VALHALLA_UP -eq 0 ]]; then
   exit 1
 fi
 echo "  Valhalla is serving"
+# Freshly built tiles get their version stamp (see step 3). The pin is
+# re-read here because step 4 can run without step 3 (--steps 4); the
+# write goes through docker because valhalla/data/ is container-owned.
+if [[ -f valhalla/data/valhalla_tiles.tar && ! -f valhalla/data/.tiles_valhalla_version ]]; then
+  PIN_NOW="$(sed -n 's/^ARG VALHALLA_REF=//p' valhalla/fork/Dockerfile | head -1)"
+  docker run --rm -v "$PWD/valhalla/data:/d" alpine \
+    sh -c "echo '$PIN_NOW' > /d/.tiles_valhalla_version"
+  echo "  stamped tiles as built with Valhalla $PIN_NOW"
+fi
 fi
 
 if want 5; then

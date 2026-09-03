@@ -1,0 +1,37 @@
+# Bicycle routing benchmark set (bicycle-costing-fork.md § Benchmark set).
+#
+# Curated origin–destination pairs with the corridor a sensible cyclist
+# would take and why. Every tuning iteration of the costing runs against
+# the whole set (scripts/bicycle_benchmark.py); a change ships only when no
+# pair regresses. Every bad route found in hand-testing becomes a new pair
+# here BEFORE it is fixed, so the fix has something to be measured against.
+#
+# Fields per pair:
+#   id            short stable handle (used in the runner's output)
+#   from / to     [lon, lat]
+#   description   the expected corridor and the reason, in one or two lines
+#   must_include  street names the primary route has to pass (any casing;
+#                 substring match against the maneuvers' street names)
+#   must_exclude  street names the primary route must not touch
+#   baseline      what stock Valhalla returned, for the record
+#
+# Coordinates come from the app's geocoder (`/api/geocode/search?q=…`),
+# which returns [lon, lat] — keep that order here too.
+pairs:
+  - id: bern-eichmatt-viktoria
+    from: [7.4301984, 46.9406065]   # Eichmattweg 7, Bern
+    to: [7.45191, 46.9544477]       # Viktoriastrasse, Bern
+    description: >
+      Weissenbühl → Breitenrain. The sensible ride is the quiet
+      Mühlematt / Monbijou corridor (residential streets and the Monbijou
+      bridge), not the Schwarztorstrasse / Belpstrasse / Bahnhofplatz main
+      roads that stock Valhalla prefers for their painted cycle lanes,
+      although it rates its own choice neither shorter nor faster.
+    must_include: [Monbijou]
+    must_exclude: [Belpstrasse, Bahnhofplatz]
+    baseline: >
+      Stock 3.8.3 (2026-09-03): 3.17 km / 11 min via Tscharnerstrasse ›
+      Schwarztorstrasse › Belpstrasse › Bahnhofplatz › Spitalgasse ›
+      Waisenhausplatz › Kornhausplatz › Viktoriaplatz, identical for
+      use_roads 0 / 0.25 / 1. No returned route touched Mühlematt or
+      Monbijou.

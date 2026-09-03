@@ -1,0 +1,14 @@
+diff --git a/proto/descriptors/options.proto b/proto/descriptors/options.proto
+index 7d80e3b..c6bba90 100644
+--- a/proto/descriptors/options.proto
++++ b/proto/descriptors/options.proto
+@@ -362,6 +362,9 @@ message Costing {
+     oneof has_low_class_factor {
+       float low_class_factor = 97;
+     }
++    // kora fork: bicycle only — refuse stairs outright (bicycle-costing-fork.md,
++    // the avoid-stairs toggle). Default false keeps stock behaviour.
++    bool exclude_steps = 98;
+   }
+ 
+   oneof has_options {

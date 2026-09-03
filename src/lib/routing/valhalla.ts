@@ -96,9 +96,11 @@ interface ValhallaRouteResponse {
 }
 
 /** Maneuver type kStepsEnter — a flight of stairs begins. Used to sum the
- * stairs metres surfaced on the bike cards (the engine already prices
- * bicycle steps traversal at ~1 km/h with an 8x cost factor, so a route
- * only contains stairs when every alternative is clearly worse). */
+ * stairs metres surfaced on the bike cards (the Kora costing fork prices
+ * stairs steeply, uphill more than downhill — bicycle-costing-fork.md — so
+ * a route only contains stairs when every alternative is clearly worse;
+ * `exclude_steps: true` in the bicycle costing options removes them
+ * entirely, which is what the avoid-stairs toggle will send). */
 const MANEUVER_STEPS_ENTER = 40;
 
 function costingOptions(args: DirectRouteArgs): Record<string, unknown> {

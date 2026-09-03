@@ -20,21 +20,30 @@
 # scripts/preprocess_osm_for_motis.py).
 services:
   valhalla:
-    # Official upstream image, pinned. The old
-    # ghcr.io/gis-ops/docker-valhalla image was archived in March 2026
-    # ("code moved to upstream") and its `latest` tag had stopped moving
-    # in October 2024 — it reported Valhalla 3.5.1 while missing the
-    # level/elevator support 3.5.0 and 3.5.1 actually shipped, so
-    # `elevator_penalty`, `step_penalty`, `search_filter.level` and the
-    # wheelchair profile were all silently inert: a lift was a free
-    # teleport between levels. The entrypoint moved upstream unchanged,
-    # so the environment interface below is the same.
+    # The Kora fork of Valhalla (valhalla/fork/): upstream pinned at
+    # VALHALLA_REF in valhalla/fork/Dockerfile plus the Kora bicycle
+    # costing (.claude/concepts/bicycle-costing-fork.md). Locally built,
+    # no registry — scripts/setup_routing.sh step 2 builds it. It is a
+    # drop-in for ghcr.io/valhalla/valhalla-scripted:<VALHALLA_REF>: same
+    # entrypoint, same environment interface below, same tiles. Costing is
+    # query-time, so a costing change is image rebuild + restart, never a
+    # tile rebuild.
     #
-    # PINNED on purpose: `latest` is what let a two-year-old router sit
-    # here unnoticed. Bumping is a deliberate act — it forces a tile
-    # rebuild and, because the transfer table is derived from the graph,
-    # a footpath-matrix rebuild too.
-    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
+    # History: the old ghcr.io/gis-ops/docker-valhalla image was archived
+    # in March 2026 and its `latest` tag had stopped moving in October 2024
+    # — it reported Valhalla 3.5.1 while missing the level/elevator support
+    # 3.5.x actually shipped, so `elevator_penalty`, `step_penalty`,
+    # `search_filter.level` and the wheelchair profile were all silently
+    # inert: a lift was a free teleport between levels. Hence the pin.
+    #
+    # The upstream version is PINNED on purpose (in the fork's Dockerfile,
+    # not here): `latest` is what let a two-year-old router sit unnoticed.
+    # Bumping it is a deliberate act — it forces a tile rebuild and,
+    # because the transfer table is derived from the graph, a
+    # footpath-matrix rebuild too. setup_routing.sh keys its tile-staleness
+    # check on that pin (valhalla/data/.tiles_valhalla_version), so a fork
+    # iteration that only changes costing leaves the tiles alone.
+    image: koramaps/valhalla:bicycle-costing
     container_name: kora-valhalla
     ports:
       - "8002:8002"

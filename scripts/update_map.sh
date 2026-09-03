@@ -5,8 +5,9 @@
 #
 # This is the data-refresh machine's routine (see the Mac / data-machine
 # split in .claude/rules/deployment.md). It never touches app code and
-# never ships a MOTIS image — the server keeps the arm64 image the dev
-# Mac built; only indexes go out (`deploy_motis.sh --data-only`).
+# never ships a MOTIS or Valhalla image — the server keeps the arm64
+# images the dev Mac built; only indexes and tiles go out
+# (`deploy_motis.sh --data-only`, `deploy_valhalla.sh --data-only`).
 #
 # Usage: ./scripts/update_map.sh [--osm] [--skip-deploy]
 #
@@ -205,7 +206,7 @@ run_fg import ./scripts/setup_routing.sh --steps 7,8 --force-import
 # ── Phase 6: deploy ──────────────────────────────────────────────────
 if [[ $DEPLOY -eq 1 ]]; then
   banner "Phase 6 — deploy"
-  run_fg deploy_valhalla ./scripts/deploy_valhalla.sh
+  run_fg deploy_valhalla ./scripts/deploy_valhalla.sh --data-only
   run_fg deploy_motis    ./scripts/deploy_motis.sh --data-only
   run_fg deploy_assets   ./scripts/deploy_map_assets.sh
 

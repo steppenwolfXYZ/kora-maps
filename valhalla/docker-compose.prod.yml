@@ -4,10 +4,11 @@
 # only the prebuilt data/ dir via scripts/deploy_valhalla.sh.
 services:
   valhalla:
-    # Official upstream image, pinned — see docker-compose.yml for why
-    # the archived gis-ops image was dropped. Keep this tag in step
-    # with the dev compose: the server serves tiles built against it.
-    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
+    # The Kora fork image (valhalla/fork/), shipped by
+    # scripts/deploy_valhalla.sh as a docker-save tarball over SSH — there
+    # is no registry to pull from. Same tag as the dev compose; the server
+    # serves tiles built against the upstream version the fork pins.
+    image: koramaps/valhalla:bicycle-costing
     container_name: kora-valhalla
     ports:
       # Loopback only — nginx is the sole external client
