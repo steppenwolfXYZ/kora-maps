@@ -56,6 +56,23 @@
 #                                    limits.h, so a fork iteration after
 #                                    this change rebuilds most of nigiri
 #                                    (~15-25 min instead of ~5-10).
+#   deps/nigiri/include/nigiri/types.h
+#                                  — kKoraFullTransferProfile: dedicated
+#                                    profile slot for the full 2-h
+#                                    transfer table (kNProfiles 5 -> 6).
+#                                    The bike slot it previously borrowed
+#                                    loses lb-graph transit edges for
+#                                    routes without bikes_allowed, which
+#                                    made RAPTOR overprune. types.h is
+#                                    included by everything, so a fork
+#                                    iteration after this change is a
+#                                    near-full rebuild (~60-90 min).
+#   include/motis/hashes.h         — nigiri_bin_ver 37 -> 1037: the
+#                                    kNProfiles bump changes the
+#                                    timetable layout; the version bump
+#                                    makes the import re-run tt +
+#                                    osr_footpath instead of serving
+#                                    pre-bump indexes.
 # No OSR walking fallback anywhere; OSR remains for non-foot profiles.
 #
 # Build:
@@ -164,6 +181,7 @@ COPY deps/ /src/deps/
 # re-configure fast (~1-2 min).
 RUN touch -c \
         /src/include/motis/kora_valhalla.h \
+        /src/include/motis/hashes.h \
         /src/include/motis/osr/parameters.h \
         /src/src/compute_footpaths.cc \
         /src/src/kora_valhalla.cc \
@@ -182,7 +200,8 @@ RUN touch -c \
         /src/deps/nigiri/include/nigiri/routing/kora_walk_points.h \
         /src/deps/nigiri/include/nigiri/routing/transfer_time_settings.h \
         /src/deps/nigiri/include/nigiri/routing/limits.h \
-        /src/deps/nigiri/include/nigiri/routing/raptor/raptor.h && \
+        /src/deps/nigiri/include/nigiri/routing/raptor/raptor.h \
+        /src/deps/nigiri/include/nigiri/types.h && \
     cmake -S . -B build && \
     cmake --build build --target motis -- -j4
 

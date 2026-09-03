@@ -31,11 +31,16 @@ namespace motis::kora_valhalla {
 // Profile slot holding the FULL (2 h) Valhalla transfer table. The foot
 // profile carries only the capped subset (KORA_TRANSFER_CAP_MINUTES,
 // default 30) that default queries search on; the full table lives in
-// the otherwise-unused bike slot and is selected per query via the
-// `koraFullTransfers=true` flag the app sends on cascade escalation.
-// Station-endpoint WALK offsets always read the full table. See
-// transfer-point-optimization.md § Two-tier transfer table.
-constexpr auto const kFullTransferProfile = nigiri::kBikeProfile;
+// its own dedicated slot (added by the fork's nigiri types.h overlay)
+// and is selected per query via the `koraFullTransfers=true` flag the
+// app sends on cascade escalation. NEVER park it in an existing named
+// slot: the bike / car slots lose lower-bound-graph transit edges for
+// routes without the matching allowed-flag (walk-scale lower bounds →
+// RAPTOR overprunes), and profile 2 is hardwired as the wheelchair flag
+// in the raptor drivers. Station-endpoint WALK offsets always read the
+// full table. See transfer-point-optimization.md § Two-tier transfer
+// table.
+constexpr auto const kFullTransferProfile = nigiri::kKoraFullTransferProfile;
 
 // Base walking speed baked into every Valhalla call. MUST stay equal to
 // WALK_SPEED_KMH in scripts/build_valhalla_footpath_matrix.py — the
