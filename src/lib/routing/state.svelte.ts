@@ -274,7 +274,14 @@ async function recordRecentRoute(
 	]);
 	// A current endpoint without a resolved coord can't be reproduced —
 	// skip the entry rather than store a dead one.
-	if (f && t) recentRoutes.record(f, t, viaList, mode, time);
+	if (f && t) {
+		recentRoutes.record(f, t, viaList, mode, time);
+		// Connect tiles ride on the same materialized endpoints, so a route
+		// run from the current location tiles as the resolved address
+		// rather than being dropped.
+		connectStations.record(f);
+		connectStations.record(t);
+	}
 }
 
 function currentSortFn() {
@@ -368,7 +375,7 @@ async function runHopCascade(
 			pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
 			transferTimeFactor: routingOptions.transferTimeFactor,
 			additionalTransferMin: routingOptions.additionalTransferMin,
-			transferWalkUnscale: routingOptions.transferWalkUnscale,
+			minTransferMin: routingOptions.minTransferMin,
 			koraWalkPoints: routingOptions.koraWalkPoints,
 			alternativesEpsilon: routingOptions.alternativesEpsilon,
 			alternativesMax: routingOptions.alternativesMax
@@ -1281,7 +1288,7 @@ export const routingState = {
 					pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
 					transferTimeFactor: routingOptions.transferTimeFactor,
 					additionalTransferMin: routingOptions.additionalTransferMin,
-			transferWalkUnscale: routingOptions.transferWalkUnscale,
+					minTransferMin: routingOptions.minTransferMin,
 					koraWalkPoints: routingOptions.koraWalkPoints,
 					alternativesEpsilon: routingOptions.alternativesEpsilon,
 					alternativesMax: routingOptions.alternativesMax
@@ -1487,11 +1494,10 @@ export const routingState = {
 			// routes list / § Connect). Covers fresh queries, URL restores and
 			// shared landings alike; empty result sets are not worth
 			// remembering. Async fire-and-forget: current-location endpoints
-			// are materialized (reverse geocode) before the entry is stored.
+			// are materialized (reverse geocode) before the entry and its
+			// Connect tiles are stored.
 			if (results.length > 0 && from && to) {
 				void recordRecentRoute(from, to, queryVias(), mode, time);
-				connectStations.record(from);
-				connectStations.record(to);
 			}
 			lastQueryKey = key;
 		} catch (e) {

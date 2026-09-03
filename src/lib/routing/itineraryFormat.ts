@@ -22,6 +22,15 @@ export function fmtDuration(secs: number): string {
 	return rem ? `${h} h ${rem} min` : `${h} h`;
 }
 
+// Walking durations (routing-options.md § Connection safety). A walk that
+// covers ground may never read "0 min" — under a minute it says "<1 min"
+// instead. Everything above a minute formats exactly like any other
+// duration, so the number a walk shows is identical in every safety mode.
+export function fmtWalkDuration(secs: number): string {
+	if (secs > 0 && secs < 60) return '<1 min';
+	return fmtDuration(secs);
+}
+
 export function fmtDistance(metres: number): string {
 	if (metres < 1000) return `${Math.round(metres)} m`;
 	const km = metres / 1000;

@@ -4,7 +4,10 @@
 # only the prebuilt data/ dir via scripts/deploy_valhalla.sh.
 services:
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    # Official upstream image, pinned — see docker-compose.yml for why
+    # the archived gis-ops image was dropped. Keep this tag in step
+    # with the dev compose: the server serves tiles built against it.
+    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
     container_name: kora-valhalla
     ports:
       # Loopback only — nginx is the sole external client

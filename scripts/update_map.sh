@@ -172,9 +172,15 @@ wait_all osm_extract gtfs_prep
 
 # ── Phase 3: pfaedle ∥ routing prep ──────────────────────────────────
 # pfaedle (sharded across PFAEDLE_JOBS containers) is the long serial
-# stage. The routing prerequisites that depend only on the OSM extracts
+# stage. The routing prerequisites that do not depend on pfaedle's output
 # — docker network, fork image, OSM patching, Valhalla tiles — run
 # alongside it instead of after everything.
+#
+# Step 3 also builds the quay anchors, which need GTFS stops. It reads
+# them from data/gtfs_filtered/ (finished in Phase 2), never from
+# data/gtfs_routed/, which pfaedle is rewriting right here. Reading the
+# routed feed anchored against the previous run's stops, so a renumbered
+# quay silently lost its platform snap.
 banner "Phase 3 — pfaedle ∥ routing prep (OSM patch, Valhalla)"
 run_bg pfaedle      ./scripts/rebuild_transit.sh --only 5
 run_bg routing_prep ./scripts/setup_routing.sh --steps 1,2,3,4

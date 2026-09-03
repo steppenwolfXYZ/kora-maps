@@ -20,7 +20,21 @@
 # scripts/preprocess_osm_for_motis.py).
 services:
   valhalla:
-    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    # Official upstream image, pinned. The old
+    # ghcr.io/gis-ops/docker-valhalla image was archived in March 2026
+    # ("code moved to upstream") and its `latest` tag had stopped moving
+    # in October 2024 — it reported Valhalla 3.5.1 while missing the
+    # level/elevator support 3.5.0 and 3.5.1 actually shipped, so
+    # `elevator_penalty`, `step_penalty`, `search_filter.level` and the
+    # wheelchair profile were all silently inert: a lift was a free
+    # teleport between levels. The entrypoint moved upstream unchanged,
+    # so the environment interface below is the same.
+    #
+    # PINNED on purpose: `latest` is what let a two-year-old router sit
+    # here unnoticed. Bumping is a deliberate act — it forces a tile
+    # rebuild and, because the transfer table is derived from the graph,
+    # a footpath-matrix rebuild too.
+    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
     container_name: kora-valhalla
     ports:
       - "8002:8002"
@@ -68,6 +82,27 @@ services:
       nofile:
         soft: 65536
         hard: 1048576
+    # Memory ceiling. Valhalla's per-request working set spikes far past
+    # its steady state under the footpath-matrix build — a 24-thread run
+    # was seen at 30 GB anon-RSS, which invoked the *host* OOM killer and
+    # took Valhalla down mid-matrix while tippecanoe was running beside
+    # it. The cap keeps that blast radius inside the container: docker
+    # kills and restarts only Valhalla, and the matrix builder waits for
+    # it to come back (see _wait_for_valhalla in
+    # scripts/build_valhalla_footpath_matrix.py) instead of losing the
+    # run. memswap_limit matches mem_limit so the container cannot buy
+    # extra headroom by thrashing the host's swap.
+    #
+    # 40g, not 32g: at 32 the cap itself became the binding constraint —
+    # four cgroup kills in one matrix run, all at 33.4 GB anon-RSS, while
+    # the host still had 30 GB free. The threads keep their largest-ever
+    # matrix allocations, so usage plateaus around 30-35 GB once the run
+    # reaches the dense agglomerations. 40g sits above that plateau and
+    # still leaves ~20 GB for the tippecanoe emit running beside it.
+    # Override per machine:
+    # VALHALLA_MEM_LIMIT=12g docker compose up -d valhalla
+    mem_limit: ${VALHALLA_MEM_LIMIT:-40g}
+    memswap_limit: ${VALHALLA_MEM_LIMIT:-40g}
     restart: unless-stopped
     # Shared network with the MOTIS fork (query-time WALK routing —
     # MOTIS resolves this container as `kora-valhalla`). One-time:

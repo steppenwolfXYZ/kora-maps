@@ -61,6 +61,17 @@ Going longer does NOT cover: reasoning that led to the answer, adjacent observat
 
 If you find yourself reaching for a justification to expand, the default is probably right.
 
+**Corrections stop at the evidence.** When the user states something that
+turns out to be wrong, the reply is the one-line correction plus the command
+output or file line that proves it. Nothing after that. Do not append what
+it implies, why it matters, what to do about it, or a recap of the change
+already made — the user reads the evidence and draws their own conclusion.
+A long reply here is worse than a short one even when every sentence is
+true: past a few lines it does not get read, so the correction itself is
+lost. Canonical case: "this script only runs on a fresh clone" answered
+with one grep showing the four places another script calls it — and then
+silence.
+
 ## Explanation depth
 The user decides at the architecture level and does not read the Python pipeline code (`scripts/`, including `scripts/transit/` and `scripts/generate_style.py`). When explaining pipeline behavior, stay at the algorithm and data-flow level: what the step does, what it consumes and produces, what the rule is. Do not reference function names, line numbers, code snippets, or Python-specific syntax unless asked.
 

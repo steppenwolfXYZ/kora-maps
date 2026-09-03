@@ -70,6 +70,26 @@ based on the **selected walking speed**.
 
 - Cautious maps to +5 min additional transfer time; Daring maps to a
   0.5 transfer-time factor (both already supported by the routing API).
+- **Safety modes never change a walking time shown in the UI.** Walking
+  time is a function of the walking speed alone — the same transfer at
+  the same station must read identically in Cautious, Balanced and
+  Daring, in the leg rows, the strip, the walked total and the
+  ranking. The safety factor is a *search* knob: it decides which
+  connections are offered, never how long a walk is said to take. The
+  tight-transfer math in § 3 follows the same rule — the walk is
+  always measured at the set speed.
+- **Daring never produces a zero-minute transfer.** Alighting and
+  boarding at the same instant is Reckless (mode 4) by definition;
+  Daring may demand a sprint, but the traveller always keeps at least
+  one minute. Every query whose transfer-time factor drops below 1 —
+  Daring, and the Brisk / Running walking tiers on their own — carries
+  a one-minute floor on the transfer time. This is the query-side half
+  of the guarantee; the transfer table carries its own floor at import
+  (`transfer-point-optimization.md` § Minimum transfer time), and the
+  query floor catches what halving that value would truncate away.
+- **Walking times are never rounded down.** A walk shorter than a
+  minute reads `<1 min`; `0 min` must never surface for a walk that
+  covers distance.
 - **Reckless is not implemented yet.** It requires the routing core to
   accept negative transfer slack (−60 s). This is the one backend-risky piece and is
   **separately shippable**: the other three modes must not depend on it.
@@ -82,21 +102,34 @@ based on the **selected walking speed**.
 Per transfer, compute spare time = (next departure − arrival at stop)
 − walking time at the set speed. Four warning levels:
 
-| Warning | Condition |
-|---|---|
-| Tight | less than 20 s to spare (but still makeable) |
-| Very tight | spare below zero, needing up to 20 % faster walking |
-| Extremely tight | needs 20–50 % faster walking |
-| If you're lucky | needs more than 50 % faster walking, or is outright infeasible (Reckless connections) — visually distinct from the tight ladder |
+| Warning | Condition | Wording |
+|---|---|---|
+| Tight | less than 20 s to spare (but still makeable) | ≥ 30 s: "~1 min to spare"; below that: "no time to spare" |
+| Very tight | spare below −5 s, needing up to 20 % faster walking | "you need to run" |
+| Extremely tight | needs 20–50 % faster walking | "you may not make it" |
+| If you're lucky | needs more than 50 % faster walking, or is outright infeasible (Reckless connections) — visually distinct from the tight ladder | "only if you are lucky" |
+
+**No seconds in the UI.** Walking times are not second-accurate, so
+neither the transfer chip nor the tooltip ever states a spare figure —
+the tier, plus the one band boundary inside Tight, carries the message.
+The "~1 min to spare" band is defined up to 90 s and so only shows
+below the 20 s tight threshold today; it exists so the wording survives
+a future widening of the warning window.
+
+**Rounding guard.** Walk-leg durations arrive as whole seconds while the
+schedule window is exact, so a walk that exactly fills its window can
+report a spare of −1 s. A spare down to −5 s therefore still counts as
+makeable ("no time to spare") and never escalates a tier; the same
+tolerance applies to the timed-feeder exception below.
 
 The ladder is pitched so the tier reads as a safety-mode signal.
 Balanced only returns transfers the set speed makes, so it can reach
 **Tight and nothing above** — and only inside the last 20 s of margin,
 which makes a warning there the exception. Every higher tier requires a
-negative spare, which only Daring's halved transfer times produce, and
-Cautious (spare ≥ 5 min by construction) never warns at all. Accepted
-loss: a 20 s–2 min buffer in Balanced gets no heads-up even though a
-delayed feeder would break it.
+meaningfully negative spare, which only Daring's halved transfer times
+produce, and Cautious (spare ≥ 5 min by construction) never warns at
+all. Accepted loss: a 20 s–2 min buffer in Balanced gets no heads-up
+even though a delayed feeder would break it.
 
 Thresholds are calibrated on Switzerland, where a positive spare on the
 Valhalla matrix genuinely means makeable. Other countries will need
@@ -112,9 +145,10 @@ their own values.
 - **Timed feeders (train → bus/tram/regional bus, tram → bus):**
   these transfers are typically Anschluss-timed in CH — the receiving
   vehicle waits for a late feeder. The tight ladder is suppressed as
-  long as the spare at the set walking speed is ≥ 0 seconds; a
-  negative spare (physically unmakeable walk) still warns with the
-  normal ladder, and the "if you're lucky" tier is unaffected.
+  long as the spare at the set walking speed is ≥ −5 seconds (the
+  rounding guard above); a spare below that (physically unmakeable
+  walk) still warns with the normal ladder, and the "if you're lucky"
+  tier is unaffected.
   tram → bus is an interim blanket rule (city buses don't actually
   wait for city trams); the per-line/per-station refinement is
   planned — see `regio-tram-timed-transfers.md`. tram → tram is not
@@ -284,6 +318,12 @@ differ wildly in speed; you can run with a stroller).
   since matrix durations are opaque single numbers.
 - Warning math and safety feasibility must use the same walking-speed
   value the backend used, or warnings will contradict the results.
+- The transfer table's one-minute resolution must not leak into the
+  UI. A transfer walk's displayed duration comes from the pedestrian
+  router's own seconds, never from the gap between the two transit
+  legs — that gap is minute-quantised and carries the safety scaling,
+  so reading walking time off it makes a sub-minute walk vanish
+  entirely once a factor below 1 truncates it to zero.
 - Reckless connections are real itineraries the user may miss — the
   "if you're lucky" warning is mandatory on every one of them.
 - The browser still makes exactly one request per query; no direct

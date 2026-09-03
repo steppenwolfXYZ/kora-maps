@@ -46,6 +46,12 @@ services:
       # baked the transfer table into tt_ext.bin), but setting it
       # keeps dev/prod config identical.
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # GTFS transfers.txt of the feed being imported — source of the
+      # operator's own per-pair minimum transfer times, which floor the
+      # matrix at import (transfer-point-optimization.md § Minimum
+      # transfer time). Equal to the default the fork compiles in;
+      # spelled out so the dependency on the mounted feed is visible.
+      KORA_GTFS_TRANSFERS_PATH: /data/gtfs/transfers.txt
       # Query-time Valhalla endpoint for WALK offsets + WALK legs
       # (fork's kora_valhalla client). Resolves over the shared
       # `koramaps` docker network — create it once with:
@@ -76,6 +82,12 @@ services:
       - ./data:/data/data
     environment:
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # GTFS transfers.txt of the feed being imported — source of the
+      # operator's own per-pair minimum transfer times, which floor the
+      # matrix at import (transfer-point-optimization.md § Minimum
+      # transfer time). Equal to the default the fork compiles in;
+      # spelled out so the dependency on the mounted feed is visible.
+      KORA_GTFS_TRANSFERS_PATH: /data/gtfs/transfers.txt
     working_dir: /data
     command: ["/motis", "import"]
 

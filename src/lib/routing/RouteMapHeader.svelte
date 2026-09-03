@@ -3,7 +3,7 @@
 	import { legBadgeColor, loadRouteColorIndex } from './legColor';
 	import { transferCount } from './ranking';
 	import {
-		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtTime, iconFor
+		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtTime, fmtWalkDuration, iconFor
 	} from './itineraryFormat';
 	import { rankOptionsFor, routingState } from './state.svelte';
 
@@ -67,7 +67,7 @@
 					<span class="rmh-leg" class:walk={isWalk}>
 						{#if isWalk}
 							<span class="rmh-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-							<span class="rmh-leg-dur">{fmtDuration(dur)}</span>
+							<span class="rmh-leg-dur">{fmtWalkDuration(dur)}</span>
 						{:else if leg.routeShortName}
 							{@const bg = legBadgeColor(colorIndex, leg)}
 							<span

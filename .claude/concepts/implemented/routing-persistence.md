@@ -39,15 +39,15 @@ When no route is set, a **recent routes** section appears below the date/time co
   - Stored date/time still in the future (or now): keep it, keep the arrive/leave mode.
   - Stored date/time in the past: switch to "now" (depart now).
 
-### Connect (station tile grid)
+### Connect (place tile grid)
 
 The no-route-set view grows two tabs: **Connect** (default) and **Recent** (the list above). The name is "Connect" — not "touch timetable", though the SBB app's touch timetable is the reference interaction. The selected tab persists in `localStorage` under `kora.routing.suggestTab`.
 
-- Connect is a **lined grid** of station cells (grid lines, not buttons). Interaction is **drag-to-connect**: press a cell, drag — a line follows the pointer — release on another cell, and the route is set (start cell = From, release cell = To).
-- **Capacity: 10 station options**, plus a fixed **bottom row** (SBB-style): a **Current location** cell (hidden when geolocation is unavailable or denied) and two **empty half-cells**, "Start" and "Stop". A connection drawn through an empty cell leaves that side of the route empty — the station on the other end of the line fills the opposite side, and the cursor lands in the empty side's input.
-- **Tile colors**: station tiles are filled with a 135° gradient from the station's average line color to its dominant line color (`ca` / `cd`, baked into `stop_search_index.json` by step 07), white text/icons; fallback with an older index is a tint→tone of the mode mid-color, then anthracite. The bottom-row cells are flat fills: blue-tinted gray for Current location, a lighter gray for Start, a darker one for Stop.
-- **Real options**: the user's most-used stations, stored in `localStorage` under `kora.connect.stations`. Every station endpoint of a shown route bumps its usage; ranking is by recency-decayed frequency (half-life on the order of months). Stations only — point/address endpoints don't tile pre-account.
-- **Cold start**: while fewer than 10 real options exist, the remaining slots are filled with standard suggestions computed from location:
+- Connect is a **lined grid** of place cells (grid lines, not buttons). Interaction is **drag-to-connect**: press a cell, drag — a line follows the pointer — release on another cell, and the route is set (start cell = From, release cell = To).
+- **Capacity: 10 place options**, plus a fixed **bottom row** (SBB-style): a **Current location** cell (hidden when geolocation is unavailable or denied) and two **empty half-cells**, "Start" and "Stop". A connection drawn through an empty cell leaves that side of the route empty — the place on the other end of the line fills the opposite side, and the cursor lands in the empty side's input.
+- **Tile colors**: station tiles are filled with a 135° gradient from the station's average line color to its dominant line color (`ca` / `cd`, baked into `stop_search_index.json` by step 07), white text/icons; fallback with an older index is a tint→tone of the mode mid-color, then anthracite. Address and POI tiles have no line colors of their own and always wear the anthracite fallback, carrying the same address / POI icons the endpoint inputs use. The bottom-row cells are flat fills: blue-tinted gray for Current location, a lighter gray for Start, a darker one for Stop.
+- **Real options**: the user's most-used **places** — stations, addresses and POIs alike — stored in `localStorage` under `kora.connect.stations`. Every endpoint of a shown route bumps its usage; ranking is by recency-decayed frequency (half-life on the order of months). Tile identity is the merged UIC for stations and a coordinate key (`pt:<lon>,<lat>`, ~1 m rounding) for points, so repeated use of the same address collapses onto one tile. Current-location endpoints are materialized into address points first, exactly as recents does — a live current location never tiles as such (the bottom row already covers it).
+- **Cold start**: while fewer than 10 real options exist, the remaining slots are filled with standard station suggestions computed from location (suggestions are stations only — there is nothing to suggest for addresses):
   - the closest station,
   - the closest station of each stop tier higher than the closest one's tier,
   - the 4 closest stations of the highest tier (major train stations).

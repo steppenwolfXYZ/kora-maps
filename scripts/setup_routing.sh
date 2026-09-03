@@ -89,10 +89,15 @@ if ! docker info >/dev/null 2>&1; then
   echo "docker is not running — start Docker and retry" >&2
   exit 1
 fi
-# Steps 1-4 (network, image, OSM patch, Valhalla) need only the OSM
-# extracts; the routed GTFS is required from step 5 on. Orchestrators
-# start steps 1-4 while pfaedle is still running.
+# Steps 1-4 (network, image, OSM patch, Valhalla) need the OSM extracts
+# plus — for step 3's quay anchors — step 04's filtered stops; the routed
+# GTFS is required from step 5 on. Orchestrators start steps 1-4 while
+# pfaedle is still running, which is exactly why step 3 reads the filtered
+# feed and never the routed one (see build_station_walk_network.py).
 PREREQS=(data/osm/ch_pfaedle.osm.pbf data/osm/switzerland-latest.osm.pbf)
+for n in 3 4; do
+  if want "$n"; then PREREQS+=(data/gtfs_filtered/stops.txt); break; fi
+done
 for n in 5 6 7 8; do
   if want "$n"; then PREREQS+=(data/gtfs_routed/stops.txt); break; fi
 done
@@ -128,10 +133,36 @@ if want 2; then
 # ── Step 2: MOTIS fork image ────────────────────────────────────────
 echo ""
 echo "▶ Step 2 — MOTIS fork image (koramaps/motis:footpath-matrix)"
-if [[ $FORCE_IMAGE -eq 0 ]] && docker image inspect koramaps/motis:footpath-matrix >/dev/null 2>&1; then
-  echo "  image present — skipped (--force-image to rebuild)"
+# Rebuild when the fork sources are newer than the last build, not merely
+# when the image is absent. "Image present" once let a pulled fork change
+# sit unbuilt through a whole update_map.sh run: the import then produced
+# an index without the minimum-transfer-time floor and without the 2-h
+# transfer profile, and nothing said so — the index is only wrong in what
+# it contains. Same shape of check step 3 applies to the OSM patch.
+#
+# The stamp lives outside motis/data/ on purpose: that directory is synced
+# between machines with --delete, so a stamp inside it would carry the
+# other machine's build time and defeat the comparison.
+IMAGE_STAMP=motis/.image_build_stamp
+image_stale() {
+  [[ $FORCE_IMAGE -eq 1 ]] && return 0
+  docker image inspect koramaps/motis:footpath-matrix >/dev/null 2>&1 || return 0
+  [[ -f $IMAGE_STAMP ]] || return 0
+  [[ -n "$(find motis/fork -type f -newer "$IMAGE_STAMP" -print -quit)" ]]
+}
+if ! image_stale; then
+  echo "  image up to date with motis/fork/ — skipped (--force-image to rebuild)"
 else
   time docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
+  touch "$IMAGE_STAMP"
+  # A new binary can build a different transfer table from identical
+  # inputs, but MOTIS's task hash covers only the data (timetable, osm,
+  # matches, way_matches) — never the image. Without dropping this key the
+  # next import reports "running tasks: []" and silently keeps the table
+  # the old binary produced. Only the footpath task is invalidated; osr,
+  # tt and matches are unaffected by the fork.
+  rm -f motis/data/meta/osr_footpath.json
+  echo "  image rebuilt — dropped meta/osr_footpath.json so step 7 redoes the transfer table"
 fi
 fi
 
@@ -143,21 +174,39 @@ if want 3; then
 # (see .claude/concepts/station-walk-network.md).
 echo ""
 echo "▶ Step 3 — Patch OSM PBFs"
-if [[ $FORCE_OSM -eq 0 && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf ]]; then
+# Each artifact is compared against the script that produces it as well as
+# against its data inputs. A code change moves no file in data/, so a
+# data-only check reports "up to date" and silently serves the old result —
+# which is how a walk-network change once reached neither the overlay nor
+# the tiles. git rewrites a script's mtime only when its content changed,
+# so this triggers on real edits and not on every pull.
+if [[ $FORCE_OSM -eq 0 \
+      && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf \
+      && data/osm/switzerland-motis.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
   echo "  switzerland-motis.osm.pbf up to date — skipped"
 else
   time python3 scripts/preprocess_osm_for_motis.py
 fi
 # Platform walk lines + quay anchors. Must precede the --valhalla patch
 # (which merges the overlay) and step 5 (which reads the anchors).
-if [[ $FORCE_OSM -eq 0 && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf ]]; then
+# The freshness test includes the filtered stops: anchors are keyed by
+# stop_id, so a GTFS refresh that renumbers a quay invalidates them even
+# when the OSM extract is untouched. Without that clause the stale anchor
+# file survived, the renumbered quay never got snapped onto its platform,
+# and it dropped out of the footpath matrix — leaving trains that call
+# there visible in /stoptimes but unboardable in /plan.
+if [[ $FORCE_OSM -eq 0 \
+      && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
+      && data/osm/station_walk_network.osm.pbf -nt data/gtfs_filtered/stops.txt \
+      && data/osm/station_walk_network.osm.pbf -nt scripts/build_station_walk_network.py ]]; then
   echo "  station_walk_network.osm.pbf up to date — skipped"
 else
   time python3 scripts/build_station_walk_network.py --force-extract
 fi
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
-      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf ]]; then
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf \
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
   echo "  ch_pfaedle_walkable.osm.pbf up to date — skipped"
 else
   time python3 scripts/preprocess_osm_for_motis.py --valhalla
@@ -170,12 +219,24 @@ fi
 # it, and a walk-network change with unchanged OSM data would then never
 # reach the tiles. Tiles are container-owned, hence the docker-side rm; the
 # slow elevation and admin data are kept.
+# The compose file counts as an input too: it pins the Valhalla image, and
+# a version bump changes what the tiles mean without touching any data
+# file. Left out, an image bump would serve the previous version's tiles
+# and the upgrade would look like it had landed when it had not — the same
+# silent skip that data-only guards produced for code changes.
 TILES_TAR=valhalla/data/valhalla_tiles.tar
-if [[ -f "$TILES_TAR" && data/osm/ch_pfaedle_walkable.osm.pbf -nt "$TILES_TAR" ]]; then
-  echo "  Valhalla tiles are older than the walkable PBF — wiping so step 4 rebuilds"
+if [[ -f "$TILES_TAR" ]] \
+   && { [[ data/osm/ch_pfaedle_walkable.osm.pbf -nt "$TILES_TAR" ]] \
+        || [[ valhalla/docker-compose.yml -nt "$TILES_TAR" ]]; }; then
+  echo "  Valhalla tiles are older than their inputs — wiping so step 4 rebuilds"
   (cd valhalla && docker compose down) >/dev/null 2>&1 || true
+  # valhalla.json goes with them: it is generated by the image, and a
+  # config written by an older Valhalla can silently lack keys the new one
+  # needs. Everything in it comes from the compose environment, so there is
+  # nothing hand-tuned to lose. Elevation and admin data are kept — they
+  # are slow to fetch and version-independent.
   docker run --rm -v "$PWD/valhalla/data:/d" alpine \
-    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt'
+    sh -c 'rm -rf /d/valhalla_tiles /d/valhalla_tiles.tar /d/file_hashes.txt /d/valhalla.json'
 elif [[ ! -f "$TILES_TAR" ]]; then
   echo "  no Valhalla tiles yet — step 4 will build them"
 else
@@ -249,6 +310,12 @@ echo "▶ Step 7 — MOTIS import"
 if [[ $FORCE_IMPORT -eq 0 && -f motis/data/tt.bin ]]; then
   echo "  index present — skipped (--force-import to re-import)"
 else
+  # Gate the importer on a self-consistent feed. nigiri drops stop ids it
+  # cannot resolve and imports the trip anyway, so a mixed-vintage
+  # data/gtfs_motis/ produces an index that looks healthy and quietly
+  # loses station calls. ~1-2 min against a ~10 min import.
+  echo "  checking data/gtfs_motis/ consistency"
+  python3 scripts/check_gtfs_motis_consistency.py
   # `run --rm` instead of `up` so the import's exit code propagates
   # and no stopped container lingers. On native Linux the container's
   # `motis` user (uid 999) cannot write the bind-mounted ./data, so map

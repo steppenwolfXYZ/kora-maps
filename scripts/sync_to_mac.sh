@@ -7,23 +7,38 @@
 # here therefore flows data-machine → Mac. Nothing here touches tracked
 # repo files — only generated artifacts.
 #
-# Groups (all but `routed` run by default):
+# Groups (all run by default — the script's job is to leave the Mac able to
+# run and debug everything, so nothing relevant is opt-in; `--no-routed`
+# drops the one big group when you only want the app current):
 #   assets    static/map-assets/     ~470 MB  pmtiles, style, indexes, glyphs
 #   motis     motis/data/            ~4.5 GB  prebuilt nigiri/OSR/shapes indexes
 #   valhalla  valhalla/data/         ~1.0 GB  tile extract + admins
-#   lookup    data/ (derived only)   ~160 MB  diagnostic + identity tables
-#   routed    data/gtfs_routed/      ~6.2 GB  opt-in, only to run steps 6-8 there
+#   lookup    data/ (raw feed +      ~400 MB  the whole GTFS feed, diagnostics,
+#             derived tables)                 identity + OSM way extracts
+#   routed    data/gtfs_routed/ +    ~6.2 GB  opt-in; needed to run steps 6-8
+#             data/gtfs_motis/                or to re-import MOTIS on the Mac
 #
-# MOTIS indexes are architecture-portable — this machine imports on amd64
-# and update_map.sh already ships those same indexes to the arm64 VPS — so
-# the Mac gets finished indexes and never needs the 1.8 GB matrix CSV. Pass
-# --with-matrix only to re-import MOTIS on the Mac (i.e. when changing the
-# fork's import path rather than its query path).
+# Feed directories travel WHOLE or not at all. Shipping a few tables out of
+# data/gtfs/ (or the sidecar's lone stops.txt out of data/gtfs_motis/) left
+# the Mac with directories mixing two GTFS releases. That is not merely
+# incomplete: SBB renumbers quays between releases, so a new stops.txt over
+# an old stop_times.txt leaves dangling stop ids, and MOTIS imports that
+# without complaint — it drops the unresolvable stops, keeps the trips, and
+# the affected station silently stops appearing in routing results.
+#
+# The `motis` group ships the finished indexes AND the 1.8 GB footpath
+# matrix CSV. The matrix used to be opt-in (--with-matrix), on the theory
+# that the Mac never re-imports because MOTIS indexes are architecture-
+# portable. In practice the Mac re-imports whenever the fork's import path
+# changes, and a Mac holding tiles from this machine next to its own months-
+# old matrix produces transfers the tiles cannot walk — silently, since the
+# import only counts the unresolvable ids. The matrix and the Valhalla tiles
+# describe the same walking and must travel together.
 #
 # Usage:
-#   ./scripts/sync_to_mac.sh                      # assets, motis, valhalla, lookup
+#   ./scripts/sync_to_mac.sh                      # everything (all five groups)
 #   ./scripts/sync_to_mac.sh --only assets,lookup
-#   ./scripts/sync_to_mac.sh --with-routed        # + gtfs_routed (steps 6-8 there)
+#   ./scripts/sync_to_mac.sh --no-routed          # skip the 6.2 GB routed feed
 #   ./scripts/sync_to_mac.sh --dry-run
 #
 # Extra arguments are passed through to rsync.
@@ -37,8 +52,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # NB: not `GROUPS` — that is a bash special array (the caller's group ids)
 # and assigning to it silently does nothing.
-SYNC_GROUPS="assets,motis,valhalla,lookup"
-WITH_MATRIX=0
+SYNC_GROUPS="assets,motis,valhalla,lookup,routed"
 STREET_WAYS=0
 FULL_VALHALLA=0
 FORCE=0
@@ -49,8 +63,11 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--only)           SYNC_GROUPS="$2"; shift 2 ;;
 		--only=*)         SYNC_GROUPS="${1#*=}"; shift ;;
-		--with-routed)    SYNC_GROUPS="$SYNC_GROUPS,routed"; shift ;;
-		--with-matrix)    WITH_MATRIX=1; shift ;;
+		--no-routed)      SYNC_GROUPS="${SYNC_GROUPS//,routed/}"; shift ;;
+		# Accepted and ignored: both ship by default now. Kept so the old
+		# habits do not fall through to rsync as unknown options.
+		--with-routed)    shift ;;
+		--with-matrix)    shift ;;
 		--street-ways)    STREET_WAYS=1; shift ;;
 		--full-valhalla)  FULL_VALHALLA=1; shift ;;
 		--force)          FORCE=1; shift ;;
@@ -124,15 +141,21 @@ if want assets && have assets "static/map-assets/style.json"; then
 fi
 
 # ── motis ────────────────────────────────────────────────────────────
-# The matrix CSV is an import-time input only. Excluding it also protects
-# any copy already on the Mac from --delete (rsync never deletes excluded
-# files unless --delete-excluded is given).
+# Two pushes, because -z is worth it for exactly one file here: the indexes
+# are binary and incompressible, the matrix is text and compresses ~8.5x.
+# The CSV is therefore excluded from the index push and sent on its own.
+# The exclude also keeps --delete from removing the Mac's copy in the gap
+# between the two pushes (rsync never deletes excluded files unless
+# --delete-excluded is given).
 if want motis && have motis "motis/data/tt.bin"; then
 	push "MOTIS indexes → motis/data/" "motis/data/" \
 		--delete --exclude 'valhalla_footpath_matrix.csv' \
 		"$ROOT/motis/data/"
 
-	if [ "$WITH_MATRIX" -eq 1 ]; then
+	# Always ships — see the header note. Guarded by its own sentinel: a
+	# missing matrix means an incomplete run, and skipping it leaves the
+	# Mac's copy alone rather than aborting the whole sync.
+	if have motis "motis/data/valhalla_footpath_matrix.csv"; then
 		push "footpath matrix → motis/data/ (1.8 GB text, compressed in flight)" \
 			"motis/data/" -z \
 			"$ROOT/motis/data/valhalla_footpath_matrix.csv"
@@ -155,22 +178,39 @@ if want valhalla && have valhalla "valhalla/data/valhalla_tiles.tar"; then
 fi
 
 # ── lookup ───────────────────────────────────────────────────────────
-# Derived tables only — the ones actually worth grepping while debugging.
-# NEVER --delete here: these land inside the Mac's own 40+ GB data/ tree.
+# The raw GTFS feed plus the derived tables worth grepping while
+# debugging. --delete is used only on data/gtfs/, which this machine owns
+# end to end; the other pushes land inside the Mac's own 40+ GB data/ tree
+# and must never delete.
 # Deliberately excluded: the country PBFs (12.7 GB, unreadable without
-# osmium), stop_times.txt / trips.txt / calendar_dates.txt (pipeline fuel,
-# not lookup material), and the large intermediate GeoJSONs.
+# osmium), gtfs_complete.zip (a second copy of the feed we send anyway),
+# and the large intermediate GeoJSONs.
 if want lookup; then
+	# '*/' keeps the recursion alive so data/transit/diagnostics/ comes
+	# along; without it the bare '*' exclude pruned every subdirectory.
 	push "diagnostics → data/transit/" "data/transit/" \
-		-z --include '*.json' --exclude '*' \
+		-z --include '*/' --include '*.json' --exclude '*' \
 		"$ROOT/data/transit/"
 
-	GTFS_TABLES=()
-	for f in stops.txt routes.txt agency.txt calendar.txt frequencies.txt feed_info.txt; do
-		if [ -f "$ROOT/data/gtfs/$f" ]; then GTFS_TABLES+=("$ROOT/data/gtfs/$f"); fi
-	done
-	if [ ${#GTFS_TABLES[@]} -gt 0 ]; then
-		push "GTFS lookup tables → data/gtfs/" "data/gtfs/" -z "${GTFS_TABLES[@]}"
+	# The raw feed goes over WHOLE, never table by table. It used to ship
+	# as six small tables (stops, routes, agency, calendar, frequencies,
+	# feed_info) with stop_times / trips / calendar_dates left behind as
+	# "pipeline fuel". That left the Mac with a data/gtfs/ whose
+	# feed_info.txt announced the new release while its big tables were
+	# the previous one — a directory that lies about its vintage, which is
+	# worse to debug against than one that is simply absent. It also made
+	# the two questions you actually ask ("what is this trip_id?", "does
+	# this service run on that date?") unanswerable, because trips.txt and
+	# calendar_dates.txt were the missing ones. ~3.6 GB raw but it
+	# overwrites the Mac's existing copy in place, so the disk delta is
+	# ~zero, and -z gets it down to ~240 MB in flight.
+	# gtfs_complete.zip is excluded: it is a second copy of what we just
+	# sent. --delete is safe here (excluded files are never deleted) and
+	# necessary — a table the new release dropped must not linger.
+	if have lookup "data/gtfs/stop_times.txt"; then
+		push "raw GTFS feed → data/gtfs/" "data/gtfs/" \
+			-z --delete --exclude 'gtfs_complete.zip' \
+			"$ROOT/data/gtfs/"
 	fi
 
 	if [ -f "$ROOT/data/gtfs_filtered/stop_identity.json" ]; then
@@ -178,13 +218,11 @@ if want lookup; then
 			"$ROOT/data/gtfs_filtered/stop_identity.json"
 	fi
 
-	# The MOTIS sidecar's one non-hardlinked file: the platform-snapped
-	# stops the router actually sees. The rest of data/gtfs_motis/ is
-	# hardlinked from data/gtfs_routed/ and is not lookup material.
-	if [ -f "$ROOT/data/gtfs_motis/stops.txt" ]; then
-		push "MOTIS stops → data/gtfs_motis/" "data/gtfs_motis/" -z \
-			"$ROOT/data/gtfs_motis/stops.txt"
-	fi
+	# NB: data/gtfs_motis/stops.txt is deliberately NOT pushed here — it
+	# ships with the `routed` group instead. Everything else in that
+	# directory is hardlinked from data/gtfs_routed/, so sending the one
+	# independent file on its own gave the Mac this machine's new stops
+	# on top of its own old stop_times. See the `routed` group below.
 
 	OSM_EXTRACTS=()
 	OSM_WANTED=(rail_ways.geojson tram_ways.geojson platform_ways.geojson
@@ -199,12 +237,32 @@ if want lookup; then
 	fi
 fi
 
-# ── routed (opt-in) ──────────────────────────────────────────────────
-# Only needed to run rebuild_transit.sh --start 6 on the Mac, i.e. to test
-# an emission change against fresh data without re-running pfaedle there.
+# ── routed ───────────────────────────────────────────────────────────
+# The feed the router actually consumed: pfaedle's output, and the input
+# to both `rebuild_transit.sh --start 6` and a MOTIS re-import on the Mac.
+# The sidecar's stops.txt rides along, because it is only meaningful next
+# to the routed feed it is hardlinked from — shipping it alone is what
+# produced a mixed-vintage import (see the lookup group). Both or neither.
+#
+# 6.2 GB, the largest group, but it overwrites the Mac's copy in place so
+# the disk does not grow, and -z puts far less than that on the wire.
+# `--no-routed` skips it — after which do NOT re-import MOTIS on the Mac:
+# the `motis` group already delivered this machine's finished indexes, and
+# a local import would rebuild them from a stale data/gtfs_motis/.
+# setup_routing.sh step 7 refuses the obviously-broken case, but "old yet
+# internally consistent" passes by design.
 if want routed && have routed "data/gtfs_routed/shapes.txt"; then
-	push "routed GTFS → data/gtfs_routed/ (steps 6-8 input)" "data/gtfs_routed/" \
-		-z --delete "$ROOT/data/gtfs_routed/"
+	push "routed GTFS → data/gtfs_routed/ (steps 6-8 + MOTIS import input)" \
+		"data/gtfs_routed/" -z --delete "$ROOT/data/gtfs_routed/"
+
+	# stops.txt only: the rest of the sidecar is hardlinked from the feed
+	# we just sent, and preprocess_gtfs_for_motis.py rebuilds those links
+	# on the Mac anyway. Sent after the feed so the pair is never
+	# momentarily mismatched.
+	if [ -f "$ROOT/data/gtfs_motis/stops.txt" ]; then
+		push "MOTIS sidecar stops → data/gtfs_motis/" "data/gtfs_motis/" -z \
+			"$ROOT/data/gtfs_motis/stops.txt"
+	fi
 fi
 
 banner "Done"

@@ -1,13 +1,21 @@
 # Kora Maps fork of MOTIS: Valhalla is the sole walking authority (see
 # .claude/concepts/valhalla-pedestrian-router.md). The fork overlays:
 #   src/compute_footpaths.cc       — import-time transfer table from the
-#                                    precomputed Valhalla matrix CSV
+#                                    precomputed Valhalla matrix CSV,
+#                                    floored per pair by the feed's own
+#                                    minimum transfer times
+#                                    (transfer-point-optimization.md
+#                                    § Minimum transfer time)
 #   src/kora_valhalla.cc
 #   include/motis/kora_valhalla.h  — query-time Valhalla HTTP client
 #   src/endpoints/routing.cc       — WALK offsets (RAPTOR boarding-stop
 #                                    selection) via Valhalla one-to-many
 #   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
-#                                    transfer) via Valhalla /route
+#                                    transfer) via Valhalla /route;
+#                                    leg.duration is Valhalla's walking
+#                                    time, not the leg's time span
+#                                    (routing-options.md § Connection
+#                                    safety)
 #   include/motis/osr/parameters.h — kora_walk_factor_: query-scoped
 #                                    walking-speed scaling of the
 #                                    Valhalla surfaces (routing-options.md)
