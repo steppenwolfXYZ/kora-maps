@@ -13,6 +13,14 @@ no retry.
 The goal: one command on the Mac, from anywhere, that leaves the Mac
 serving fresh data hours later without further attention.
 
+Two adjacent problems are folded in, because remote triggering makes both
+worse. The build is nearly all-or-nothing — its only levers are `--osm`
+and `--skip-deploy`, so a fork-only change still re-runs the whole map
+pipeline and a style-only change still rebuilds the routing stack. Hours
+of wasted work matter more when you cannot watch the machine. And
+`scripts/` has grown flat: pipeline, routing, deploy, and cross-machine
+scripts sit side by side with no grouping.
+
 ## Requirements
 
 ### Reachability
@@ -90,6 +98,11 @@ serving fresh data hours later without further attention.
 - Each group retries on failure, resuming mid-file rather than restarting
   a multi-GB index. A stalled connection must fail fast rather than hang
   indefinitely.
+- The fetch stays content-driven and is never told which branch was
+  built. A branch-scoped build leaves the other branch's artifacts
+  untouched rather than missing, so sentinel checks plus rsync's own
+  change detection already do the right thing: an unchanged group
+  transfers nothing.
 
 ### Completion
 
@@ -101,12 +114,100 @@ serving fresh data hours later without further attention.
 - Any phase failing stops the run before the next phase. A partial fetch
   must never reach `post_sync.sh`.
 
+### Build selection
+
+The build's shape is described by two independent axes, not by one list
+of special cases.
+
+**Axis 1 — which branch to build.** The DAG already forks after the
+routed feed into a map-emission branch and a routing branch. Selecting a
+branch is a new mutually exclusive pair, default both:
+
+- **`--only-pipeline`** — transit pipeline and map emission only.
+  Skips routing prep, the footpath matrix, the MOTIS import, and the
+  local routing smoke test.
+- **`--only-routing`** — routing prep, footpath matrix, MOTIS import and
+  smoke test only. Skips map emission.
+
+**Axis 2 — what to refresh first.** Independent of the branch:
+
+- **`--skip-gtfs`** — new. Skip the GTFS and atlas download outright and
+  build on the feed already on disk. Distinct from the current behaviour,
+  where the download stage runs and is merely forced.
+- `--osm` — unchanged.
+
+**Deploy scope follows the branch automatically.** `--only-pipeline`
+deploys map assets only; `--only-routing` deploys Valhalla and MOTIS data
+only. `--skip-deploy` continues to suppress all of it. The user never
+has to name deploy targets — choosing a branch already says which
+artifacts exist.
+
+**Whether pfaedle runs follows the branch too.** `--only-routing` builds
+on the routed feed already on disk; re-shaping it is exactly the work
+that flag exists to avoid.
+
+**Preflight must enforce the preconditions.** A branch selection that
+depends on artifacts not present on disk — `--only-routing` without a
+routed feed, `--skip-gtfs` without a feed at all — aborts in preflight
+within seconds. The existing preflight's contract ("fail in seconds, not
+after hours") extends to cover these.
+
+**The flags live on the build script, not the orchestrator.**
+`remote_build.sh` forwards its unrecognised arguments verbatim to the
+build and never interprets them. The build script is already the
+orchestrator for the local DAG — it owns the stage graph, the preflight,
+the per-stage bookkeeping and the timing table — while `remote_build.sh`
+is a transport wrapper for a different concern (launch, watch, fetch,
+post-sync). Duplicating the flag surface across both would guarantee
+drift, and would force the transport wrapper to understand the DAG.
+
+*Open decision:* `update_map.sh` is now misnamed — with these flags it is
+the build entry point, not a map refresh. Renaming it (`build.sh`) is
+defensible while the layout is being reworked, but it appears in the
+rules docs, the README, and the sync script's "is a build running" guard,
+so it is called out here rather than assumed.
+
+### Script layout
+
+`scripts/` gains two subfolders:
+
+- **`scripts/routing/`** — `setup_routing.sh` plus the routing-only
+  Python: the station walk network builder, the footpath matrix builder,
+  the MOTIS GTFS sidecar preprocessor, the OSM-for-MOTIS preprocessor,
+  and the sidecar consistency checker.
+- **`scripts/deploy/`** — the three deploy scripts (map assets, MOTIS,
+  Valhalla).
+
+Unchanged at the top level: the build orchestrator, `rebuild_transit.sh`,
+`post_sync.sh`, `remote_build.sh`, `generate_style.py`, `build_glyphs.py`,
+`config.yaml`, and the existing `transit/` and `style/` packages.
+`generate_style.py` stays out of `transit/` for the reason already
+recorded in the rules — it generates the whole map style, not a
+transit-only artifact.
+
+The move is only complete when every caller is updated in the same
+change. References live in more places than the shell callers: the
+pipeline's own Python, the docker-compose files, the fork's C++ sources
+and README, `.env.example`, the GitHub workflow, the README, the rules
+docs, and several concept docs. A move that updates the shell callers
+alone leaves the documentation lying about paths.
+
 ## Constraints
 
-- Unchanged: `update_map.sh`, `post_sync.sh`, `rebuild_transit.sh`,
-  `setup_routing.sh`, and all four deploy scripts. Production deploys
-  still happen from the desktop at the end of the build; the app deploy
-  stays the push-to-`main` GitHub Action.
+- Behaviour unchanged: `post_sync.sh`, `rebuild_transit.sh`,
+  `setup_routing.sh`, and the three deploy scripts. They move and their
+  internal paths to moved siblings change, but their interfaces, flags
+  and semantics do not.
+- The build script changes only by gaining the new flags, the branch-
+  scoped deploy selection, and the matching preflight guards. The stage
+  graph, the overlap scheduling, the abort-before-deploy rule and the
+  timing table stay as they are.
+- Production deploys still happen from the desktop at the end of the
+  build; the app deploy stays the push-to-`main` GitHub Action.
+- The two reworks are separable and should land as separate changes: the
+  layout move is mechanical and touches ~30 files, while the flags and
+  the remote orchestration are behavioural. Reviewing them together would
+  bury the behavioural diff in renames.
 - GNU rsync must be installed on the Mac before the direction flip. The
   bundled openrsync 2.6.9 works as a passive receiver (the desktop's GNU
   rsync drives the filters today), but as the filter-driving client its
