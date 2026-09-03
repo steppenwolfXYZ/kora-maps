@@ -136,21 +136,30 @@ change is allowed to take. Two consequences met in the results:
   is loaded into the transfer table. The stored duration becomes
   `max(walking time, minimum transfer time)` — the matrix keeps saying
   how far it is, the feed says how soon you may go.
-- **The minimum comes from the feed, per pair.** GTFS `transfers.txt`
-  `transfer_type=2` rows carry the operator's own minimum for a directed
-  quay pair (94,035 pairs in the current feed, from 60 s to 600 s).
-  Those values win over any blanket rule.
+- **The feed may only relax the floor, never raise it.** GTFS
+  `transfers.txt` `transfer_type=2` values are the operator's own walking
+  estimates, computed on walking speeds and paths we do not know; taken
+  as floors they overrode the measured Valhalla walks at exactly the
+  station-adjacent stops the walk network exists to get right
+  (Bern↔Hirschengraben carries 600 s against a measured 4–5 minute walk,
+  flipping every transfer there to worse stops). A pair's value is
+  therefore used only when it is BELOW the default floor — a deliberate
+  short-transfer allowance (19,746 such rows in the current feed) —
+  and ignored otherwise. Valhalla remains the walking authority.
 - **A flat two minutes applies where the feed is silent.** Two minutes is
   MOTIS's own `default_transfer_time` for staying at one stop, so a
   change between two quays is never cheaper than not changing quay at
   all.
-- **Timed connections are exempt from the flat floor.**
-  `transfer_type=1` marks a guaranteed connection: the vehicles are
-  scheduled to meet, and a one-minute change there is real. Such pairs
-  keep their walking time.
-- **No transfer ever falls below one minute**, timed connections
-  included. Arriving at the instant of departure is Reckless by
-  definition and the search must never produce it unasked.
+- **Timed connections carry no exemption of their own.**
+  `transfer_type=1` rows are keyed by trip pair, which a stop-keyed
+  table cannot express; honouring them widened the exemption to every
+  trip over the quay pair and handed out tighter-than-necessary
+  connections. Where a transfer genuinely allows less than the default,
+  the operator publishes a sub-default `transfer_type=2` value for the
+  pair — that row is the trustworthy signal, and it is the one used.
+- **No transfer ever falls below one minute.** Arriving at the instant
+  of departure is Reckless by definition and the search must never
+  produce it unasked.
 - **Displayed and ranked walking is unaffected.** The floor is a
   scheduling rule, not a walk. Walking times in the leg rows, the walked
   total and the ranking come from the pedestrian router's own seconds

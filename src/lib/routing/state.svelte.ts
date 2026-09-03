@@ -593,13 +593,38 @@ async function loadMoreInDirection(direction: 'earlier' | 'later') {
 	// Direction-native seed (see runHopCascade): forward hops are leave-at
 	// queries anchored just past the latest known departure, backward hops
 	// are arrive-by queries anchored just before the earliest known arrival.
-	const anchors = combined.map((i) =>
-		Date.parse(dir === 1 ? i.startTime : i.endTime));
-	const startEpoch = dir === 1
-		? Math.max(...anchors) + 60_000
-		: Math.min(...anchors) - 60_000;
+	// Recomputed for the escalation retry — merged results move the edge.
+	const seedEpoch = () => {
+		const anchors = combined.map((i) =>
+			Date.parse(dir === 1 ? i.startTime : i.endTime));
+		return dir === 1
+			? Math.max(...anchors) + 60_000
+			: Math.min(...anchors) - 60_000;
+	};
+	// Extend with the budget the visible list was built with (see
+	// activePrePostSec). While that is narrow, arm the same sparse-gap
+	// escalation as the initial cascade: service can thin out past the
+	// list's edge (e.g. extending into the night) even when the original
+	// window was dense.
+	const budget = activePrePostSec;
+	const startEpoch = seedEpoch();
 	try {
-		await runHopCascade(dir, startEpoch, WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
+		const outcome = await runHopCascade(
+			dir, startEpoch, budget, budget, ac,
+			budget === NARROW_PRE_POST_SEC
+				? (frontier) => hasSparseServiceGap(combined, startEpoch, frontier, mode)
+				: undefined
+		);
+		// Sparse service past the edge — continue wide (full transfer
+		// table rides along). Unlike stage 2c the shown results are NOT
+		// replaced: only the extension beyond the current edge is
+		// re-searched, so the seed is recomputed from the merged set and
+		// the wide budget sticks for further loadMore clicks.
+		if (outcome === 'escalate' && !ac.signal.aborted) {
+			activePrePostSec = WIDE_PRE_POST_SEC;
+			await runHopCascade(
+				dir, seedEpoch(), WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
+		}
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') {
 			error = userFacingError(e);
@@ -1314,6 +1339,9 @@ export const routingState = {
 			if (results.length > 0 && from && to) {
 				void recordRecentRoute(from, to, queryVias(), mode, time);
 			}
+			// Remember the budget this cascade settled on — loadMore extends
+			// with the same reach (see activePrePostSec).
+			activePrePostSec = pre;
 			lastQueryKey = key;
 		} catch (e) {
 			if ((e as Error).name === 'AbortError') return;
