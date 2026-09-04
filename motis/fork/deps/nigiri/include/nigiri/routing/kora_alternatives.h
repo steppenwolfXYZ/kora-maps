@@ -189,10 +189,9 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
       !q.via_stops_.empty()) {
     return;
   }
+  // The primary's own level — diagnostics only; the level scan below
+  // deliberately does not cap at it (see the comment on the scan).
   auto const k = static_cast<unsigned>(j.transfers_) + 1U;
-  if (k >= round_times.n_rows_) {
-    return;
-  }
   auto const dir = [](int const x) { return kFwd ? x : -x; };
   auto const better = [](delta_t const a, delta_t const b) {
     return kFwd ? a < b : a > b;
@@ -201,11 +200,21 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
 
   // kora fork walk-weighted points (kora_walk_points.h): with weighted
   // walks the round index is a point level, and a path reaching an
-  // egress stop can sit at any level up to the primary's — scan them all
-  // (rows are cheap int16 reads) and keep the best candidate per stop:
-  // earliest anchored endpoint time, level as tiebreak. The candidate's
-  // journey level is the label's level plus the egress walk's own class
-  // delta; reconstruction is anchored at exactly that level.
+  // egress stop can sit at ANY level — scan every row (cheap int16
+  // reads, ≤ kMaxTransfers+2 per stop) and keep the best candidate per
+  // stop: earliest anchored endpoint time, level as tiebreak. The scan
+  // must NOT cap at the primary's own level: walk deltas only raise a
+  // candidate's level AFTER its row is read (cand_level = lvl + kd), so
+  // a capped scan reached high levels via long walks but never via
+  // ridden rows — a low-level ride + long walk was extractable while
+  // the same corridor with one more boarding and less walking, sitting
+  // one row higher, was structurally invisible (canonical: S1 + 15-min
+  // walk extractable from a level-2 primary, S44+S3+bus 28 tying its
+  // arrival with a third of the walking never read from row 3). The ε
+  // gap gate below still bounds which candidates qualify. The
+  // candidate's journey level is the label's level plus the egress
+  // walk's own class delta; reconstruction is anchored at exactly that
+  // level.
   struct kora_cand {
     delta_t time_;
     offset const* o_;
@@ -220,10 +229,7 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
     auto const change = adjusted_transfer_time(
         q.transfer_time_settings_, tt.locations_.transfer_time_[s].count());
     auto best_cand = std::optional<kora_cand>{};
-    for (auto lvl = 1U; lvl <= k; ++lvl) {
-      if (lvl + kd >= round_times.n_rows_) {
-        break;
-      }
+    for (auto lvl = 1U; lvl + kd < round_times.n_rows_; ++lvl) {
       auto const rt = round_times[lvl][to_idx(s)][0];
       if (rt == kInvalidDelta<SearchDir>) {
         continue;
