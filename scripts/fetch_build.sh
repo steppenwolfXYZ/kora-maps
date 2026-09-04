@@ -37,14 +37,14 @@
 #
 # Env:
 #   KRANICH_REMOTE  SSH alias of the data machine   (default: kranich)
-#   KRANICH_PATH    repo path over there            (default: ~/kora-maps)
+#   KRANICH_PATH    repo path over there            (default: ~/Prog/kora-maps)
 #   RSYNC_BIN       rsync to use                    (default: autodetect)
 #
 # Extra arguments are passed through to rsync.
 set -euo pipefail
 
 REMOTE="${KRANICH_REMOTE:-kranich}"
-REMOTE_PATH="${KRANICH_PATH:-~/kora-maps}"
+REMOTE_PATH="${KRANICH_PATH:-~/Prog/kora-maps}"
 REMOTE_PATH="${REMOTE_PATH%/}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

@@ -3,7 +3,7 @@
 
 The sidecar is a hardlink farm over `data/gtfs_routed/` with one file of
 its own — the platform-anchored `stops.txt`. That single independent file
-is also the one `sync_to_mac.sh` used to push on its own, which is how a
+is also the one the old `sync_to_mac.sh` pushed on its own, which is how a
 Mac ended up importing this machine's *new* `stops.txt` on top of its own
 *old* `stop_times.txt`. SBB renumbers quays between releases (Bern
 platform 8 went `ch:1:sloid:7000:0:229097` → `ch:1:sloid:7000:4:8`), so
@@ -125,7 +125,7 @@ def check(gtfs_dir: Path) -> int:
         "      python3 scripts/routing/preprocess_gtfs_for_motis.py\n"
         "  On the dev Mac, re-sync the feed whole instead — rebuilding here\n"
         "  only makes the sidecar agree with whatever old feed is present:\n"
-        "      ./scripts/sync_to_mac.sh --only routed",
+        "      ./scripts/fetch_build.sh --only routed",
         file=sys.stderr,
     )
     return 1

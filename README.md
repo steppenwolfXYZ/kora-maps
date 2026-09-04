@@ -50,6 +50,34 @@ code ships via git push):
 ./scripts/update_map.sh          # --osm to refresh OpenStreetMap as well
 ```
 
+Two independent axes narrow the work. Which branch to build:
+
+```bash
+./scripts/update_map.sh --only-pipeline   # transit pipeline + map emission
+./scripts/update_map.sh --only-routing    # routing prep, matrix, MOTIS import
+```
+
+And what to refresh first: `--skip-gtfs` builds on the feed already on
+disk, `--osm` re-downloads the country PBFs. Deploy scope follows the
+branch automatically; `--skip-deploy` suppresses it entirely.
+
+## Building on the data machine from the laptop
+
+The heavy builds run on the data machine (Kranich) and the dev Mac pulls
+the result back. From the Mac, over Tailscale, one command does all of
+it — launch detached, stream the log, fetch the artifacts, restart the
+local stack:
+
+```bash
+./scripts/remote_build.sh                 # build flags are forwarded
+./scripts/remote_build.sh --watch-only    # follow a build already running
+./scripts/remote_build.sh --fetch-only    # skip to the transfer
+```
+
+The build lives in a tmux session on Kranich, so a dropped connection
+costs the view and nothing else. See `.claude/rules/deployment.md`
+§ Remote build and fetch.
+
 ## Run the dev server
 
 ```bash
