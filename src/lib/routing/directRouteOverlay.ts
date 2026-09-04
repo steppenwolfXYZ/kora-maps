@@ -102,6 +102,11 @@ function onLineLeave(e: maplibregl.MapLayerMouseEvent) {
 	e.target.getCanvas().style.cursor = '';
 }
 
+// One width table for the route line AND the pushed dots, so the dots
+// always match the line they continue. [zoom, selected, muted].
+const LINE_WIDTH_STOPS: [number, number, number][] = [[6, 5, 3.5], [12, 8, 6], [16, 13, 10]];
+const DOT_GLYPH_EM = 0.66;
+
 const selCase = (selValue: unknown, altValue: unknown) =>
 	['case', ['==', ['get', 'sel'], 1], selValue, altValue] as unknown;
 
@@ -145,7 +150,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 		layout: { 'line-cap': 'round', 'line-join': 'round' },
 		paint: {
 			'line-color': selCase(color, muted) as any,
-			'line-width': selWidth([[6, 5, 3.5], [12, 8, 6], [16, 13, 10]]),
+			'line-width': selWidth(LINE_WIDTH_STOPS),
 			...(mode === 'walk' ? { 'line-dasharray': [1.4, 1.4] as any } : {}),
 			'line-opacity': mode === 'walk' ? 0.9 : 1
 		}
@@ -165,10 +170,23 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 		filter: ['==', ['get', 'pushed'], 1],
 		layout: {
 			'symbol-placement': 'line',
-			'symbol-spacing': ['interpolate', ['linear'], ['zoom'], 6, 9, 12, 14, 16, 22] as any,
+			// Dot diameter = line width; gap = one diameter, so dot
+			// centers sit 2 widths apart. Spacing is a layer-wide layout
+			// property (not data-driven), so it follows the SELECTED
+			// width — muted alternates share the spacing with smaller
+			// dots. DOT_GLYPH_EM converts width to text-size: the ●
+			// glyph's drawn circle fills ~0.66 em of Noto Sans (measured
+			// visually — tweak this one constant if dots drift off the
+			// line width).
+			'symbol-spacing': [
+				'interpolate', ['linear'], ['zoom'],
+				...LINE_WIDTH_STOPS.flatMap(([z, sel]) => [z, sel * 2])
+			] as any,
 			'text-field': '\u25CF',
 			'text-font': ['Noto Sans Regular'],
-			'text-size': selWidth([[6, 8, 6], [12, 12, 9], [16, 19, 15]]),
+			'text-size': selWidth(
+				LINE_WIDTH_STOPS.map(([z, sel, alt]) => [z, sel / DOT_GLYPH_EM, alt / DOT_GLYPH_EM])
+			),
 			'text-allow-overlap': true,
 			'text-ignore-placement': true,
 			'text-keep-upright': false,
