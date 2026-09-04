@@ -823,6 +823,7 @@
 		border-color: transparent;
 		background: var(--gray-75);
 	}
+	.card.selected .leg-usable { --lu-fill: var(--gray-200); }
 	/* Brand-gradient strip along the selected card's left edge. Painted
 	   before the ::after ring so the border stays on top of it. */
 	.card.selected::before {
@@ -1081,14 +1082,16 @@
 		margin: 0.35rem 0 0.1rem;
 		padding: 0.4rem 0.55rem;
 		border-radius: 8px;
-		/* Clearly below the selected card's --gray-75, so the box stays
-		   visible on an active card. Thin gradient border via the double
+		/* Fill tracks the card ground: one step below white on an idle
+		   card, one below --gray-75 on a selected one, so the box reads
+		   the same either way. Thin gradient border via the double
 		   background (padding-box fill, border-box gradient) so it follows
 		   the radius — 165° input variant, since the box is thin and wide
 		   (ux-guidelines.md § Usage rules). */
+		--lu-fill: var(--gray-100);
 		border: 1px solid transparent;
 		background:
-			linear-gradient(var(--gray-200), var(--gray-200)) padding-box,
+			linear-gradient(var(--lu-fill), var(--lu-fill)) padding-box,
 			var(--gradient-brand-input) border-box;
 		font-size: 0.78rem;
 		color: var(--gray-500);
