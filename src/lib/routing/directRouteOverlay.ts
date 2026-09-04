@@ -128,6 +128,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			id: DIRECT_CASING_LAYER,
 			type: 'line',
 			source: DIRECT_SOURCE,
+			filter: ['!=', ['get', 'pushed'], 1],
 			layout: { 'line-cap': 'round', 'line-join': 'round' },
 			paint: {
 				'line-color': CASING_COLOR,
@@ -149,20 +150,32 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			'line-opacity': mode === 'walk' ? 0.9 : 1
 		}
 	});
-	// Pushed-bike sections: same color, round dots (bicycle-costing-fork.md
-	// § pushed-bike). A zero-length dash with round caps renders each dash
-	// as a circle; the gap is in line-width units. Walk routes never carry
-	// pushed features, so the layer only draws in bike mode.
+	// Pushed-bike sections: true round dots (bicycle-costing-fork.md
+	// § pushed-bike). Dash-based dots render as ovals (the dash SDF
+	// stretches along the line), so the dots are ● glyphs placed along
+	// the line — the same Noto Sans U+25CF route the map's color-dot
+	// indicator layer takes, since this style has no sprite. Overlap
+	// and placement checks are disabled so dots never thin out against
+	// other symbols. Walk routes never carry pushed features, so the
+	// layer only draws in bike mode.
 	map.addLayer({
 		id: DIRECT_PUSHED_LAYER,
-		type: 'line',
+		type: 'symbol',
 		source: DIRECT_SOURCE,
 		filter: ['==', ['get', 'pushed'], 1],
-		layout: { 'line-cap': 'round', 'line-join': 'round' },
+		layout: {
+			'symbol-placement': 'line',
+			'symbol-spacing': ['interpolate', ['linear'], ['zoom'], 6, 9, 12, 14, 16, 22] as any,
+			'text-field': '\u25CF',
+			'text-font': ['Noto Sans Regular'],
+			'text-size': selWidth([[6, 8, 6], [12, 12, 9], [16, 19, 15]]),
+			'text-allow-overlap': true,
+			'text-ignore-placement': true,
+			'text-keep-upright': false,
+			'text-padding': 0
+		},
 		paint: {
-			'line-color': selCase(color, muted) as any,
-			'line-width': selWidth([[6, 5, 3.5], [12, 8, 6], [16, 13, 10]]),
-			'line-dasharray': [0, 2] as any
+			'text-color': selCase(color, muted) as any
 		}
 	});
 	if (!handlersInstalled) {
