@@ -14,8 +14,10 @@ walk away, and pull the finished artifacts back.
 
 For that to work Kranich must be usable **while nobody is logged in
 graphically** — powered on and at the login screen is the normal state
-during a build. Sleep is already disabled. Wake-on-LAN is explicitly out
-of scope for now.
+during a build. Sleep must therefore be impossible in *that* state, which
+is not the same as it being off in yours: see item 6, which is the one
+that already caused a stalled build. Wake-on-LAN is explicitly out of
+scope for now.
 
 Your job is to verify (and where needed establish) that headless
 readiness, then report back. **Check first, act only where a check
@@ -75,12 +77,59 @@ The build's last phase deploys to the production VPS over the SSH alias
 - `command -v tmux`; install if missing. Builds will run inside a named
   tmux session so they survive a dropped SSH connection.
 
-### 6. Sleep stays off
+### 6. Sleep must be impossible, not merely unconfigured
 
-- Confirm `systemctl status sleep.target suspend.target hibernate.target`
-  shows them masked or otherwise inactive.
-- Optionally set the BIOS/UEFI to restore power state after an AC loss,
-  so a power cut does not leave Kranich off indefinitely.
+The single most dangerous item on this list, and the one that already bit
+us. A build that suspends stalls silently and indefinitely: the exit-code
+stamp never appears, the Mac's watch loop reconnects forever, and nothing
+says why.
+
+**Do not use `systemctl is-enabled` to judge this.** For these units it
+returns `static` — meaning "no [Install] section", not "disabled". It says
+`static` on a machine that suspends every 15 minutes and on one that
+cannot suspend at all. It is not a check.
+
+Two things make the naive check especially misleading:
+
+- **Being logged in proves nothing.** Power settings are per session. A
+  desktop that has run scripts for days without sleeping while you were
+  logged in can still suspend at the login screen, which is exactly the
+  state it sits in during every remote build.
+- **On this machine the greeter was set to suspend.** GDM's session
+  reported `sleep-inactive-ac-type = 'suspend'` while the logged-in user's
+  was `'nothing'`, and `/etc/dconf/db/gdm.d/` was empty, so it inherited
+  the stock GNOME default. GNOME's power plugin goes by *session idle*,
+  not CPU load, so a running build does not hold it off.
+
+**The fix is masking**, because it is the only layer that does not depend
+on which session's settings are in effect — user, greeter, or none:
+
+```bash
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
+
+Verify with `systemctl is-enabled sleep.target` → must print `masked`.
+That is the check; `static` is a failure, not a pass.
+
+Optional supporting settings:
+
+- **Power button.** A press suspends a running machine by default.
+  Nobara has no `/etc/systemd/logind.conf`, so use a drop-in:
+  ```bash
+  sudo mkdir -p /etc/systemd/logind.conf.d
+  printf '[Login]\nHandlePowerKey=ignore\n' | sudo tee /etc/systemd/logind.conf.d/10-kora.conf
+  sudo systemctl restart systemd-logind
+  ```
+  This does not affect waking from suspend — that is a firmware/ACPI
+  event — only what a press does while the machine is running. You do
+  lose press-to-shutdown; use `systemctl poweroff` instead.
+- **BIOS/UEFI**: restore power state after an AC loss, so a power cut does
+  not leave Kranich off indefinitely.
+
+Diagnostics worth recording if any of this looks wrong:
+`cat /sys/power/state` (what the hardware can do), and
+`sudo -u gdm dbus-run-session gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type`
+(read-only — what the greeter will do).
 
 ### 7. Repo state
 
@@ -110,10 +159,11 @@ The real proof, and the last step:
 - Report the total wall time and the per-stage timing table the script
   prints at the end.
 
-Note: the build script is about to gain new flags (branch selection,
-`--skip-gtfs`) and its helper scripts are about to move into
-`scripts/routing/` and `scripts/deploy/`. Do not anticipate those
-changes — test what is on disk today.
+Note: the build script takes branch flags (`--only-pipeline`,
+`--only-routing`) and `--skip-gtfs`; its helper scripts live in
+`scripts/routing/` and `scripts/deploy/`. For a quicker acceptance test
+than a full build, `--only-pipeline --skip-gtfs --skip-deploy` exercises
+the same machinery without downloads, matrix or deploy.
 
 ## Report back
 
@@ -123,5 +173,6 @@ changes — test what is on disk today.
 4. Absolute repo path, tracked branch, `git log -1 --oneline`, whether
    the tree is clean.
 5. Free disk on the repo's filesystem.
-6. Acceptance-test result with the timing table.
-7. Anything you had to change, and anything you found but did not change.
+6. `systemctl is-enabled sleep.target` — must be `masked`, not `static`.
+7. Acceptance-test result with the timing table.
+8. Anything you had to change, and anything you found but did not change.

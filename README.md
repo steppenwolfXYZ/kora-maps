@@ -61,6 +61,17 @@ And what to refresh first: `--skip-gtfs` builds on the feed already on
 disk, `--osm` re-downloads the country PBFs. Deploy scope follows the
 branch automatically; `--skip-deploy` suppresses it entirely.
 
+To re-enter the pipeline partway, reusing what earlier steps produced:
+
+```bash
+./scripts/update_map.sh --only-pipeline --pipeline-from 6   # emit 6,7,8  (~11 min)
+./scripts/update_map.sh --only-pipeline --pipeline-from 8   # pmtiles only
+```
+
+`--pipeline-from N` skips every pipeline step below N; preflight checks
+that the artifacts those steps would have produced are present, and names
+the missing file rather than the flag.
+
 ## Building on the data machine from the laptop
 
 The heavy builds run on the data machine (Kranich) and the dev Mac pulls
