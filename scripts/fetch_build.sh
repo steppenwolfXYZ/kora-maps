@@ -104,19 +104,23 @@ fi
 # indexes, where it only burns CPU on an already-fast link.
 BASE=(-a -v --partial --human-readable --timeout=120)
 
-# pull <label> <dest-subpath> <rsync opts…> <remote-source-subpath…>
-# Remote sources are given as repo-relative paths and expanded against
-# REMOTE_PATH here, so callers read like the old push() did.
+# pull <label> <dest-subpath> <rsync opts…> -- <remote-source-subpath…>
+# The `--` is required. Options and sources cannot be told apart by shape:
+# filter values like '*.json' or 'fonts/***' do not start with a dash, and
+# guessing sent them to rsync as paths to fetch.
+# Remote sources are repo-relative and expanded against REMOTE_PATH here.
 pull() {
 	local label="$1" dest="$2"; shift 2
-	local opts=() srcs=()
+	local opts=() srcs=() seen_sep=0
 	while [ $# -gt 0 ]; do
-		case "$1" in
-			-*) opts+=("$1") ;;
-			*)  srcs+=("$REMOTE:$REMOTE_PATH/$1") ;;
-		esac
+		if [ "$1" = "--" ]; then seen_sep=1; shift; continue; fi
+		if [ $seen_sep -eq 0 ]; then opts+=("$1"); else srcs+=("$REMOTE:$REMOTE_PATH/$1"); fi
 		shift
 	done
+	if [ $seen_sep -eq 0 ] || [ ${#srcs[@]} -eq 0 ]; then
+		echo "internal error: pull '$label' called without -- <sources>" >&2
+		return 1
+	fi
 	banner "$label"
 	mkdir -p "$ROOT/$dest"
 	# Retry: the Mac is on WiFi and this leg can run for an hour. With
@@ -142,8 +146,12 @@ banner "Preflight"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" true 2>/dev/null \
 	|| { echo "error: cannot reach '$REMOTE' over SSH — is Tailscale up?" >&2; exit 1; }
 
-ssh "$REMOTE" "[ -d '$REMOTE_PATH' ]" \
-	|| { echo "error: $REMOTE_PATH not found on $REMOTE (set KRANICH_PATH)" >&2; exit 1; }
+# Resolve the remote path to an absolute one, once. A leading ~ stays
+# literal inside the single-quoted remote tests below, and rsync would
+# inherit the same ambiguity; `cd && pwd` expands it and proves it exists
+# in the same step.
+REMOTE_PATH="$(ssh "$REMOTE" "cd $REMOTE_PATH 2>/dev/null && pwd")" \
+	|| { echo "error: ${KRANICH_PATH:-~/Prog/kora-maps} not found on $REMOTE (set KRANICH_PATH)" >&2; exit 1; }
 
 # A running build means artifacts are being rewritten over there —
 # pfaedle mid-run, or the Valhalla tile wipe that precedes a rebuild.
@@ -183,7 +191,7 @@ if want assets && have assets "static/map-assets/style.json"; then
 		--include 'fonts/***' \
 		--include 'tl_*.pmtiles' \
 		--exclude '*' \
-		"static/map-assets/"
+		-- "static/map-assets/"
 fi
 
 # ── motis ────────────────────────────────────────────────────────────
@@ -195,7 +203,7 @@ fi
 if want motis && have motis "motis/data/tt.bin"; then
 	pull "MOTIS indexes → motis/data/" "motis/data/" \
 		--delete --exclude 'valhalla_footpath_matrix.csv' \
-		"motis/data/"
+		-- "motis/data/"
 
 	# The matrix always travels with the indexes. It used to be opt-in, on
 	# the theory that the Mac never re-imports; in practice it re-imports
@@ -205,7 +213,7 @@ if want motis && have motis "motis/data/tt.bin"; then
 	if have motis "motis/data/valhalla_footpath_matrix.csv"; then
 		pull "footpath matrix → motis/data/ (1.8 GB text, compressed in flight)" \
 			"motis/data/" -z \
-			"motis/data/valhalla_footpath_matrix.csv"
+			-- "motis/data/valhalla_footpath_matrix.csv"
 	fi
 fi
 
@@ -221,7 +229,7 @@ if want valhalla && have valhalla "valhalla/data/valhalla_tiles.tar"; then
 	fi
 	pull "Valhalla tiles → valhalla/data/" "valhalla/data/" \
 		--delete "${VALHALLA_EXCLUDES[@]}" \
-		"valhalla/data/"
+		-- "valhalla/data/"
 fi
 
 # ── lookup ───────────────────────────────────────────────────────────
@@ -237,7 +245,7 @@ if want lookup; then
 	# along; without it the bare '*' exclude prunes every subdirectory.
 	pull "diagnostics → data/transit/" "data/transit/" \
 		-z --include '*/' --include '*.json' --exclude '*' \
-		"data/transit/"
+		-- "data/transit/"
 
 	# The raw feed comes over WHOLE, never table by table — see the header.
 	# ~3.6 GB raw, but it overwrites in place so the disk delta is ~zero,
@@ -247,12 +255,12 @@ if want lookup; then
 	if have lookup "data/gtfs/stop_times.txt"; then
 		pull "raw GTFS feed → data/gtfs/" "data/gtfs/" \
 			-z --delete --exclude 'gtfs_complete.zip' \
-			"data/gtfs/"
+			-- "data/gtfs/"
 	fi
 
 	if rhave "data/gtfs_filtered/stop_identity.json"; then
 		pull "stop identity → data/gtfs_filtered/" "data/gtfs_filtered/" -z \
-			"data/gtfs_filtered/stop_identity.json"
+			-- "data/gtfs_filtered/stop_identity.json"
 	fi
 
 	# NB: data/gtfs_motis/stops.txt is deliberately NOT fetched here — it
@@ -270,7 +278,7 @@ if want lookup; then
 		if rhave "data/osm/$f"; then OSM_EXTRACTS+=("data/osm/$f"); fi
 	done
 	if [ ${#OSM_EXTRACTS[@]} -gt 0 ]; then
-		pull "OSM way extracts → data/osm/" "data/osm/" -z "${OSM_EXTRACTS[@]}"
+		pull "OSM way extracts → data/osm/" "data/osm/" -z -- "${OSM_EXTRACTS[@]}"
 	fi
 fi
 
@@ -287,7 +295,7 @@ fi
 # import would rebuild them from a stale data/gtfs_motis/.
 if want routed && have routed "data/gtfs_routed/shapes.txt"; then
 	pull "routed GTFS → data/gtfs_routed/ (steps 6-8 + MOTIS import input)" \
-		"data/gtfs_routed/" -z --delete "data/gtfs_routed/"
+		"data/gtfs_routed/" -z --delete -- "data/gtfs_routed/"
 
 	# stops.txt only: the rest of the sidecar is hardlinked from the feed
 	# just fetched, and preprocess_gtfs_for_motis.py rebuilds those links
@@ -295,7 +303,7 @@ if want routed && have routed "data/gtfs_routed/shapes.txt"; then
 	# momentarily mismatched.
 	if rhave "data/gtfs_motis/stops.txt"; then
 		pull "MOTIS sidecar stops → data/gtfs_motis/" "data/gtfs_motis/" -z \
-			"data/gtfs_motis/stops.txt"
+			-- "data/gtfs_motis/stops.txt"
 	fi
 fi
 

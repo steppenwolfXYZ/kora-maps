@@ -74,7 +74,11 @@ rssh() { ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=6 "$REMOTE" "$@"; 
 banner "Preflight"
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" true 2>/dev/null \
   || die "cannot reach '$REMOTE' over SSH — is Tailscale up?"
-rssh "[ -d '$REMOTE_PATH' ]" || die "$REMOTE_PATH not found on $REMOTE (set KRANICH_PATH)"
+# Resolve to an absolute path once: a leading ~ stays literal inside the
+# single-quoted remote commands below. `cd && pwd` expands it and proves
+# it exists in one step.
+REMOTE_PATH="$(rssh "cd $REMOTE_PATH 2>/dev/null && pwd")" \
+  || die "${KRANICH_PATH:-~/Prog/kora-maps} not found on $REMOTE (set KRANICH_PATH)"
 
 LIVE=0
 if rssh "tmux has-session -t '$SESSION' 2>/dev/null"; then LIVE=1; fi
