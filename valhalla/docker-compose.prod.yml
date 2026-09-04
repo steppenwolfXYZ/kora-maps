@@ -1,7 +1,7 @@
 # Production Valhalla server (Hetzner CAX11, /var/www/koramaps.app/valhalla/).
 # Serve-only, mirroring the MOTIS split (see motis/docker-compose.prod.yml):
 # tiles and elevation are built locally on the Mac, the server receives
-# only the prebuilt data/ dir via scripts/deploy_valhalla.sh.
+# only the prebuilt data/ dir via scripts/deploy/deploy_valhalla.sh.
 services:
   valhalla:
     # Official upstream image, pinned — see docker-compose.yml for why

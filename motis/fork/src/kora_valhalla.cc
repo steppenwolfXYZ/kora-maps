@@ -53,7 +53,7 @@ std::string const& base_url() {
 }
 
 // Pedestrian costing shared by every call. MUST stay in sync with
-// COSTING_JSON in scripts/build_valhalla_footpath_matrix.py — the
+// COSTING_JSON in scripts/routing/build_valhalla_footpath_matrix.py — the
 // import-time matrix and these query-time calls must describe the same
 // walker. destination_only_penalty / driveway_factor neutralize
 // Valhalla's car-oriented driveway defaults (Swiss footway shortcuts

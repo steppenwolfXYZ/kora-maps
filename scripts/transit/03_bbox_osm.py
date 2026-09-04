@@ -574,7 +574,7 @@ def extract_rail_ways(image: str, cuts: list) -> None:
 
 def extract_platform_ways(image: str, cuts: list) -> None:
     """Extract public_transport=platform ways for step 07's search-index
-    coord snap AND for `scripts/preprocess_gtfs_for_motis.py`'s platform-code
+    coord snap AND for `scripts/routing/preprocess_gtfs_for_motis.py`'s platform-code
     snap (transit-routing.md § Endpoint inputs / § Backend). Same
     per-country-slice pattern as extract_rail_ways: tags-filter → osmium
     export → JSON concat with way-id dedup. LineString geometries only;

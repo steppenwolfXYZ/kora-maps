@@ -6,14 +6,14 @@
 #   docker build -t koramaps/motis:footpath-matrix -f fork/Dockerfile fork
 #
 # Prerequisites (once, then rerun whenever data/gtfs_routed/ is regenerated):
-#   python3 scripts/preprocess_gtfs_for_motis.py
+#   python3 scripts/routing/preprocess_gtfs_for_motis.py
 #   → builds data/gtfs_motis/ with a platform-snapped stops.txt +
 #     hardlinks of every other GTFS file from data/gtfs_routed/.
 #     See transit-routing.md § Backend.
 #
 # Then, before importing MOTIS, rebuild the Valhalla footpath matrix:
 #   cd valhalla && docker compose up -d valhalla   # if not running yet
-#   python3 scripts/build_valhalla_footpath_matrix.py
+#   python3 scripts/routing/build_valhalla_footpath_matrix.py
 #   → writes motis/data/valhalla_footpath_matrix.csv, which the fork's
 #     compute_footpaths.cc loads at import time (see
 #     .claude/concepts/valhalla-pedestrian-router.md).

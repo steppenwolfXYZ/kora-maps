@@ -101,6 +101,22 @@ to provide implicitly:
   served no later by a kept journey's endpoint vehicle — ridden past
   that journey's own exit, without requiring an earlier departure from
   home — is the same corridor journey in disguise and is dropped.
+  "Same corridor" must be verified, never assumed from the endpoint
+  alone: the two journeys' full stop sets (every parent station ridden
+  through, interior stops included, minus the query's shared anchor —
+  the origin-side boarding station for leave-at, the destination-side
+  alighting station for arrive-by, which every journey of the query
+  shares by construction and which therefore carries no corridor
+  information) must overlap by at least 75% of the smaller set. The
+  smaller-set denominator keeps express-vs-local pairs matching in
+  both directions (the express's stops are a subset of the local's,
+  never the reverse). Journeys below the overlap are genuinely
+  different routes that merely end near each other, and the rule must
+  leave them for the client's ranking to judge — canonical failure
+  before the gate: Thun→Belp→S3→bus 28 (Gürbetal line) dropped because
+  Thun→Bern→S1→bus 10 (mainline) reached Eigerplatz inside the slack,
+  two routes sharing no stop but their origin, with the strictly worse
+  sibling surviving.
 - **Once per Pareto point.** Extraction runs once per (arrival,
   transfers) point, not once per search-cursor rediscovery. The
   accepted performance budget is ~2.5× the alternates-off search time

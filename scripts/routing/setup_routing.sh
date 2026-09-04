@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local routing backend bring-up (Valhalla + MOTIS fork).
-# Run from the project root: ./scripts/setup_routing.sh
+# Run from the project root: ./scripts/routing/setup_routing.sh
 #
 # Turns a finished map pipeline run (./scripts/rebuild_transit.sh) into a
 # working local routing stack. Every step is idempotent — re-running the
@@ -41,7 +41,7 @@
 # (python3 -m pip install --user --break-system-packages osmium).
 
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 FORCE_IMAGE=0
 FORCE_OSM=0
@@ -169,7 +169,7 @@ fi
 if want 3; then
 # ── Step 3: preprocessed OSM PBFs ───────────────────────────────────
 # foot=yes patch on access=agricultural/forestry ways so alp / forest
-# roads route for pedestrians (see scripts/preprocess_osm_for_motis.py),
+# roads route for pedestrians (see scripts/routing/preprocess_osm_for_motis.py),
 # plus the synthetic station walk network merged into the Valhalla input
 # (see .claude/concepts/station-walk-network.md).
 echo ""
@@ -182,10 +182,10 @@ echo "▶ Step 3 — Patch OSM PBFs"
 # so this triggers on real edits and not on every pull.
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/switzerland-motis.osm.pbf -nt data/osm/switzerland-latest.osm.pbf \
-      && data/osm/switzerland-motis.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
+      && data/osm/switzerland-motis.osm.pbf -nt scripts/routing/preprocess_osm_for_motis.py ]]; then
   echo "  switzerland-motis.osm.pbf up to date — skipped"
 else
-  time python3 scripts/preprocess_osm_for_motis.py
+  time python3 scripts/routing/preprocess_osm_for_motis.py
 fi
 # Platform walk lines + quay anchors. Must precede the --valhalla patch
 # (which merges the overlay) and step 5 (which reads the anchors).
@@ -198,18 +198,18 @@ fi
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/station_walk_network.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
       && data/osm/station_walk_network.osm.pbf -nt data/gtfs_filtered/stops.txt \
-      && data/osm/station_walk_network.osm.pbf -nt scripts/build_station_walk_network.py ]]; then
+      && data/osm/station_walk_network.osm.pbf -nt scripts/routing/build_station_walk_network.py ]]; then
   echo "  station_walk_network.osm.pbf up to date — skipped"
 else
-  time python3 scripts/build_station_walk_network.py --force-extract
+  time python3 scripts/routing/build_station_walk_network.py --force-extract
 fi
 if [[ $FORCE_OSM -eq 0 \
       && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/ch_pfaedle.osm.pbf \
       && data/osm/ch_pfaedle_walkable.osm.pbf -nt data/osm/station_walk_network.osm.pbf \
-      && data/osm/ch_pfaedle_walkable.osm.pbf -nt scripts/preprocess_osm_for_motis.py ]]; then
+      && data/osm/ch_pfaedle_walkable.osm.pbf -nt scripts/routing/preprocess_osm_for_motis.py ]]; then
   echo "  ch_pfaedle_walkable.osm.pbf up to date — skipped"
 else
-  time python3 scripts/preprocess_osm_for_motis.py --valhalla
+  time python3 scripts/routing/preprocess_osm_for_motis.py --valhalla
 fi
 
 # Valhalla never notices a changed PBF: use_tiles_ignore_pbf=True means it
@@ -272,7 +272,7 @@ if want 5; then
 # ── Step 5: GTFS sidecar for MOTIS ──────────────────────────────────
 echo ""
 echo "▶ Step 5 — Preprocess GTFS for MOTIS (platform-anchored stops.txt)"
-time python3 scripts/preprocess_gtfs_for_motis.py
+time python3 scripts/routing/preprocess_gtfs_for_motis.py
 fi
 
 if want 6; then
@@ -299,7 +299,7 @@ else
     rm -f "$MATRIX_CKPT"
     echo "  removed stale checkpoint (no CSV)"
   fi
-  time python3 scripts/build_valhalla_footpath_matrix.py
+  time python3 scripts/routing/build_valhalla_footpath_matrix.py
 fi
 fi
 
@@ -315,7 +315,7 @@ else
   # data/gtfs_motis/ produces an index that looks healthy and quietly
   # loses station calls. ~1-2 min against a ~10 min import.
   echo "  checking data/gtfs_motis/ consistency"
-  python3 scripts/check_gtfs_motis_consistency.py
+  python3 scripts/routing/check_gtfs_motis_consistency.py
   # `run --rm` instead of `up` so the import's exit code propagates
   # and no stopped container lingers. On native Linux the container's
   # `motis` user (uid 999) cannot write the bind-mounted ./data, so map

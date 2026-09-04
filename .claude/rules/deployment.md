@@ -3,9 +3,9 @@
 Four deliberately separate deploy channels:
 
 1. **App** (SvelteKit build) — automatic, GitHub Actions on every push to `main`.
-2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
-3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
-4. **Valhalla pedestrian router** — manual, `scripts/deploy_valhalla.sh`, run only when the tile set should be (re)published. Tile + elevation build runs locally; the server only serves prebuilt tiles.
+2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
+3. **MOTIS routing backend** — manual, `scripts/deploy/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
+4. **Valhalla pedestrian router** — manual, `scripts/deploy/deploy_valhalla.sh`, run only when the tile set should be (re)published. Tile + elevation build runs locally; the server only serves prebuilt tiles.
 
 `scripts/update_map.sh` is the data-refresh machine's whole routine, scheduled as a DAG rather than a line: GTFS ∥ OSM downloads → OSM extracts ∥ GTFS preprocess → pfaedle (sharded over `PFAEDLE_JOBS` containers) ∥ routing prep (`setup_routing.sh --steps 1,2,3,4`: network, image, OSM patch, station walk network + quay anchors, Valhalla tiles — with a tile wipe first when the OSM extract is newer than the tiles) → footpath matrix ∥ map emission (`rebuild_transit.sh --only 6,7,8`) → MOTIS import + local smoke test → the three deploys (`deploy_motis.sh --data-only`: indexes only, never this machine's amd64 image) → production smoke test. Any failing stage aborts before the deploy phase, so a broken local import never reaches the server; per-stage wall times print at the end. Sizing env: `PFAEDLE_JOBS`, `TIPPECANOE_JOBS`, `VALHALLA_THREADS`, `MATRIX_WORKERS`. The app deploy stays separate (git push from the dev Mac).
 
@@ -35,13 +35,13 @@ Mirrors the user's standard workflow used across their projects (same shape as o
 
 adapter-node does not bundle production dependencies — that is why node_modules ships in the artifact.
 
-## Map assets deploy (`scripts/deploy_map_assets.sh`)
+## Map assets deploy (`scripts/deploy/deploy_map_assets.sh`)
 
 Rsyncs `static/map-assets/` → `map-assets/` on the server over the `koramaps` SSH alias. Allowlist: `*.json` (style, stop-search index, line index), `fonts/` (MapLibre glyph PBFs), `tl_*.pmtiles`; excludes `tl_debug_*` and anything else (stale/legacy files never leave the machine). `--delete` inside the target dir. Extra args pass through to rsync (`--dry-run`). Fonts transfer once; later runs skip them as unchanged.
 
 Run it before the first app deploy on a fresh server — without assets the app serves but the map cannot load.
 
-## MOTIS deploy (`scripts/deploy_motis.sh`)
+## MOTIS deploy (`scripts/deploy/deploy_motis.sh`)
 
 Ships the MOTIS **software** by default — the locally-built Kora fork image plus `motis/config.yml` and `motis/docker-compose.prod.yml` → `motis/` on the server over the `koramaps` SSH alias, then restarts the container. `motis/data/` (the prebuilt nigiri/OSR/shapes indexes, ~2.6 GB, imported locally) ships only on explicit request: `--with-data` adds it to the software deploy (exception case from the dev Mac), `--data-only` ships data + config without the image (the data machine's mode, used by `update_map.sh` — its amd64 image must never reach the arm64 server). The default skips data because the dev Mac's indexes are usually older than the data machine's last deploy, and the data rsync runs with `--delete`. The image transfer uses `docker save | ssh docker load` (no registry) — repeat deploys skip the transfer when layers are unchanged. The prod compose is serve-only: no `motis-import` service, no GTFS/OSM bind mounts (the server never imports — the Mac's aarch64 indexes run on the arm64 image; `/motis server` ignores the import-only config paths at serve time, verified locally), loopback-bound port (`127.0.0.1:8080`), `mem_limit: 2g` (CAX11 has 4 GB total), capped json-file logs (10 MB × 3). When data ships, the script stops the container before rsync because MOTIS memory-maps its index files — replacing them under a running server can fault mid-query (an image-only deploy skips the stop; `up -d` recreates the container from the new image). `--delete` on `data/`; `--dry-run` passes through to rsync and skips the stop/start.
 
@@ -51,9 +51,9 @@ The client reaches MOTIS same-origin at `/routing/` (env var `PUBLIC_MOTIS_URL`,
 
 One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Because the transfer table is built at import, both the two-tier split and the minimum-transfer-time floor only exist in indexes produced by an image that carries them — an index imported by an older image silently lacks them (the `koraFullTransfers` profile then degrades to the capped table). After bumping the fork, re-import before judging routing behaviour.
 
-Re-import cycle (all local): `python3 scripts/build_station_walk_network.py` → `python3 scripts/preprocess_gtfs_for_motis.py` → `python3 scripts/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
+Re-import cycle (all local): `python3 scripts/routing/build_station_walk_network.py` → `python3 scripts/routing/preprocess_gtfs_for_motis.py` → `python3 scripts/routing/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/routing/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
 
-## Valhalla deploy (`scripts/deploy_valhalla.sh`)
+## Valhalla deploy (`scripts/deploy/deploy_valhalla.sh`)
 
 Ships `valhalla/data/` (Valhalla tiles + SRTM elevation + admin polygons, ~500-800 MB depending on the OSM extract), `valhalla/docker-compose.prod.yml` → `valhalla/` on the server, then restarts the container. Prod compose is serve-only (`use_tiles_ignore_pbf=True`, no PBF mounted, no elevation download), loopback-bound (`127.0.0.1:8002`), `mem_limit: 1g`, capped json-file logs. The script stops the container before rsync because Valhalla memory-maps its tiles.
 
@@ -149,7 +149,7 @@ re-import throws them away and rebuilds the same thing from
 A default sync makes that safe — the `routed` group delivers the feed, and
 `post_sync.sh` rebuilds the sidecar from it — but after `--no-routed` the
 Mac's feed is stale, so don't re-import; just restart MOTIS on the synced
-indexes. `setup_routing.sh` step 7 runs `scripts/check_gtfs_motis_consistency.py`
+indexes. `setup_routing.sh` step 7 runs `scripts/routing/check_gtfs_motis_consistency.py`
 before the importer and refuses a mixed feed, but "old yet internally
 consistent" passes that check by design.
 
@@ -244,7 +244,7 @@ looks like corrupt routing data rather than a stale process.
 
 **Fresh clone:** `./scripts/rebuild_transit.sh` with no arguments (the
 no-argument form additionally runs the glyph bootstrap, step 0), then
-`./scripts/setup_routing.sh`.
+`./scripts/routing/setup_routing.sh`.
 
 Run `sync_to_mac.sh` or `post_sync.sh` with `--dry-run` first when in doubt.
 

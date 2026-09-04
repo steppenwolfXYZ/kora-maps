@@ -43,7 +43,7 @@ namespace motis::kora_valhalla {
 constexpr auto const kFullTransferProfile = nigiri::kKoraFullTransferProfile;
 
 // Base walking speed baked into every Valhalla call. MUST stay equal to
-// WALK_SPEED_KMH in scripts/build_valhalla_footpath_matrix.py — the
+// WALK_SPEED_KMH in scripts/routing/build_valhalla_footpath_matrix.py — the
 // matrix (transfer table) and the live query-time walks describe the
 // same physical walking and must agree. Changing it requires a matrix
 // rebuild.
@@ -57,7 +57,7 @@ constexpr auto const kElevationIntervalM = 30.0;
 // Seconds charged for each lift ride, roughly wait plus travel. Valhalla
 // defaults to 0, which makes a lift a free level change and beats the ramp
 // beside it. MUST stay equal to `elevator_penalty` in COSTING_JSON in
-// scripts/build_valhalla_footpath_matrix.py — the transfer matrix and the
+// scripts/routing/build_valhalla_footpath_matrix.py — the transfer matrix and the
 // query-time walks have to describe the same walker. Changing it requires
 // a matrix rebuild.
 constexpr auto const kElevatorPenaltySec = 60.0;

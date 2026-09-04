@@ -5,7 +5,7 @@
 # MOTIS image (see motis/fork/), then restarts the container.
 #
 # Deliberately separate from the GitHub Actions app deploy, same model
-# as scripts/deploy_map_assets.sh and scripts/deploy_valhalla.sh:
+# as scripts/deploy/deploy_map_assets.sh and scripts/deploy/deploy_valhalla.sh:
 # re-imports happen locally and not every pipeline run produces a
 # publishable routing dataset.
 #
@@ -23,18 +23,18 @@
 # data machine last deployed, and shipping them would downgrade the
 # server (the data rsync runs with --delete).
 #
-#   ./scripts/deploy_motis.sh              # image + config, NO data (dev Mac)
-#   ./scripts/deploy_motis.sh --with-data  # also ship motis/data/ (exception)
-#   ./scripts/deploy_motis.sh --data-only  # data only, no image (data machine)
+#   ./scripts/deploy/deploy_motis.sh              # image + config, NO data (dev Mac)
+#   ./scripts/deploy/deploy_motis.sh --with-data  # also ship motis/data/ (exception)
+#   ./scripts/deploy/deploy_motis.sh --data-only  # data only, no image (data machine)
 #
 # Extra arguments are passed through to rsync, e.g.:
-#   ./scripts/deploy_motis.sh --dry-run
+#   ./scripts/deploy/deploy_motis.sh --dry-run
 set -euo pipefail
 
 # SSH alias from ~/.ssh/config (ga_koramaps@91.99.74.183 + key).
 REMOTE="koramaps"
 REMOTE_PATH="/var/www/koramaps.app/motis/"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 IMAGE="koramaps/motis:footpath-matrix"
 
 DRY_RUN=0

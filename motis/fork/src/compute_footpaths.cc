@@ -3,7 +3,7 @@
 // Replaces MOTIS's OSR-based stop-to-stop transfer-table generator with
 // a loader that reads a precomputed CSV matrix (rows:
 // from_stop_id,to_stop_id,duration_sec). The matrix is built by
-// scripts/build_valhalla_footpath_matrix.py querying the local Valhalla
+// scripts/routing/build_valhalla_footpath_matrix.py querying the local Valhalla
 // pedestrian router (see .claude/concepts/valhalla-pedestrian-router.md).
 //
 // Every loaded pair also passes the minimum-transfer-time floor (see

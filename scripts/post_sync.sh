@@ -107,14 +107,14 @@ banner "1 — GTFS sidecar consistency"
 CONSISTENT=1
 if [ "$SKIP_CHECK" -eq 1 ]; then
 	note "skipped (--skip-check)"
-elif python3 scripts/check_gtfs_motis_consistency.py; then
+elif python3 scripts/routing/check_gtfs_motis_consistency.py; then
 	:
 else
 	echo ""
 	warn "sidecar out of step with data/gtfs_routed/ — rebuilding the hardlinks"
-	run python3 scripts/preprocess_gtfs_for_motis.py
+	run python3 scripts/routing/preprocess_gtfs_for_motis.py
 	if [ "$DRY_RUN" -eq 0 ]; then
-		if python3 scripts/check_gtfs_motis_consistency.py; then
+		if python3 scripts/routing/check_gtfs_motis_consistency.py; then
 			note "sidecar repaired"
 		else
 			CONSISTENT=0

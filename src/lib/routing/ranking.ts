@@ -2,8 +2,8 @@ import type { Itinerary, Leg, LegPlace, TimeMode } from './types';
 
 // Quality ranking for the merged cascade results — see transit-routing.md
 // § Ranking. Three unconditional prunes run on Pareto-time-dominated
-// pairs first: Rule 0 (same route minus a vehicle, slower AND more
-// walking), Rule 0b (prefix/suffix dominance — the distinct trains are
+// pairs first: Rule 0 (same route minus a vehicle, not-faster AND more
+// walking — this one also fires on an exact time tie), Rule 0b (prefix/suffix dominance — the distinct trains are
 // provably catchable from B's own legs with less walking), Rule 0c
 // (shared endpoint + more walking = no benefit anywhere). Every other
 // pair (A, B) falls into one of two shapes and is judged by a
@@ -454,11 +454,15 @@ function droppedByNonOverlap(
 }
 
 /** Dispatches (a, b) to the case-specific rule. Two unconditional prunes
- * run first, both only for Pareto-time-dominated A (no marginality
+ * run first, both for Pareto-time-dominated A (no marginality
  * allowance applies):
  *   Rule 0 — A is the same route as B minus one or more vehicles (walked
  *     instead) and the trade also cost walking: pure noise. If the trade
  *     wins on either axis (faster, or less walking), A falls through.
+ *     Uniquely, this rule also fires on an exact time tie (neither side
+ *     strictly better within T_SLACK) — a subset pair tying on both
+ *     endpoints otherwise slipped between Rule 0 (strict dominance) and
+ *     Rule 0d (identical vehicle sets), showing both.
  *   Rule 0b — prefix/suffix dominance: A's distinct trains buy nothing,
  *     because B's actual legs reach A's first boarding station in time to
  *     catch them (or leave A's last alighting station after A arrives)
@@ -469,8 +473,17 @@ function droppedByNonOverlap(
  * When A dominates B the pair is B's problem, not A's — return false.
  * Otherwise apply Case 2. */
 function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): boolean {
-	if (paretoTimeDominates(b, a)) {
+	// Rule 0 also fires on an exact time tie (both endpoints within
+	// T_SLACK): B strictly dominating A is not required — riding a subset
+	// of B's vehicles with MORE walking for identical times wins nothing
+	// on any axis. Only the subset side can drop (vehicleSubset is strict
+	// on size), so a tie never removes both.
+	const timeTie = Math.abs(a.start - b.start) <= T_SLACK_MS
+		&& Math.abs(a.end - b.end) <= T_SLACK_MS;
+	if (paretoTimeDominates(b, a) || timeTie) {
 		if (vehicleSubset(a, b) && a.walk > b.walk) return true;
+	}
+	if (paretoTimeDominates(b, a)) {
 		if (accessDominated(a.it, b.it) || egressDominated(a.it, b.it)) return true;
 		// Rule 0c — shared endpoint: A and B arrive together (or leave
 		// together), so A's whole time claim collapses onto its one worse

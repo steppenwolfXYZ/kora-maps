@@ -60,7 +60,7 @@ from collections import defaultdict
 from math import cos, radians
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 GTFS_IN = ROOT / "data" / "gtfs_routed"
 GTFS_OUT = ROOT / "data" / "gtfs_motis"
 PLATFORMS = ROOT / "data" / "osm" / "platform_ways.geojson"
@@ -132,7 +132,7 @@ def _load_anchors() -> dict:
     stacked stations stay as wrong as they were."""
     if not ANCHORS_JSON.exists():
         print(f"note: {ANCHORS_JSON.name} absent — "
-              "run scripts/build_station_walk_network.py for platform anchors")
+              "run scripts/routing/build_station_walk_network.py for platform anchors")
         return {}
     return json.loads(ANCHORS_JSON.read_text())
 

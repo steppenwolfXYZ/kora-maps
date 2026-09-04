@@ -29,7 +29,7 @@ first/last mile, direct walks) comes from a Valhalla pedestrian router.
 Once the map pipeline has run at least once:
 
 ```bash
-./scripts/setup_routing.sh
+./scripts/routing/setup_routing.sh
 ```
 
 Idempotent — every step skips when its output is already in place, so
@@ -39,7 +39,7 @@ elevation (~20–40 min), and computes the stop-to-stop footpath matrix
 (hours on a laptop; `.claude/runbooks/matrix_build_remote.md` covers
 running that part on a bigger machine). It then imports MOTIS and
 serves routing on `:8080` (Valhalla on `:8002`). Per-step `--force-*`
-flags: `./scripts/setup_routing.sh --help`.
+flags: `./scripts/routing/setup_routing.sh --help`.
 
 ## Routine data refresh
 

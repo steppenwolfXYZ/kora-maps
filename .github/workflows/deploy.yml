@@ -34,7 +34,7 @@ jobs:
         run: npm prune --omit=dev
 
       # App only. Map assets (pmtiles, style.json, fonts) deploy separately
-      # via scripts/deploy_map_assets.sh — they are pipeline artifacts, not
+      # via scripts/deploy/deploy_map_assets.sh — they are pipeline artifacts, not
       # repo content.
       - name: Prepare Deployment Artifact
         run: |

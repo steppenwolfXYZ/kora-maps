@@ -22,7 +22,7 @@ Exit code 0 = consistent, 1 = inconsistent (with examples), 2 = missing
 input. Called by setup_routing.sh step 7 before the importer runs.
 
 Usage:
-  python3 scripts/check_gtfs_motis_consistency.py [--gtfs-dir DIR]
+  python3 scripts/routing/check_gtfs_motis_consistency.py [--gtfs-dir DIR]
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import csv
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DIR = ROOT / "data" / "gtfs_motis"
 
 # How many offending ids to print per check. Enough to recognise the
@@ -122,7 +122,7 @@ def check(gtfs_dir: Path) -> int:
         "  own — check mtimes:\n"
         f"      ls -la {gtfs_dir}\n"
         "  On the data machine, regenerate the sidecar from one feed:\n"
-        "      python3 scripts/preprocess_gtfs_for_motis.py\n"
+        "      python3 scripts/routing/preprocess_gtfs_for_motis.py\n"
         "  On the dev Mac, re-sync the feed whole instead — rebuilding here\n"
         "  only makes the sidecar agree with whatever old feed is present:\n"
         "      ./scripts/sync_to_mac.sh --only routed",
