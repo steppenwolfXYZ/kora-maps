@@ -116,6 +116,12 @@ Additional signals:
   network level (national / regional / local) or route identity — the
   graph-build change is part of the same fork, and it is the one
   deliberate exception to "no tile rebuild".
+- **Destination-only streets** (`motor_vehicle=destination`) carry no
+  penalty for bicycles — the restriction does not apply to bikes, and
+  these are precisely the quiet streets of the *fine* plateau. (The
+  engine's stock default priced them like a ~3 km detour, which chased
+  routes out of entire quiet quarters — the Bern benchmark's Mühlematt
+  quarter is the canonical case.)
 - **Hills:** the strong hill-avoidance default from the main concept
   is preserved and must compose with the tier model (a flat bad road
   vs. a hilly fine road remains a meaningful trade-off, not an

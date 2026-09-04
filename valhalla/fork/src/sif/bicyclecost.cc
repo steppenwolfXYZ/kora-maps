@@ -279,6 +279,14 @@ BaseCostingOptionsConfig GetBaseCostOptsConfig() {
   // override defaults
   cfg.alley_penalty_.def = kDefaultAlleyPenalty;
   cfg.gate_penalty_.def = kDefaultGatePenalty;
+  // kora fork: no destination-only penalty for bicycles. The graph bakes
+  // motor_vehicle=destination in as destination_only, and the base
+  // costing's 600 s default made every such street cost like a ~3 km
+  // detour — bikes fled exactly the quiet quarters the fine tier wants
+  // (the Bern benchmark's Mühlematt quarter is the canonical case).
+  // motor_vehicle=destination does not restrict bicycles at all. A
+  // request can still send destination_only_penalty explicitly.
+  cfg.dest_only_penalty_.def = 0.0f;
   cfg.disable_toll_booth_ = true;
   cfg.disable_rail_ferry_ = true;
   cfg.use_living_streets_.def = kDefaultUseLivingStreets;

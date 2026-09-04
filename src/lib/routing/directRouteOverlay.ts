@@ -149,20 +149,20 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			'line-opacity': mode === 'walk' ? 0.9 : 1
 		}
 	});
-	// Pushed-bike sections: same color, dotted — the walking-leg visual
-	// language (bicycle-costing-fork.md § pushed-bike). Walk routes never
-	// carry pushed features, so the layer only draws in bike mode; butt
-	// caps keep the dots from swallowing the gaps at this short a dash.
+	// Pushed-bike sections: same color, round dots (bicycle-costing-fork.md
+	// § pushed-bike). A zero-length dash with round caps renders each dash
+	// as a circle; the gap is in line-width units. Walk routes never carry
+	// pushed features, so the layer only draws in bike mode.
 	map.addLayer({
 		id: DIRECT_PUSHED_LAYER,
 		type: 'line',
 		source: DIRECT_SOURCE,
 		filter: ['==', ['get', 'pushed'], 1],
-		layout: { 'line-cap': 'butt', 'line-join': 'round' },
+		layout: { 'line-cap': 'round', 'line-join': 'round' },
 		paint: {
 			'line-color': selCase(color, muted) as any,
 			'line-width': selWidth([[6, 5, 3.5], [12, 8, 6], [16, 13, 10]]),
-			'line-dasharray': [0.8, 1.1] as any
+			'line-dasharray': [0, 2] as any
 		}
 	});
 	if (!handlersInstalled) {
