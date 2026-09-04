@@ -105,6 +105,7 @@ function onLineLeave(e: maplibregl.MapLayerMouseEvent) {
 // One width table for the route line AND the pushed dots, so the dots
 // always match the line they continue. [zoom, selected, muted].
 const LINE_WIDTH_STOPS: [number, number, number][] = [[6, 5, 3.5], [12, 8, 6], [16, 13, 10]];
+const CASING_WIDTH_STOPS: [number, number, number][] = [[6, 7, 5], [12, 12, 9], [16, 18, 14]];
 const DOT_GLYPH_EM = 0.66;
 
 const selCase = (selValue: unknown, altValue: unknown) =>
@@ -137,7 +138,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			layout: { 'line-cap': 'round', 'line-join': 'round' },
 			paint: {
 				'line-color': CASING_COLOR,
-				'line-width': selWidth([[6, 7, 5], [12, 12, 9], [16, 18, 14]]),
+				'line-width': selWidth(CASING_WIDTH_STOPS),
 				'line-opacity': selCase(1, 0.7) as any
 			}
 		});
@@ -193,7 +194,17 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			'text-padding': 0
 		},
 		paint: {
-			'text-color': selCase(color, muted) as any
+			'text-color': selCase(color, muted) as any,
+			// The same white border the ridden line gets from its casing:
+			// halo width = (casing − line) / 2, per zoom and selection.
+			'text-halo-color': CASING_COLOR,
+			'text-halo-width': selWidth(
+				CASING_WIDTH_STOPS.map(([z, cs, ca], i) => [
+					z,
+					(cs - LINE_WIDTH_STOPS[i][1]) / 2,
+					(ca - LINE_WIDTH_STOPS[i][2]) / 2
+				])
+			)
 		}
 	});
 	if (!handlersInstalled) {
