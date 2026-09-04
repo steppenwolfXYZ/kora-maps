@@ -179,6 +179,8 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
   **Minimize-walking exception.** With the option active, the time test is skipped for an A that walks meaningfully less than B (> 60 s, the same jitter slack as Rules 0b / 0c), and the comfort test alone decides. The time test is a pure time argument — "A costs more of your day for no time benefit" — and applying it unconditionally overrides the one axis this mode exists to weigh: an A departing 13 min earlier, arriving at the same minute, walking 33 min less was being deleted by the walk-heavier B. The comfort test still removes a genuinely bad A, since minimize-walking's effective time prices walking linearly (see `routing-options.md` § Minimize walking). Off the option, Case 1 is unchanged.
 
+  **Usable-time rescue.** A dominated A survives Case 1 entirely (both tests) when its hassle time — judged duration minus usable time — beats B's by ≥ 10 min and its judged duration is ≤ 1.5× B's. This keeps slower direct connections whose long uninterrupted rides are worth more than the faster chain of changes (canonical: Bern → Chur direct IR35 vs IC + IC3). Applies after the Rule 0* prunes, which it never overrides. See `usable-time.md`.
+
 - **Case 2 — non-overlapping: gap-scaled comfort tolerance.** When neither option Pareto-dominates the other in time, A is dropped when there exists another non-overlapping B such that:
 
   - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**

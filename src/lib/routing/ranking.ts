@@ -53,6 +53,14 @@ const GAP_FLOOR_SEC = 120;
 // distance — beyond it, the faster option is "the only one around" and
 // stays regardless of walking.
 const REVERSE_DISPLACE_MAX_GAP_MS = 3 * 3600 * 1000;
+// Usable-time rescue (usable-time.md): a Case-1-dominated A survives
+// when its hassle time (judged duration − usable time) beats every
+// dominator's by this margin AND its judged duration stays within the
+// ratio cap. The margin keeps jitter-level differences from rescuing
+// near-ties; the cap keeps a scenic all-rail meander from surviving
+// against options half its length.
+const RESCUE_HASSLE_MARGIN_SEC = 10 * 60;
+const RESCUE_MAX_DURATION_RATIO = 1.5;
 
 export function legDuration(leg: Leg): number {
 	return leg.duration ?? Math.max(0, (Date.parse(leg.endTime) - Date.parse(leg.startTime)) / 1000);
@@ -101,6 +109,45 @@ export function walkElevation(it: Itinerary): { up: number; down: number } | nul
 		down += l.elevationDown ?? 0;
 	}
 	return any ? { up, down } : null;
+}
+
+// Usable time (usable-time.md): the portion of a transit leg the
+// traveller can actually use (work, read, play). Per leg: the first and
+// last 5 min count 0 (settling in / packing up — a ≤10 min leg gives 0),
+// the 10 min inside each edge count half, the middle counts full; the
+// whole thing scaled by a mode rate. Walks and waits contribute nothing.
+const USABLE_EDGE_SEC = 5 * 60;
+const USABLE_RAMP_SEC = 10 * 60;
+// Mode rate: buses shake too much to use the time at all; tram/metro
+// rides are usable at half rate; trains, ferries and mountain modes at
+// full rate (ferries/mountain not always truly workable, but the
+// coolness factor makes up for it). Unknown transit modes count as
+// train.
+const USABLE_RATE: Record<string, number> = {
+	BUS: 0, COACH: 0,
+	TRAM: 0.5, SUBWAY: 0.5, METRO: 0.5
+};
+
+function usableCore(durSec: number): number {
+	const zero = 2 * USABLE_EDGE_SEC;
+	const rampEnd = zero + 2 * USABLE_RAMP_SEC;
+	if (durSec <= zero) return 0;
+	if (durSec <= rampEnd) return 0.5 * (durSec - zero);
+	return durSec - zero - USABLE_RAMP_SEC;
+}
+
+/** Total usable seconds across the itinerary's transit legs. Shown in
+ * the expanded connection details and the basis of the hassle-time
+ * rescue. */
+export function usableSeconds(it: Itinerary): number {
+	let s = 0;
+	for (const l of it.legs) {
+		if (l.mode === 'WALK' || l.mode === 'BIKE' || l.mode === 'CAR') continue;
+		const rate = USABLE_RATE[l.mode] ?? 1;
+		if (rate <= 0) continue;
+		s += rate * usableCore(legDuration(l));
+	}
+	return s;
 }
 
 /** Number of transit legs − 1 (same count the result card shows). Vehicle
@@ -225,6 +272,10 @@ interface Entry {
 	score: number;
 	effTime: number;
 	walk: number;
+	/** Judged duration (seconds) — the rescue's ratio-cap base. */
+	dur: number;
+	/** Hassle time: judged duration − usable time (usable-time.md). */
+	hassle: number;
 	transitKeys: Set<string>;
 	vehicles: string;
 }
@@ -493,6 +544,14 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 		// falls through to Case 1's marginality.
 		if ((Math.abs(a.end - b.end) <= T_SLACK_MS || Math.abs(a.start - b.start) <= T_SLACK_MS)
 			&& a.walk - b.walk > WALK_DOM_SLACK_SEC) return true;
+		// Usable-time rescue (usable-time.md): a dominated A with a
+		// meaningfully lower hassle time survives Case 1 entirely, as
+		// long as it isn't drastically slower — the slower direct train
+		// whose long uninterrupted ride is worth more of the clock than
+		// the faster chain of changes. Deliberately after the Rule 0*
+		// prunes: pure noise cannot be redeemed by ride quality.
+		if (b.hassle - a.hassle >= RESCUE_HASSLE_MARGIN_SEC
+			&& a.dur <= RESCUE_MAX_DURATION_RATIO * b.dur) return false;
 		return droppedByOverlap(a, b, opts);
 	}
 	if (paretoTimeDominates(a, b)) return false;
@@ -505,16 +564,21 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 export function pruneDominated(
 	its: Itinerary[], mode: TimeMode, opts?: RankOptions
 ): Itinerary[] {
-	const entries: Entry[] = its.map((it) => ({
-		it,
-		start: Date.parse(it.startTime),
-		end: Date.parse(it.endTime),
-		score: itineraryScore(it, opts),
-		effTime: judgedDuration(it, opts) * comfortFactor(it, opts),
-		walk: walkSeconds(it),
-		transitKeys: transitLegKeys(it),
-		vehicles: vehicleKeys(it)
-	}));
+	const entries: Entry[] = its.map((it) => {
+		const dur = judgedDuration(it, opts);
+		return {
+			it,
+			start: Date.parse(it.startTime),
+			end: Date.parse(it.endTime),
+			score: itineraryScore(it, opts),
+			effTime: dur * comfortFactor(it, opts),
+			walk: walkSeconds(it),
+			dur,
+			hassle: dur - usableSeconds(it),
+			transitKeys: transitLegKeys(it),
+			vehicles: vehicleKeys(it)
+		};
+	});
 	return entries
 		.filter((a, ai) => !entries.some((b, bi) =>
 			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, mode, opts))))

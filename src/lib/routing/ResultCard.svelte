@@ -3,7 +3,8 @@
 	import type { FilledVia, Itinerary, Leg } from './types';
 	import { legBadgeColor, loadHfGondolaRoutes, loadRouteColorIndex } from './legColor';
 	import {
-		assessTransfers, legDuration, transferCount, walkElevation, walkMetres, walkSeconds
+		assessTransfers, legDuration, transferCount, usableSeconds, walkElevation, walkMetres,
+		walkSeconds
 	} from './ranking';
 	import { stationPlaceId } from './client';
 	import type { Badge, TransferAssessment, TransferTier, Warning, WarningKind, WarningSeverity } from './ranking';
@@ -280,6 +281,10 @@
 	// a transfer (via-stops.md § Planned dwell) — rankOptionsFor carries
 	// the via waits that let transferCount see the difference.
 	let transfers = $derived(transferCount(itinerary, rankOptionsFor()));
+
+	// Usable time (usable-time.md) for the expanded details footer.
+	let usableSecs = $derived(usableSeconds(itinerary));
+	let showUsableInfo = $state(false);
 
 	/** Marker text for the collapsed legs strip: the requested wait when
 	 * there is one, otherwise just the pin. */
@@ -611,6 +616,38 @@
 					</button>
 				{/if}
 			{/each}
+			{#if usableSecs >= 60}
+				<!-- usable-time.md § Display: only when positive — an all-bus
+				     connection shows nothing rather than "0 min". -->
+				<div class="leg-usable">
+					<div class="lu-row">
+						<span class="lu-label">Total travel time</span>
+						<strong>{fmtDuration(itinerary.duration)}</strong>
+					</div>
+					<div class="lu-row">
+						<span class="lu-label">Active travel time</span>
+						<strong>− {fmtDuration(Math.max(0, itinerary.duration - usableSecs))}</strong>
+					</div>
+					<div class="lu-row">
+						<span class="lu-label">Usable time
+							<button
+								class="icon-btn lu-info-btn"
+								type="button"
+								aria-label="What is usable time?"
+								aria-expanded={showUsableInfo}
+								onclick={(e) => { e.stopPropagation(); showUsableInfo = !showUsableInfo; }}
+							><span class="material-symbols-outlined" aria-hidden="true">info</span></button>
+						</span>
+						<strong>{fmtDuration(usableSecs)}</strong>
+					</div>
+					{#if showUsableInfo}
+						<p class="lu-explainer" transition:slide>
+							Time on board you can actually use — long, smooth rides
+							count; short hops and buses don't.
+						</p>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 	<button
@@ -1036,6 +1073,44 @@
 		gap: 0.1rem;
 		border-top: 1px solid var(--gray-100);
 		padding-top: 0.35rem;
+	}
+	/* Usable-time group of the expanded details (usable-time.md): total /
+	   active / usable rows in a set-off box, values bold and a shade
+	   darker, labels plain — same value/label treatment as the meta row. */
+	.leg-usable {
+		margin: 0.35rem 0 0.1rem;
+		padding: 0.4rem 0.55rem;
+		border-radius: 8px;
+		/* Clearly below the selected card's --gray-75, so the box stays
+		   visible on an active card. Thin gradient border via the double
+		   background (padding-box fill, border-box gradient) so it follows
+		   the radius — 165° input variant, since the box is thin and wide
+		   (ux-guidelines.md § Usage rules). */
+		border: 1px solid transparent;
+		background:
+			linear-gradient(var(--gray-200), var(--gray-200)) padding-box,
+			var(--gradient-brand-input) border-box;
+		font-size: 0.78rem;
+		color: var(--gray-500);
+	}
+	.lu-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.08rem 0;
+	}
+	.lu-label { display: inline-flex; align-items: center; gap: 0.25rem; }
+	.leg-usable strong { font-weight: 600; color: var(--gray-700); }
+	/* The (i) explainer toggle is a shared .icon-btn (app.css) — only
+	   sizing here, per ux-guidelines.md § Icon button system. */
+	.lu-info-btn { padding: 0.1rem; margin: -0.1rem 0; }
+	.lu-info-btn :global(.material-symbols-outlined) { font-size: 0.95rem; line-height: 1; }
+	.lu-explainer {
+		margin: 0.25rem 0 0.05rem;
+		font-size: 0.72rem;
+		line-height: 1.45;
+		color: var(--gray-500);
 	}
 	.leg-item {
 		display: flex;
