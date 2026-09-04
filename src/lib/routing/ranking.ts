@@ -1,11 +1,13 @@
 import type { Itinerary, Leg, LegPlace, TimeMode } from './types';
 
 // Quality ranking for the merged cascade results — see transit-routing.md
-// § Ranking. Three unconditional prunes run on Pareto-time-dominated
+// § Ranking. Four unconditional prunes run on Pareto-time-dominated
 // pairs first: Rule 0 (same route minus a vehicle, not-faster AND more
 // walking — this one also fires on an exact time tie), Rule 0b (prefix/suffix dominance — the distinct trains are
 // provably catchable from B's own legs with less walking), Rule 0c
-// (shared endpoint + more walking = no benefit anywhere). Every other
+// (shared endpoint + more walking = no benefit anywhere), Rule 0f
+// (same-corridor duplicate — the ridden stations overlap ≥ 75% and A
+// offers no structural advantage). Every other
 // pair (A, B) falls into one of two shapes and is judged by a
 // case-specific rule:
 //   Case 1 (overlapping): B Pareto-time-dominates A — A takes strictly
@@ -285,6 +287,10 @@ interface Entry {
 	hassle: number;
 	transitKeys: Set<string>;
 	vehicles: string;
+	/** Boardings — Rule 0f's structural-advantage guard. */
+	boardings: number;
+	/** Ridden stations + shared-anchor info for the Rule 0f corridor verify. */
+	corridor: CorridorInfo;
 }
 
 /** Identity keys of an itinerary's transit legs: same vehicle (trip),
@@ -429,6 +435,75 @@ function egressDominated(a: Itinerary, b: Itinerary): boolean {
 	return false;
 }
 
+// Same-corridor verify (Rule 0f): minimum overlap of the two journeys'
+// ridden station sets, as a share of the SMALLER set — the same
+// threshold the fork's ε-alternates ride-through rule uses
+// (near-optimal-endpoint-alternatives.md § Ride-through redundancy).
+// The smaller-set denominator keeps express-vs-local pairs matching in
+// both directions (the express's stops are a subset of the local's,
+// never the reverse).
+const CORRIDOR_OVERLAP_MIN = 0.75;
+
+/** Everything Rule 0f needs to know about the stations a journey rides:
+ * every parent station touched by a transit leg (board, alight, and
+ * interior stops where the response carries them — shared-in itineraries
+ * are stripped of intermediateStops and just compare more coarsely),
+ * plus the first boarding / last alighting station for the anchor
+ * exclusion. */
+interface CorridorInfo {
+	stations: Set<string>;
+	firstBoard: string | null;
+	lastAlight: string | null;
+}
+
+function corridorInfo(it: Itinerary): CorridorInfo {
+	const stations = new Set<string>();
+	let firstBoard: string | null = null;
+	let lastAlight: string | null = null;
+	for (const l of it.legs) {
+		if (!isTransitLeg(l)) continue;
+		const f = stationKey(l.from);
+		const t = stationKey(l.to);
+		if (f) { stations.add(f); firstBoard ??= f; }
+		if (t) { stations.add(t); lastAlight = t; }
+		for (const m of l.intermediateStops ?? []) {
+			const k = stationKey(m);
+			if (k) stations.add(k);
+		}
+	}
+	return { stations, firstBoard, lastAlight };
+}
+
+/** True when A and B ride the same corridor: their ridden station sets
+ * overlap by ≥ 75% of the smaller set. Endpoint stations the pair
+ * SHARES (same first boarding, same last alighting) are excluded first —
+ * every journey of a query tends to share them by construction, so they
+ * carry no corridor information and would let two genuinely different
+ * routes that merely start and end together look similar. An empty set
+ * after exclusion decides nothing (two direct trains with stripped
+ * interior stops fall through to Case 1's marginality). */
+function corridorEquivalent(a: Entry, b: Entry): boolean {
+	const excl = new Set<string>();
+	if (a.corridor.firstBoard && a.corridor.firstBoard === b.corridor.firstBoard) {
+		excl.add(a.corridor.firstBoard);
+	}
+	if (a.corridor.lastAlight && a.corridor.lastAlight === b.corridor.lastAlight) {
+		excl.add(a.corridor.lastAlight);
+	}
+	let sizeA = 0;
+	let sizeB = 0;
+	let shared = 0;
+	for (const s of a.corridor.stations) if (!excl.has(s)) sizeA++;
+	for (const s of b.corridor.stations) {
+		if (excl.has(s)) continue;
+		sizeB++;
+		if (a.corridor.stations.has(s)) shared++;
+	}
+	const smaller = Math.min(sizeA, sizeB);
+	if (smaller === 0) return false;
+	return shared >= CORRIDOR_OVERLAP_MIN * smaller;
+}
+
 /** True when B Pareto-dominates A in time: B departs later-or-equal AND
  * arrives earlier-or-equal (both within T_SLACK), with at least one
  * endpoint strictly better beyond T_SLACK. In this case A takes strictly
@@ -530,6 +605,10 @@ function droppedByNonOverlap(
  *   Rule 0e (minimize-walking only) — same subset shape as Rule 0 but A
  *     is the faster side: the saving survives only at ≥ 3× the extra
  *     walking.
+ *   Rule 0f — same-corridor domination: A rides the same stations as B
+ *     (≥ 75% overlap of the smaller set, shared anchors excluded) with
+ *     no fewer boardings and no meaningful walking advantage — a
+ *     disguised duplicate, dropped without marginality or rescue.
  * Then: when B Pareto-time-dominates A the pair is overlapping (Case 1).
  * When A dominates B the pair is B's problem, not A's — return false.
  * Otherwise apply Case 2. */
@@ -567,6 +646,20 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 		// falls through to Case 1's marginality.
 		if ((Math.abs(a.end - b.end) <= T_SLACK_MS || Math.abs(a.start - b.start) <= T_SLACK_MS)
 			&& a.walk - b.walk > WALK_DOM_SLACK_SEC) return true;
+		// Rule 0f — same-corridor domination: A rides the same corridor as
+		// the B that dominates it (station sets overlap ≥ 75% of the
+		// smaller, shared anchors excluded) and offers no structural
+		// advantage — no fewer boardings, not meaningfully less walking.
+		// Different line numbers on the same tracks are not different
+		// connections: A is B in disguise, departing earlier only to wait
+		// or ride longer through the same stations, so neither Case 1's
+		// marginality window nor the usable-time rescue applies (its extra
+		// usable time is just extra ride on the same corridor). Canonical
+		// case: Thun → Eigerplatz, RE1 15:59 (extra Münsingen stop) vs IC6
+		// 16:04, identical 16:41 arrival, both continuing on bus 10.
+		if (corridorEquivalent(a, b)
+			&& a.boardings >= b.boardings
+			&& !(b.walk - a.walk > WALK_DOM_SLACK_SEC)) return true;
 		// Usable-time rescue (usable-time.md): a dominated A with a
 		// meaningfully lower hassle time survives Case 1 entirely, as
 		// long as it isn't drastically slower — the slower direct train
@@ -599,7 +692,9 @@ export function pruneDominated(
 			dur,
 			hassle: dur - usableSeconds(it),
 			transitKeys: transitLegKeys(it),
-			vehicles: vehicleKeys(it)
+			vehicles: vehicleKeys(it),
+			boardings: boardingCount(it),
+			corridor: corridorInfo(it)
 		};
 	});
 	return entries
