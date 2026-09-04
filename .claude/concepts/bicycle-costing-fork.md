@@ -124,8 +124,18 @@ Additional signals:
   downward — replacing stock's flat 8× factor. A costing option
   excludes them entirely — this backs the V1-mandatory avoid-stairs
   toggle.
-- **Pushed-bike access** (walking-speed use of foot-only ways) may
-  arrive in a follow-up, per the main concept.
+- **Pushed-bike access** — a core requirement, not a follow-up: without
+  it whole neighbourhoods route nonsensically (the Bern benchmark's
+  Zieglerstrasse crossing is the canonical case). Any edge that is
+  walkable but not ridable is traversable by pushing the bike: foot-only
+  ways (sidewalks, crossings, pedestrian zones) and streets that are
+  oneway against the direction of travel. Pushing happens at walking
+  pace and is priced above riding, so a push wins only where the riding
+  alternatives are clearly worse. Pushed sections are reported to the
+  client as walking-mode segments; the map draws them dotted (the same
+  visual language as walking legs). The connection cards do not mention
+  them. Implemented at query time — access to the walkable graph is
+  already in the tiles, so this forces no tile rebuild.
 - All tunable constants live in one central, documented place so
   tuning stays reviewable and future user-facing preferences
   (hilliness, stairs) map onto them cleanly.

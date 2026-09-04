@@ -58,11 +58,13 @@ One card per route, analogous to the transit connection cards:
 - **Strong hill avoidance by default.** A user-facing hilliness
   preference is planned for later; until then the default leans hard
   toward flat routes.
-- **Pushed-bike access:** ways where cycling is not permitted but
-  walking is (pedestrian-only paths, dismount zones) are usable, at
-  walking speed. Sections where the bike must be pushed are visible in
-  the route detail. May ship in a follow-up if not achievable with
-  reasonable effort in this step.
+- **Pushed-bike access** (mandatory — bike routing is nonsensical in
+  large parts without it): ways where cycling is not permitted but
+  walking is (pedestrian-only paths, sidewalks, crossings, dismount
+  zones) are usable at walking speed, as are streets oneway against the
+  direction of travel. On the map, pushed sections are drawn dotted —
+  the walking-leg visual language; the cards do not call them out.
+  Weighting details live in `bicycle-costing-fork.md`.
 - **Stairs:** heavily penalized, upward more than downward. An
   **avoid-stairs toggle** removes them entirely. The toggle is
   **mandatory for V1** — stairs are an absolute no-go for e-bikes,

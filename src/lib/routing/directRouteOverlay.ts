@@ -16,6 +16,7 @@ import type { DirectRoute } from './types';
 const DIRECT_SOURCE = 'direct-route';
 const DIRECT_CASING_LAYER = 'direct-route-casing';
 const DIRECT_LINE_LAYER = 'direct-route-line';
+const DIRECT_PUSHED_LAYER = 'direct-route-pushed';
 
 // Mode colors. Walk keeps the neutral dashed language every walking leg
 // on this map already speaks (route-display.md § Per-leg rendering);
@@ -46,6 +47,24 @@ function unionBBox(routes: DirectRoute[]): [number, number, number, number] | nu
 	return bb;
 }
 
+/** Split a route's shape at its pushed ranges (bicycle-costing-fork.md
+ * § pushed-bike): ridden parts render solid, pushed parts dotted. Slices
+ * share their boundary coordinate so the line stays visually continuous. */
+function splitByPushed(route: DirectRoute): { coords: [number, number][]; pushed: 0 | 1 }[] {
+	if (route.pushedRanges.length === 0) return [{ coords: route.coords, pushed: 0 }];
+	const parts: { coords: [number, number][]; pushed: 0 | 1 }[] = [];
+	let cursor = 0;
+	for (const [start, end] of route.pushedRanges) {
+		if (start > cursor) parts.push({ coords: route.coords.slice(cursor, start + 1), pushed: 0 });
+		parts.push({ coords: route.coords.slice(start, end + 1), pushed: 1 });
+		cursor = end;
+	}
+	if (cursor < route.coords.length - 1) {
+		parts.push({ coords: route.coords.slice(cursor), pushed: 0 });
+	}
+	return parts.filter((p) => p.coords.length >= 2);
+}
+
 function buildData(routes: DirectRoute[], selected: number): GeoJSON.FeatureCollection {
 	// Selected route last — within one layer, later features paint on
 	// top, so the full-color route always covers the muted alternates.
@@ -54,17 +73,20 @@ function buildData(routes: DirectRoute[], selected: number): GeoJSON.FeatureColl
 		.sort((a, b) => (a === selected ? 1 : 0) - (b === selected ? 1 : 0));
 	return {
 		type: 'FeatureCollection',
-		features: order.map((idx) => ({
-			type: 'Feature',
-			id: idx,
-			geometry: { type: 'LineString', coordinates: routes[idx].coords },
-			properties: { idx, sel: idx === selected ? 1 : 0 }
-		}))
+		features: order.flatMap((idx) =>
+			splitByPushed(routes[idx]).map(
+				(part): GeoJSON.Feature => ({
+					type: 'Feature',
+					geometry: { type: 'LineString', coordinates: part.coords },
+					properties: { idx, sel: idx === selected ? 1 : 0, pushed: part.pushed }
+				})
+			)
+		)
 	};
 }
 
 function removeLayers(map: maplibregl.Map) {
-	for (const id of [DIRECT_CASING_LAYER, DIRECT_LINE_LAYER]) {
+	for (const id of [DIRECT_CASING_LAYER, DIRECT_LINE_LAYER, DIRECT_PUSHED_LAYER]) {
 		if (map.getLayer(id)) map.removeLayer(id);
 	}
 }
@@ -118,6 +140,7 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 		id: DIRECT_LINE_LAYER,
 		type: 'line',
 		source: DIRECT_SOURCE,
+		filter: ['!=', ['get', 'pushed'], 1],
 		layout: { 'line-cap': 'round', 'line-join': 'round' },
 		paint: {
 			'line-color': selCase(color, muted) as any,
@@ -126,10 +149,28 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 			'line-opacity': mode === 'walk' ? 0.9 : 1
 		}
 	});
+	// Pushed-bike sections: same color, dotted — the walking-leg visual
+	// language (bicycle-costing-fork.md § pushed-bike). Walk routes never
+	// carry pushed features, so the layer only draws in bike mode; butt
+	// caps keep the dots from swallowing the gaps at this short a dash.
+	map.addLayer({
+		id: DIRECT_PUSHED_LAYER,
+		type: 'line',
+		source: DIRECT_SOURCE,
+		filter: ['==', ['get', 'pushed'], 1],
+		layout: { 'line-cap': 'butt', 'line-join': 'round' },
+		paint: {
+			'line-color': selCase(color, muted) as any,
+			'line-width': selWidth([[6, 5, 3.5], [12, 8, 6], [16, 13, 10]]),
+			'line-dasharray': [0.8, 1.1] as any
+		}
+	});
 	if (!handlersInstalled) {
-		map.on('click', DIRECT_LINE_LAYER, onLineClick);
-		map.on('mouseenter', DIRECT_LINE_LAYER, onLineEnter);
-		map.on('mouseleave', DIRECT_LINE_LAYER, onLineLeave);
+		for (const id of [DIRECT_LINE_LAYER, DIRECT_PUSHED_LAYER]) {
+			map.on('click', id, onLineClick);
+			map.on('mouseenter', id, onLineEnter);
+			map.on('mouseleave', id, onLineLeave);
+		}
 		handlersInstalled = true;
 	}
 }
@@ -205,9 +246,11 @@ export function exitDirectRouteOverlay(map: maplibregl.Map) {
 	}
 	removeLayers(map);
 	if (handlersInstalled) {
-		map.off('click', DIRECT_LINE_LAYER, onLineClick);
-		map.off('mouseenter', DIRECT_LINE_LAYER, onLineEnter);
-		map.off('mouseleave', DIRECT_LINE_LAYER, onLineLeave);
+		for (const id of [DIRECT_LINE_LAYER, DIRECT_PUSHED_LAYER]) {
+			map.off('click', id, onLineClick);
+			map.off('mouseenter', id, onLineEnter);
+			map.off('mouseleave', id, onLineLeave);
+		}
 		handlersInstalled = false;
 	}
 	if (map.getSource(DIRECT_SOURCE)) map.removeSource(DIRECT_SOURCE);

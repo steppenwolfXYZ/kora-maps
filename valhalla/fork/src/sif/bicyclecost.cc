@@ -20,7 +20,12 @@
 // surface term. Official cycle routes (OSM relation membership, the
 // graph's bike_network bit) earn a small multiplicative bonus. Stairs are
 // priced steeply, uphill more than downhill, and `exclude_steps` removes
-// them entirely. Transitions keep upstream's turn-time model and add the
+// them entirely. Edges that are walkable but not ridable in the travel
+// direction — sidewalks, crossings, pedestrian zones, oneways against us —
+// are traversable by pushing the bike at walking pace, priced above riding
+// (kora::kPushSpeedKph / kPushFactor); the fork's triplegbuilder overlay
+// reports those sections as pedestrian-mode maneuvers so the client can
+// draw them dotted. Transitions keep upstream's turn-time model and add the
 // crossing rule: moving from one through-traffic road onto another costs
 // extra unless it is a right turn; straight ahead it costs only across a
 // traffic signal (the proxy for "a real crossing of two big roads").
@@ -109,6 +114,15 @@ constexpr float kStepsFactorUp = 25.0f;
 constexpr float kStepsFactorDown = 12.0f;
 constexpr uint32_t kFlatGradeIndex = 6;
 
+// ── Pushed bike ─────────────────────────────────────────────────────────
+// Walkable-but-not-ridable edges (foot-only ways; streets oneway against
+// the travel direction) are used at pushing pace. The factor prices the
+// pushed second above a ridden one so a push wins only where the riding
+// alternatives are clearly worse — the Bern benchmark's Zieglerstrasse
+// crossing (a 30 m push saving a 400 m detour) is the calibration case.
+constexpr float kPushSpeedKph = 4.5f;
+constexpr float kPushFactor = 1.5f;
+
 // ── Crossings (cost seconds added at the transition) ────────────────────
 // Applied when BOTH the road being left and the road being entered are
 // through-traffic class. Right turns (with-traffic side) are exempt.
@@ -180,8 +194,6 @@ constexpr float kDefaultCyclingSpeed[] = {
     18.0f, // Hybrid or "city" bicycle: ~11.5 MPH
     16.0f  // Mountain bicycle: ~10 MPH
 };
-
-constexpr float kDismountSpeed = 5.1f;
 
 // Minimum and maximum average bicycling speed (to validate input).
 // Maximum is just above the fastest average speed in Tour de France time trial
@@ -283,6 +295,15 @@ enum class Tier : uint8_t { kGreat, kFine, kSharedPath, kTertiaryBare, kBad };
 inline bool is_path_like(Use use) {
   return use == Use::kFootway || use == Use::kPath || use == Use::kPedestrian ||
          use == Use::kSidewalk || use == Use::kMountainBike;
+}
+
+// kora fork: pushed-bike — walkable but not ridable in the traversal
+// direction. forwardaccess is the traversal direction's mask, so the
+// reverse edge of a oneway street (bike stripped, foot kept) lands here
+// alongside sidewalks, crossings and pedestrian zones.
+inline bool is_pushed(const DirectedEdge* edge) {
+  return !(edge->forwardaccess() & kBicycleAccess) &&
+         (edge->forwardaccess() & kPedestrianAccess);
 }
 
 // Does this edge carry through traffic? Road class decides; cycle
@@ -685,7 +706,9 @@ bool BicycleCost::Allowed(const baldr::DirectedEdge* edge,
   // Check bicycle access and turn restrictions. Bicycles should obey
   // vehicular turn restrictions. Allow Uturns at dead ends only.
   // Skip impassable edges and shortcut edges.
-  if (!IsAccessible(edge) || edge->is_shortcut() ||
+  // kora fork: an edge that is walkable but not ridable is admitted too —
+  // the bike is pushed there (EdgeCost prices it as walking).
+  if ((!IsAccessible(edge) && !is_pushed(edge)) || edge->is_shortcut() ||
       (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
        pred.mode() == TravelMode::kBicycle) ||
       (!ignore_turn_restrictions_ && (pred.restrictions() & (1 << edge->localedgeidx()))) ||
@@ -705,8 +728,9 @@ bool BicycleCost::Allowed(const baldr::DirectedEdge* edge,
     return false;
   }
 
-  // Prohibit certain roads based on surface type and bicycle type
-  if (edge->surface() > worst_allowed_surface_) {
+  // Prohibit certain roads based on surface type and bicycle type.
+  // kora fork: not while pushing — on foot any surface is fine.
+  if (edge->surface() > worst_allowed_surface_ && !is_pushed(edge)) {
     return false;
   }
   return DynamicCost::EvaluateRestrictions(access_mask_, edge, is_dest, tile, edgeid, current_time,
@@ -726,7 +750,8 @@ bool BicycleCost::AllowedReverse(const baldr::DirectedEdge* edge,
                                  uint8_t& destonly_access_restr_mask) const {
   // Check access, U-turn (allow at dead-ends), and simple turn restriction.
   // Do not allow transit connection edges.
-  if (!IsAccessible(opp_edge) || opp_edge->is_shortcut() ||
+  // kora fork: pushed edges admitted, as in Allowed().
+  if ((!IsAccessible(opp_edge) && !is_pushed(opp_edge)) || opp_edge->is_shortcut() ||
       opp_edge->use() == Use::kTransitConnection || opp_edge->use() == Use::kEgressConnection ||
       opp_edge->use() == Use::kPlatformConnection ||
       (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
@@ -741,8 +766,9 @@ bool BicycleCost::AllowedReverse(const baldr::DirectedEdge* edge,
     return false;
   }
 
-  // Prohibit certain roads based on surface type and bicycle type
-  if (edge->surface() > worst_allowed_surface_) {
+  // Prohibit certain roads based on surface type and bicycle type.
+  // kora fork: not while pushing.
+  if (edge->surface() > worst_allowed_surface_ && !is_pushed(opp_edge)) {
     return false;
   }
   return DynamicCost::EvaluateRestrictions(access_mask_, opp_edge, false, tile, opp_edgeid,
@@ -783,6 +809,15 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
     return {shortest_ ? edge->length() : sec * ferry_factor_, sec};
   }
 
+  // kora fork: pushed bike — walking pace on edges we may not (or, for
+  // bicycle=dismount tagging, must not) ride. The tier model does not
+  // apply on foot; time at pushing pace times kPushFactor is the whole
+  // price.
+  if (is_pushed(edge) || edge->dismount()) {
+    const float sec = edge->length() * 3.6f / kora::kPushSpeedKph;
+    return {shortest_ ? edge->length() : sec * kora::kPushFactor, sec};
+  }
+
   // kora fork: tier factor + official-route bonus + hills + surface.
   float factor = tier_factor(classify(edge), edge);
   if (edge->bike_network()) {
@@ -797,16 +832,15 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
                                               static_cast<uint32_t>(minimal_surface_penalized_)];
   }
 
-  // Compute bicycle speed. If you have to dismount on the edge then set speed to an average
-  // walking speed. Otherwise, set speed based on surface factor and grade. Lower bike speed
-  // for rougher surfaces (amount depends on on the bicycle type). Weighted grade (relative
-  // measure of elevation change along the edge) modulates speed based on elevation changes.
-  uint32_t bike_speed =
-      edge->dismount() ? kDismountSpeed
-                       : static_cast<uint32_t>(
-                             (speed_ * surface_speed_factor_[static_cast<uint32_t>(edge->surface())] *
-                              kGradeBasedSpeedFactor[edge->weighted_grade()]) +
-                             0.5f);
+  // Compute bicycle speed based on surface factor and grade (dismount
+  // edges returned above via the pushed branch — kora fork). Lower bike
+  // speed for rougher surfaces (amount depends on the bicycle type).
+  // Weighted grade (relative measure of elevation change along the edge)
+  // modulates speed based on elevation changes.
+  uint32_t bike_speed = static_cast<uint32_t>(
+      (speed_ * surface_speed_factor_[static_cast<uint32_t>(edge->surface())] *
+       kGradeBasedSpeedFactor[edge->weighted_grade()]) +
+      0.5f);
 
   factor *= EdgeFactor(edgeid);
 

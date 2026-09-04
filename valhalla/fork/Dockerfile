@@ -5,8 +5,13 @@
 #
 # The fork overlays / patches:
 #   src/sif/bicyclecost.cc                  — full-file overlay: the three-tier
-#                                             weighting model, stairs pricing,
-#                                             crossing rule, exclude_steps
+#                                             weighting model, pushed-bike
+#                                             access, stairs pricing, crossing
+#                                             rule, exclude_steps
+#   src/thor/triplegbuilder.cc              — full-file overlay: pushed-bike
+#                                             sections come back as pedestrian
+#                                             travel_mode maneuvers so the
+#                                             client can draw them dotted
 #   patches/options-proto-exclude-steps.patch
 #                                           — adds `bool exclude_steps = 98` to
 #                                             Costing.Options (the avoid-stairs
@@ -74,7 +79,7 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DENABLE_TE
 COPY patches/ /src/valhalla/kora-patches/
 COPY src/ /src/valhalla/src/
 RUN for p in /src/valhalla/kora-patches/*.patch; do git apply --verbose "$p"; done && \
-    touch -c src/sif/bicyclecost.cc && \
+    touch -c src/sif/bicyclecost.cc src/thor/triplegbuilder.cc && \
     make -C build all -j${CONCURRENCY} && \
     make -C build install
 

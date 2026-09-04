@@ -9,7 +9,8 @@ that is not bicycle costing is upstream, byte for byte.
 
 | File | Kind | Purpose |
 |---|---|---|
-| `src/sif/bicyclecost.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | The three-tier quality model (great / fine / bad), official-route bonus, stairs pricing with up/down asymmetry, the crossing rule, and the `exclude_steps` request option. All tunables sit in the `kora` namespace at the top of the file — the one place to change numbers. Every kora-specific line is marked `kora fork:`. |
+| `src/sif/bicyclecost.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | The three-tier quality model (great / fine / bad), pushed-bike access (walkable-but-not-ridable edges — sidewalks, crossings, pedestrian zones, oneways against the travel direction — admitted at walking pace, priced above riding), official-route bonus, stairs pricing with up/down asymmetry, the crossing rule, and the `exclude_steps` request option. All tunables sit in the `kora` namespace at the top of the file — the one place to change numbers. Every kora-specific line is marked `kora fork:`. |
+| `src/thor/triplegbuilder.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | Pushed-bike sections are reported as pedestrian `travel_mode` maneuvers (upstream already does this for dismount + steps; the overlay extends the condition to not-ridable-but-walkable edges). Maneuvers never merge across a mode change, so the client gets exact shape ranges to draw dotted. |
 | `patches/options-proto-exclude-steps.patch` | `git apply` patch on `proto/descriptors/options.proto` | Adds `bool exclude_steps = 98` to `Costing.Options`. Field 98 must stay unused upstream — check on a bump. |
 
 Request API: everything upstream accepts still parses. `use_roads` is
@@ -77,11 +78,13 @@ refuses a non-arm64 image), `--with-data` = both. `update_map.sh` uses
 A bump means a tile rebuild AND a footpath-matrix rebuild (the graph
 changes), plus re-applying the overlay:
 
-1. `git diff <old>..<new> -- src/sif/bicyclecost.cc proto/descriptors/options.proto docker/Dockerfile docker/Dockerfile-scripted scripts/install-linux-deps.sh`
-2. Re-copy upstream's `bicyclecost.cc`, re-apply the `kora fork:` blocks
-   (the tier/crossing helpers in the anonymous namespace, the `kora`
-   constants, `exclude_steps_`, and the three replaced methods —
-   `EdgeCost`, `TransitionCost`, `TransitionCostReverse`).
+1. `git diff <old>..<new> -- src/sif/bicyclecost.cc src/thor/triplegbuilder.cc proto/descriptors/options.proto docker/Dockerfile docker/Dockerfile-scripted scripts/install-linux-deps.sh`
+2. Re-copy upstream's `bicyclecost.cc` and `triplegbuilder.cc`, re-apply
+   the `kora fork:` blocks (bicyclecost: the tier/crossing/pushed helpers
+   in the anonymous namespace, the `kora` constants, `exclude_steps_`, and
+   the three replaced methods — `EdgeCost`, `TransitionCost`,
+   `TransitionCostReverse`; triplegbuilder: the pedestrian-mode override
+   condition for pushed edges).
 3. Check `git apply --check patches/*.patch` against the new proto; confirm
    field number 98 is still free, renumber if not (and update the parser
    line — the JSON key stays `exclude_steps`).

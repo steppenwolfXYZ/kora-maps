@@ -49,6 +49,12 @@ export interface DirectRoute {
 	/** Metres of stairs on the route (bike: sections to carry / push the
 	 * bike over; summed from the steps maneuvers). 0 when none. */
 	stairsM: number;
+	/** Bike only: [start, end] index ranges into `coords` where the bike
+	 * is pushed (walkable-but-not-ridable sections — the fork reports
+	 * them as pedestrian-mode maneuvers, bicycle-costing-fork.md). The
+	 * map draws these ranges dotted. Empty for walk routes and rides
+	 * without pushed sections. */
+	pushedRanges: [number, number][];
 }
 
 /** The `station` variant of Endpoint, pulled out because via stops can

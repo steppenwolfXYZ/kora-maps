@@ -64,6 +64,13 @@ interface ValhallaManeuver {
 	type: number;
 	/** Length in the requested units (kilometres here). */
 	length?: number;
+	/** 'pedestrian' on a bicycle route marks a pushed-bike (or stairs)
+	 * section — the fork's triplegbuilder reports walkable-but-not-
+	 * ridable edges this way (bicycle-costing-fork.md § pushed-bike). */
+	travel_mode?: string;
+	/** Indices into the leg's decoded shape. */
+	begin_shape_index?: number;
+	end_shape_index?: number;
 }
 
 interface ValhallaLeg {
@@ -146,7 +153,11 @@ function tripToRoute(trip: ValhallaTrip, mode: 'bike' | 'walk'): DirectRoute | n
 	let elevationComplete = true;
 	let intervalM = ELEVATION_INTERVAL_M;
 	let stairsM = 0;
+	const pushedRanges: [number, number][] = [];
 	for (const leg of legs) {
+		// Ranges are per-leg shape indices; offset them into the
+		// concatenated coords (two break locations → one leg anyway).
+		const legStart = coords.length;
 		// Valhalla encodes shapes with 6-digit precision.
 		coords.push(...decodePolyline(leg.shape, 6));
 		if (Array.isArray(leg.elevation) && leg.elevation.length > 0) {
@@ -161,6 +172,22 @@ function tripToRoute(trip: ValhallaTrip, mode: 'bike' | 'walk'): DirectRoute | n
 		for (const m of leg.maneuvers ?? []) {
 			if (m.type === MANEUVER_STEPS_ENTER && typeof m.length === 'number') {
 				stairsM += m.length * 1000;
+			}
+			// Pushed-bike sections: pedestrian-mode maneuvers on a bike
+			// route, drawn dotted on the map. Adjacent ranges merge so a
+			// push crossing a maneuver boundary stays one dotted run.
+			if (
+				mode === 'bike' &&
+				m.travel_mode === 'pedestrian' &&
+				typeof m.begin_shape_index === 'number' &&
+				typeof m.end_shape_index === 'number' &&
+				m.end_shape_index > m.begin_shape_index
+			) {
+				const start = legStart + m.begin_shape_index;
+				const end = legStart + m.end_shape_index;
+				const last = pushedRanges[pushedRanges.length - 1];
+				if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+				else pushedRanges.push([start, end]);
 			}
 		}
 	}
@@ -178,7 +205,8 @@ function tripToRoute(trip: ValhallaTrip, mode: 'bike' | 'walk'): DirectRoute | n
 		descentM: totals ? Math.round(totals.down) : null,
 		profile: hasProfile ? elevation : null,
 		profileIntervalM: intervalM,
-		stairsM: Math.round(stairsM)
+		stairsM: Math.round(stairsM),
+		pushedRanges
 	};
 }
 
