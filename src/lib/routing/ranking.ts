@@ -177,6 +177,13 @@ export function boardingCount(it: Itinerary): number {
 // to ~timing 40 / transfers 10 / walking 50 — expressed here as a flat
 // multiplier on the walking cost terms (transfer terms untouched).
 const MINIMIZE_WALK_MULT = 4;
+// Rule 0e (minimize-walking only): a same-route-minus-a-vehicle variant
+// escapes Rule 0 by being faster, but a marginal saving must not buy
+// meaningful extra walking — the trade survives only when the time
+// saved is at least this multiple of the extra walking. 3 keeps real
+// wins (18 min saved for 5 min walking) while killing the canonical
+// offender (2 min saved for 9 min walking).
+const MINWALK_SUBSET_SAVE_RATIO = 3;
 
 /** Ranking knobs derived from the user's routing options. All optional —
  * absent means today's behavior. */
@@ -520,6 +527,9 @@ function droppedByNonOverlap(
  *     with meaningfully less walking.
  *   Rule 0c — shared endpoint: A arrives (or departs) together with B,
  *     is dominated, and walks meaningfully more — no benefit anywhere.
+ *   Rule 0e (minimize-walking only) — same subset shape as Rule 0 but A
+ *     is the faster side: the saving survives only at ≥ 3× the extra
+ *     walking.
  * Then: when B Pareto-time-dominates A the pair is overlapping (Case 1).
  * When A dominates B the pair is B's problem, not A's — return false.
  * Otherwise apply Case 2. */
@@ -533,6 +543,19 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 		&& Math.abs(a.end - b.end) <= T_SLACK_MS;
 	if (paretoTimeDominates(b, a) || timeTie) {
 		if (vehicleSubset(a, b) && a.walk > b.walk) return true;
+	}
+	// Rule 0e (minimize-walking only) — same route minus a vehicle, but A
+	// is the FASTER side, which Rule 0 spares unconditionally. Under
+	// minimize-walking a marginal saving must not buy meaningful extra
+	// walking: A drops unless the time saved is ≥ 3× the extra walking.
+	// Gated on A being equal-or-better on BOTH time axes (the mirror of
+	// Rule 0's gate — mixed pairs are Case 2's territory), so only the
+	// subset side can ever drop and mutual drops stay impossible.
+	if (opts?.minimizeWalking && vehicleSubset(a, b)
+		&& a.walk - b.walk > WALK_DOM_SLACK_SEC
+		&& a.start >= b.start - T_SLACK_MS && a.end <= b.end + T_SLACK_MS) {
+		const savedSec = (Math.max(0, a.start - b.start) + Math.max(0, b.end - a.end)) / 1000;
+		if (savedSec < MINWALK_SUBSET_SAVE_RATIO * (a.walk - b.walk)) return true;
 	}
 	if (paretoTimeDominates(b, a)) {
 		if (accessDominated(a.it, b.it) || egressDominated(a.it, b.it)) return true;

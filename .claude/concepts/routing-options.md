@@ -251,6 +251,17 @@ candidates is the ranking's job, below.)
   that departs a few minutes later. Mutual drops stay impossible: the
   exception only widens who reaches the comfort test, and Pareto
   dominance still runs in one direction only.
+- The same-route-minus-a-vehicle prune (Rule 0) gains a **marginal-
+  saving extension**: a variant riding a subset of another's vehicles
+  (walked instead of ridden) normally survives by being faster, but
+  under this mode a marginal saving must not buy meaningful extra
+  walking — it survives only when the time saved is at least **3×**
+  the extra walking (> 60 s extra to engage at all). Fires only when
+  the subset side is equal-or-better on both time endpoints, so only
+  the subset side can drop and mutual drops stay impossible. Canonical
+  case: same train to Bern, then a 15-min walk arriving 2 min before
+  the tram variant with 6 min walking — the 2-min saving does not
+  justify 9 min more walking.
 - Badges use an **additive effective time** (duration + penalty score)
   instead of the multiplicative comfort factor — the multiplicative
   walking malus saturates, letting a few minutes of duration outvote a
