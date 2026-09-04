@@ -127,9 +127,15 @@ if [ $DO_WATCH -eq 1 ]; then
 
     # Tail until it dies (connection drop) or the stamp appears. The
     # remote side stops the tail itself so we do not have to kill it.
-    rssh "cd '$REMOTE_PATH' && tail -n +1 -F build.log 2>/dev/null & \
-          TP=\$!; while [ ! -f build.status ]; do sleep 5; done; \
-          sleep 2; kill \$TP 2>/dev/null" 2>/dev/null | tee -a "$LOCAL_LOG" || true
+    # Absolute paths throughout, deliberately. Written as
+    # `cd … && tail … &` the ampersand backgrounds the whole cd+tail list,
+    # so the cd takes effect only inside the subshell and the poll below
+    # then tests build.status relative to $HOME — and waits forever.
+    rssh "tail -n +1 -F '$REMOTE_PATH/build.log' 2>/dev/null &
+          TP=\$!
+          while [ ! -f '$REMOTE_PATH/build.status' ]; do sleep 5; done
+          sleep 2
+          kill \$TP 2>/dev/null" 2>/dev/null | tee -a "$LOCAL_LOG" || true
 
     if rssh "[ -f '$REMOTE_PATH/build.status' ]" 2>/dev/null; then break; fi
     echo ""
