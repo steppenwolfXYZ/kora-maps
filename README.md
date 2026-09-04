@@ -29,7 +29,7 @@ first/last mile, direct walks) comes from a Valhalla pedestrian router.
 Once the map pipeline has run at least once:
 
 ```bash
-./scripts/setup_routing.sh
+./scripts/routing/setup_routing.sh
 ```
 
 Idempotent — every step skips when its output is already in place, so
@@ -39,7 +39,7 @@ elevation (~20–40 min), and computes the stop-to-stop footpath matrix
 (hours on a laptop; `.claude/runbooks/matrix_build_remote.md` covers
 running that part on a bigger machine). It then imports MOTIS and
 serves routing on `:8080` (Valhalla on `:8002`). Per-step `--force-*`
-flags: `./scripts/setup_routing.sh --help`.
+flags: `./scripts/routing/setup_routing.sh --help`.
 
 ## Routine data refresh
 
@@ -49,6 +49,45 @@ code ships via git push):
 ```bash
 ./scripts/update_map.sh          # --osm to refresh OpenStreetMap as well
 ```
+
+Two independent axes narrow the work. Which branch to build:
+
+```bash
+./scripts/update_map.sh --only-pipeline   # transit pipeline + map emission
+./scripts/update_map.sh --only-routing    # routing prep, matrix, MOTIS import
+```
+
+And what to refresh first: `--skip-gtfs` builds on the feed already on
+disk, `--osm` re-downloads the country PBFs. Deploy scope follows the
+branch automatically; `--skip-deploy` suppresses it entirely.
+
+To re-enter the pipeline partway, reusing what earlier steps produced:
+
+```bash
+./scripts/update_map.sh --only-pipeline --pipeline-from 6   # emit 6,7,8  (~11 min)
+./scripts/update_map.sh --only-pipeline --pipeline-from 8   # pmtiles only
+```
+
+`--pipeline-from N` skips every pipeline step below N; preflight checks
+that the artifacts those steps would have produced are present, and names
+the missing file rather than the flag.
+
+## Building on the data machine from the laptop
+
+The heavy builds run on the data machine (Kranich) and the dev Mac pulls
+the result back. From the Mac, over Tailscale, one command does all of
+it — launch detached, stream the log, fetch the artifacts, restart the
+local stack:
+
+```bash
+./scripts/remote_build.sh                 # build flags are forwarded
+./scripts/remote_build.sh --watch-only    # follow a build already running
+./scripts/remote_build.sh --fetch-only    # skip to the transfer
+```
+
+The build lives in a tmux session on Kranich, so a dropped connection
+costs the view and nothing else. See `.claude/rules/deployment.md`
+§ Remote build and fetch.
 
 ## Run the dev server
 

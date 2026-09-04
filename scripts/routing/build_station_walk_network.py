@@ -47,7 +47,7 @@ from pathlib import Path
 
 import osmium
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 OSM_DIR = ROOT / "data" / "osm"
 # Quays are read from step 04's output, NOT from data/gtfs_routed/.
 # update_map.sh runs this script (setup_routing.sh step 3) concurrently

@@ -1,11 +1,11 @@
 # Production Valhalla server (Hetzner CAX11, /var/www/koramaps.app/valhalla/).
 # Serve-only, mirroring the MOTIS split (see motis/docker-compose.prod.yml):
 # tiles and elevation are built locally on the Mac, the server receives
-# only the prebuilt data/ dir via scripts/deploy_valhalla.sh.
+# only the prebuilt data/ dir via scripts/deploy/deploy_valhalla.sh.
 services:
   valhalla:
     # The Kora fork image (valhalla/fork/), shipped by
-    # scripts/deploy_valhalla.sh as a docker-save tarball over SSH — there
+    # scripts/deploy/deploy_valhalla.sh as a docker-save tarball over SSH — there
     # is no registry to pull from. Same tag as the dev compose; the server
     # serves tiles built against the upstream version the fork pins.
     image: koramaps/valhalla:bicycle-costing

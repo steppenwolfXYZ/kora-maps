@@ -3,15 +3,17 @@
 Four deliberately separate deploy channels:
 
 1. **App** (SvelteKit build) — automatic, GitHub Actions on every push to `main`.
-2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
-3. **MOTIS routing backend** — manual, `scripts/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
-4. **Valhalla router** — manual, `scripts/deploy_valhalla.sh`. Ships the Kora fork of Valhalla (`valhalla/fork/`: upstream pinned at `VALHALLA_REF` plus the Kora bicycle costing, see `bicycle-costing-fork.md`) as a locally-built docker image, and — on request — the tile set. Tile + elevation build runs locally; the server only serves prebuilt tiles and never builds.
+2. **Map assets** (pmtiles, style.json, indexes, glyph fonts) — manual, `scripts/deploy/deploy_map_assets.sh`, run only when a pipeline result is worth publishing. Not integrated into the pipeline on purpose: not every rebuild produces a publishable outcome.
+3. **MOTIS routing backend** — manual, `scripts/deploy/deploy_motis.sh`, run only when the routing data should be (re)published. The GTFS/OSM import runs locally (Mac is aarch64, portable to the server's arm64 image); the server only serves prebuilt indexes, never imports. Ships the Kora fork of MOTIS as a locally-built docker image (see `motis/fork/`).
+4. **Valhalla router** — manual, `scripts/deploy/deploy_valhalla.sh`. Ships the Kora fork of Valhalla (`valhalla/fork/`: upstream pinned at `VALHALLA_REF` plus the Kora bicycle costing, see `bicycle-costing-fork.md`) as a locally-built docker image, and — on request — the tile set. Tile + elevation build runs locally; the server only serves prebuilt tiles and never builds.
 
 `scripts/update_map.sh` is the data-refresh machine's whole routine, scheduled as a DAG rather than a line: GTFS ∥ OSM downloads → OSM extracts ∥ GTFS preprocess → pfaedle (sharded over `PFAEDLE_JOBS` containers) ∥ routing prep (`setup_routing.sh --steps 1,2,3,4`: network, image, OSM patch, station walk network + quay anchors, Valhalla tiles — with a tile wipe first when the OSM extract is newer than the tiles) → footpath matrix ∥ map emission (`rebuild_transit.sh --only 6,7,8`) → MOTIS import + local smoke test → the three deploys (`deploy_motis.sh --data-only` and `deploy_valhalla.sh --data-only`: indexes / tiles only, never this machine's amd64 images) → production smoke test. Any failing stage aborts before the deploy phase, so a broken local import never reaches the server; per-stage wall times print at the end. Sizing env: `PFAEDLE_JOBS`, `TIPPECANOE_JOBS`, `VALHALLA_THREADS`, `MATRIX_WORKERS`. The app deploy stays separate (git push from the dev Mac).
 
+The build's shape is set by two independent axes. **Which branch:** `--only-pipeline` (transit pipeline + map emission; skips routing prep, matrix, import) or `--only-routing` (routing prep, matrix, import, smoke test; skips map emission *and* the whole GTFS chain, building on the routed feed already on disk — not re-shaping it is the point of the flag). Neither flag = both branches. **What to refresh:** `--osm` re-downloads the country PBFs, `--skip-gtfs` skips the GTFS/atlas download entirely. **Where the pipeline starts:** `--pipeline-from N` skips every pipeline step below N and reuses what it produced last time — `4` gtfs_prep onward, `5` pfaedle onward, `6` emit (6,7,8), `7` emit (7,8), `8` pmtiles only. It is not the same as `--skip-gtfs`, which skips only the download and still runs steps 2-4, and it is rejected with `--only-routing` rather than ignored. Emit-only is the common iteration: ~11 min against ~30 for the whole pipeline branch. Deploy scope follows the branch automatically — `--only-pipeline` ships map assets, `--only-routing` ships Valhalla + MOTIS data — so deploy targets are never named by hand, and the production smoke test checks whatever was actually shipped. Preconditions a pruned stage graph cannot satisfy itself are caught in preflight, in seconds, and are named by missing artifact rather than by flag. The guards are scoped to the actual consumer, not to "something later runs" — step 8 reads none of the OSM or GTFS artifacts, so a pmtiles-only rebuild is not blocked by their absence.
+
 Because that routing-prep branch runs *alongside* pfaedle, anything in it that needs GTFS reads `data/gtfs_filtered/` (final since the previous phase) and never `data/gtfs_routed/`, which pfaedle is rewriting at that moment — see `station-walk-network.md` § Quay source.
 
-Separate from all four, `scripts/sync_to_mac.sh` pushes a finished run sideways from the data machine to the dev Mac so the Mac stays current without re-running the pipeline — see § Dev-machine sync.
+Separate from all four, the Mac drives builds on the data machine remotely and pulls the result back: `scripts/remote_build.sh` on the Mac launches, watches, fetches and post-syncs in one command — see § Remote build and fetch.
 
 The split exists because map assets are large generated artifacts (~470 MB, gitignored) while the app is small committed code. It also maps cleanly onto the future setup where a dedicated pipeline server runs nightly rebuilds and pushes assets itself — the GitHub Actions side never changes.
 
@@ -35,13 +37,13 @@ Mirrors the user's standard workflow used across their projects (same shape as o
 
 adapter-node does not bundle production dependencies — that is why node_modules ships in the artifact.
 
-## Map assets deploy (`scripts/deploy_map_assets.sh`)
+## Map assets deploy (`scripts/deploy/deploy_map_assets.sh`)
 
 Rsyncs `static/map-assets/` → `map-assets/` on the server over the `koramaps` SSH alias. Allowlist: `*.json` (style, stop-search index, line index), `fonts/` (MapLibre glyph PBFs), `tl_*.pmtiles`; excludes `tl_debug_*` and anything else (stale/legacy files never leave the machine). `--delete` inside the target dir. Extra args pass through to rsync (`--dry-run`). Fonts transfer once; later runs skip them as unchanged.
 
 Run it before the first app deploy on a fresh server — without assets the app serves but the map cannot load.
 
-## MOTIS deploy (`scripts/deploy_motis.sh`)
+## MOTIS deploy (`scripts/deploy/deploy_motis.sh`)
 
 Ships the MOTIS **software** by default — the locally-built Kora fork image plus `motis/config.yml` and `motis/docker-compose.prod.yml` → `motis/` on the server over the `koramaps` SSH alias, then restarts the container. `motis/data/` (the prebuilt nigiri/OSR/shapes indexes, ~2.6 GB, imported locally) ships only on explicit request: `--with-data` adds it to the software deploy (exception case from the dev Mac), `--data-only` ships data + config without the image (the data machine's mode, used by `update_map.sh` — its amd64 image must never reach the arm64 server). The default skips data because the dev Mac's indexes are usually older than the data machine's last deploy, and the data rsync runs with `--delete`. The image transfer uses `docker save | ssh docker load` (no registry) — repeat deploys skip the transfer when layers are unchanged. The prod compose is serve-only: no `motis-import` service, no GTFS/OSM bind mounts (the server never imports — the Mac's aarch64 indexes run on the arm64 image; `/motis server` ignores the import-only config paths at serve time, verified locally), loopback-bound port (`127.0.0.1:8080`), `mem_limit: 2g` (CAX11 has 4 GB total), capped json-file logs (10 MB × 3). When data ships, the script stops the container before rsync because MOTIS memory-maps its index files — replacing them under a running server can fault mid-query (an image-only deploy skips the stop; `up -d` recreates the container from the new image). `--delete` on `data/`; `--dry-run` passes through to rsync and skips the stop/start.
 
@@ -51,9 +53,9 @@ The client reaches MOTIS same-origin at `/routing/` (env var `PUBLIC_MOTIS_URL`,
 
 One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Because the transfer table is built at import, both the two-tier split and the minimum-transfer-time floor only exist in indexes produced by an image that carries them — an index imported by an older image silently lacks them (the `koraFullTransfers` profile then degrades to the capped table). After bumping the fork, re-import before judging routing behaviour.
 
-Re-import cycle (all local): `python3 scripts/build_station_walk_network.py` → `python3 scripts/preprocess_gtfs_for_motis.py` → `python3 scripts/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
+Re-import cycle (all local): `python3 scripts/routing/build_station_walk_network.py` → `python3 scripts/routing/preprocess_gtfs_for_motis.py` → `python3 scripts/routing/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/routing/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
 
-## Valhalla deploy (`scripts/deploy_valhalla.sh`)
+## Valhalla deploy (`scripts/deploy/deploy_valhalla.sh`)
 
 Same software / data split as the MOTIS deploy. Default ships the **software**: the locally-built Kora fork image `koramaps/valhalla:bicycle-costing` (`valhalla/fork/`, built by `setup_routing.sh` step 2b or `docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork`) via `docker save | ssh docker load` plus `valhalla/docker-compose.prod.yml` → `valhalla/` on the server, then `up -d` recreates the container. `valhalla/data/` (Valhalla tiles + SRTM elevation + admin polygons, ~500-800 MB depending on the OSM extract) ships only on explicit request: `--with-data` adds it (dev-Mac exception), `--data-only` ships data + compose without the image (the data machine's mode, used by `update_map.sh` — its amd64 image must never reach the arm64 server; the script refuses a non-arm64 image outright). When data ships the script stops the container before rsync because Valhalla memory-maps its tiles. Prod compose is serve-only (`use_tiles_ignore_pbf=True`, no PBF mounted, no elevation download), loopback-bound (`127.0.0.1:8002`), `mem_limit: 1g`, capped json-file logs.
 
@@ -63,13 +65,57 @@ The **transit tab** does NOT call Valhalla — its walking is computed server-si
 
 One-time server prep: create `/var/www/koramaps.app/valhalla/` (owned by `ga_koramaps`), `docker network create koramaps`, optionally add the nginx debug location, keep 8002 closed in the cloud firewall, confirm ~1 GB free disk. The tiles are built from `ch_pfaedle_walkable.osm.pbf`, which carries the synthetic station walk network merged in by `preprocess_osm_for_motis.py --valhalla` (see `station-walk-network.md`) — changing that overlay means rebuilding tiles *and* the footpath matrix, since both describe the same walking. Local tile build (one-off, ~20-40 min): `cd valhalla && docker compose up -d valhalla` — the fork image (upstream's scripted entrypoint) downloads SRTM elevation, builds admins, then routing tiles. First-time bring-up order: Valhalla tiles → matrix build → MOTIS import → deploy both (Valhalla first — the forked MOTIS refuses to serve without it).
 
-## Dev-machine sync (`scripts/sync_to_mac.sh`)
+## Remote build and fetch
 
-Sideways, not a deploy channel: this pushes a finished pipeline run from the
-**data machine** (Linux, amd64 — the box that runs `update_map.sh`) to the
-**dev Mac**, so the Mac's local map and routing stack are current without
-re-running the pipeline there. It never touches production, and it only ever
-flows data-machine → Mac.
+Sideways, not a deploy channel. The **Mac** drives a build on the **data
+machine** ("Kranich", Linux amd64) and pulls the finished artifacts back, so
+the Mac's local map and routing stack are current without re-running the
+pipeline there. It never touches production, and it only ever flows
+Kranich → Mac.
+
+Three scripts, and one of them is the only one you normally run:
+
+| Script | Runs on | Job |
+|---|---|---|
+| `scripts/remote_build.sh` | Mac | the entry point: launch → watch → fetch → post-sync |
+| `scripts/run_build_detached.sh` | Kranich | starts the build in tmux, writes the log and the exit-code stamp |
+| `scripts/fetch_build.sh` | Mac | pulls the five artifact groups back |
+
+**Reachability is Tailscale.** Both machines are on the tailnet, so Kranich
+has a stable name from anywhere — no DynDNS, no port forwarding, no SSH
+exposed to the internet. Kranich needs power only; it never needs a graphical
+login. Overrides: `KRANICH_REMOTE` (SSH alias, default `kranich`) and
+`KRANICH_PATH` (repo path over there, default `~/Prog/kora-maps`).
+
+**The build outlives the connection.** `run_build_detached.sh` starts it in a
+named tmux session (`kora-build`) on Kranich and returns immediately, so a
+closed lid or a WiFi switch costs the view and nothing else. It writes
+`build.log` live and — only on completion — `build.status` containing the
+build's real exit code, captured through `PIPESTATUS` so `tee` cannot mask it.
+The stamp is deleted before each run, so a previous run's result can never be
+mistaken for this one's.
+
+**The stamp is the sole success signal.** `remote_build.sh` streams the log
+for the human and polls the stamp for the decision; those are separate. A
+dropped stream reconnects and is never itself a failure. On a non-zero stamp
+the whole log is copied down to
+`data/transit/logs/remote-build-failed.log` and the fetch does not run.
+
+**Phases are separately enterable**, so an interrupted run resumes instead of
+restarting: `--watch-only` attaches to a build already running,
+`--fetch-only` skips to the transfer, `--no-fetch` / `--no-post-sync` stop
+early, `--dry-run` prints the decisions. Every unrecognised argument is
+forwarded verbatim to `update_map.sh` — the build's flag surface lives on the
+build script, and the transport wrapper deliberately does not interpret it.
+
+**The transfer pulls, it does not push.** The direction flipped when the Mac
+became the machine that drives builds. Three reasons: the roaming machine
+should be the client, so the link that fails is the one you are already
+watching (a push needs a second, Kranich → Mac connection); Kranich then needs
+no credentials for and no way to reach the Mac; and `--delete` acts on the
+machine you are sitting at, gated by checks made from there. What did *not*
+change is everything below — the groups, filters, `--delete` set, compression
+choices and sentinels are direction-agnostic and encode past incidents.
 
 **Why it exists.** The Mac is where code is written, so every pipeline or fork
 change lands there long before the data machine runs. What the Mac lacks is
@@ -77,17 +123,17 @@ fresh *data* — and it cannot practically build the footpath matrix. Re-running
 the whole pipeline on the Mac just to catch up costs hours for artifacts the
 data machine already produced.
 
-**Two-machine roles.** The data machine imports MOTIS and builds Valhalla
-tiles + the matrix; the Mac develops the app and the fork. This supersedes the
-assumption in deploy channel 3 above that the Mac is the importing machine —
-`update_map.sh` on the data machine now does that, and `deploy_motis.sh
---data-only` ships its indexes to the VPS.
+**Two-machine roles.** Kranich imports MOTIS and builds Valhalla tiles + the
+matrix; the Mac develops the app and the fork and triggers the builds. This
+supersedes the assumption in deploy channel 3 above that the Mac is the
+importing machine — `update_map.sh` on Kranich now does that, and
+`deploy_motis.sh --data-only` ships its indexes to the VPS.
 
-**Groups** (all run by default; `--only a,b` selects, `--no-routed` drops the
-big one). Nothing relevant is opt-in: the script's job is to leave the Mac able
-to run *and* debug everything, and a flag you have to remember is a flag that
-gets forgotten — which is exactly how the Mac ended up importing a feed it had
-never been sent.
+**Groups** of `fetch_build.sh` (all run by default; `--only a,b` selects,
+`--no-routed` drops the big one). Nothing relevant is opt-in: the script's job
+is to leave the Mac able to run *and* debug everything, and a flag you have to
+remember is a flag that gets forgotten — which is exactly how the Mac ended up
+importing a feed it had never been sent.
 
 | Group | Source | Size | Contents |
 |---|---|---|---|
@@ -151,46 +197,57 @@ re-import throws them away and rebuilds the same thing from
 A default sync makes that safe — the `routed` group delivers the feed, and
 `post_sync.sh` rebuilds the sidecar from it — but after `--no-routed` the
 Mac's feed is stale, so don't re-import; just restart MOTIS on the synced
-indexes. `setup_routing.sh` step 7 runs `scripts/check_gtfs_motis_consistency.py`
+indexes. `setup_routing.sh` step 7 runs `scripts/routing/check_gtfs_motis_consistency.py`
 before the importer and refuses a mixed feed, but "old yet internally
 consistent" passes that check by design.
 
 **Safety rails.** Two, both learned the hard way:
 
-- The script **refuses to run while `update_map.sh` is alive**. Mid-run,
-  artifacts are being rewritten — pfaedle is producing a partial feed, and the
-  Valhalla tile wipe that precedes a rebuild leaves `valhalla/data/` with no
-  tiles at all. Syncing that with `--delete` would replace good data on the Mac
-  with an empty directory. `--force` overrides.
+- The fetch **refuses to run while a build is alive on Kranich** (a remote
+  `pgrep`). Mid-run, artifacts are being rewritten — pfaedle is producing a
+  partial feed, and the Valhalla tile wipe that precedes a rebuild leaves
+  `valhalla/data/` with no tiles at all. Fetching that with `--delete` would
+  replace good data on the Mac with an empty directory. `--force` overrides.
 - Every `--delete` group is gated on a sentinel that exists only once that
   group's build finished (`style.json`, `tt.bin`, `valhalla_tiles.tar`,
   `shapes.txt`). A missing sentinel skips the group with a warning instead of
   mirroring an interrupted run. Within `lookup`, `--delete` is used only on
   `data/gtfs/`, which the data machine owns end to end (gated on
   `stop_times.txt`, and a table the new release dropped must not linger); the
-  other pushes in that group land inside the Mac's own 40+ GB `data/` tree and
-  must never delete.
+  other transfers in that group land inside the Mac's own 40+ GB `data/` tree
+  and must never delete. Sentinels are now checked **on Kranich** over SSH,
+  since that is where the artifacts are.
 
 **Transfer details.** `-z` is applied per group: on for the text payloads
 (JSON / CSV / GeoJSON compress 9–20×), off for pmtiles and the binary indexes,
 where it only burns CPU on an already-fast link. `--partial` is kept
 throughout because the Mac is on WiFi — a dropped connection resumes mid-file
-instead of restarting a 1.4 GB index. macOS ships openrsync (protocol 29);
-`-a -v --partial --delete` and the `--include`/`--exclude` filter chain all
-negotiate correctly with GNU rsync on the sending side.
+instead of restarting a 1.4 GB index. Added with the pull flip: `--timeout=120`
+so a stalled link fails in two minutes instead of hanging, and a five-attempt
+retry loop per group (30 s apart) that resumes rather than restarts.
 
-**Target.** SSH alias `mac` from `~/.ssh/config`, repo at
-`~/Documents/prog/newmap` (the Mac's folder name predates the Kora rename).
-Override with `MAC_REMOTE` / `MAC_PATH`. Preflight prints the Mac's free disk,
-which is worth watching — its data volume runs near full and the default sync
-is ~12 GB, almost all of it overwriting in place. One caveat on that: the
-sidecar's hardlinks pin the superseded routed feed until `post_sync.sh`
-rebuilds them, so the Mac transiently holds two copies of it.
+**GNU rsync is required on the Mac.** Under the old push, GNU rsync on the
+data machine drove the filter chain and the Mac was a passive receiver, so the
+bundled openrsync (protocol 29) was fine. Pulling makes the Mac the client
+that interprets `--include` / `--exclude` / `--delete`, and openrsync's
+filter-rule support is not up to it — the failure mode is silently
+transferring the wrong set, not an error. `fetch_build.sh` therefore prefers a
+Homebrew rsync, and **aborts** if all it can find is openrsync. Install with
+`brew install rsync`, or point `RSYNC_BIN` at one.
 
-**The Mac side is `scripts/post_sync.sh`.** The sync copies files; it cannot
-restart anything on the receiving end, and it does not know whether what it
-delivered still matches. This script closes that gap and is the only thing to
-run on the Mac afterwards. It reports the feed version and artifact ages, then:
+**Target.** SSH alias `kranich` from the Mac's `~/.ssh/config` (the tailnet
+name), repo path `~/Prog/kora-maps`. Override with `KRANICH_REMOTE` /
+`KRANICH_PATH`. Preflight prints the **Mac's** free disk, which is worth
+watching — its data volume runs near full and a default fetch is ~12 GB,
+almost all of it overwriting in place. One caveat on that: the sidecar's
+hardlinks pin the superseded routed feed until `post_sync.sh` rebuilds them,
+so the Mac transiently holds two copies of it.
+
+**Making it serve is `scripts/post_sync.sh`.** The fetch copies files; it does
+not restart anything and does not know whether what it delivered still
+matches. This script closes that gap. `remote_build.sh` runs it as the final
+phase, so success means "the Mac serves the new data", not "files arrived";
+run it by hand after a bare `fetch_build.sh`. It reports the feed version and artifact ages, then:
 checks the sidecar and rebuilds it when it no longer matches the routed feed
 (see below), decides whether the index needs re-importing by comparing
 `motis/data/tt.bin` against `data/gtfs_routed/shapes.txt` and the matrix
@@ -204,19 +261,18 @@ a walk-only smoke test cannot tell you whether a quay has matrix rows at all.
 `--dry-run` prints the decisions; `--force-import` after a fork import-path
 change; `--no-import` to restart on what is already there.
 
-**The sidecar cannot be synced — only rebuilt.** `data/gtfs_motis/` is a
+**The sidecar cannot be transferred — only rebuilt.** `data/gtfs_motis/` is a
 hardlink farm over `data/gtfs_routed/` plus its own `stops.txt`. rsync mirrors
 the routed feed by writing *new inodes*, so the sidecar's links keep pointing
-at the feed the Mac held before the sync; shipping `gtfs_routed` therefore
-never refreshes it, and the superseded feed stays on disk held alive by those
-links. Only `preprocess_gtfs_for_motis.py` re-creates the farm. So a failed
-consistency check right after a sync is the normal case, not an alarm, and
+at the feed the Mac held before; fetching `gtfs_routed` therefore never
+refreshes it, and the superseded feed stays on disk held alive by those links.
+Only `preprocess_gtfs_for_motis.py` re-creates the farm. So a failed
+consistency check right after a fetch is the normal case, not an alarm, and
 `post_sync.sh` repairs it — all of that script's inputs (`quay_anchors.json`,
-`platform_ways.geojson`, `stop_identity.json`) ride along with the sync, so
-the result matches what the data machine produced. If it is *still*
-inconsistent afterwards, `data/gtfs_routed/` itself is mixed: the script then
-blocks a local import, keeps serving the synced index, and points at the
-sending side. The rebuild cannot mask a stale feed either — the import
+`platform_ways.geojson`, `stop_identity.json`) come along in the same fetch,
+so the result matches what Kranich produced. If it is *still* inconsistent
+afterwards, `data/gtfs_routed/` itself is mixed: the script then blocks a
+local import, keeps serving the fetched index, and points at Kranich. The rebuild cannot mask a stale feed either — the import
 decision is made from the routed feed's own timestamp, so a stale feed simply
 yields "no import".
 
@@ -225,30 +281,40 @@ yields "no import".
 The deciding question is how long the rebuild takes, not what it touches.
 
 **Short rebuilds (under ~20-30 min): the Mac does them.** Staying on one
-machine avoids a sync round trip, and the Mac is where the code already is.
+machine avoids a round trip, and the Mac is where the code already is.
 
-**Long rebuilds: the data machine does them**, in three steps:
+**Long rebuilds: Kranich does them**, driven from the Mac with one command:
 
-1. `./scripts/update_map.sh` on the data machine — rebuilds and, on
-   success, deploys to production.
-2. `./scripts/sync_to_mac.sh` on the data machine — pushes the finished
-   artifacts to the Mac.
-3. `./scripts/post_sync.sh` on the Mac — makes what arrived actually serve.
+```
+./scripts/remote_build.sh [--osm] [--only-pipeline | --only-routing] [--skip-gtfs]
+```
 
-Step 3 is not optional. `sync_to_mac.sh` only copies files; it cannot
-restart anything on the Mac and does not know whether what it delivered is
-self-consistent. `post_sync.sh` rebuilds the `data/gtfs_motis` hardlink farm
-(rsync writes new inodes, so the links still point at the Mac's previous
-feed), decides whether a re-import is needed, restarts both services in the
-required order — **Valhalla first, then MOTIS** — and runs a smoke query.
-Skipping it leaves the Mac serving pre-sync mmaps of post-sync files, which
-looks like corrupt routing data rather than a stale process.
+That launches the build detached on Kranich, streams its log here, waits for
+the exit-code stamp, fetches the artifacts, and runs `post_sync.sh`. Kranich
+still deploys to production itself at the end of the build. The Mac may sleep
+during the build but must stay awake for the fetch and post-sync legs.
+
+If you run the pieces by hand instead — `run_build_detached.sh` on Kranich,
+then `fetch_build.sh` on the Mac — **`post_sync.sh` is not optional**. The
+fetch only copies files; it cannot restart anything and does not know whether
+what it delivered is self-consistent. `post_sync.sh` rebuilds the
+`data/gtfs_motis` hardlink farm (rsync writes new inodes, so the links still
+point at the Mac's previous feed), decides whether a re-import is needed,
+restarts both services in the required order — **Valhalla first, then
+MOTIS** — and runs a smoke query. Skipping it leaves the Mac serving
+pre-fetch mmaps of post-fetch files, which looks like corrupt routing data
+rather than a stale process.
+
+**Wake-on-LAN is not set up.** Kranich has sleep disabled and is assumed to be
+powered on; a build cannot currently be triggered on a machine that is off.
+Waking it would need an always-on device inside the LAN, since magic packets
+must originate there.
 
 **Fresh clone:** `./scripts/rebuild_transit.sh` with no arguments (the
 no-argument form additionally runs the glyph bootstrap, step 0), then
-`./scripts/setup_routing.sh`.
+`./scripts/routing/setup_routing.sh`.
 
-Run `sync_to_mac.sh` or `post_sync.sh` with `--dry-run` first when in doubt.
+Run `remote_build.sh`, `fetch_build.sh` or `post_sync.sh` with `--dry-run` first when in doubt.
 
 ## SSR constraints (deployment-driven)
 

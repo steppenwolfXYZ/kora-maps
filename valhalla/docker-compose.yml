@@ -5,7 +5,7 @@
 #   - direct walk-only itineraries surfaced to the user
 #   - pre/post-transit walk legs shown in transit results
 #   - the stop-to-stop footpath matrix that seeds MOTIS's RAPTOR
-#     transfer table (see scripts/build_valhalla_footpath_matrix.py
+#     transfer table (see scripts/routing/build_valhalla_footpath_matrix.py
 #     and the MOTIS fork's `footpath_matrix` config key)
 #
 # The gis-ops docker-valhalla image bootstraps everything:
@@ -17,13 +17,13 @@
 #
 # The same MOTIS-preprocessed PBF is reused so alp / forest roads
 # route for pedestrians on both engines (see
-# scripts/preprocess_osm_for_motis.py).
+# scripts/routing/preprocess_osm_for_motis.py).
 services:
   valhalla:
     # The Kora fork of Valhalla (valhalla/fork/): upstream pinned at
     # VALHALLA_REF in valhalla/fork/Dockerfile plus the Kora bicycle
     # costing (.claude/concepts/bicycle-costing-fork.md). Locally built,
-    # no registry — scripts/setup_routing.sh step 2 builds it. It is a
+    # no registry — scripts/routing/setup_routing.sh step 2 builds it. It is a
     # drop-in for ghcr.io/valhalla/valhalla-scripted:<VALHALLA_REF>: same
     # entrypoint, same environment interface below, same tiles. Costing is
     # query-time, so a costing change is image rebuild + restart, never a
@@ -50,7 +50,7 @@ services:
     volumes:
       - ./data:/custom_files
       # Mount the pipeline-bboxed multi-country PBF with foot=yes
-      # patches (see scripts/preprocess_osm_for_motis.py --valhalla).
+      # patches (see scripts/routing/preprocess_osm_for_motis.py --valhalla).
       # CH-only would leave every cross-border GTFS stop (Basel Bad,
       # Konstanz, Domodossola, Weil am Rhein, …) unroutable, poisoning
       # the transfer matrix. The wider bbox covers CH + DE + FR + IT +
@@ -98,7 +98,7 @@ services:
     # it. The cap keeps that blast radius inside the container: docker
     # kills and restarts only Valhalla, and the matrix builder waits for
     # it to come back (see _wait_for_valhalla in
-    # scripts/build_valhalla_footpath_matrix.py) instead of losing the
+    # scripts/routing/build_valhalla_footpath_matrix.py) instead of losing the
     # run. memswap_limit matches mem_limit so the container cannot buy
     # extra headroom by thrashing the host's swap.
     #

@@ -3,7 +3,7 @@
 // Replaces MOTIS's OSR-based stop-to-stop transfer-table generator with
 // a loader that reads a precomputed CSV matrix (rows:
 // from_stop_id,to_stop_id,duration_sec). The matrix is built by
-// scripts/build_valhalla_footpath_matrix.py querying the local Valhalla
+// scripts/routing/build_valhalla_footpath_matrix.py querying the local Valhalla
 // pedestrian router (see .claude/concepts/valhalla-pedestrian-router.md).
 //
 // Every loaded pair also passes the minimum-transfer-time floor (see
@@ -157,18 +157,33 @@ constexpr std::uint64_t pair_key(n::location_idx_t const from,
 // same-stop rows land in nigiri's `locations_.transfer_time_` at load
 // time and never pass through the footpath table.
 //
-//   transfer_type=2 -> min_transfer_time is the minimum.
-//   transfer_type=1 -> a timed (guaranteed) connection: the vehicles are
-//                      scheduled to meet, so the pair is exempt from the
-//                      default floor (0 here; kAbsoluteFloorMinutes still
-//                      applies). These rows are keyed by TRIP pair, which
-//                      a stop-keyed table cannot express — the exemption
-//                      therefore widens to every trip over that quay pair.
-//                      Accepted: the feed carries 281 such rows.
+// The table can only RELAX the default floor, never raise it. A row's
+// min_transfer_time is the operator's own walking estimate, computed on
+// walking speeds and paths we do not know; used as a floor it overrode
+// the Valhalla times at exactly the station-adjacent stops the walk
+// network was built to get right (Bern↔Hirschengraben carries 600 s
+// against a measured 4–5 min walk, flipping every transfer there to
+// worse stops). Valhalla is the walking authority; the feed is trusted
+// only where it says a transfer needs LESS slack than our default:
+//
+//   transfer_type=2 -> kept ONLY if below the default floor (then it is a
+//                      deliberate short-transfer allowance, e.g. adjacent
+//                      bays); at or above the default it is the walking
+//                      estimate and is dropped.
+//   transfer_type=1 -> IGNORED. A timed (guaranteed) connection sounds
+//                      like a reason to allow less than the default, but
+//                      these rows are keyed by TRIP pair, which a
+//                      stop-keyed table cannot express — honouring them
+//                      widened the exemption to every trip over the quay
+//                      pair and handed out tighter-than-necessary
+//                      connections. Where a transfer genuinely needs less
+//                      than the default, the operator publishes a
+//                      sub-default type-2 value for the pair; that row is
+//                      the trustworthy signal, and it is the one used.
 //   everything else -> ignored (0/3 carry no time, 4/5 are stay-seated).
 //
-// Duplicates keep the SMALLEST value, so a pair listed as both timed and
-// timed-with-a-minimum ends up on the permissive side.
+// Duplicates keep the SMALLEST value, so the map holds only sub-default
+// relaxations and floored() may use any hit as-is.
 std::unordered_map<std::uint64_t, unsigned> read_official_minimums(
     std::unordered_map<std::string, n::location_idx_t> const& id_idx) {
   auto const* env = std::getenv(kTransfersEnvVar);
@@ -209,7 +224,7 @@ std::unordered_map<std::uint64_t, unsigned> read_official_minimums(
   auto const c_min = idx("min_transfer_time");
 
   auto out = std::unordered_map<std::uint64_t, unsigned>{};
-  auto n_timed = 0UL;
+  auto n_relaxed = 0UL;
   auto n_unknown = 0UL;
   auto line = std::string{};
   while (std::getline(in, line)) {
@@ -221,8 +236,8 @@ std::unordered_map<std::uint64_t, unsigned> read_official_minimums(
     if (f.size() <= std::max({c_from, c_to, c_type, c_min})) {
       continue;
     }
-    if (f[c_type] != "1" && f[c_type] != "2") {
-      continue;
+    if (f[c_type] != "2") {
+      continue;  // type 1 deliberately unused — see the comment above
     }
     if (f[c_from] == f[c_to]) {
       continue;
@@ -234,16 +249,16 @@ std::unordered_map<std::uint64_t, unsigned> read_official_minimums(
       continue;
     }
     auto secs = 0U;
-    if (f[c_type] == "1") {
-      ++n_timed;  // timed connection: no minimum beyond the absolute floor
-    } else {
-      auto const v = f[c_min];
-      auto const [ptr, ec] =
-          std::from_chars(v.data(), v.data() + v.size(), secs);
-      if (ec != std::errc{} || ptr != v.data() + v.size()) {
-        continue;  // type 2 without a usable time carries no information
-      }
+    auto const v = f[c_min];
+    auto const [ptr, ec] =
+        std::from_chars(v.data(), v.data() + v.size(), secs);
+    if (ec != std::errc{} || ptr != v.data() + v.size()) {
+      continue;  // type 2 without a usable time carries no information
     }
+    if (secs >= kDefaultFloorMinutes * 60U) {
+      continue;  // operator walking estimate — deliberately unused
+    }
+    ++n_relaxed;
     auto const key = pair_key(from_it->second, to_it->second);
     auto const it = out.find(key);
     if (it == end(out)) {
@@ -254,9 +269,11 @@ std::unordered_map<std::uint64_t, unsigned> read_official_minimums(
   }
 
   fmt::println(std::clog,
-               "kora fork: {} per-pair minimum transfer times from {} "
-               "({} timed connections, {} rows with unknown stop ids)",
-               out.size(), path, n_timed, n_unknown);
+               "kora fork: {} sub-default transfer relaxations from {} "
+               "({} kept of the type-2 rows, {} rows with unknown stop ids; "
+               "operator walking estimates >= the default floor and timed "
+               "type-1 rows deliberately unused)",
+               out.size(), path, n_relaxed, n_unknown);
   return out;
 }
 
@@ -323,9 +340,13 @@ void load_matrix_into(
                            unsigned const secs) {
     auto const walk_min = (secs + 59U) / 60U;
     auto const it = official_minimums.find(pair_key(from, to));
-    auto const floor_min = it != end(official_minimums)
-                               ? (it->second + 59U) / 60U
-                               : kDefaultFloorMinutes;
+    // Map hits are sub-default relaxations only (see read_official_minimums)
+    // — the min() restates that invariant locally so the feed can never
+    // raise a floor past the default even if the read-side filter drifts.
+    auto const floor_min =
+        it != end(official_minimums)
+            ? std::min((it->second + 59U) / 60U, kDefaultFloorMinutes)
+            : kDefaultFloorMinutes;
     auto const dur =
         std::max({walk_min, floor_min, kAbsoluteFloorMinutes});
     if (dur > walk_min) {

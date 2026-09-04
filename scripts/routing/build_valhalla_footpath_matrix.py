@@ -18,7 +18,7 @@ sees the same set of transfer opportunities, only with corrected times.
 
 Prerequisite:
   * `valhalla` docker service running (see valhalla/docker-compose.yml).
-  * `data/gtfs_motis/` up to date (`scripts/preprocess_gtfs_for_motis.py`).
+  * `data/gtfs_motis/` up to date (`scripts/routing/preprocess_gtfs_for_motis.py`).
 
 Idempotent: the run is resumable if killed — completed source stops are
 recorded in a checkpoint file and skipped on restart, and rows from
@@ -26,7 +26,7 @@ sources the checkpoint never confirmed are pruned at startup, so a
 resumed run produces no duplicate rows. The checkpoint is deleted when
 a build completes, so a lingering checkpoint always marks an unfinished
 build ("CSV present, no checkpoint" = complete — the signal
-scripts/setup_routing.sh skips on). Delete the CSV + checkpoint
+scripts/routing/setup_routing.sh skips on). Delete the CSV + checkpoint
 (or pass --restart) to force a full rebuild.
 """
 
@@ -46,7 +46,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 STOPS_TXT = ROOT / "data" / "gtfs_motis" / "stops.txt"
 OUT_CSV = ROOT / "motis" / "data" / "valhalla_footpath_matrix.csv"
 CHECKPOINT = ROOT / "motis" / "data" / "valhalla_footpath_matrix.checkpoint"
@@ -168,7 +168,7 @@ def _load_stops() -> list[tuple[str, float, float, str]]:
     skipped — MOTIS's transfer table is stop-level. `name` is kept only
     for the unroutable-stops diagnostic file (never sent to Valhalla)."""
     if not STOPS_TXT.exists():
-        sys.exit(f"missing {STOPS_TXT} — run scripts/preprocess_gtfs_for_motis.py")
+        sys.exit(f"missing {STOPS_TXT} — run scripts/routing/preprocess_gtfs_for_motis.py")
     stops: list[tuple[str, float, float, str]] = []
     with open(STOPS_TXT, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):

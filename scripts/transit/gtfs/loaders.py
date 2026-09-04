@@ -370,6 +370,12 @@ def load_trips(route_lookup: dict, mountain_aids: set) -> dict:
             r = route_lookup.get(row["route_id"])
             if not r:
                 continue
+            # EV-prefixed routes (Bahnersatz / rail replacement) stay in the
+            # feed for MOTIS routing but are never drawn — the map shows
+            # general year-round connections. Skipping them here keeps every
+            # map stage (grouping, scoring, stops, indexes) EV-free.
+            if r["short_name"].strip().upper().startswith("EV"):
+                continue
             bucket = gtfs_type_to_bucket(r["type"])
             if not bucket:
                 continue

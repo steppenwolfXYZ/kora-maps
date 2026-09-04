@@ -1,6 +1,6 @@
 # Building the Valhalla footpath matrix on a remote machine
 
-The [Valhalla footpath matrix](../../scripts/build_valhalla_footpath_matrix.py) is the
+The [Valhalla footpath matrix](../../scripts/routing/build_valhalla_footpath_matrix.py) is the
 one-off input MOTIS's fork loads at import time (see
 `.claude/concepts/valhalla-pedestrian-router.md`). On the Mac it takes
 ~10+ hours; a beefier CPU cuts that to 2-4 h. Everything else (MOTIS
@@ -70,12 +70,12 @@ bbox (TGV to Paris, ICE to Berlin); zero inside-bbox stops unroutable.
 Takes ~15 s. Check the dropped list against the bbox rather than just
 counting — the right count does not prove the right stops were dropped.
 
-    python3 scripts/build_valhalla_footpath_matrix.py --prescan-only
+    python3 scripts/routing/build_valhalla_footpath_matrix.py --prescan-only
 
 Then the full build. `MATRIX_WORKERS` is Python-side HTTP concurrency;
 match or slightly exceed `server_threads`.
 
-    MATRIX_WORKERS=20 python3 scripts/build_valhalla_footpath_matrix.py
+    MATRIX_WORKERS=20 python3 scripts/routing/build_valhalla_footpath_matrix.py
 
 Reckon on 2-4 h for ~65k stops (34.8M pairs for the CH feed). The rate
 swings from ~25 stops/s in rural areas to ~3.5 across the Zurich
@@ -92,7 +92,7 @@ Finally, recover whatever the bisection floor discarded (with the
 batch span cap in place, error 154 is gone and the skip list should be
 empty or near-empty — this pass is a backstop for the rare error 499):
 
-    MATRIX_WORKERS=20 python3 scripts/build_valhalla_footpath_matrix.py --repair
+    MATRIX_WORKERS=20 python3 scripts/routing/build_valhalla_footpath_matrix.py --repair
 
 This re-runs only the pairs in `valhalla_failed_pairs.csv` with full
 isolation, parallelised across sources, and rewrites that file with the

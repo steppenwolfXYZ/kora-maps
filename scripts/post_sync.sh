@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Bring the dev Mac's routing stack in line after a sync_to_mac.sh push.
+# Bring the dev Mac's routing stack in line after a fetch_build.sh pull.
 # Run from the project root: ./scripts/post_sync.sh
 #
-# sync_to_mac.sh copies files; it cannot restart anything on this side and
+# fetch_build.sh copies files; it cannot restart anything on this side and
 # it does not know whether what it delivered still matches. This script
 # closes that gap: it inspects what arrived, does the minimum needed to
 # make it serve correctly, and tells you what it decided and why.
@@ -75,7 +75,7 @@ for f in motis/data/tt.bin motis/data/valhalla_footpath_matrix.csv \
          valhalla/data/valhalla_tiles.tar data/gtfs_motis/stops.txt; do
 	if [ ! -s "$f" ]; then
 		warn "missing or empty: $f"
-		warn "the sync looks incomplete — re-run sync_to_mac.sh on the data machine"
+		warn "the fetch looks incomplete — re-run ./scripts/fetch_build.sh"
 		exit 1
 	fi
 done
@@ -107,14 +107,14 @@ banner "1 — GTFS sidecar consistency"
 CONSISTENT=1
 if [ "$SKIP_CHECK" -eq 1 ]; then
 	note "skipped (--skip-check)"
-elif python3 scripts/check_gtfs_motis_consistency.py; then
+elif python3 scripts/routing/check_gtfs_motis_consistency.py; then
 	:
 else
 	echo ""
 	warn "sidecar out of step with data/gtfs_routed/ — rebuilding the hardlinks"
-	run python3 scripts/preprocess_gtfs_for_motis.py
+	run python3 scripts/routing/preprocess_gtfs_for_motis.py
 	if [ "$DRY_RUN" -eq 0 ]; then
-		if python3 scripts/check_gtfs_motis_consistency.py; then
+		if python3 scripts/routing/check_gtfs_motis_consistency.py; then
 			note "sidecar repaired"
 		else
 			CONSISTENT=0
@@ -122,7 +122,7 @@ else
 			warn "still inconsistent, so data/gtfs_routed/ is itself mixed."
 			warn "The synced index is unaffected — this only blocks a local"
 			warn "re-import. Re-sync the feed whole from the data machine:"
-			warn "    ./scripts/sync_to_mac.sh --only routed"
+			warn "    ./scripts/fetch_build.sh --only routed"
 		fi
 	fi
 fi

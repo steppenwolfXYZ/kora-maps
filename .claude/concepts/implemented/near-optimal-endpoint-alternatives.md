@@ -51,6 +51,21 @@ gets to see them.
 - **Layer 2 stays the arbiter.** No comfort or walking judgment moves
   into the server. The client's existing pruning decides which
   alternates survive; the server's only job is to stop withholding them.
+- **Every effort level is scanned.** Candidate extraction reads the
+  arrival table at every point level per egress stop, never capped at
+  the anchoring Pareto point's own level. Walk penalties raise a
+  candidate's level only after its row is read, so a capped scan had a
+  built-in asymmetry: a low-level ride plus a long walk was extractable
+  (it climbs past the cap via the walk delta), while the same corridor
+  with one more boarding and less walking sat one row above the cap and
+  could never be extracted — the strictly better sibling was
+  structurally invisible while the walk-heavy one surfaced. Canonical
+  case: from a level-2 anchor, S1 + 15-min walk (level 1 + walk delta 2)
+  was extracted while S44+S3+bus 28 (level 3, a third of the walking,
+  tying or beating the arrival) never was. The ε slack still bounds
+  which candidates qualify; which siblings then survive is layer 2's
+  call (its subset rule keeps a walked stretch only when walking is
+  strictly faster than riding the same route).
 - **Acceptance case:** the canonical query above, replayed with the
   app's standard cascade — the 31 → 19 journey (Thunplatz same-platform
   transfer, Manuelstrasse egress) must be present in the raw merged
@@ -101,6 +116,22 @@ to provide implicitly:
   served no later by a kept journey's endpoint vehicle — ridden past
   that journey's own exit, without requiring an earlier departure from
   home — is the same corridor journey in disguise and is dropped.
+  "Same corridor" must be verified, never assumed from the endpoint
+  alone: the two journeys' full stop sets (every parent station ridden
+  through, interior stops included, minus the query's shared anchor —
+  the origin-side boarding station for leave-at, the destination-side
+  alighting station for arrive-by, which every journey of the query
+  shares by construction and which therefore carries no corridor
+  information) must overlap by at least 75% of the smaller set. The
+  smaller-set denominator keeps express-vs-local pairs matching in
+  both directions (the express's stops are a subset of the local's,
+  never the reverse). Journeys below the overlap are genuinely
+  different routes that merely end near each other, and the rule must
+  leave them for the client's ranking to judge — canonical failure
+  before the gate: Thun→Belp→S3→bus 28 (Gürbetal line) dropped because
+  Thun→Bern→S1→bus 10 (mainline) reached Eigerplatz inside the slack,
+  two routes sharing no stop but their origin, with the strictly worse
+  sibling surviving.
 - **Once per Pareto point.** Extraction runs once per (arrival,
   transfers) point, not once per search-cursor rediscovery. The
   accepted performance budget is ~2.5× the alternates-off search time

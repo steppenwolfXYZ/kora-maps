@@ -1,7 +1,9 @@
 #include "nigiri/routing/raptor/reconstruct.h"
 
 #include <cassert>
+#include <cstdint>
 #include <iterator>
+#include <utility>
 
 #include "utl/enumerate.h"
 #include "utl/helpers/algorithm.h"
@@ -805,6 +807,61 @@ void reconstruct_journey_with_vias(timetable const& tt,
       return std::move(*transfer_at_same_stop);
     }
 
+    // kora fork: take the BEST transfer into this stop, not the first one
+    // that reconstructs (transfer-stop-selection.md).
+    //
+    // Several footpaths routinely reconstruct a valid predecessor: a bus
+    // that calls at three stops near the station gives three consistent
+    // ways to reach the platform, all with the same trips and the same
+    // door-to-door times. Returning the first meant taking whichever the
+    // footpath table happened to list first — at Bern that alighted at
+    // Kocherpark and walked 9 minutes where staying aboard two more stops
+    // walks 5, which reads as the router picking a route nobody would.
+    //
+    // These candidates are equal on departure, arrival and transfer count
+    // by construction — check_fp validates each against the same
+    // curr_time — so preferring the shorter walk is not a comfort
+    // judgement the server has no business making; it is the same journey
+    // described better. Ranking between genuinely different journeys stays
+    // with the client.
+    //
+    // Cost is confined to reconstruction, which runs once per returned
+    // journey: the loop no longer exits early, so it visits at most the
+    // fan-in of one stop's footpath list. Nothing in the search changes —
+    // no extra rounds, no label arrays, no new Pareto dimension. The
+    // walk-point table (kora_walk_points.h) keeps its own job of holding
+    // absurdly long walks out of the search.
+    //
+    // Resolution is the transfer table's: footpath durations are whole
+    // minutes, so differences below a minute are invisible here.
+    using rc_result = std::tuple<journey::leg, journey::leg, unsigned>;
+    auto best = std::optional<rc_result>{};
+    auto best_key = std::pair<std::int64_t, std::int64_t>{};
+    auto const consider = [&](std::optional<rc_result>&& cand) {
+      if (!cand.has_value()) {
+        return;
+      }
+      auto const& fp_leg = std::get<0>(*cand);
+      // Legs are stored chronologically regardless of search direction,
+      // so the walk's length is arrival minus departure either way.
+      auto const walk = (fp_leg.arr_time_ - fp_leg.dep_time_).count();
+      // Tie-break on connection safety: with the time at `l` fixed, the
+      // candidate that finishes its walk furthest from it leaves the most
+      // slack for the vehicle being caught. The leg's endpoint at `l` is
+      // its arrival when searching forward, its departure when backward.
+      auto const at_l =
+          unix_to_delta(base, kFwd ? fp_leg.arr_time_ : fp_leg.dep_time_);
+      auto const gap = static_cast<std::int64_t>(curr_time) -
+                       static_cast<std::int64_t>(at_l);
+      auto const slack = gap < 0 ? -gap : gap;
+      auto const key =
+          std::pair{static_cast<std::int64_t>(walk), -slack};
+      if (!best.has_value() || key < best_key) {
+        best_key = key;
+        best = std::move(cand);
+      }
+    };
+
     trace_reconstruct("CHECKING FOOTPATHS OF {}\n", loc{tt, l});
     if (rtt == nullptr || !(kFwd ? rtt->has_td_footpaths_in_
                                  : rtt->has_td_footpaths_out_)[q.prf_idx_]
@@ -812,11 +869,11 @@ void reconstruct_journey_with_vias(timetable const& tt,
       auto const footpaths = kFwd ? tt.locations_.footpaths_in_[q.prf_idx_][l]
                                   : tt.locations_.footpaths_out_[q.prf_idx_][l];
       for (auto const& fp : footpaths) {
-        auto fp_legs = check_fp(k, l, curr_time, fp, true, false,
-                                /*is_transfer_buffer=*/false);
-        if (fp_legs.has_value()) {
-          return std::move(*fp_legs);
-        }
+        consider(check_fp(k, l, curr_time, fp, true, false,
+                          /*is_transfer_buffer=*/false));
+      }
+      if (best.has_value()) {
+        return std::move(*best);
       }
     }
 
@@ -830,16 +887,17 @@ void reconstruct_journey_with_vias(timetable const& tt,
       auto const unix_now = delta_to_unix(base, curr_time);
       auto legs =
           std::optional<std::tuple<journey::leg, journey::leg, unsigned>>{};
+      // Same best-of selection as the static footpaths above: visit every
+      // candidate instead of stopping at the first that reconstructs.
       for_each_footpath<SearchDir>(
           td_footpaths, unix_now, [&](footpath const& fp) {
-            auto fp_legs = check_fp(k, l, curr_time, fp, true, true,
-                                    /*is_transfer_buffer=*/false);
-            if (fp_legs.has_value()) {
-              legs = std::move(*fp_legs);
-              return utl::cflow::kBreak;
-            }
+            consider(check_fp(k, l, curr_time, fp, true, true,
+                              /*is_transfer_buffer=*/false));
             return utl::cflow::kContinue;
           });
+      if (best.has_value()) {
+        legs = std::move(*best);
+      }
       if (legs) {
         return *legs;
       }

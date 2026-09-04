@@ -189,10 +189,9 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
       !q.via_stops_.empty()) {
     return;
   }
+  // The primary's own level — diagnostics only; the level scan below
+  // deliberately does not cap at it (see the comment on the scan).
   auto const k = static_cast<unsigned>(j.transfers_) + 1U;
-  if (k >= round_times.n_rows_) {
-    return;
-  }
   auto const dir = [](int const x) { return kFwd ? x : -x; };
   auto const better = [](delta_t const a, delta_t const b) {
     return kFwd ? a < b : a > b;
@@ -201,11 +200,21 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
 
   // kora fork walk-weighted points (kora_walk_points.h): with weighted
   // walks the round index is a point level, and a path reaching an
-  // egress stop can sit at any level up to the primary's — scan them all
-  // (rows are cheap int16 reads) and keep the best candidate per stop:
-  // earliest anchored endpoint time, level as tiebreak. The candidate's
-  // journey level is the label's level plus the egress walk's own class
-  // delta; reconstruction is anchored at exactly that level.
+  // egress stop can sit at ANY level — scan every row (cheap int16
+  // reads, ≤ kMaxTransfers+2 per stop) and keep the best candidate per
+  // stop: earliest anchored endpoint time, level as tiebreak. The scan
+  // must NOT cap at the primary's own level: walk deltas only raise a
+  // candidate's level AFTER its row is read (cand_level = lvl + kd), so
+  // a capped scan reached high levels via long walks but never via
+  // ridden rows — a low-level ride + long walk was extractable while
+  // the same corridor with one more boarding and less walking, sitting
+  // one row higher, was structurally invisible (canonical: S1 + 15-min
+  // walk extractable from a level-2 primary, S44+S3+bus 28 tying its
+  // arrival with a third of the walking never read from row 3). The ε
+  // gap gate below still bounds which candidates qualify. The
+  // candidate's journey level is the label's level plus the egress
+  // walk's own class delta; reconstruction is anchored at exactly that
+  // level.
   struct kora_cand {
     delta_t time_;
     offset const* o_;
@@ -220,10 +229,7 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
     auto const change = adjusted_transfer_time(
         q.transfer_time_settings_, tt.locations_.transfer_time_[s].count());
     auto best_cand = std::optional<kora_cand>{};
-    for (auto lvl = 1U; lvl <= k; ++lvl) {
-      if (lvl + kd >= round_times.n_rows_) {
-        break;
-      }
+    for (auto lvl = 1U; lvl + kd < round_times.n_rows_; ++lvl) {
       auto const rt = round_times[lvl][to_idx(s)][0];
       if (rt == kInvalidDelta<SearchDir>) {
         continue;
@@ -373,6 +379,20 @@ void kora_collect_endpoint_alternatives(timetable const& tt,
 //    Egghölzli one stop later). Every station it serves, the kept
 //    journey's vehicle serves at least as well. Mirrored to the
 //    boarding side for arrive-by.
+//    "Same corridor" is verified, not assumed: the two journeys' full
+//    stop sets (every parent station ridden through, interior stops
+//    included, minus the query's shared anchor — the origin-side
+//    boarding station for leave-at, the destination-side alighting
+//    station for arrive-by, shared by every journey of the query by
+//    construction) must overlap by ≥ kKoraCorridorCoverage of the
+//    SMALLER set. The min-side denominator keeps the express-vs-local
+//    pair matching in both directions (the express's stops are a
+//    subset of the local's, never the reverse). Without this gate the
+//    rule conflated entirely different routes that merely end near
+//    each other — canonical: Thun→Belp→S3→bus 28 killed by
+//    Thun→Bern→S1→bus 10 reaching Eigerplatz inside the slack, two
+//    routes sharing no stop but their origin, with the strictly worse
+//    sibling (same trains, more walking, later arrival) surviving.
 template <direction SearchDir, typename Journeys>
 void kora_dedupe_alternatives(timetable const& tt,
                               rt_timetable const* rtt,
@@ -401,15 +421,83 @@ void kora_dedupe_alternatives(timetable const& tt,
     return nullptr;
   };
 
+  // Rule 3's corridor test: the query's shared anchor station — every
+  // journey boards there for leave-at (alights there for arrive-by), so
+  // it carries no corridor information and is excluded from the sets.
+  auto const anchor_station = [&](journey const& j) -> location_idx_t {
+    if constexpr (kFwd) {
+      for (auto const& l : j.legs_) {
+        if (std::holds_alternative<journey::run_enter_exit>(l.uses_)) {
+          return kora_parent_of(tt, l.from_);
+        }
+      }
+    } else {
+      for (auto it = j.legs_.rbegin(); it != j.legs_.rend(); ++it) {
+        if (std::holds_alternative<journey::run_enter_exit>(it->uses_)) {
+          return kora_parent_of(tt, it->to_);
+        }
+      }
+    }
+    return location_idx_t::invalid();
+  };
+
+  // Sorted, deduped set of every parent station the journey's transit
+  // legs touch — interior ride-through stops included — minus the
+  // shared query anchor.
+  auto const corridor_stops =
+      [&](journey const& j) -> std::vector<location_idx_t> {
+    auto out = std::vector<location_idx_t>{};
+    auto const anchor = anchor_station(j);
+    for (auto const& leg : j.legs_) {
+      auto const* r = std::get_if<journey::run_enter_exit>(&leg.uses_);
+      if (r == nullptr) {
+        continue;
+      }
+      auto const fr = rt::frun{tt, rtt, r->r_};
+      for (auto i = r->stop_range_.from_; i < r->stop_range_.to_; ++i) {
+        auto const p = kora_parent_of(
+            tt, fr[static_cast<stop_idx_t>(i)].get_location_idx());
+        if (p != anchor) {
+          out.push_back(p);
+        }
+      }
+    }
+    std::sort(begin(out), end(out));
+    out.erase(std::unique(begin(out), end(out)), end(out));
+    return out;
+  };
+
+  // Two journeys ride the same corridor when their stop sets overlap by
+  // at least this share of the SMALLER set (min-side so express-vs-
+  // local matches regardless of which side is the express).
+  constexpr auto const kKoraCorridorCoverage = 0.75;
+  auto const same_corridor = [](std::vector<location_idx_t> const& a,
+                                std::vector<location_idx_t> const& b) {
+    if (a.empty() || b.empty()) {
+      return false;
+    }
+    auto shared = std::size_t{0U};
+    for (auto const& s : a) {
+      if (std::binary_search(begin(b), end(b), s)) {
+        ++shared;
+      }
+    }
+    return static_cast<double>(shared) >=
+           kKoraCorridorCoverage *
+               static_cast<double>(std::min(a.size(), b.size()));
+  };
+
   // Coverage descriptor of a kept journey for rule 3: its endpoint
   // vehicle and the stop index bounding what a rider of that journey
   // could still reach (after boarding for fwd, before alighting for
   // bwd), plus the journey's own door times for the no-earlier-
-  // commitment gate.
+  // commitment gate and its corridor stop set for the same-corridor
+  // gate.
   struct cover {
     rt::run run_;
     stop_idx_t bound_;
     unixtime_t dep_, arr_;
+    std::vector<location_idx_t> stops_;
   };
   auto covers = std::vector<cover>{};
   auto const add_cover = [&](journey const& j) {
@@ -422,7 +510,7 @@ void kora_dedupe_alternatives(timetable const& tt,
         {r.r_,
          kFwd ? r.stop_range_.from_
               : static_cast<stop_idx_t>(r.stop_range_.to_ - 1U),
-         j.departure_time(), j.arrival_time()});
+         j.departure_time(), j.arrival_time(), corridor_stops(j)});
   };
   auto const ride_through_redundant = [&](journey const& a) {
     auto const* l = endpoint_leg(a);
@@ -431,10 +519,14 @@ void kora_dedupe_alternatives(timetable const& tt,
     }
     auto const s = kora_parent_of(tt, kFwd ? l->to_ : l->from_);
     auto const t_a = kFwd ? l->arr_time_ : l->dep_time_;
+    auto const a_stops = corridor_stops(a);
     for (auto const& c : covers) {
       if (kFwd ? c.dep_ + kSlack < a.departure_time()
                : c.arr_ - kSlack > a.arrival_time()) {
         continue;  // would require an earlier commitment than a
+      }
+      if (!same_corridor(a_stops, c.stops_)) {
+        continue;  // different route end to end, not a disguise
       }
       auto const fr = rt::frun{tt, rtt, c.run_};
       if constexpr (kFwd) {

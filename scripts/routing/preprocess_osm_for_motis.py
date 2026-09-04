@@ -45,7 +45,7 @@ from pathlib import Path
 
 import osmium
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 OSM_DIR = ROOT / "data" / "osm"
 
 # `access=` values that block foot in the OSR / Valhalla pedestrian
@@ -78,7 +78,7 @@ def patch(in_path: Path, out_path: Path, overlay: Path | None = None) -> None:
         if not overlay.exists():
             raise SystemExit(
                 f"overlay not found: {overlay} — run "
-                "scripts/build_station_walk_network.py first")
+                "scripts/routing/build_station_walk_network.py first")
         ov_nodes, ov_ways = _read_overlay(overlay)
 
     # Synthetic ids sit far above every live OSM id, so appending each

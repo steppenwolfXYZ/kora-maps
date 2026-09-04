@@ -23,7 +23,7 @@ avoid-stairs toggle; stairs edges are refused outright instead of priced.
 docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
 ```
 
-`scripts/setup_routing.sh` step 2b does this for you and rebuilds whenever
+`scripts/routing/setup_routing.sh` step 2b does this for you and rebuilds whenever
 anything under `valhalla/fork/` is newer than the last build. First build
 ~30–60 min (full upstream compile, cached per `VALHALLA_REF`); a costing-only
 change recompiles one translation unit plus the link (~minutes); a proto
@@ -65,7 +65,7 @@ The tiles were built with 3.8.3; the pin is 3.8.3.
 
 ## Deploy
 
-`scripts/deploy_valhalla.sh` ships the image the way `deploy_motis.sh`
+`scripts/deploy/deploy_valhalla.sh` ships the image the way `deploy_motis.sh`
 does (`docker save | ssh docker load`, no registry): default = image +
 compose from the dev Mac (arm64), `--data-only` = tiles only from the data
 machine (its amd64 image must never reach the arm64 server; the script

@@ -6,10 +6,6 @@ Drops trips that pfaedle should not route:
   • Trips belonging to excluded agencies (long-distance coaches).
     Match is case-insensitive substring on agency_name vs config
     `excluded_agencies`.
-  • Trips whose route_short_name begins with "EV" (Bahnersatz /
-    rail-replacement buses). The MVP map shows general connections,
-    not construction-period substitutes; a future daily-updating
-    variant will reintroduce them.
   • Trips with any stop outside the bbox declared in
     config `osm_bbox`. (Foreign-terminus trips.)
 
@@ -17,6 +13,11 @@ Writes a filtered GTFS folder at `data/gtfs_filtered/`. Files unaffected by
 the filter (calendar, feed_info, transfers, frequencies) are copied verbatim.
 Stop coverage is preserved — we do not prune unreferenced stops because
 pfaedle does not care, and downstream stages still need full stop metadata.
+
+EV-prefixed routes (Bahnersatz / rail replacement) are deliberately KEPT:
+the MOTIS routing feed descends from this folder and must offer replacement
+buses. Their map exclusion lives in step 06 (`load_trips` skips them), so
+they are shaped by pfaedle but never drawn.
 
 Diagnostic side-effect: writes data/transit/gtfs_filtered.json listing the
 dropped trips' route identity and reason, and data/transit/gtfs_trip_splits.json
@@ -282,27 +283,19 @@ def identify_excluded_agencies(excluded_tokens: list) -> set:
 
 def identify_excluded_routes(excluded_agencies: set) -> tuple:
     """
-    Returns (excluded_route_ids, route_to_agency, route_drop_reason).
-    A route is excluded if its agency is in `excluded_agencies` OR its
-    `route_short_name` begins with "EV" (Bahnersatz / rail-replacement).
-    Agency takes precedence in the reason map when both apply.
+    Returns (excluded_route_ids, route_to_agency).
+    A route is excluded if its agency is in `excluded_agencies`.
     """
     excluded = set()
     route_to_agency = {}
-    route_drop_reason: dict = {}
     with open(GTFS_IN / "routes.txt", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             rid = row["route_id"]
             aid = row.get("agency_id", "")
-            short = (row.get("route_short_name") or "").strip().upper()
             route_to_agency[rid] = aid
             if aid in excluded_agencies:
                 excluded.add(rid)
-                route_drop_reason[rid] = "agency"
-            elif short.startswith("EV"):
-                excluded.add(rid)
-                route_drop_reason[rid] = "ev_route"
-    return excluded, route_to_agency, route_drop_reason
+    return excluded, route_to_agency
 
 
 def load_trips_index(excluded_route_ids: set) -> tuple:
@@ -794,13 +787,9 @@ def main() -> None:
     print(f"  {len(excluded_agencies):,} agencies matched")
 
     print(f"Identifying excluded routes…")
-    excluded_route_ids, route_to_agency, route_drop_reason = \
+    excluded_route_ids, route_to_agency = \
         identify_excluded_routes(excluded_agencies)
-    n_agency = sum(1 for r in route_drop_reason.values() if r == "agency")
-    n_ev = sum(1 for r in route_drop_reason.values() if r == "ev_route")
-    print(f"  {len(excluded_route_ids):,} routes excluded "
-          f"({n_agency:,} via excluded agencies, "
-          f"{n_ev:,} via EV route_short_name)")
+    print(f"  {len(excluded_route_ids):,} routes excluded via excluded agencies")
 
     print(f"Indexing trips…")
     trip_to_route, trips_excluded_by_route = load_trips_index(excluded_route_ids)
@@ -885,14 +874,10 @@ def main() -> None:
 
     # Diagnostic: summarize dropped trips by route+reason.
     diag: dict = defaultdict(
-        lambda: {"by_agency": 0, "by_ev_route": 0, "foreign_terminus": 0})
+        lambda: {"by_agency": 0, "foreign_terminus": 0})
     for tid in trips_excluded_by_route:
         rid = trip_to_route.get(tid, "?")
-        reason = route_drop_reason.get(rid, "agency")
-        if reason == "ev_route":
-            diag[rid]["by_ev_route"] += 1
-        else:
-            diag[rid]["by_agency"] += 1
+        diag[rid]["by_agency"] += 1
     for tid in foreign_terminus:
         rid = trip_to_route.get(tid, "?")
         diag[rid]["foreign_terminus"] += 1

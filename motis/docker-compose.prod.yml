@@ -1,13 +1,13 @@
 # Production MOTIS server (Hetzner CAX11, /var/www/koramaps.app/motis/).
 # Serve-only: the GTFS/OSM import runs on the local Mac (see
-# docker-compose.yml + scripts/preprocess_gtfs_for_motis.py), the server
-# receives just the prebuilt indexes in ./data via scripts/deploy_motis.sh.
+# docker-compose.yml + scripts/routing/preprocess_gtfs_for_motis.py), the server
+# receives just the prebuilt indexes in ./data via scripts/deploy/deploy_motis.sh.
 # Verified locally: /motis server starts and serves with only config.yml +
 # data/ mounted — the import-only paths in config.yml are ignored at
 # serve time, so no trimmed config.prod.yml is needed.
 #
 # Runs the Kora fork of MOTIS. The image tag must match what
-# scripts/deploy_motis.sh pushes — build locally with:
+# scripts/deploy/deploy_motis.sh pushes — build locally with:
 #   docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
 #   docker save koramaps/motis:footpath-matrix | ssh koramaps 'docker load'
 # (see .claude/rules/deployment.md § MOTIS deploy).
