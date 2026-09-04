@@ -16,6 +16,7 @@ import type { DirectRoute } from './types';
 const DIRECT_SOURCE = 'direct-route';
 const DIRECT_CASING_LAYER = 'direct-route-casing';
 const DIRECT_LINE_LAYER = 'direct-route-line';
+const DIRECT_DOTS_SOURCE = 'direct-route-dots';
 const DIRECT_PUSHED_LAYER = 'direct-route-pushed';
 
 // Mode colors. Walk keeps the neutral dashed language every walking leg
@@ -85,6 +86,94 @@ function buildData(routes: DirectRoute[], selected: number): GeoJSON.FeatureColl
 	};
 }
 
+/** Selected-route line width at a zoom — piecewise-linear over
+ * LINE_WIDTH_STOPS, clamped at the ends. */
+function lineWidthAt(zoom: number): number {
+	const stops = LINE_WIDTH_STOPS;
+	if (zoom <= stops[0][0]) return stops[0][1];
+	for (let i = 1; i < stops.length; i++) {
+		if (zoom <= stops[i][0]) {
+			const [z0, w0] = stops[i - 1];
+			const [z1, w1] = stops[i];
+			return w0 + ((zoom - z0) / (z1 - z0)) * (w1 - w0);
+		}
+	}
+	return stops[stops.length - 1][1];
+}
+
+/** Metres per screen pixel at this zoom / latitude (512-px world tiles). */
+function metersPerPixel(zoom: number, lat: number): number {
+	return (40075016.686 * Math.cos((lat * Math.PI) / 180)) / (512 * Math.pow(2, zoom));
+}
+
+const EARTH_M_PER_DEG = 111320;
+
+/** Points every `spacingM` metres along a coordinate slice, first dot half
+ * a spacing in; a slice shorter than one spacing gets a single dot at its
+ * midpoint so short pushes stay visible. Equirectangular metres — fine at
+ * city scale. */
+function dotsAlong(coords: [number, number][], spacingM: number): [number, number][] {
+	const segLen: number[] = [];
+	let total = 0;
+	for (let i = 1; i < coords.length; i++) {
+		const midLat = ((coords[i - 1][1] + coords[i][1]) / 2) * (Math.PI / 180);
+		const dx = (coords[i][0] - coords[i - 1][0]) * EARTH_M_PER_DEG * Math.cos(midLat);
+		const dy = (coords[i][1] - coords[i - 1][1]) * EARTH_M_PER_DEG;
+		const d = Math.hypot(dx, dy);
+		segLen.push(d);
+		total += d;
+	}
+	const targets: number[] = [];
+	if (total < spacingM) targets.push(total / 2);
+	else for (let t = spacingM / 2; t <= total; t += spacingM) targets.push(t);
+	const out: [number, number][] = [];
+	let acc = 0;
+	let seg = 0;
+	for (const t of targets) {
+		while (seg < segLen.length - 1 && acc + segLen[seg] < t) acc += segLen[seg++];
+		const f = segLen[seg] > 0 ? Math.min(1, (t - acc) / segLen[seg]) : 0;
+		const a = coords[seg];
+		const b = coords[seg + 1];
+		out.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+	}
+	return out;
+}
+
+/** Rebuild the pushed-dot positions for the current zoom: dot centres sit
+ * 2 line-widths apart on screen (gap = one dot diameter), converted to
+ * metres at this zoom and regenerated on zoomend — MapLibre's own dash /
+ * symbol spacing can't hold that invariant across zooms. */
+function buildDotData(map: maplibregl.Map, routes: DirectRoute[], selected: number): GeoJSON.FeatureCollection {
+	const zoom = map.getZoom();
+	const features: GeoJSON.Feature[] = [];
+	for (let idx = 0; idx < routes.length; idx++) {
+		const route = routes[idx];
+		if (route.pushedRanges.length === 0) continue;
+		const lat = (route.bbox[1] + route.bbox[3]) / 2;
+		const spacingM = 2 * lineWidthAt(zoom) * metersPerPixel(zoom, lat);
+		for (const [start, end] of route.pushedRanges) {
+			for (const pt of dotsAlong(route.coords.slice(start, end + 1), spacingM)) {
+				features.push({
+					type: 'Feature',
+					geometry: { type: 'Point', coordinates: pt },
+					properties: { idx, sel: idx === selected ? 1 : 0 }
+				});
+			}
+		}
+	}
+	// Selected route's dots last — painted on top of muted alternates.
+	features.sort((a, b) => (a.properties!.sel as number) - (b.properties!.sel as number));
+	return { type: 'FeatureCollection', features };
+}
+
+let selectedIdx = 0;
+let zoomHandler: (() => void) | null = null;
+
+function refreshDots(map: maplibregl.Map) {
+	const src = map.getSource(DIRECT_DOTS_SOURCE) as maplibregl.GeoJSONSource | undefined;
+	if (src && lastRoutes) src.setData(buildDotData(map, lastRoutes, selectedIdx));
+}
+
 function removeLayers(map: maplibregl.Map) {
 	for (const id of [DIRECT_CASING_LAYER, DIRECT_LINE_LAYER, DIRECT_PUSHED_LAYER]) {
 		if (map.getLayer(id)) map.removeLayer(id);
@@ -106,7 +195,6 @@ function onLineLeave(e: maplibregl.MapLayerMouseEvent) {
 // always match the line they continue. [zoom, selected, muted].
 const LINE_WIDTH_STOPS: [number, number, number][] = [[6, 5, 3.5], [12, 8, 6], [16, 13, 10]];
 const CASING_WIDTH_STOPS: [number, number, number][] = [[6, 7, 5], [12, 12, 9], [16, 18, 14]];
-const DOT_GLYPH_EM = 0.66;
 
 const selCase = (selValue: unknown, altValue: unknown) =>
 	['case', ['==', ['get', 'sel'], 1], selValue, altValue] as unknown;
@@ -157,54 +245,32 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 		}
 	});
 	// Pushed-bike sections: true round dots (bicycle-costing-fork.md
-	// § pushed-bike). Dash-based dots render as ovals (the dash SDF
-	// stretches along the line), so the dots are ● glyphs placed along
-	// the line — the same Noto Sans U+25CF route the map's color-dot
-	// indicator layer takes, since this style has no sprite. Overlap
-	// and placement checks are disabled so dots never thin out against
-	// other symbols. Walk routes never carry pushed features, so the
-	// layer only draws in bike mode.
+	// § pushed-bike) as a circle layer over generated point features.
+	// MapLibre's native options can't hold "diameter = line width, gap =
+	// one diameter" across zooms — dash patterns stretch into ovals and
+	// symbol spacing quantises at tile-zoom time — so the dot positions
+	// are computed in code (buildDotData) and regenerated on zoomend.
+	// Radius and stroke come from the shared width tables, so the dots
+	// always match the line they continue; the white stroke is the same
+	// border the ridden line gets from its casing.
 	map.addLayer({
 		id: DIRECT_PUSHED_LAYER,
-		type: 'symbol',
-		source: DIRECT_SOURCE,
-		filter: ['==', ['get', 'pushed'], 1],
-		layout: {
-			'symbol-placement': 'line',
-			// Dot diameter = line width; gap = one diameter, so dot
-			// centers sit 2 widths apart. Spacing is a layer-wide layout
-			// property (not data-driven), so it follows the SELECTED
-			// width — muted alternates share the spacing with smaller
-			// dots. DOT_GLYPH_EM converts width to text-size: the ●
-			// glyph's drawn circle fills ~0.66 em of Noto Sans (measured
-			// visually — tweak this one constant if dots drift off the
-			// line width).
-			'symbol-spacing': [
-				'interpolate', ['linear'], ['zoom'],
-				...LINE_WIDTH_STOPS.flatMap(([z, sel]) => [z, sel * 2])
-			] as any,
-			'text-field': '\u25CF',
-			'text-font': ['Noto Sans Regular'],
-			'text-size': selWidth(
-				LINE_WIDTH_STOPS.map(([z, sel, alt]) => [z, sel / DOT_GLYPH_EM, alt / DOT_GLYPH_EM])
-			),
-			'text-allow-overlap': true,
-			'text-ignore-placement': true,
-			'text-keep-upright': false,
-			'text-padding': 0
-		},
+		type: 'circle',
+		source: DIRECT_DOTS_SOURCE,
 		paint: {
-			'text-color': selCase(color, muted) as any,
-			// The same white border the ridden line gets from its casing:
-			// halo width = (casing − line) / 2, per zoom and selection.
-			'text-halo-color': CASING_COLOR,
-			'text-halo-width': selWidth(
+			'circle-color': selCase(color, muted) as any,
+			'circle-radius': selWidth(
+				LINE_WIDTH_STOPS.map(([z, sel, alt]) => [z, sel / 2, alt / 2])
+			),
+			'circle-stroke-color': CASING_COLOR,
+			'circle-stroke-width': selWidth(
 				CASING_WIDTH_STOPS.map(([z, cs, ca], i) => [
 					z,
 					(cs - LINE_WIDTH_STOPS[i][1]) / 2,
 					(ca - LINE_WIDTH_STOPS[i][2]) / 2
 				])
-			)
+			),
+			'circle-pitch-alignment': 'map'
 		}
 	});
 	if (!handlersInstalled) {
@@ -238,12 +304,26 @@ export function enterDirectRouteOverlay(
 
 	applyBasemapFocus(map, 'direct');
 
-	const data = buildData(routes, Math.min(selected, routes.length - 1));
+	selectedIdx = Math.min(selected, routes.length - 1);
+	const data = buildData(routes, selectedIdx);
 	const src = map.getSource(DIRECT_SOURCE) as maplibregl.GeoJSONSource | undefined;
 	if (!src) {
 		map.addSource(DIRECT_SOURCE, { type: 'geojson', data });
 	} else {
 		src.setData(data);
+	}
+	const dotData = buildDotData(map, routes, selectedIdx);
+	const dotSrc = map.getSource(DIRECT_DOTS_SOURCE) as maplibregl.GeoJSONSource | undefined;
+	if (!dotSrc) {
+		map.addSource(DIRECT_DOTS_SOURCE, { type: 'geojson', data: dotData });
+	} else {
+		dotSrc.setData(dotData);
+	}
+	// Dot spacing is zoom-dependent (screen-space invariant), so the
+	// positions regenerate whenever a zoom settles.
+	if (!zoomHandler) {
+		zoomHandler = () => refreshDots(map);
+		map.on('zoomend', zoomHandler);
 	}
 	if (installedMode !== mode) {
 		removeLayers(map);
@@ -295,7 +375,12 @@ export function exitDirectRouteOverlay(map: maplibregl.Map) {
 		}
 		handlersInstalled = false;
 	}
+	if (zoomHandler) {
+		map.off('zoomend', zoomHandler);
+		zoomHandler = null;
+	}
 	if (map.getSource(DIRECT_SOURCE)) map.removeSource(DIRECT_SOURCE);
+	if (map.getSource(DIRECT_DOTS_SOURCE)) map.removeSource(DIRECT_DOTS_SOURCE);
 	installedMode = null;
 	lastRoutes = null;
 	restoreBasemapFocus(map, 'direct');
