@@ -60,6 +60,7 @@ def request(url: str, pair: dict, options: dict, alternates: int) -> dict:
 
 
 def street_chain(trip: dict) -> list[str]:
+    """First street name per maneuver — the printed chain."""
     names: list[str] = []
     for leg in trip.get("legs", []):
         for m in leg.get("maneuvers", []):
@@ -67,6 +68,17 @@ def street_chain(trip: dict) -> list[str]:
             if sn and (not names or names[-1] != sn[0]):
                 names.append(sn[0])
     return names
+
+
+def all_street_names(trip: dict) -> list[str]:
+    """Every street name on the route — what must_include / must_exclude
+    match against (a corridor street can sit second in a maneuver's
+    name list and never lead one)."""
+    names: set[str] = set()
+    for leg in trip.get("legs", []):
+        for m in leg.get("maneuvers", []):
+            names.update(m.get("street_names") or [])
+    return sorted(names)
 
 
 def summarize(trip: dict) -> str:
@@ -121,7 +133,7 @@ def main() -> int:
         for i, trip in enumerate(trips):
             tag = "primary " if i == 0 else f"alt {i}    "
             print(f"   {tag}{summarize(trip)}")
-        problems = judge(street_chain(trips[0]), pair)
+        problems = judge(all_street_names(trips[0]), pair)
         if problems:
             failures += 1
             print(f"   FAIL  {'; '.join(problems)}")

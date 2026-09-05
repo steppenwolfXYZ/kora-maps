@@ -112,10 +112,12 @@ const MANEUVER_STEPS_ENTER = 40;
 
 function costingOptions(args: DirectRouteArgs): Record<string, unknown> {
 	if (args.mode === 'bike') {
-		// Strong hill avoidance by default (concept § Bicycle costing
-		// behavior): use_hills 0.1 leans hard toward flat routes until the
-		// user-facing hilliness preference ships. Hybrid bike ≈ everyday
-		// utility cycling (18 km/h base).
+		// Hills price themselves through the fork's everyday grade→speed
+		// curve (bicycle-costing-fork.md § Hills); use_hills only scales
+		// the steep-discomfort penalty for pushing-territory grades, and
+		// 0.1 keeps that near full strength until the hilliness
+		// preference ships. Hybrid bike ≈ everyday utility cycling
+		// (18 km/h base).
 		return { bicycle: { bicycle_type: 'hybrid', use_hills: 0.1 } };
 	}
 	const pedestrian: Record<string, unknown> = {};
@@ -144,7 +146,8 @@ function climbTotals(profile: number[]): { up: number; down: number } {
 	return { up, down };
 }
 
-function tripToRoute(trip: ValhallaTrip, mode: 'bike' | 'walk'): DirectRoute | null {
+function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | null {
+	const mode = args.mode;
 	const legs = trip.legs ?? [];
 	if (legs.length === 0) return null;
 	// Two break locations → one leg; concat defensively anyway.
@@ -206,7 +209,9 @@ function tripToRoute(trip: ValhallaTrip, mode: 'bike' | 'walk'): DirectRoute | n
 		profile: hasProfile ? elevation : null,
 		profileIntervalM: intervalM,
 		stairsM: Math.round(stairsM),
-		pushedRanges
+		pushedRanges,
+		requestedFrom: args.from,
+		requestedTo: args.to
 	};
 }
 
@@ -250,6 +255,6 @@ export async function fetchDirectRoutes(
 	if (json.trip) trips.push(json.trip);
 	for (const a of json.alternates ?? []) if (a?.trip) trips.push(a.trip);
 	return trips
-		.map((t) => tripToRoute(t, args.mode))
+		.map((t) => tripToRoute(t, args))
 		.filter((r): r is DirectRoute => r !== null);
 }

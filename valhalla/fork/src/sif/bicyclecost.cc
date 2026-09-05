@@ -72,19 +72,24 @@ namespace kora {
 // The plateau principle: every "fine" surface sits within a few percent of
 // 1.0 so none of them can buy a detour against another; only the tier
 // boundaries move a route.
-constexpr float kGreatFactor = 0.90f;        // separated lanes, dedicated cycleways
-constexpr float kFineFactor = 1.00f;         // painted lanes, quiet streets, living streets
-constexpr float kSharedPathFactor = 1.10f;   // paths shared with pedestrians (still fine)
-constexpr float kTertiaryBareFactor = 1.50f; // tertiary through road, no infrastructure
-constexpr float kBadFactor = 2.00f;          // primary / secondary / trunk without
-                                             // infrastructure; any multi-lane road
-// Extra on top of kBadFactor when the bad road is also fast (posted or
-// assumed speed above the threshold — rural main roads).
-constexpr uint32_t kFastRoadKph = 50;
-constexpr float kFastRoadExtra = 0.50f;
+constexpr float kGreatFactor = 0.90f;      // separated lanes, dedicated cycleways
+constexpr float kFineFactor = 1.00f;       // painted lanes, quiet streets, living streets
+constexpr float kSharedPathFactor = 1.10f; // paths shared with pedestrians (still fine)
+// A through road WITHOUT bike infrastructure is priced by its speed, not
+// its road class: Swiss city roads are never extremely dangerous for
+// bikes. 30 km/h zones carry no penalty at all whatever the class, 50 is
+// a slim penalty, 60 noticeably more, 80 the full bad-road factor.
+// Piecewise linear between the points; the edge speed is Valhalla's
+// posted/assumed speed for the road.
+constexpr float kBareSpeedPoints[][2] = {
+    {30.0f, 1.00f},
+    {50.0f, 1.30f},
+    {60.0f, 1.60f},
+    {80.0f, 2.20f},
+};
 // A road tagged bicycle=use_sidepath has a parallel cycleway; riding the
-// carriageway anyway is treated like a bad road.
-constexpr float kUseSidepathFactor = kBadFactor;
+// carriageway anyway is priced like a fast bare road regardless of speed.
+constexpr float kUseSidepathFactor = 2.20f;
 // Road classes at or above this one carry through traffic. Everything
 // below (unclassified, residential, service) is a quiet street by default.
 constexpr baldr::RoadClass kThroughClassLimit = baldr::RoadClass::kTertiary;
@@ -96,12 +101,70 @@ constexpr baldr::RoadClass kThroughClassLimit = baldr::RoadClass::kTertiary;
 constexpr float kBikeNetworkFactor = 0.92f;
 
 // ── Hills ───────────────────────────────────────────────────────────────
-// Upstream's avoid-hills table (kAvoidHillsStrength below) scaled by the
-// request's (1 - use_hills) is ADDED to the tier factor, so a flat bad road
-// against a hilly fine road stays a trade-off: at ~5 % the fine road still
-// wins, at ~8 % the flat bad one does. kHillStrength rescales the whole
-// table (1.0 = upstream's values).
+// The PRIMARY hill mechanism is honest time: kEverydaySpeedFactor below
+// replaces upstream's grade→speed curve, which models an athletic rider
+// holding speed by pushing harder (10 % before speed halves). An everyday
+// utility rider at constant comfortable power halves around 3 % and is
+// near walking pace at 10 %; downhill is capped by city braking, not
+// physics. With time priced honestly, altitude avoids itself — the
+// discomfort penalty (kSteepDiscomfort) only kicks in where most
+// cyclists would start pushing. An e-bike mode will later select a much
+// flatter curve via bicycle_type; this one is the muscle-bike profile.
+// Grade buckets (index 0-15, upstream's):
+//   -10, -8, -6.5, -5, -3, -1.5, 0, 1.5, 3, 5, 6.5, 8, 10, 11.5, 13, 15 %
+constexpr float kEverydaySpeedFactor[] = {
+    1.70f, // -10%  braking-capped, ~30 km/h
+    1.70f, // -8%
+    1.65f, // -6.5%
+    1.60f, // -5%
+    1.40f, // -3%
+    1.20f, // -1.5%
+    1.00f, // 0%    18 km/h base (hybrid)
+    0.80f, // 1.5%
+    0.55f, // 3%    ~10 km/h — the realistic halving point
+    0.40f, // 5%    ~7 km/h
+    0.33f, // 6.5%
+    0.28f, // 8%    ~5 km/h
+    0.22f, // 10%   ~4 km/h — pushing territory
+    0.19f, // 11.5%
+    0.17f, // 13%
+    0.15f  // 15%
+};
+// Extra discomfort ONLY in pushing territory (≥ ~10 % up) and on
+// treacherous descents — everything below that is priced by time alone.
+// Scaled by (1 - use_hills) like upstream's table; kHillStrength rescales
+// the whole thing.
+constexpr float kSteepDiscomfort[] = {
+    0.30f, // -10%  fast descent needs constant braking
+    0.15f, // -8%
+    0.0f,  // -6.5%
+    0.0f,  // -5%
+    0.0f,  // -3%
+    0.0f,  // -1.5%
+    0.0f,  // 0%
+    0.0f,  // 1.5%
+    0.0f,  // 3%
+    0.0f,  // 5%
+    0.0f,  // 6.5%
+    0.0f,  // 8%
+    0.40f, // 10%   most everyday riders push from here
+    0.80f, // 11.5%
+    1.50f, // 13%
+    2.20f  // 15%
+};
 constexpr float kHillStrength = 1.0f;
+// ── Grade cap on through roads (elevation-artifact fallback) ────────────
+// The DEM samples the structures a road passes UNDER (rail overpasses,
+// bridges), baking fake 10-15 % spikes into underpasses — the canonical
+// case is Schwarzenburgstrasse under the rail line at Weissenstein, where
+// a level ride reads as a mountain. Engineered through roads are never
+// genuinely that steep in a city, so their grade index is capped at
+// 6.5 %; small streets keep their full grades (steep lanes are real).
+// This is the interim guard — the correct fix (endpoint-interpolated
+// elevation for layer<0 ways at graph build) is queued and needs a tile
+// rebuild. Known cost: sustained alpine climbs on primary roads read a
+// touch too fast until then.
+constexpr uint32_t kThroughGradeCapIndex = 10; // bucket 10 = 6.5 %
 
 // ── Stairs ──────────────────────────────────────────────────────────────
 // Time: pushing / carrying speeds. Cost: those seconds times a factor that
@@ -125,11 +188,16 @@ constexpr float kPushFactor = 1.5f;
 
 // ── Crossings (cost seconds added at the transition) ────────────────────
 // Applied when BOTH the road being left and the road being entered are
-// through-traffic class. Right turns (with-traffic side) are exempt.
+// through-traffic class. Right turns (with-traffic side) are exempt, and
+// so are roundabouts — a Kreisel is the safe way across a big road, not
+// a crossing to avoid (keyed on the entered edge's roundabout flag; the
+// exit is a right turn and exempt anyway).
 constexpr float kCrossingTurnPenalty = 45.0f;           // left / sharp left / reverse
 constexpr float kCrossingStraightSignalPenalty = 30.0f; // straight on, across a signal
-// Entering a bad-tier road from a quiet one: a small nudge on top of the
-// tier factor, which does the real work.
+// Entering a genuinely fast bare road (≥ this speed, no bike
+// infrastructure) from a quiet street: a small nudge on top of the
+// speed factor, which does the real work.
+constexpr uint32_t kEnterBadSpeedKph = 60;
 constexpr float kEnterBadPenalty = 15.0f;
 
 } // namespace kora
@@ -216,55 +284,9 @@ constexpr Surface kWorstAllowedSurface[] = {Surface::kCompacted, // Road bicycle
 
 constexpr float kSurfaceFactors[] = {1.0f, 2.5f, 4.5f, 7.0f};
 
-// Speed adjustment factors based on weighted grade. Comments here show an
-// example of speed changes based on "grade", using a base speed of 18 MPH
-// on flat roads
-constexpr float kGradeBasedSpeedFactor[] = {
-    2.2f,  // -10%  - 39.6
-    2.0f,  // -8%   - 36
-    1.9f,  // -6.5% - 34.2
-    1.7f,  // -5%   - 30.6
-    1.4f,  // -3%   - 25
-    1.2f,  // -1.5% - 21.6
-    1.0f,  // 0%    - 18
-    0.95f, // 1.5%  - 17
-    0.85f, // 3%    - 15
-    0.75f, // 5%    - 13.5
-    0.65f, // 6.5%  - 12
-    0.55f, // 8%    - 10
-    0.5f,  // 10%   - 9
-    0.45f, // 11.5% - 8
-    0.4f,  // 13%   - 7
-    0.3f   // 15%   - 5.5
-};
-
 // User propensity to use "hilly" roads. Ranges from a value of 0 (avoid
 // hills) to 1 (take hills when they offer a more direct, less time, path).
 constexpr float kDefaultUseHills = 0.25f;
-
-// Avoid hills "strength". How much do we want to avoid a hill. Combines
-// with the usehills factor (1.0 - usehills = avoidhills factor) to create
-// a weighting penalty per weighted grade factor. This indicates how strongly
-// edges with the specified grade are weighted. Note that speed also is
-// influenced by grade, so these weights help further avoid hills.
-constexpr float kAvoidHillsStrength[] = {
-    2.0f,  // -10%  - Treacherous descent possible
-    1.0f,  // -8%   - Steep downhill
-    0.5f,  // -6.5% - Good downhill - where is the bottom?
-    0.2f,  // -5%   - Picking up speed!
-    0.1f,  // -3%   - Modest downhill
-    0.0f,  // -1.5% - Smooth slight downhill, ride this all day!
-    0.05f, // 0%    - Flat, no avoidance
-    0.1f,  // 1.5%  - These are called "false flat"
-    0.3f,  // 3%    - Slight rise
-    0.8f,  // 5%    - Small hill
-    2.0f,  // 6.5%  - Starting to feel this...
-    3.0f,  // 8%    - Moderately steep
-    4.5f,  // 10%   - Getting tough
-    6.5f,  // 11.5% - Tiring!
-    10.0f, // 13%   - Ooof - this hurts
-    12.0f  // 15%   - Only for the strongest!
-};
 
 // Valid ranges and defaults
 constexpr ranged_default_t<float> kUseRoadRange{0.0f, kDefaultUseRoad, 1.0f};
@@ -297,7 +319,7 @@ const BaseCostingOptionsConfig kBaseCostOptsConfig = GetBaseCostOptsConfig();
 
 // ── kora fork: tier classification ──────────────────────────────────────
 
-enum class Tier : uint8_t { kGreat, kFine, kSharedPath, kTertiaryBare, kBad };
+enum class Tier : uint8_t { kGreat, kFine, kSharedPath, kBad };
 
 // Pedestrian-first uses that a bicycle may nevertheless be allowed on.
 inline bool is_path_like(Use use) {
@@ -341,19 +363,44 @@ inline Tier classify(const DirectedEdge* edge) {
   if (lane == CycleLane::kSeparated) {
     return Tier::kGreat;
   }
-  // Multi-lane in the direction of travel without physical separation is
-  // bad whatever the paint says.
-  if (edge->lanecount() > 1) {
-    return Tier::kBad;
-  }
-  const baldr::RoadClass rc = edge->classification();
-  if (!is_through(rc, use)) {
+  // NO lane-count rule: a lanes=3 tag is usually a bus lane in a 30/50
+  // zone, and riding beside a bus lane is safer, not more dangerous.
+  // Speed prices bare roads (tier_factor); paint puts them on the plateau.
+  if (!is_through(edge->classification(), use)) {
     return Tier::kFine; // residential, unclassified, service: the quiet streets
   }
   if (lane == CycleLane::kDedicated || lane == CycleLane::kShared) {
     return Tier::kFine; // painted lane on a through road: on the plateau, not above it
   }
-  return rc == baldr::RoadClass::kTertiary ? Tier::kTertiaryBare : Tier::kBad;
+  return Tier::kBad; // bare through road — priced by speed in tier_factor
+}
+
+// The speed curve for through roads without bike infrastructure.
+inline float bare_speed_factor(uint32_t speed_kph) {
+  const auto& pts = kora::kBareSpeedPoints;
+  constexpr size_t n = sizeof(kora::kBareSpeedPoints) / sizeof(kora::kBareSpeedPoints[0]);
+  const float s = static_cast<float>(speed_kph);
+  if (s <= pts[0][0]) {
+    return pts[0][1];
+  }
+  for (size_t i = 1; i < n; ++i) {
+    if (s <= pts[i][0]) {
+      const float f = (s - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]);
+      return pts[i - 1][1] + f * (pts[i][1] - pts[i - 1][1]);
+    }
+  }
+  return pts[n - 1][1];
+}
+
+// kora fork: the grade bucket the costing responds to — through roads are
+// capped (see kThroughGradeCapIndex) because their extreme grades are
+// DEM artifacts from structures passing overhead, not real climbs.
+inline uint32_t effective_grade(const DirectedEdge* edge) {
+  const uint32_t wg = edge->weighted_grade();
+  if (wg > kora::kThroughGradeCapIndex && is_through(edge->classification(), edge->use())) {
+    return kora::kThroughGradeCapIndex;
+  }
+  return wg;
 }
 
 inline float tier_factor(Tier tier, const DirectedEdge* edge) {
@@ -364,16 +411,9 @@ inline float tier_factor(Tier tier, const DirectedEdge* edge) {
       return kora::kFineFactor;
     case Tier::kSharedPath:
       return kora::kSharedPathFactor;
-    case Tier::kTertiaryBare:
-      return kora::kTertiaryBareFactor;
     case Tier::kBad:
-    default: {
-      float f = edge->use_sidepath() ? kora::kUseSidepathFactor : kora::kBadFactor;
-      if (edge->speed() > kora::kFastRoadKph) {
-        f += kora::kFastRoadExtra;
-      }
-      return f;
-    }
+    default:
+      return edge->use_sidepath() ? kora::kUseSidepathFactor : bare_speed_factor(edge->speed());
   }
 }
 
@@ -400,6 +440,11 @@ inline float crossing_penalty(baldr::RoadClass from_rc,
                               const NodeInfo* node,
                               Turn::Type turn) {
   float penalty = 0.0f;
+  // Roundabouts are the safe way across a big road — never a crossing to
+  // penalize (entering / circulating; the exit is an exempt right turn).
+  if (to->roundabout()) {
+    return penalty;
+  }
   const bool right = node->drive_on_right();
   const bool from_through = is_through(from_rc, from_use);
   const bool to_through = is_through(to->classification(), to->use());
@@ -412,7 +457,8 @@ inline float crossing_penalty(baldr::RoadClass from_rc,
       penalty += kora::kCrossingTurnPenalty;
     }
   }
-  if (!from_through && classify(to) == Tier::kBad) {
+  if (!from_through && classify(to) == Tier::kBad && !to->use_sidepath() &&
+      to->speed() >= kora::kEnterBadSpeedKph) {
     penalty += kora::kEnterBadPenalty;
   }
   return penalty;
@@ -691,11 +737,13 @@ BicycleCost::BicycleCost(const Costing& costing)
   exclude_steps_ = costing_options.exclude_steps();
 
   // Populate the grade penalties (based on use_hills factor - value between 0 and 1)
-  // kora fork: scaled once more by kHillStrength.
+  // kora fork: the steep-discomfort table (pushing territory only) scaled
+  // by kHillStrength — honest time from the everyday speed curve is the
+  // primary hill mechanism.
   float use_hills = costing_options.use_hills();
   float avoid_hills = (1.0f - use_hills);
   for (uint32_t i = 0; i <= kMaxGradeFactor; i++) {
-    grade_penalty[i] = kora::kHillStrength * avoid_hills * kAvoidHillsStrength[i];
+    grade_penalty[i] = kora::kHillStrength * avoid_hills * kora::kSteepDiscomfort[i];
   }
 
   use_hierarchy_limits = false;
@@ -827,11 +875,12 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
   }
 
   // kora fork: tier factor + official-route bonus + hills + surface.
+  const uint32_t grade = effective_grade(edge);
   float factor = tier_factor(classify(edge), edge);
   if (edge->bike_network()) {
     factor *= kora::kBikeNetworkFactor;
   }
-  factor += grade_penalty[edge->weighted_grade()];
+  factor += grade_penalty[grade];
 
   // If surface is worse than the minimum we add a surface factor
   if (edge->surface() >= minimal_surface_penalized_) {
@@ -842,12 +891,13 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   // Compute bicycle speed based on surface factor and grade (dismount
   // edges returned above via the pushed branch — kora fork). Lower bike
-  // speed for rougher surfaces (amount depends on the bicycle type).
-  // Weighted grade (relative measure of elevation change along the edge)
-  // modulates speed based on elevation changes.
+  // speed for rougher surfaces (amount depends on the bicycle type). The
+  // everyday grade→speed curve is the primary hill mechanism; the grade
+  // is the capped one so DEM spikes on through roads distort neither
+  // cost nor the displayed time.
   uint32_t bike_speed = static_cast<uint32_t>(
       (speed_ * surface_speed_factor_[static_cast<uint32_t>(edge->surface())] *
-       kGradeBasedSpeedFactor[edge->weighted_grade()]) +
+       kora::kEverydaySpeedFactor[grade]) +
       0.5f);
 
   factor *= EdgeFactor(edgeid);

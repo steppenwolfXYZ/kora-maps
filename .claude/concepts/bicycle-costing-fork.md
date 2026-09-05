@@ -95,18 +95,24 @@ Edges are weighted by a three-tier quality model:
   no-through-traffic streets. All approximately equal cost; none may
   meaningfully outweigh another. Among fine options, shorter/faster
   wins.
-- **bad** — through-traffic roads without bike infrastructure,
-  multi-lane roads. Significant penalty, but calibrated for
-  Switzerland — strong enough to avoid when an alternative exists,
-  not so strong that absurd detours win.
+- **bad** — through-traffic roads without bike infrastructure, priced
+  by their speed limit rather than their road class: Swiss city roads
+  are never extremely dangerous for bikes. 30 km/h zones carry no
+  penalty at all whatever the class; 50 km/h a slim penalty; 60 km/h
+  noticeably more; 80 km/h the full bad-road factor — strong enough to
+  avoid when an alternative exists, not so strong that absurd detours
+  win. Lane count is deliberately NOT a signal: an extra mapped lane is
+  usually a bus lane, and riding beside a bus lane is safer, not more
+  dangerous.
 
 Additional signals:
 
 - **Crossing penalty:** a transition where both roads are
-  through-traffic class costs extra; right turns are exempt. For
-  straight-ahead passage along a through road, a traffic signal at
-  the node may serve as the proxy for "a real crossing of two big
-  roads".
+  through-traffic class costs extra; right turns are exempt, and so
+  are roundabouts — a Kreisel is the safe way across a big road, not a
+  crossing to avoid. For straight-ahead passage along a through road,
+  a traffic signal at the node may serve as the proxy for "a real
+  crossing of two big roads".
 - **Official bicycle routes** (OSM cycle-route relations) are
   slightly favored: membership gives an edge a small bonus in the
   same spirit as the *great* tier — enough to tip the balance between
@@ -122,10 +128,30 @@ Additional signals:
   engine's stock default priced them like a ~3 km detour, which chased
   routes out of entire quiet quarters — the Bern benchmark's Mühlematt
   quarter is the canonical case.)
-- **Hills:** the strong hill-avoidance default from the main concept
-  is preserved and must compose with the tier model (a flat bad road
-  vs. a hilly fine road remains a meaningful trade-off, not an
-  override).
+- **Hills — honest time, not avoidance.** The primary hill mechanism
+  is a realistic grade→speed curve for an everyday utility rider at
+  constant comfortable power: speed halves around a 3 % climb (not the
+  athletic 10 % the stock engine assumes) and reaches walking pace
+  near 10 %; descents are capped by city braking. With time priced
+  honestly, altitude avoids itself and no separate hill-avoidance
+  weight is needed. An extra discomfort penalty exists only in pushing
+  territory (≥ ~10 %, where most everyday cyclists dismount) and on
+  treacherous descents. An e-bike mode (later: own mode, probably a
+  slider — modern e-bikes climb nearly without slowing) will select a
+  flatter curve; the current curve is the muscle-bike profile.
+- **Grade cap on through roads (elevation-artifact fallback).** The
+  DEM samples the structures a road passes under, so underpasses carry
+  fake 10-15 % spikes (canonical case: Schwarzenburgstrasse under the
+  rail line at Weissenstein — a level ride that read as a mountain and
+  bought an 840 m detour). Engineered through roads are never that
+  steep in a city, so their grade is capped at ~6.5 %; small streets
+  keep their full grades — steep lanes are real, even in cities. This
+  is an interim guard: the correct fix — endpoint-interpolated
+  elevation for under-passing (`layer<0`) ways at graph build, the
+  same treatment bridges and tunnels already get — is queued for the
+  next tile rebuild, and the cap stays as the fallback thereafter.
+  Known interim cost: sustained alpine climbs on primary roads read a
+  touch too fast.
 - **Stairs:** heavily penalized by default, upward more than
   downward — replacing stock's flat 8× factor. A costing option
   excludes them entirely — this backs the V1-mandatory avoid-stairs

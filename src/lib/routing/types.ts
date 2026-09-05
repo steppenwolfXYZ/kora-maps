@@ -49,6 +49,12 @@ export interface DirectRoute {
 	/** Metres of stairs on the route (bike: sections to carry / push the
 	 * bike over; summed from the steps maneuvers). 0 when none. */
 	stairsM: number;
+	/** The query's requested endpoints, [lon, lat] — where the user
+	 * actually wants to go, BEFORE Valhalla snapped onto the street
+	 * network. The map pins sit here; a thin walking connector bridges
+	 * to `coords[0]` / the last coord (the snapped points). */
+	requestedFrom: [number, number];
+	requestedTo: [number, number];
 	/** Bike only: [start, end] index ranges into `coords` where the bike
 	 * is pushed (walkable-but-not-ridable sections — the fork reports
 	 * them as pedestrian-mode maneuvers, bicycle-costing-fork.md). The

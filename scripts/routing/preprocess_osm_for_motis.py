@@ -11,6 +11,19 @@ This step adds `foot=yes` to any way tagged `access=agricultural` or
 `access=forestry` that doesn't already carry a `foot=*` override, so the
 per-profile access_override picks it up as a foot-whitelist.
 
+For the Valhalla output it additionally tags under-passing highways
+(`layer<0`, no tunnel) as `tunnel=yes`. Valhalla samples elevation from
+a ~30 m DEM, which sees the structure a road passes UNDER — underpasses
+come out as fake 10-15 % climbs (canonical case: Schwarzenburgstrasse
+under the rail line at Weissenstein, a level ride that priced like a
+mountain). Tunnel and bridge edges are exempt from DEM sampling —
+Valhalla interpolates their elevation endpoint to endpoint — so marking
+under-passing ways as tunnels buys exactly that treatment. The tag is a
+routing-graph fiction that never reaches the map or MOTIS; its only
+other Valhalla effect is the (unused) exclude_tunnels request option.
+See bicycle-costing-fork.md § grade cap for the query-time fallback that
+guards the same artifact until tiles are rebuilt.
+
 With `--overlay` it also merges the synthetic station walk network
 (`build_station_walk_network.py`) into the output: platform walk lines,
 their level-checked welds into the real pedestrian graph, and lift hubs.
@@ -69,7 +82,23 @@ def _read_overlay(path: Path):
     return nodes, ways
 
 
-def patch(in_path: Path, out_path: Path, overlay: Path | None = None) -> None:
+def _underpass_fix(tags: dict) -> bool:
+    """True when the way needs tunnel=yes for sane elevation: a highway
+    below ground level (layer<0) that is neither tunnel nor bridge. An
+    explicit tunnel=no still qualifies — the tag speaks to semantics, but
+    the DEM is poisoned either way."""
+    if "highway" not in tags:
+        return False
+    if tags.get("tunnel", "no") != "no" or "bridge" in tags:
+        return False
+    try:
+        return int(tags.get("layer", "0")) < 0
+    except ValueError:
+        return False
+
+
+def patch(in_path: Path, out_path: Path, overlay: Path | None = None,
+          underpass_elevation_fix: bool = False) -> None:
     if not in_path.exists():
         raise SystemExit(f"input PBF not found: {in_path}")
 
@@ -84,7 +113,7 @@ def patch(in_path: Path, out_path: Path, overlay: Path | None = None) -> None:
     # Synthetic ids sit far above every live OSM id, so appending each
     # synthetic block after the corresponding real block keeps the output
     # sorted by (type, id) the way every osmium consumer expects.
-    n_ways = n_patched = 0
+    n_ways = n_patched = n_underpass = 0
     wrote_nodes = wrote_ways = False
     with osmium.SimpleWriter(str(out_path), overwrite=True) as writer:
         def flush_nodes():
@@ -112,11 +141,18 @@ def patch(in_path: Path, out_path: Path, overlay: Path | None = None) -> None:
                 flush_nodes()
                 n_ways += 1
                 tags = dict(obj.tags)
+                extra = []
                 if (tags.get("access") in OVERRIDE_ACCESS
                         and "foot" not in tags):
-                    new_tags = [(k, v) for k, v in obj.tags] + [("foot", "yes")]
-                    writer.add_way(obj.replace(tags=new_tags))
+                    extra.append(("foot", "yes"))
                     n_patched += 1
+                if underpass_elevation_fix and _underpass_fix(tags):
+                    extra.append(("tunnel", "yes"))
+                    n_underpass += 1
+                if extra:
+                    new_tags = [(k, v) for k, v in obj.tags
+                                if not (k == "tunnel" and ("tunnel", "yes") in extra)]
+                    writer.add_way(obj.replace(tags=new_tags + extra))
                 else:
                     writer.add_way(obj)
             elif obj.is_relation():
@@ -127,6 +163,8 @@ def patch(in_path: Path, out_path: Path, overlay: Path | None = None) -> None:
         flush_ways()
 
     print(f"ways: {n_ways:,}  patched (added foot=yes): {n_patched:,}")
+    if underpass_elevation_fix:
+        print(f"underpasses marked tunnel=yes for elevation: {n_underpass:,}")
     if overlay is not None:
         print(f"overlay merged: {len(ov_nodes):,} nodes, {len(ov_ways):,} ways")
     print(f"→ {out_path}")
@@ -156,12 +194,14 @@ def main() -> None:
         overlay = None
 
     if args.input and args.output:
-        patch(args.input, args.output, overlay)
+        patch(args.input, args.output, overlay,
+              underpass_elevation_fix=args.valhalla)
         return
 
     if args.valhalla:
         patch(OSM_DIR / "ch_pfaedle.osm.pbf",
-              OSM_DIR / "ch_pfaedle_walkable.osm.pbf", overlay)
+              OSM_DIR / "ch_pfaedle_walkable.osm.pbf", overlay,
+              underpass_elevation_fix=True)
     else:
         # MOTIS's own OSR graph is not a walking authority (Valhalla is),
         # so the overlay is deliberately not merged here.

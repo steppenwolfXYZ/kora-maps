@@ -55,9 +55,13 @@ One card per route, analogous to the transit connection cards:
 
 ### 4. Bicycle costing behavior
 
-- **Strong hill avoidance by default.** A user-facing hilliness
-  preference is planned for later; until then the default leans hard
-  toward flat routes.
+- **Hills cost their honest time.** The engine models an everyday
+  rider at constant comfortable power (speed halves around a 3 %
+  climb), so hilly routes lose on time alone; an extra penalty exists
+  only where most cyclists would push the bike (≥ ~10 %). Details and
+  the elevation-artifact guard live in `bicycle-costing-fork.md`. A
+  user-facing hilliness preference and an e-bike mode are planned for
+  later.
 - **Pushed-bike access** (mandatory — bike routing is nonsensical in
   large parts without it): ways where cycling is not permitted but
   walking is (pedestrian-only paths, sidewalks, crossings, dismount

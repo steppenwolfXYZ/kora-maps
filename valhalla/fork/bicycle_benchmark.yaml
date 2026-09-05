@@ -22,12 +22,14 @@ pairs:
     from: [7.4301984, 46.9406065]   # Eichmattweg 7, Bern
     to: [7.45191, 46.9544477]       # Viktoriastrasse, Bern
     description: >
-      Weissenbühl → Breitenrain. The sensible ride is the quiet
-      Mühlematt / Monbijou corridor (residential streets and the Monbijou
-      bridge), not the Schwarztorstrasse / Belpstrasse / Bahnhofplatz main
-      roads that stock Valhalla prefers for their painted cycle lanes,
-      although it rates its own choice neither shorter nor faster.
-    must_include: [Monbijou]
+      Weissenbühl → Breitenrain. The sensible ride crosses the Monbijou
+      quarter on the quiet Mühlemattstrasse corridor (entered by pushing
+      over the Zieglerstrasse bike crossing), not the Schwarztorstrasse /
+      Belpstrasse / Bahnhofplatz main roads that stock Valhalla prefers
+      for their painted cycle lanes, although it rates its own choice
+      neither shorter nor faster. No street on the corridor is *named*
+      Monbijou — the quarter's spine is Mühlemattstrasse.
+    must_include: [Mühlematt]
     must_exclude: [Belpstrasse, Bahnhofplatz]
     baseline: >
       Stock 3.8.3 (2026-09-03): 3.17 km / 11 min via Tscharnerstrasse ›
@@ -35,3 +37,20 @@ pairs:
       Waisenhausplatz › Kornhausplatz › Viktoriaplatz, identical for
       use_roads 0 / 0.25 / 1. No returned route touched Mühlematt or
       Monbijou.
+
+  - id: bern-eichmatt-koeniz
+    from: [7.4301984, 46.9406065]   # Eichmattweg 7, Bern
+    to: [7.4142401, 46.9232213]     # Migros, Köniz
+    description: >
+      Weissenbühl → Köniz centre. The sensible ride is straight down
+      Schwarzenburgstrasse, which carries a bike lane the whole way
+      (partly separated). The fork's first tuning state instead wove
+      through the quiet-street maze west of it (Chutzenstrasse /
+      Lentulusstrasse / Morillonstrasse zigzags), a massive detour with
+      constant turning.
+    must_include: [Schwarzenburgstrasse]
+    must_exclude: [Chutzenstrasse, Lentulusstrasse, Morillonstrasse]
+    baseline: >
+      Kora fork as of 2026-09-05 (pre-fix): primary 3.38 km / 13 min via
+      Balmweg › Bürkiweg › Chutzenstrasse › Morillonstrasse maze;
+      alternates via Lentulusstrasse / Weissensteinstrasse, 3.2-3.7 km.
