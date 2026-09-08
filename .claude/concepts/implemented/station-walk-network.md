@@ -80,12 +80,43 @@ exactly the large interchanges where transfers are tight.
   `tunnel=building_passage` ways on Bern's Welle overpass onto the
   level-0 platform 1/2, and the router then routed passengers off the
   street onto a platform that has no street access.)
+- **Shared-node exception.** A candidate way that ends on one of the
+  platform's own outline nodes is connected to the platform by the
+  mapper's hand, and is welded whatever its tags say. The level rule
+  exists for ways that merely pass over or under a platform; a way that
+  shares a node with the outline does neither. (Bolligen's platform 2
+  carries a stray `layer=1`, copied from the footbridges beside it, and
+  the strict rule cut off the untagged 8 m walkway that ends on its
+  outline — the only exit — turning platform 2, the bridges and the bus
+  platform into an island. The Bern passages share no outline node, so
+  the exception cannot reopen that defect.)
+- **Candidates are only what the router walks.** A weld target must be a
+  way Valhalla routes pedestrians on: pedestrian-accessible under OSM's
+  access hierarchy (an explicit `foot` tag decides, else a blanket
+  `access=no` / `access=private` closes the way — bus-terminal lanes
+  tagged `highway=service` + `access=no` + `psv=yes` are the canonical
+  non-candidate), and a real way rather than an area outline. Valhalla
+  never routes along `area=yes` outlines or `highway=platform` ways, so
+  a "weld" to one of those connects nothing; a platform's own outline
+  nodes in particular are never candidates. (Lugano Centro's bus
+  platforms welded to each other's outlines and to the bus lanes and
+  became an island.) `highway=platform` open ways are consequently not
+  "already routable" either: they get a synthetic twin like areas do.
 - Welding must reuse the identity of the existing pedestrian node, so
   that the connection is a real graph connection and not a second,
   parallel piece of geometry.
-- A platform with no level-compatible pedestrian way touching it gets a
-  walk line but no connection; it must not be welded to something on the
-  wrong level as a fallback.
+- A platform with no level-compatible pedestrian way touching it must not
+  be welded to something on the wrong level as a fallback — and its walk
+  line is **not written at all**. An isolated walk line is worse than no
+  walk line: the quay's published coordinate snaps onto it anyway, being
+  the nearest edge, and the quay becomes unreachable. That costs more
+  than the wrong walk — Valhalla's one-to-many matrix (the fork's WALK
+  offsets for coordinate endpoints) can only declare a target unreachable
+  after exhausting the whole graph within the walking limit, so every
+  cold coordinate query whose candidate radius contains such a quay pays
+  seconds (13–17 s on the production box for any address near Bolligen or
+  central Zürich, 2026-09). Dropped walk lines are counted, and their
+  quays fall back to the ordinary snap.
 
 ### Platform seams
 
@@ -99,6 +130,9 @@ exactly the large interchanges where transfers are tight.
   the same level compatibility rule, and only when the join is a few
   metres long. A longer join means the areas merely touch at a corner,
   and joining them would invent a shortcut across whatever lies between.
+- A seam carries connectivity across, it never creates it. Two halves
+  that both welded to nothing stay unconnected after being joined, are
+  dropped together with their seam, and are not anchor targets.
 
 ### Quay anchors
 
@@ -208,21 +242,37 @@ exactly the large interchanges where transfers are tight.
   definition a node the area shares with the way, so the two are the same
   geometry.
 - An area with fewer than two usable entry points contributes nothing and
-  is skipped rather than connected to something arbitrary. Areas whose
-  crossing graph would exceed a fixed node budget (a handful of enormous
-  plazas) are skipped too, and reported rather than silently truncated.
+  is skipped rather than connected to something arbitrary.
+- Areas whose crossing graph exceeds a fixed node budget are crossed with
+  a **sparse graph** — every node joined to its nearest visible
+  neighbours, obstructions still rounded via the corners — instead of
+  every visible pair. They used to be skipped as "too large", and the
+  four areas that fell under that were precisely Zürich HB's
+  Bahnhofpassage, Passage Sihlquai, Passage Löwenstrasse and main hall:
+  every stair from platforms 4–17 and 31–34 dead-ended on their outlines
+  and those platforms were unreachable from any street. The station halls
+  are where crossings matter most, so size must never be a reason to
+  leave one uncrossed.
 - The marker tag introduced for these crossings is `kora:area_cross`.
 
 ### Coverage and diagnostics
 
 - The work produces a coverage record with overlay totals — platforms
   traced and synthesised, open platform ways reused, welds made,
-  platforms left unwelded, seams welded or refused, lift hubs and links,
-  pedestrian areas seen, crossed, skipped for want of entry points or
-  size, and crossing edges kept or rejected as obstructed — plus, per
-  station, how many quays were anchored by which tier. This is the
-  artefact used to judge whether a station is modelled well enough to
-  answer a step-free query.
+  platforms left unwelded and dropped, seams welded, refused or dropped,
+  lift hubs and links, pedestrian areas seen, crossed, skipped for want
+  of entry points or crossed sparsely, and crossing edges kept or
+  rejected as obstructed — plus, per station, how many quays were
+  anchored by which tier. This is the artefact used to judge whether a
+  station is modelled well enough to answer a step-free query.
+- **Island check.** After every matrix build, `find_isolated_quays.py`
+  reads the stop-to-stop walking matrix and reports every Swiss quay
+  whose walking partners all lie within a platform's length of itself:
+  a quay the router cannot leave. The builder's rules above are meant to
+  make that list empty; the check is what proves they did against the
+  tiles and the OSM data actually built. Output:
+  `data/transit/isolated_quays.json`. Before the fix it listed Zürich HB
+  (19 quays), Lugano Centro (6) and Bolligen (3).
 - Anchor coverage on the current data (all modes, every quay with a
   platform code): roughly 7,300 quays anchored, about half of them by
   platform designation, against roughly 6,300 unanchored. The unanchored

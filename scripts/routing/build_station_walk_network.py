@@ -25,9 +25,20 @@ This script produces two artefacts:
     MOTIS asks Valhalla to walk to a point that is *on* the platform.
 
 Only quays whose walk line is actually connected to the surrounding
-network are anchored: an isolated walk line would be a worse snap target
-than the status quo, because Valhalla would either fail to route or fall
-back to the very edge we are trying to avoid.
+network are anchored, and a walk line that welded to nothing is not
+written at all: an isolated walk line is worse than no walk line, because
+the quay's published coordinate snaps onto it anyway (it is the nearest
+edge) and the quay then becomes unreachable. Worse than the wrong walk:
+Valhalla's one-to-many matrix has to exhaust the whole graph within the
+walking limit before it can report an unreachable target, so every
+coordinate query whose candidate radius contains such a quay pays
+seconds for it (Bolligen, Zürich HB and Lugano Centro did exactly that).
+
+Welds are only made to geometry Valhalla actually walks. A candidate way
+must be pedestrian-accessible (`access=no` bus lanes are not, however
+`highway=service` they are) and must be a real way, not an area outline:
+Valhalla never routes along `area=yes` outlines or `highway=platform`
+ways, so a "weld" to one of those connects nothing.
 
 Synthetic ids start at `SYNTH_ID_BASE`, far above any live OSM id, so
 they never collide and the output stays id-stable across runs.
@@ -79,11 +90,32 @@ SYNTH_ID_BASE = 9_000_000_000_000
 # out of Bern, Hirschengraben traverses way 603146021, a bare
 # `highway=platform`. So a platform way carrying a highway value needs no
 # synthetic twin — only `railway=platform` without one is invisible.
+# `platform` is deliberately absent: Valhalla does not route along
+# `highway=platform` ways (verified against the served tiles), so they are
+# neither weld targets nor "already routable" platforms — an open platform
+# way gets a synthetic twin like an area does.
 WALKABLE_HIGHWAY = {
     "footway", "path", "steps", "corridor", "pedestrian", "elevator",
-    "platform", "living_street", "residential", "unclassified", "service",
+    "living_street", "residential", "unclassified", "service",
     "track", "cycleway", "tertiary", "secondary", "primary", "road",
 }
+
+
+def pedestrian_allowed(tags: dict) -> bool:
+    """Whether Valhalla's pedestrian costing may use this way at all.
+
+    Mirrors the access hierarchy the router applies: an explicit `foot`
+    tag decides, otherwise a blanket `access=no` / `access=private`
+    closes the way. Bus-terminal lanes (`highway=service`, `access=no`,
+    `psv=yes`) are the case that matters — Lugano Centro's platforms
+    welded to nothing but those and became an island.
+    """
+    foot = tags.get("foot")
+    if foot in ("yes", "designated", "permissive", "official"):
+        return True
+    if foot in ("no", "private", "use_sidepath"):
+        return False
+    return tags.get("access") not in ("no", "private")
 
 # Platform-ish tag signatures. `railway=platform_edge` is deliberately
 # excluded — it traces the track side of the platform, not a walk line.
@@ -116,10 +148,16 @@ WELD_TOLERANCE_M = 3.0
 LIFT_TOLERANCE_M = 2.0
 # A quay farther than this from any platform walk line is left alone.
 ANCHOR_MAX_M = 25.0
-# Upper bound on visibility-graph nodes per pedestrian area. A handful of
-# enormous plazas would otherwise dominate the build for no routing gain;
-# they are logged rather than silently truncated.
+# Above this many visibility-graph nodes a pedestrian area is crossed with
+# a sparse graph (each node joined to its nearest visible neighbours,
+# AREA_SPARSE_DEGREE of them) instead of every visible pair. The full
+# graph is quadratic and a handful of enormous areas would dominate the
+# build; skipping them instead — the previous behaviour — dead-ended
+# every stair that lands on their outline, which is how Zürich HB's
+# platforms 4–17 and 31–34 ended up on an island behind the
+# Bahnhofpassage, Passage Sihlquai and the main hall.
 AREA_MAX_GRAPH_NODES = 60
+AREA_SPARSE_DEGREE = 6
 # Crossings shorter than this are already covered by the ring itself.
 AREA_MIN_CROSS_M = 2.0
 # Longest seam weld between two abutting platform areas. Their walk lines
@@ -542,6 +580,11 @@ class Reader:
                 }
                 (self.lifts if is_lift(tags) else self.platforms).append(rec)
                 self._mark(ring)
+                # A platform outline is not a routable way; its own nodes
+                # must never count as weld candidates (Bolligen's bus
+                # platform welded to itself and nothing else).
+                if obj.from_way():
+                    self._area_way_ids.add(obj.orig_id())
             elif obj.is_way():
                 tags = dict(obj.tags)
                 hw = tags.get("highway")
@@ -550,18 +593,22 @@ class Reader:
                            for n in obj.nodes if n.location.valid()]
                     ids = [n.ref for n in obj.nodes if n.location.valid()]
                     if len(pts) >= 2 and pts[0] != pts[-1]:
+                        # A platform way is only part of the routing
+                        # graph if it also carries a highway value
+                        # Valhalla walks on. `railway=platform` alone or
+                        # `highway=platform` is invisible to the router,
+                        # so those get a synthetic twin like the areas do.
+                        routable = (hw in WALKABLE_HIGHWAY
+                                    and pedestrian_allowed(tags))
                         self.open_platforms.append({
                             "line": pts, "ring_ids": ids, "tags": tags,
                             "levels": level_set(tags),
-                            # A platform way is only part of the routing
-                            # graph if it also carries a highway value
-                            # Valhalla walks on. `railway=platform` alone
-                            # is invisible to the router, so those get a
-                            # synthetic twin like the areas do.
-                            "routable": hw in WALKABLE_HIGHWAY,
+                            "routable": routable,
                             "osm": f"w{obj.id}",
                         })
                         self._mark(pts)
+                        if not routable:
+                            self._area_way_ids.add(obj.id)
 
     def _read_pedestrian_area(self, obj, tags) -> None:
         """A pedestrian square, kept with node ids so crossings can be
@@ -598,6 +645,11 @@ class Reader:
                 if obj.id in self._area_way_ids:
                     continue
                 if tags.get("highway") not in WALKABLE_HIGHWAY:
+                    continue
+                # Only geometry the router walks: an `area=yes` outline is
+                # not an edge, and a way closed to pedestrians connects
+                # nothing (see the module docstring).
+                if tags.get("area") == "yes" or not pedestrian_allowed(tags):
                     continue
                 lv = level_set(tags)
                 for n in obj.nodes:
@@ -642,6 +694,14 @@ class Overlay:
         self.ways.append((wid, list(node_ids), dict(tags)))
         return wid
 
+    def remove_ways(self, wids) -> None:
+        """Drop the given ways and every synthetic node only they used."""
+        if not wids:
+            return
+        self.ways = [w for w in self.ways if w[0] not in wids]
+        used = {nid for _, nodes, _ in self.ways for nid in nodes}
+        self.nodes = [n for n in self.nodes if n[0] in used]
+
 
 def platform_refs(tags: dict):
     """Platform designations an OSM platform claims ("9;10" → {9, 10})."""
@@ -679,11 +739,12 @@ def build(reader: Reader, overlay: Overlay):
 
     walk_lines = []   # dicts: line(lonlat), refs, levels, connected, osm
     emitted = []      # synthetic walk lines, kept for seam welding
-    stats = {"platforms": 0, "welds": 0, "orphans": 0, "lifts": 0,
-             "lift_links": 0, "open_platforms": 0, "open_synthesised": 0,
-             "seams_welded": 0, "seams_level_blocked": 0, "seams_too_far": 0,
+    stats = {"platforms": 0, "welds": 0, "orphans": 0, "orphans_dropped": 0,
+             "lifts": 0, "lift_links": 0, "open_platforms": 0,
+             "open_synthesised": 0, "seams_welded": 0, "seams_dropped": 0,
+             "seams_level_blocked": 0, "seams_too_far": 0,
              "areas_seen": 0, "areas_crossed": 0, "areas_no_entry": 0,
-             "areas_too_large": 0, "area_edges": 0, "area_edges_blocked": 0}
+             "areas_sparse": 0, "area_edges": 0, "area_edges_blocked": 0}
 
     # --- platforms mapped as areas: trace a walk line, then weld it.
     # Open platform ways that the router cannot see join the same path,
@@ -707,6 +768,7 @@ def build(reader: Reader, overlay: Overlay):
         outline = plat["ring"] if own_line is None else own_line
         lons = [p[0] for p in outline]
         lats = [p[1] for p in outline]
+        ring_id_set = set(plat.get("ring_ids") or ())
         seen = set()
         welds = []
         for nid, lon, lat, lv in nodes_near(
@@ -722,7 +784,12 @@ def build(reader: Reader, overlay: Overlay):
                             <= WELD_TOLERANCE_M)
             if not touching:
                 continue
-            if not levels_compatible(plat["levels"], lv):
+            # A candidate that shares one of the platform's own outline
+            # nodes is connected to it by the mapper's hand, whatever the
+            # tags say; the level rule exists for ways that merely pass
+            # over or under (see levels_compatible).
+            if (nid not in ring_id_set
+                    and not levels_compatible(plat["levels"], lv)):
                 continue
             seen.add(nid)
             d, seg, t, p = project_on_line(x, y, line_xy)
@@ -759,7 +826,7 @@ def build(reader: Reader, overlay: Overlay):
             tags["level"] = plat["tags"]["level"]
         if plat["tags"].get("layer"):
             tags["layer"] = plat["tags"]["layer"]
-        overlay.way(ids, tags)
+        walk_wid = overlay.way(ids, tags)
 
         for jid, nid in junctions:
             overlay.way([nid, jid], {
@@ -782,7 +849,7 @@ def build(reader: Reader, overlay: Overlay):
         emitted.append({
             "ids": ids, "xy": line_xy, "levels": plat["levels"],
             "ring_ids": set(plat.get("ring_ids") or ()), "osm": plat["osm"],
-            "walk_line": walk_lines[-1],
+            "walk_line": walk_lines[-1], "walk_wid": walk_wid,
         })
 
     # --- platforms already routable as open ways: usable as they stand
@@ -837,6 +904,15 @@ def build(reader: Reader, overlay: Overlay):
 
     _weld_seams(emitted, overlay, stats, kx, ky)
 
+    # --- walk lines that still connect to nothing are not written. Their
+    # quays fall back to snapping onto real ways (the status quo) instead
+    # of onto an island that the router cannot leave — see the module
+    # docstring for why an island is worse than no walk line at all.
+    dropped = {e["walk_wid"] for e in emitted
+               if not e["walk_line"]["connected"]}
+    overlay.remove_ways(dropped)
+    stats["orphans_dropped"] = len(dropped)
+
     # --- pedestrian squares: direct crossings between their entry points
     for area in reader.areas:
         _cross_area(area, reader, overlay, stats)
@@ -846,6 +922,14 @@ def build(reader: Reader, overlay: Overlay):
 
 def _weld_seams(emitted, overlay, stats, kx, ky) -> None:
     """Join platform walk lines that belong to the same physical surface.
+
+    A seam carries connectivity across, it never creates it: two halves
+    that both welded to nothing stay unconnected after being joined to
+    each other (Lugano Centro's bus platforms A+C and B+D were exactly
+    that, and passed as "connected" on the strength of the seam alone).
+    Connectivity is therefore propagated over the seam graph from the
+    halves that have real junctions, and a seam between two halves that
+    end up unconnected is discarded with them.
 
     A long platform is regularly mapped as two abutting OSM areas laid end
     to end — at Bern every platform is, with the Welle's stairs landing on
@@ -876,6 +960,7 @@ def _weld_seams(emitted, overlay, stats, kx, ky) -> None:
                 if i != j:
                     pairs.add((min(i, j), max(i, j)))
 
+    seams = []  # (i, j, way id)
     for i, j in sorted(pairs):
         ea, eb = emitted[i], emitted[j]
         if ea["osm"] == eb["osm"]:
@@ -893,14 +978,30 @@ def _weld_seams(emitted, overlay, stats, kx, ky) -> None:
             stats["seams_too_far"] += 1
             continue
         _, ai, bi = best
-        overlay.way([ea["ids"][ai], eb["ids"][bi]], {
+        wid = overlay.way([ea["ids"][ai], eb["ids"][bi]], {
             "highway": "footway", "foot": "yes",
             "kora:platform_seam": "yes",
             "kora:source": f"{ea['osm']}+{eb['osm']}",
         })
         stats["seams_welded"] += 1
-        ea["walk_line"]["connected"] = True
-        eb["walk_line"]["connected"] = True
+        seams.append((i, j, wid))
+
+    # Propagate real connectivity over the seam graph to a fixpoint.
+    adj = defaultdict(list)
+    for i, j, _ in seams:
+        adj[i].append(j)
+        adj[j].append(i)
+    frontier = [i for i in adj if emitted[i]["walk_line"]["connected"]]
+    while frontier:
+        i = frontier.pop()
+        for j in adj[i]:
+            if not emitted[j]["walk_line"]["connected"]:
+                emitted[j]["walk_line"]["connected"] = True
+                frontier.append(j)
+    dead = {wid for i, j, wid in seams
+            if not emitted[i]["walk_line"]["connected"]}
+    overlay.remove_ways(dead)
+    stats["seams_dropped"] = len(dead)
 
 
 def _cross_area(area, reader, overlay, stats) -> None:
@@ -949,9 +1050,9 @@ def _cross_area(area, reader, overlay, stats) -> None:
         for (nid, _, _), xy in zip(ring, rxy):
             add(nid, xy)
 
-    if len(idx) > AREA_MAX_GRAPH_NODES:
-        stats["areas_too_large"] += 1
-        return
+    sparse = len(idx) > AREA_MAX_GRAPH_NODES
+    if sparse:
+        stats["areas_sparse"] += 1
 
     edges = [(ring_xy[i], ring_xy[i + 1]) for i in range(len(ring_xy) - 1)]
     for rxy in inner_xy:
@@ -981,16 +1082,51 @@ def _cross_area(area, reader, overlay, stats) -> None:
             "kora:area_cross": "yes", "kora:source": area["osm"]}
     if area["tags"].get("level"):
         tags["level"] = area["tags"]["level"]
-    for a in range(len(ids)):
-        for b in range(a + 1, len(ids)):
-            pa, pb = idx[ids[a]], idx[ids[b]]
-            if math.dist(pa, pb) < AREA_MIN_CROSS_M:
-                continue
-            if not visible(pa, pb):
-                stats["area_edges_blocked"] += 1
-                continue
-            overlay.way([ids[a], ids[b]], tags)
-            made += 1
+
+    tested = {}  # (a, b) -> emitted?
+
+    def try_pair(a, b) -> bool:
+        key = (min(a, b), max(a, b))
+        if key in tested:
+            return tested[key]
+        pa, pb = idx[ids[a]], idx[ids[b]]
+        if math.dist(pa, pb) < AREA_MIN_CROSS_M:
+            tested[key] = False
+            return False
+        if not visible(pa, pb):
+            stats["area_edges_blocked"] += 1
+            tested[key] = False
+            return False
+        overlay.way([ids[a], ids[b]], tags)
+        tested[key] = True
+        return True
+
+    n_ids = len(ids)
+    if not sparse:
+        for a in range(n_ids):
+            for b in range(a + 1, n_ids):
+                if try_pair(a, b):
+                    made += 1
+    else:
+        # Sparse graph: each node reaches for its nearest visible
+        # neighbours, trying a bounded number of candidates in distance
+        # order. Chains of such links span the area, and the reflex and
+        # inner-ring corners in the node set let them bend round
+        # obstructions exactly as the full graph does.
+        for a in range(n_ids):
+            order = sorted((b for b in range(n_ids) if b != a),
+                           key=lambda b: math.dist(idx[ids[a]], idx[ids[b]]))
+            accepted = 0
+            for attempt, b in enumerate(order):
+                if (accepted >= AREA_SPARSE_DEGREE
+                        or attempt >= AREA_SPARSE_DEGREE * 4):
+                    break
+                key = (min(a, b), max(a, b))
+                already = key in tested
+                if try_pair(a, b):
+                    accepted += 1
+                    if not already:
+                        made += 1
     stats["area_edges"] += made
     if made:
         stats["areas_crossed"] += 1
@@ -1105,15 +1241,17 @@ def main() -> None:
           f"+ {stats['open_synthesised']:,} from unroutable ways "
           f"({stats['open_platforms']:,} ways already routable)")
     print(f"  welds {stats['welds']:,}  "
-          f"unwelded platforms {stats['orphans']:,}")
+          f"unwelded platforms {stats['orphans']:,} "
+          f"(dropped after seams: {stats['orphans_dropped']:,})")
     print(f"  platform seams welded {stats['seams_welded']:,} "
           f"(level-blocked {stats['seams_level_blocked']:,}, "
-          f"too far {stats['seams_too_far']:,})")
+          f"too far {stats['seams_too_far']:,}, "
+          f"dropped with unconnected halves {stats['seams_dropped']:,})")
     print(f"  lift hubs {stats['lifts']:,}  lift links {stats['lift_links']:,}")
     print(f"  pedestrian areas {stats['areas_seen']:,}: "
           f"crossed {stats['areas_crossed']:,}, "
           f"no entry points {stats['areas_no_entry']:,}, "
-          f"too large {stats['areas_too_large']:,}")
+          f"crossed sparsely {stats['areas_sparse']:,}")
     print(f"  crossing edges {stats['area_edges']:,}  "
           f"(rejected as obstructed {stats['area_edges_blocked']:,})")
 
