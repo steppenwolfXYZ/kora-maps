@@ -37,9 +37,10 @@ exactly the large interchanges where transfers are tight.
 
 ### Platform walk surfaces
 
-- Every rail platform that is mapped in OSM as an area gains a routable
+- Every platform that is mapped in OSM as an area gains a routable
   **platform walk line** in the pedestrian routing graph, running along
-  the platform's long axis.
+  the platform's long axis. This covers rail, tram and bus platforms
+  alike — anything tagged as a platform without a routable highway value.
 - The walk line follows the platform's shape. A platform that curves must
   produce a curved walk line; a straight rectangular platform must
   produce a straight one. The line must stay inside the platform
@@ -47,21 +48,27 @@ exactly the large interchanges where transfers are tight.
   the footprint merely changes width — a stair opening or a widened head
   is not a bend in the platform.
 - Platforms already mapped as open ways are used directly and are not
-  re-synthesised.
+  re-synthesised. A platform way that carries a walkable highway value is
+  already in the graph and needs no synthetic twin.
 - Walk lines carry the level of the platform they were derived from.
 - Walk lines are marked as synthetic so they are distinguishable from
   surveyed OSM geometry at any later stage. The marker tags introduced by
   this concept are `kora:platform_walk` for the walk line and
-  `kora:platform_link` for the connectors below.
+  `kora:platform_link` for the connectors below. Every synthetic object
+  additionally records the OSM object it was derived from in
+  `kora:source`.
 
 ### Level-aware welding
 
 - Each platform walk line is connected to the existing pedestrian
   network at every point where a real pedestrian way (stairs, ramp,
-  footway, corridor, lift) meets that platform.
+  footway, corridor, lift, or an ordinary street at a small halt) meets
+  that platform, within a small tolerance for stair heads drawn a little
+  short of the platform edge.
 - **A connection may only be made between geometry on compatible
   levels.** Level compatibility is decided from the OSM `level` tag,
-  falling back to `layer`. A way whose level set does not intersect the
+  falling back to `layer`; multi-level values (`-1;0`, `0-2`) count as
+  every level they span. A way whose level set does not intersect the
   platform's level set must never be welded, even where it passes
   directly over or under the platform.
 - Level compatibility is **asymmetric**. A platform that says nothing
@@ -80,24 +87,44 @@ exactly the large interchanges where transfers are tight.
   walk line but no connection; it must not be welded to something on the
   wrong level as a fallback.
 
+### Platform seams
+
+- A long platform is regularly mapped as two abutting OSM areas laid end
+  to end (every Bern platform is). Each half gets its own walk line, and
+  welding only ever attaches walk lines to real pedestrian ways — so the
+  halves would be severed at the seam and a passenger arriving on one
+  half could not reach a boarding point on the other.
+- Abutting platform areas are therefore joined at their seam: walk lines
+  of areas that share boundary nodes are welded end to end, subject to
+  the same level compatibility rule, and only when the join is a few
+  metres long. A longer join means the areas merely touch at a corner,
+  and joining them would invent a shortcut across whatever lies between.
+
 ### Quay anchors
 
-- Every GTFS quay served by rail at a Swiss station is anchored onto the
-  walk line of its own platform. The anchor is the point on that walk
-  line nearest the quay's published coordinate.
+- Every GTFS quay with a platform code at a station with a parent is
+  anchored onto the walk line of its own platform, regardless of mode.
+  The anchor is the point on that walk line nearest the quay's published
+  coordinate, and only walk lines within a short radius are eligible.
+- Only walk lines that are actually connected to the surrounding network
+  are anchor targets. An isolated walk line would be a worse snap target
+  than the status quo, because the router would either fail or fall back
+  to the very edge the concept exists to avoid.
 - Platform identity is matched first by platform designation (the GTFS
   platform code against the OSM platform reference, which may name
   several tracks at once), and only where that fails by proximity.
 - Anchors are consumed by the routing backend only. Map rendering keeps
-  using the published GTFS coordinates and must be bit-identical before
-  and after this change.
-- Anchors replace, and are strictly preferred over, the existing
-  platform-code snap. The existing snap remains as a lower tier for stops
-  this concept does not cover (notably non-rail platforms).
-- Each anchor records which tier produced it. The tier values introduced
-  are `centerline_ref` (platform designation matched), `centerline_near`
-  (proximity matched), `platform_snap` (pre-existing tier) and
-  `unanchored`.
+  using the published GTFS coordinates and is bit-identical before and
+  after this change.
+- Anchors replace, and are strictly preferred over, the pre-existing
+  platform-code snap in the MOTIS sidecar builder, which remains as the
+  lower tier for quays no walk line covers — notably platforms with no
+  mapped body. That lower tier is applied by the sidecar builder itself
+  and is not labelled in the anchor record.
+- Each anchor records which tier produced it, the platform it landed on
+  and its distance from the published coordinate. The tier values are
+  `centerline_ref` (platform designation matched), `centerline_near`
+  (proximity matched) and `unanchored`.
 
 ### Quay source
 
@@ -124,23 +151,37 @@ exactly the large interchanges where transfers are tight.
   remaining straight-line gap is charged as walking time at a speed
   **below** normal walking pace, on the assumption that an unmodelled
   gap is more likely to contain stairs or a detour than a clear straight
-  run. The penalty must be proportionate: a few seconds for a few
-  metres, never a dominant term.
+  run.
+- The penalty must be proportionate. Gaps of a metre or less are snapping
+  noise and charged nothing. The slow pace applies to the first stretch
+  of a gap only; anything beyond that is charged at normal walking pace,
+  because a long gap means the requested point simply sits off the
+  network (a free-form map click in a field), and penalising all of it
+  would let the gap dominate the leg. The slow speed, the noise threshold
+  and the slow-stretch length are three named constants, not per-case
+  values.
 - The gap distance is added to the leg's reported distance, and the gap
   is drawn as part of the walking line so the user sees an unbroken path.
-- The reduced speed is a single named constant, not a per-case value.
+- This applies to point-to-point walks only. The one-to-many offsets that
+  seed the search return durations without snapped points, so no gap can
+  be measured there.
 
 ### Lifts
 
-- Lifts mapped as ways or areas must become routable. Today only
-  node-mapped lifts reach the graph, so at stations where the lift is
-  drawn as a shaft the step-free path does not exist at all.
+- Lifts mapped as ways or areas must become routable. Previously only
+  node-mapped lifts reached the graph, so at stations where the lift is
+  drawn as a shaft the step-free path did not exist at all.
+- A lift shaft becomes a single hub node joined to every pedestrian node
+  touching the shaft, whatever level it is on — joining the levels is the
+  point. A shaft touching fewer than two ways connects nothing and is
+  skipped.
 - Lift traversal must remain distinguishable from ordinary footway
   traversal, so a later step-free mode can price or prefer it. The
-  marker tag introduced for this is `kora:elevator`.
-- A lift must not become a free vertical shortcut. Whatever carries the
-  connection has to be something the router already prices as a lift,
-  or an able walker's route will prefer it over the stairs beside it.
+  marker tag introduced for this is `kora:elevator`, on the hub and on
+  its connectors.
+- A lift must not become a free vertical shortcut. The hub therefore
+  carries the tag the router already prices as a lift, so an able
+  walker's route does not prefer it over the stairs beside it.
 
 ### Pedestrian areas
 
@@ -154,32 +195,40 @@ exactly the large interchanges where transfers are tight.
 - Where a direct line is not possible — a concave outline, or an
   obstacle inside the area — the crossing bends around the obstruction
   by the shortest available path, using the area's own corners. It must
-  never pass through a hole, and never leave the area's outline.
+  never pass through a hole, and never leave the area's outline; a
+  candidate crossing is proven clear at several points along its length,
+  not just at its midpoint, because sliver holes defeat a single test.
 - This requirement is as much about what is drawn as about timing. A walk
   line that cuts through a building is wrong on the map before it is
   wrong in the schedule, and it stays wrong under any future aerial
   imagery. Because the drawn line is the routed geometry, one mechanism
   has to serve both.
 - Entry points are the area's boundary nodes shared with other walkable
-  ways, subject to the same level compatibility rule as platform welds.
+  ways. No level check is applied to them: an area's entry is by
+  definition a node the area shares with the way, so the two are the same
+  geometry.
 - An area with fewer than two usable entry points contributes nothing and
-  is skipped rather than connected to something arbitrary.
+  is skipped rather than connected to something arbitrary. Areas whose
+  crossing graph would exceed a fixed node budget (a handful of enormous
+  plazas) are skipped too, and reported rather than silently truncated.
 - The marker tag introduced for these crossings is `kora:area_cross`.
 
 ### Coverage and diagnostics
 
-- The work produces a coverage record listing, per station, how many
-  quays were anchored and by which tier, which platforms produced a walk
-  line with no level-compatible connection, and how many pedestrian areas
-  were crossed, skipped for want of entry points, or had crossings
-  rejected as obstructed. This is the artefact
-  used to judge whether a station is modelled well enough to answer a
-  step-free query.
-- Known coverage as measured on the current data: 98% of Swiss rail quay
-  positions lie within 10 m of mapped platform geometry, and 117 of 118
-  stations with four or more distinct quay positions are fully covered.
-  The residual is dominated by small narrow-gauge halts with no mapped
-  platform body and by stations outside the Swiss extract.
+- The work produces a coverage record with overlay totals — platforms
+  traced and synthesised, open platform ways reused, welds made,
+  platforms left unwelded, seams welded or refused, lift hubs and links,
+  pedestrian areas seen, crossed, skipped for want of entry points or
+  size, and crossing edges kept or rejected as obstructed — plus, per
+  station, how many quays were anchored by which tier. This is the
+  artefact used to judge whether a station is modelled well enough to
+  answer a step-free query.
+- Anchor coverage on the current data (all modes, every quay with a
+  platform code): roughly 7,300 quays anchored, about half of them by
+  platform designation, against roughly 6,300 unanchored. The unanchored
+  residual is dominated by quays with no mapped platform body — most bus
+  quays — and falls to the platform-code snap or the published
+  coordinate.
 
 ## Constraints
 
@@ -202,6 +251,6 @@ exactly the large interchanges where transfers are tight.
 - Applying the change requires rebuilding the pedestrian routing tiles
   and re-importing the routing backend, because both the graph and the
   precomputed stop-to-stop walking matrix change.
-- Transfer times will get longer at large interchanges. That is the
-  intended correction, and any transfer-safety thresholds tuned against
-  the old optimistic values need re-checking afterwards.
+- Transfer times get longer at large interchanges. That is the intended
+  correction, and any transfer-safety thresholds tuned against the old
+  optimistic values need re-checking afterwards.
