@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <exception>
 #include <iterator>
 #include <utility>
 
@@ -28,6 +29,31 @@ bool is_journey_start(timetable const& tt,
   return utl::any_of(q.start_, [&](offset const& o) {
     return matches(tt, q.start_match_mode_, o.target(), candidate_l);
   });
+}
+
+// kora fork: ε-alternate candidates (kora_alternatives.h) are guesses
+// that reconstruction is expected to reject — the collector catches the
+// exception and drops the candidate, "a wrong guess costs one failed
+// reconstruction". utl::fail, however, prints "[VERIFY FAIL] …" to
+// stderr from its constructor, before anything can catch it, which put
+// a few hundred expected lines per query in the server log and buried
+// real failures. Alternates therefore throw this silent, message-free
+// exception instead; primary journeys keep utl::fail so a genuine
+// reconstruction failure stays visible.
+struct kora_alt_reconstruct_error : std::exception {
+  char const* what() const noexcept override {
+    return "kora alternate: candidate rejected by reconstruction";
+  }
+};
+
+template <typename... Args>
+[[noreturn]] void reconstruct_fail(journey const& j,
+                                   std::string_view const msg,
+                                   Args&&... args) {
+  if (j.kora_alt_egress_ != location_idx_t::invalid()) {
+    throw kora_alt_reconstruct_error{};
+  }
+  throw utl::fail(msg, std::forward<Args>(args)...);
 }
 
 template <direction SearchDir, via_offset_t Vias>
@@ -159,7 +185,7 @@ std::optional<journey::leg> find_start_footpath(timetable const& tt,
     }
   }
 
-  throw utl::fail("no valid journey start found");
+  reconstruct_fail(j, "no valid journey start found");
 }
 
 template <direction SearchDir, via_offset_t Vias>
@@ -788,7 +814,8 @@ void reconstruct_journey_with_vias(timetable const& tt,
           k, j.transfers_, v, loc{tt, l}, delta_to_unix(base, curr_time),
           j.start_time_, j.dest_time_);
 
-      throw utl::fail(
+      reconstruct_fail(
+          j,
           "intermodal destination reconstruction failed at k={}, t={}, v={}, "
           "stop={}, time={}",
           k, j.transfers_, v, loc{tt, l}, delta_to_unix(base, curr_time));
@@ -903,8 +930,8 @@ void reconstruct_journey_with_vias(timetable const& tt,
       }
     }
 
-    throw utl::fail(
-        "reconstruction failed at k={}, t={}, v={}, stop={}, time={}", k,
+    reconstruct_fail(
+        j, "reconstruction failed at k={}, t={}, v={}, stop={}, time={}", k,
         j.transfers_, v, loc{tt, l}, delta_to_unix(base, curr_time));
   };
 
