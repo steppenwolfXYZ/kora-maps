@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { slide } from 'svelte/transition';
-	import type { FilledVia, Itinerary, Leg, StationEndpoint } from './types';
+	import type { FilledVia, IntermediateStop, Itinerary, Leg, StationEndpoint } from './types';
 	import { legBadgeColor, loadHfGondolaRoutes, loadRouteColorIndex } from './legColor';
 	import {
 		assessTransfers, legDuration, transferCount, usableSeconds, walkElevation, walkMetres,
@@ -96,6 +96,29 @@
 		if (!selected) routingState.selectItinerary(itinerary);
 		if (isNarrow()) routingState.enterMapMode();
 		onFocusLeg?.(leg);
+	}
+
+	// The transit leg row hosts a real <button> (the in-between-stops
+	// toggle), so it cannot itself be a <button>; it acts as one via role
+	// + keyboard handling instead.
+	function focusLegKey(e: KeyboardEvent, leg: Leg) {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		e.preventDefault();
+		focusLeg(e, leg);
+	}
+
+	// Leg indices whose in-between stops are unfolded. Local to the card:
+	// collapsing the details forgets it, which is the natural reset.
+	let openStops = $state<number[]>([]);
+
+	function toggleStops(e: Event, i: number) {
+		e.stopPropagation();
+		openStops = openStops.includes(i) ? openStops.filter((k) => k !== i) : [...openStops, i];
+	}
+
+	function stopTime(stop: { arrival?: string; departure?: string }): string {
+		const t = stop.departure ?? stop.arrival;
+		return t ? fmtTime(t) : '';
 	}
 
 	const BADGE_ICON: Record<Badge, string> = {
@@ -382,6 +405,36 @@
 	}
 </script>
 
+{#snippet lineRow(leg: Leg, i: number, stops: IntermediateStop[], stopsOpen: boolean)}
+	<span class="leg-line-row">
+		{#if stops.length > 0}
+			<button
+				class="icon-btn leg-stops-toggle"
+				type="button"
+				aria-expanded={stopsOpen}
+				aria-label={stopsOpen ? 'Hide stops' : `Show ${stops.length} stops`}
+				title={stopsOpen ? 'Hide stops' : `Show ${stops.length} stops`}
+				onclick={(e) => toggleStops(e, i)}
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">{stopsOpen ? 'remove' : 'add'}</span>
+			</button>
+		{:else}
+			<span class="leg-stops-toggle leg-stops-toggle-blank" aria-hidden="true"></span>
+		{/if}
+		{#if leg.routeShortName}
+			{@const bg = legBadgeColor(colorIndex, leg)}
+			<span
+				class="card-ref"
+				style="background:{bg};color:{badgeTextColor(bg)}"
+			>{leg.routeShortName}</span>
+		{:else}
+			<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
+		{/if}
+		{#if headsign(leg)}<span class="leg-dir">→ {headsign(leg)}</span>{/if}
+		<span class="leg-dur">{fmtDuration(legDuration(leg))}</span>
+	</span>
+{/snippet}
+
 {#snippet transferWarn(mark: TransferAssessment)}
 	<span
 		class="leg-transfer-warn leg-transfer-warn-{mark.tier}"
@@ -548,8 +601,17 @@
 		<div class="leg-list" transition:slide>
 			{#each itinerary.legs as leg, i}
 				{#if isTransitMode(leg.mode)}
-					<button class="leg-item" type="button" onclick={(e) => focusLeg(e, leg)}>
-						<span class="leg-stop-row" class:leg-stop-end={i === firstTransitIdx}>
+					{@const stops = leg.intermediateStops ?? []}
+					{@const stopsOpen = openStops.includes(i)}
+					<div
+						class="leg-item"
+						role="button"
+						tabindex="0"
+						onclick={(e) => focusLeg(e, leg)}
+						onkeydown={(e) => focusLegKey(e, leg)}
+					>
+						{#if stopsOpen}{@render lineRow(leg, i, stops, stopsOpen)}{/if}
+						<span class="leg-stop-row" class:leg-stop-end={i === firstTransitIdx} class:leg-stop-open={stopsOpen}>
 							<span class="leg-time">{fmtTime(leg.startTime)}</span>
 							<span class="leg-stop-name">{leg.from?.name ?? ''}</span>
 							{#if leg.from?.track}<span class="leg-pf">Pl. {leg.from.track}</span>{/if}
@@ -560,25 +622,24 @@
 								{@render transferWarn(transferMarks.get(i)!)}
 							{/if}
 						</span>
-						<span class="leg-line-row">
-							{#if leg.routeShortName}
-								{@const bg = legBadgeColor(colorIndex, leg)}
-								<span
-									class="card-ref"
-									style="background:{bg};color:{badgeTextColor(bg)}"
-								>{leg.routeShortName}</span>
-							{:else}
-								<span class="card-mode material-symbols-outlined" aria-hidden="true">{iconFor(leg.mode)}</span>
-							{/if}
-							{#if headsign(leg)}<span class="leg-dir">→ {headsign(leg)}</span>{/if}
-							<span class="leg-dur">{fmtDuration(legDuration(leg))}</span>
-						</span>
-						<span class="leg-stop-row" class:leg-stop-end={i === lastTransitIdx}>
+						{#if !stopsOpen}{@render lineRow(leg, i, stops, stopsOpen)}{/if}
+						{#if stopsOpen}
+							<span class="leg-stops" transition:slide={{ duration: 150 }}>
+								{#each stops as stop}
+									<span class="leg-stop-row leg-stop-mid">
+										<span class="leg-time">{stopTime(stop)}</span>
+										<span class="leg-stop-name">{stop.name ?? ''}</span>
+										{#if stop.track}<span class="leg-pf">Pl. {stop.track}</span>{/if}
+									</span>
+								{/each}
+							</span>
+						{/if}
+						<span class="leg-stop-row" class:leg-stop-end={i === lastTransitIdx} class:leg-stop-open={stopsOpen}>
 							<span class="leg-time">{fmtTime(leg.endTime)}</span>
 							<span class="leg-stop-name">{leg.to?.name ?? ''}</span>
 							{#if leg.to?.track}<span class="leg-pf">Pl. {leg.to.track}</span>{/if}
 						</span>
-					</button>
+					</div>
 					{#if viaStays.has(i)}
 						{@const stay = viaStays.get(i)!}
 						<!-- The stay the traveller asked for, kept visually apart
@@ -1153,9 +1214,35 @@
 		align-items: center;
 		gap: 0.35rem;
 		min-width: 0;
-		/* Align under the station-name column (time column + gap). */
-		margin-left: 2.8rem;
 	}
+	/* The in-between-stops toggle lives in the time column, so the line
+	 * badge still aligns under the station-name column (time column
+	 * 2.4rem + row gap 0.4rem = 0.5 + 1.4 + 0.55 + the 0.35 flex gap). */
+	.leg-stops-toggle {
+		flex: 0 0 auto;
+		width: 1.4rem;
+		height: 1.4rem;
+		padding: 0;
+		margin: 0 0.55rem 0 0.5rem;
+		font-size: 1rem;
+	}
+	.leg-stops-toggle .material-symbols-outlined { font-size: 1rem; }
+	/* The row under it is already gray on hover (#f0f0f0 / #e0e0e0), so
+	 * the shared --gray-100 hover circle would vanish — one step darker. */
+	.leg-item .leg-stops-toggle:hover { background: var(--gray-200); }
+	.card.selected .leg-item .leg-stops-toggle:hover { background: #cfcfcf; }
+	.leg-stops-toggle-blank { display: inline-block; }
+	.leg-stops {
+		display: flex;
+		flex-direction: column;
+		gap: 0.12rem;
+		overflow: hidden;
+	}
+	.leg-stop-open .leg-stop-name,
+	.leg-stop-open .leg-time { font-weight: 700; color: #111; }
+	.leg-stop-open .leg-pf { font-weight: 700; color: var(--gray-800); }
+	.leg-stop-mid .leg-time { font-weight: 400; color: var(--gray-500); }
+	.leg-stop-mid .leg-stop-name { color: var(--gray-600); }
 	.leg-dir {
 		flex: 1 1 auto;
 		min-width: 0;
@@ -1179,6 +1266,7 @@
 	}
 	.leg-time {
 		font-weight: 600;
+		font-variant-numeric: tabular-nums;
 		color: var(--gray-850);
 		width: 2.4rem;
 		flex: 0 0 auto;

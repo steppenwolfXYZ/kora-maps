@@ -1264,7 +1264,12 @@
 	   in the timing row now (TimeSelector's `swap` snippet). */
 	.rp-swap {
 		flex: 0 0 auto;
-		padding: 0 0.35rem;
+		/* Fill the row (2rem in both the timing row and the direct-tab
+		   row) so the hover disc matches the height of the mode toggle
+		   and Options button beside it; the wider padding keeps the disc
+		   round at that height. */
+		align-self: stretch;
+		padding: 0 0.45rem;
 	}
 	.rp-swap :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; display: block; }
 
