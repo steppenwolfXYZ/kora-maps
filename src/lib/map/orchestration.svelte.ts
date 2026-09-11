@@ -163,9 +163,11 @@ export function setupMapOrchestration() {
 	$effect(() => {
 		const it = routingState.selectedItinerary;
 		const map = mapUi.mapRef;
-		if (!map || !map.isStyleLoaded()) return;
-		if (it) enterRouteOverlay(map, it, routeColorIndex, routeStationIndex);
-		else exitRouteOverlay(map);
+		if (!map) return;
+		return whenStyleReady(map, () => {
+			if (it) enterRouteOverlay(map, it, routeColorIndex, routeStationIndex);
+			else exitRouteOverlay(map);
+		});
 	});
 
 	// Direct cycling / walking overlay (pedestrian-bicycle-routing.md
@@ -182,9 +184,11 @@ export function setupMapOrchestration() {
 			&& routingState.travelMode !== 'transit'
 			&& routes.length > 0;
 		const map = mapUi.mapRef;
-		if (!map || !map.isStyleLoaded()) return;
-		if (active) enterDirectRouteOverlay(map, routes, sel);
-		else exitDirectRouteOverlay(map);
+		if (!map) return;
+		return whenStyleReady(map, () => {
+			if (active) enterDirectRouteOverlay(map, routes, sel);
+			else exitDirectRouteOverlay(map);
+		});
 	});
 
 	// Direct cycling / walking tabs read the map as a base map: while
@@ -229,6 +233,23 @@ export function setupMapOrchestration() {
 			if (match) routingState.selectItinerary(match);
 		}
 	});
+}
+
+/** Run `apply` against a map whose style is ready. `isStyleLoaded()` is
+ * false while any source is still fetching tiles — e.g. right after an
+ * overlay exit re-shows stop layers — and it is not reactive, so an
+ * effect that simply returned there would never come back. Instead the
+ * apply is parked on the map's next `idle` (which implies a loaded
+ * style; re-checked anyway). Returns a cancel for the effect's cleanup,
+ * so a selection that changes again first drops the stale apply. */
+function whenStyleReady(map: maplibregl.Map, apply: () => void): () => void {
+	if (map.isStyleLoaded()) { apply(); return () => {}; }
+	const handler = () => {
+		if (map.isStyleLoaded()) apply();
+		else map.once('idle', handler);
+	};
+	map.once('idle', handler);
+	return () => { map.off('idle', handler); };
 }
 
 // ── Per-map wiring ──────────────────────────────────────────────────────
