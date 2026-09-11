@@ -16,7 +16,7 @@ import { reportShareExpired, shareFingerprint, type ShareData } from './share';
 import { reverseAddress } from '$lib/geocoding/client';
 import {
 	activeVias, MAX_VIAS, MAX_VIA_WAIT_MIN, plannedDwellSec,
-	type DirectRoute, type Endpoint, type FilledVia, type Itinerary,
+	type DirectRoute, type Endpoint, type FilledVia, type Itinerary, type PlanResponse,
 	type StationEndpoint, type TimeMode, type TravelMode, type Via
 } from './types';
 import { endpointToParam, writeRoutingQuery } from './url';
@@ -212,15 +212,30 @@ function viaWaitByStop(): Map<string, number> | null {
 	return new Map(withWait.map((v) => [stationPlaceId(v.station), v.wait * 60]));
 }
 
+/** comfort-walk-baseline.md: the query's unavoidable walking (seconds),
+ * summed from the fork's per-endpoint minima. A property of the query —
+ * every hop, escalation and later load returns the same number, so it is
+ * simply re-read from each response; it never depends on which
+ * itineraries came back. Reset with the cascade state. */
+let walkBaselineSec = $state(0);
+
+/** Take the baseline off a plan response. Absent fields (station
+ * endpoints report 0; an unreachable endpoint or an older server omits
+ * them) contribute nothing. */
+function noteWalkBaseline(res: PlanResponse) {
+	walkBaselineSec = (res.koraMinWalkFrom ?? 0) + (res.koraMinWalkTo ?? 0);
+}
+
 /** Ranking knobs shared by publishResults and the panel's card states. */
 export function rankOptionsFor(): {
 	minimizeWalking: boolean; plannedDwellSec: number;
-	viaWaitByStop: Map<string, number> | null;
+	viaWaitByStop: Map<string, number> | null; walkBaselineSec: number;
 } {
 	return {
 		minimizeWalking: routingOptions.minimizeWalking,
 		plannedDwellSec: plannedDwellSec(vias),
-		viaWaitByStop: viaWaitByStop()
+		viaWaitByStop: viaWaitByStop(),
+		walkBaselineSec
 	};
 }
 
@@ -253,6 +268,7 @@ function commitViaEdit(before: string) {
 
 function resetCascadeState() {
 	combined = [];
+	walkBaselineSec = 0;
 	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
 	resultTarget = TARGET_RESULT_COUNT;
@@ -403,6 +419,7 @@ async function runHopCascade(
 			alternativesMax: routingOptions.alternativesMax
 		}, ac.signal);
 		if (ac.signal.aborted) return 'done';
+		noteWalkBaseline(res);
 		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 		const unseen = items.filter((it) => !seenFingerprints.has(itineraryFingerprint(it)));
 		// Merge only the adjacent-most items still needed to reach the
@@ -1388,6 +1405,7 @@ export const routingState = {
 			// polylines are correct — the loop-back bug was OSR's.)
 			let res = await doQuery(queryTime);
 			if (ac.signal.aborted) return;
+			noteWalkBaseline(res);
 			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 
 			// Stage 2 — escalate walking budget on trigger:
@@ -1439,6 +1457,7 @@ export const routingState = {
 				post = WIDE_PRE_POST_SEC;
 				res = await doQuery(queryTime);
 				if (ac.signal.aborted) return;
+				noteWalkBaseline(res);
 				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
 			}
 			// Seed the dedupe set now that `combined` has stabilised for stages

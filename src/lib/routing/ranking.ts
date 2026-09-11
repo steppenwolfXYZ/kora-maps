@@ -192,6 +192,12 @@ const MINWALK_SUBSET_SAVE_RATIO = 3;
 export interface RankOptions {
 	/** Weight walking ~5x heavier in pruning, badges and comfort. */
 	minimizeWalking?: boolean;
+	/** comfort-walk-baseline.md: the query's unavoidable walking in
+	 * seconds (shortest walk from the start to any sufficiently served
+	 * stop + the same on the destination side, 0 per station endpoint).
+	 * Subtracted from every itinerary's walking before the comfort malus
+	 * prices it. A property of the query, never of the result set. */
+	walkBaselineSec?: number;
 	/** Route ids of "continuous" gondolas (short frequencies.txt headways,
 	 * from route_color_index.json via loadHfGondolaRoutes) — boarding them
 	 * never warns: missing one departure means taking the next a minute
@@ -527,8 +533,8 @@ function droppedByOverlap(a: Entry, b: Entry, opts?: RankOptions): boolean {
 	// for "costing more of your day for no time benefit", which ignores
 	// the one axis this mode exists to weigh. An A that walks
 	// meaningfully LESS therefore skips the window and is judged by the
-	// comfort test alone (minimize-walking's effectiveTime already
-	// prices walking linearly, so a genuinely bad A still fails it).
+	// comfort test alone (minimize-walking's effective time prices
+	// walking in absolute minutes, so a genuinely bad A still fails it).
 	// Case 2 has carried the mirror-image exception all along; without
 	// this one a walk-heavier connection departing a few minutes later
 	// silently deleted the low-walk option it happens to dominate in
@@ -687,7 +693,7 @@ export function pruneDominated(
 			start: Date.parse(it.startTime),
 			end: Date.parse(it.endTime),
 			score: itineraryScore(it, opts),
-			effTime: dur * comfortFactor(it, opts),
+			effTime: effectiveTime(it, opts),
 			walk: walkSeconds(it),
 			dur,
 			hassle: dur - usableSeconds(it),
@@ -730,9 +736,9 @@ export interface CardState {
 	warnings: Warning[];
 }
 
-// Comfort factor multiplies the trip's duration to produce an
-// "effective time". Each malus ∈ [0, 1]; they add and share a fixed cap,
-// so the factor lives in [1.0, 1.0 + 2·COMFORT_FACTOR_SLOPE] = [1.0, 1.2].
+// Comfort factor (normal mode) multiplies the trip's duration to produce
+// an "effective time". Each malus is capped at 1; they add and share a
+// fixed cap, so the factor tops out at 1.0 + 2·COMFORT_FACTOR_SLOPE = 1.2.
 // Worseness is then a single ratio (this_eff / min_eff − 1), and the 80/20
 // speed-vs-comfort intuition is baked into the factor's shape — no
 // separate weight to tune, no unbounded ratios.
@@ -742,9 +748,17 @@ const COMFORT_FACTOR_SLOPE = 0.1;
 // toward 100%. Counting boardings (not transfers) prices in schedule-
 // dependence — a walk-only trip needs no vehicle at all.
 const TRANSFER_STEP_R = 0.3;
-// Walking malus: t² / (t² + T²) with t in minutes, T = 30.
-// 10 min → 10%, 20 → 31%, 30 → 50%, 40 → 64%, 60 → 80%.
-const WALK_HALF_MIN = 30;
+// Walking malus (comfort-walk-baseline.md), normal mode: LINEAR in the
+// itinerary's walking minus the query's unavoidable walking
+// (RankOptions.walkBaselineSec), capped at 1 once the reduced walk
+// reaches 60 min. Linear so a 5-min walk is priced at full rate (the
+// earlier t² curve, half-point 30 min, made it worth +1.4% — less than
+// a boarding). The baseline keeps address queries far from every stop
+// off the cap, where connections could no longer be told apart; the
+// malus may go NEGATIVE for a connection that walks less than the
+// baseline (it boards at a rarely served stop the baseline ignores) —
+// a genuinely better connection.
+const WALK_CAP_MIN = 60;
 
 // Absolute worseness thresholds — no dependency on the surviving set's
 // spread. Adding or removing another itinerary never re-ranks the rest.
@@ -774,38 +788,66 @@ function transferMalus(boardings: number): number {
 	return 1 - Math.pow(1 - TRANSFER_STEP_R, boardings);
 }
 
-function walkMalus(walkSec: number): number {
-	const t = walkSec / 60;
-	return (t * t) / (t * t + WALK_HALF_MIN * WALK_HALF_MIN);
+/** Reduced walking in minutes: raw walking minus the query's unavoidable
+ * walking. Negative when the itinerary walks less than the baseline. */
+function reducedWalkMin(it: Itinerary, opts?: RankOptions): number {
+	return (walkSeconds(it) - (opts?.walkBaselineSec ?? 0)) / 60;
 }
 
-// Minimize-walking: the walking malus gets its own, much steeper slope
-// (0.5 instead of 0.1) so walking-heavy connections rate clearly worse;
-// the boarding malus keeps the standard slope. Factor range grows from
-// [1.0, 1.2] to [1.0, 1.6].
-const MINIMIZE_WALK_SLOPE = 0.5;
+function walkMalus(it: Itinerary, opts?: RankOptions): number {
+	return Math.min(reducedWalkMin(it, opts) / WALK_CAP_MIN, 1);
+}
 
-/** Effective time driving badges and auto-select. Normal mode:
- * duration x comfortFactor (multiplicative, bounded malus). Minimize
- * walking: duration + penalty score (additive) — the multiplicative
- * walk malus SATURATES (t^2 curve), so an 11-min walking difference
- * between two 80-90-min-walk connections registers as ~1% and a
- * 3-min duration edge outvotes it; the additive score keeps walking
- * differences linear (routing-options.md § Minimize walking). */
+// Minimize-walking (comfort-walk-baseline.md § Absolute pricing): a
+// percentage of the journey cannot serve both ends — 10% is 2 min on a
+// 24-min trip and 18 min on a 3-h one — while the mode's intuition is
+// absolute: a walked minute is worth a fixed number of journey minutes.
+// So the effective time is ADDITIVE here: duration + walk penalty +
+// boarding penalty, all in minutes. The walk penalty is concave over
+// the reduced walk (2.5 × sqrt(5 × t): 1 min → 5.6, 5 → 12.5, 10 →
+// 17.7, 20 → 25, 30 → 30.6) — with the unavoidable share removed, the
+// first extra minutes are exactly the walk-to-a-different-stop
+// decisions the mode targets and weigh most. Past 30 min there is no
+// cap, just one further penalty minute per walked minute; negative
+// reduced walks mirror the curve. Calibration anchors: saving 4 min of
+// walking is worth ~8-10 min on a short trip (the canonical Rosengarten
+// case), while saving 5 min is NOT worth 30 min on a 3-h trip.
+const MINWALK_PENALTY_SCALE = 2.5;
+const MINWALK_PENALTY_KNEE_MIN = 5;
+const MINWALK_PENALTY_LINEAR_FROM_MIN = 30;
+const MINWALK_BOARDING_PENALTY_MIN = 5;
+
+function minwalkWalkPenaltyMin(reducedMin: number): number {
+	const concave = (t: number) =>
+		MINWALK_PENALTY_SCALE * Math.sqrt(MINWALK_PENALTY_KNEE_MIN * t);
+	const t = Math.abs(reducedMin);
+	const p = t <= MINWALK_PENALTY_LINEAR_FROM_MIN
+		? concave(t)
+		: concave(MINWALK_PENALTY_LINEAR_FROM_MIN) + (t - MINWALK_PENALTY_LINEAR_FROM_MIN);
+	return Math.sign(reducedMin) * p;
+}
+
+/** Effective time driving pruning (Case 1), badges and auto-select.
+ * Normal mode: duration × comfortFactor (multiplicative, percentage
+ * view). Minimize-walking: additive, duration + penalties in seconds
+ * (see MINWALK_* above) — comfort-walk-baseline.md. */
 export function effectiveTime(it: Itinerary, opts?: RankOptions): number {
+	const dur = judgedDuration(it, opts);
 	if (opts?.minimizeWalking) {
-		return judgedDuration(it, opts) + itineraryScore(it, opts);
+		return dur
+			+ minwalkWalkPenaltyMin(reducedWalkMin(it, opts)) * 60
+			+ MINWALK_BOARDING_PENALTY_MIN * 60 * boardingCount(it);
 	}
-	return judgedDuration(it, opts) * comfortFactor(it, opts);
+	return dur * comfortFactor(it, opts);
 }
 
-/** Multiplier applied to duration to get effective time. In [1.0, 1.2]
- * (up to [1.0, 1.6] with minimize-walking). */
+/** Normal-mode multiplier applied to duration to get effective time.
+ * Tops out at 1.2; may dip below 1 when the itinerary walks less than
+ * the query's baseline. */
 export function comfortFactor(it: Itinerary, opts?: RankOptions): number {
-	const w = walkMalus(walkSeconds(it));
+	const w = walkMalus(it, opts);
 	const x = transferMalus(boardingCount(it));
-	const walkSlope = opts?.minimizeWalking ? MINIMIZE_WALK_SLOPE : COMFORT_FACTOR_SLOPE;
-	return 1 + walkSlope * w + COMFORT_FACTOR_SLOPE * x;
+	return 1 + COMFORT_FACTOR_SLOPE * w + COMFORT_FACTOR_SLOPE * x;
 }
 
 /** Longest single WALK leg in seconds. */

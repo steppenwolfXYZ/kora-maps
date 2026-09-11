@@ -266,6 +266,11 @@ candidates is the ranking's job, below.)
   instead of the multiplicative comfort factor — the multiplicative
   walking malus saturates, letting a few minutes of duration outvote a
   larger walking difference between two walk-heavy options.
+  *Superseded by `comfort-walk-baseline.md`: minimize-walking now
+  prices walking in absolute minutes over the query's unavoidable walk
+  (concave, uncapped), and that one additive effective time serves
+  pruning and badges alike; normal mode keeps a multiplicative factor
+  with a linear walk malus.*
 - Auto-select is NOT re-weighted: it stays on the chronological edge
   (leave-at first, arrive-by last) in every mode. Picking the crown
   here made the selection unpredictable — after an option change the

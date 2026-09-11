@@ -9,7 +9,9 @@
 #   src/kora_valhalla.cc
 #   include/motis/kora_valhalla.h  — query-time Valhalla HTTP client
 #   src/endpoints/routing.cc       — WALK offsets (RAPTOR boarding-stop
-#                                    selection) via Valhalla one-to-many
+#                                    selection) via Valhalla one-to-many;
+#                                    koraMinWalkFrom/To response fields
+#                                    (comfort-walk-baseline.md)
 #   src/osr/street_routing.cc      — WALK legs (direct, pre/post,
 #                                    transfer) via Valhalla /route;
 #                                    leg.duration is Valhalla's walking
@@ -22,7 +24,9 @@
 #   openapi.yaml                   — Leg.elevationUp / Leg.elevationDown:
 #                                    walk ascent / descent sampled from
 #                                    Valhalla's elevation profile
-#                                    (transit-routing.md § Walk elevation)
+#                                    (transit-routing.md § Walk elevation);
+#                                    plan koraMinWalkFrom / koraMinWalkTo
+#                                    (comfort-walk-baseline.md)
 #   src/server.cc                  — startup probe: no Valhalla, no serve
 #   deps/nigiri/src/routing/raptor/optimize_footpaths.cc
 #                                  — same-stop re-boarding as a transfer-

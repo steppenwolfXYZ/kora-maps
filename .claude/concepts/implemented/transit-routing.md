@@ -97,8 +97,9 @@ Every card is assigned at most one quality badge. Thresholds are **absolute**: t
   `effective_time = duration · (1 + 0.1 · (walk_malus + transfer_malus))`
 
   - `transfer_malus = 1 − (1 − 0.3)^boardings`, where `boardings` = number of transit legs (walk-only = 0, direct bus = 1, one transfer = 2, …) → 0 / 30 / 51 / 66 / 76 / … % (saturates toward 100% as boardings pile up). Counting boardings rather than transfers prices in schedule-dependence: a walk-only itinerary needs no vehicle at all, so a pure walk rates better than walking nearly as far plus a one-stop hop. The card display still shows transfers (legs − 1).
-  - `walk_malus = t² / (t² + 30²)` with `t = walk_minutes` → 10 min ≈ 10%, 20 ≈ 31%, 30 ≈ 50%, 40 ≈ 64%, 1 h ≈ 80%, 2 h ≈ 94% (saturates toward 100%).
-  - Both maluses live in [0, 1]; they add, so the comfort factor lives in [1.0, 1.2]. Max 20% inflation on top of duration, regardless of how bad the trip's comfort is.
+  - `walk_malus = reduced_walk_minutes / 60`, capped at 1, where `reduced_walk` is the itinerary's walking minus the query's unavoidable walking (the fork's `koraMinWalkFrom` + `koraMinWalkTo`; see `comfort-walk-baseline.md`). Linear: 10 min ≈ 17%, 30 ≈ 50%, 60+ = 100%. May go negative for a connection walking less than the baseline. (Formerly a saturating `t² / (t² + 30²)` curve, whose flat start priced a 5-min walk below one boarding.)
+  - Both maluses are capped at 1; they add, so the comfort factor tops out at 1.2. Max 20% inflation on top of duration, regardless of how bad the trip's comfort is.
+  - **Minimize walking** does not use this factor at all: its effective time is additive, `duration + walk_penalty(reduced_walk) + 5 min · boardings`, with a concave uncapped walk penalty — see `comfort-walk-baseline.md`.
   - Rationale for the multiplicative shape: expressing comfort in absolute seconds would tie its weight to trip length (2 transfers on a 15-min trip vs a 3 h trip would score identically). A factor scales naturally with duration and needs no clamps.
   - Rationale for the additive combination of the two maluses (rather than probabilistic OR or max): each axis is an independent kind of discomfort; a trip with both should be worse than one with only one, and the shared 20% cap keeps the sum bounded without extra machinery.
 

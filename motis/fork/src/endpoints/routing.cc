@@ -67,6 +67,7 @@
 #include "motis/tag_lookup.h"
 #include "motis/td_offsets.h"
 #include "motis/kora_valhalla.h"
+#include "nigiri/timetable.h"
 #include "motis/timetable/modes_to_clasz_mask.h"
 #include "motis/timetable/time_conv.h"
 #include "motis/update_rtt_td_footpaths.h"
@@ -809,6 +810,86 @@ stats_map_t join(auto&&... maps) {
   return ret;
 }
 
+// kora fork: comfort walk baseline (comfort-walk-baseline.md). The
+// client's comfort ranking subtracts the query's UNAVOIDABLE walking —
+// the shortest walk from the start to any sufficiently served quay plus
+// the same on the destination side — before pricing a connection's
+// walking, so a linear walk malus does not saturate on address queries
+// far from every stop. "Sufficiently served" keeps a once-a-day special
+// from defining the norm: a quay counts only when its average departures
+// per day over the feed period reach the threshold below. Computed once
+// from the loaded timetable on first use (route transports × active
+// days, spread over the route's stop sequence — no per-stop-time pass),
+// never touches the search.
+constexpr auto const kKoraBaselineEnvVar = "KORA_BASELINE_MIN_DEPARTURES_PER_DAY";
+constexpr auto const kKoraBaselineDefaultMinPerDay = 2.0;
+
+std::vector<float> const& kora_departures_per_day(n::timetable const& tt) {
+  static std::once_flag once;
+  static std::vector<float> per_day;
+  std::call_once(once, [&]() {
+    auto total = std::vector<double>(tt.n_locations(), 0.0);
+    for (auto r = n::route_idx_t{0U}; r != tt.n_routes(); ++r) {
+      auto days = 0.0;
+      for (auto const t : tt.route_transport_ranges_[r]) {
+        days += static_cast<double>(
+            tt.bitfields_[tt.transport_traffic_days_[t]].count());
+      }
+      for (auto const s : tt.route_location_seq_[r]) {
+        total[n::stop{s}.location_idx().v_] += days;
+      }
+    }
+    auto const n_days = std::max(
+        1.0, static_cast<double>(tt.internal_interval_days().size().count()));
+    per_day = utl::to_vec(
+        total, [&](double const x) { return static_cast<float>(x / n_days); });
+  });
+  return per_day;
+}
+
+double kora_baseline_min_per_day() {
+  static double const v = [] {
+    auto const* env = std::getenv(kKoraBaselineEnvVar);
+    if (env == nullptr || *env == '\0') {
+      return kKoraBaselineDefaultMinPerDay;
+    }
+    return std::max(0.0, std::atof(env));
+  }();
+  return v;
+}
+
+// Shortest WALK offset (seconds, minute-quantised like the offsets) from
+// a coordinate endpoint to a sufficiently served quay. Station endpoints
+// have no unavoidable walk (0); an endpoint with no reachable quay yields
+// nothing — such a query returns no transit itinerary anyway.
+std::optional<std::int64_t> kora_min_walk(
+    n::timetable const& tt,
+    std::vector<n::routing::offset> const& offsets,
+    place_t const& p) {
+  if (!std::holds_alternative<osr::location>(p)) {
+    return 0;
+  }
+  auto const& per_day = kora_departures_per_day(tt);
+  auto const min_per_day = kora_baseline_min_per_day();
+  auto best = std::optional<n::duration_t>{};
+  for (auto const& o : offsets) {
+    if (o.transport_mode_id_ !=
+        static_cast<n::transport_mode_id_t>(osr::search_profile::kFoot)) {
+      continue;
+    }
+    if (per_day[o.target_.v_] < min_per_day) {
+      continue;
+    }
+    if (!best.has_value() || o.duration_ < *best) {
+      best = o.duration_;
+    }
+  }
+  if (!best.has_value()) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(best->count()) * 60;
+}
+
 void remove_slower_than_fastest_direct(n::routing::query& q) {
   if (!q.fastest_direct_) {
     return;
@@ -1243,6 +1324,11 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
     q.kora_alt_epsilon_ = n::duration_t{(kora_alt_epsilon_sec + 59) / 60};
     q.kora_alt_max_ = static_cast<std::uint8_t>(kora_alt_max);
 
+    // kora fork: comfort walk baseline — read off the offsets the search
+    // is about to use, so it follows walking speed and budget exactly.
+    auto const kora_min_walk_from = kora_min_walk(*tt_, q.start_, start);
+    auto const kora_min_walk_to = kora_min_walk(*tt_, q.destination_, dest);
+
     UTL_STOP_TIMING(query_preparation);
 
     // kora fork: with pre-two-tier index data the full-table slot is
@@ -1434,6 +1520,8 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
             fmt::format("EARLIER|{}", to_seconds(search_interval.from_)),
         .nextPageCursor_ =
             fmt::format("LATER|{}", to_seconds(search_interval.to_)),
+        .koraMinWalkFrom_ = kora_min_walk_from,
+        .koraMinWalkTo_ = kora_min_walk_to,
     };
   }
 

@@ -232,4 +232,11 @@ export interface PlanResponse {
 	nextPageCursor?: string;
 	/** Same, but for arrive-by mode — earlier departures. */
 	previousPageCursor?: string;
+	/** Fork-only (comfort-walk-baseline.md): shortest walk in seconds from
+	 * the start endpoint to any sufficiently served stop, off the query's
+	 * own access offsets. 0 for a station endpoint; absent when no stop is
+	 * reachable within the budget or the server predates the field. */
+	koraMinWalkFrom?: number;
+	/** Same for the destination side. */
+	koraMinWalkTo?: number;
 }

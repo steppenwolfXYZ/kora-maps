@@ -1075,6 +1075,19 @@ paths:
                       Use the cursor to get the next page of results. Insert the cursor into the request and post it to get the next page.
                       The next page is a set of itineraries departing AFTER the last itinerary in this result.
                     type: string
+                  koraMinWalkFrom:
+                    description: |
+                      kora fork (comfort-walk-baseline.md): shortest walking time in seconds
+                      from the start endpoint to any sufficiently served stop, taken from the
+                      query's own access offsets (walking speed and budget applied). 0 for a
+                      station endpoint; absent when no stop is reachable within the budget.
+                    type: integer
+                  koraMinWalkTo:
+                    description: |
+                      kora fork (comfort-walk-baseline.md): same for the destination side —
+                      shortest walking time in seconds from any sufficiently served stop to
+                      the destination endpoint.
+                    type: integer
 
   /api/v1/one-to-many:
     get:
