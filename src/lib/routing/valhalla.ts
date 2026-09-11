@@ -8,7 +8,9 @@ import type { DirectRoute } from './types';
 // local Valhalla container (valhalla/docker-compose.yml,
 // http://localhost:8002), production at the same-origin nginx proxy
 // (/valhalla/). Set via PUBLIC_VALHALLA_URL in .env / .env.production;
-// inlined at build time — same pattern as PUBLIC_MOTIS_URL.
+// inlined at build time. The only engine the browser still calls
+// directly — the transit search goes through the app's own /api/plan
+// (server-side-transit-planning.md).
 //
 // Only the /route action is used. The transit connection search is
 // untouched: it keeps its single MOTIS request per query — the "no client

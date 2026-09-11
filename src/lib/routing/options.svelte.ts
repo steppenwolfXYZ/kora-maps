@@ -1,50 +1,25 @@
 import { browser } from '$app/environment';
+import {
+	DEFAULT_OPTIONS, isSafetyMode, isWalkSpeedTier, pedestrianSpeedMs, tierKmh,
+	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
+} from './optionParams';
 
 // Routing search options (routing-options.md): walking speed tiers,
-// connection-safety modes and the minimize-walking ranking toggle.
-// localStorage-backed under a single key; defaults produce byte-identical
-// queries to the pre-options behavior (no extra params sent). The
-// "reckless" safety mode and the step-free toggle are deferred
+// connection-safety modes and the minimize-walking toggle. localStorage-
+// backed under a single key. The value model, the tier tables and the
+// MOTIS parameter derivation live in optionParams.ts (pure — shared with
+// the server-side planning engine); this module only holds the reactive
+// store. The "reckless" safety mode and the step-free toggle are deferred
 // (separately shippable per the concept) and deliberately absent here.
 
+// Re-exported so existing importers (panel, URL round-trip) keep one
+// import site for the option model.
+export {
+	BASE_WALK_KMH, DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
+	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
+} from './optionParams';
+
 const STORAGE_KEY = 'kora_routing_prefs';
-
-// Base speed baked into the Valhalla matrix + live calls (kWalkSpeedKmh
-// in the MOTIS fork). The normal tier IS this speed — it sends no params.
-export const BASE_WALK_KMH = 5.1;
-
-export type WalkSpeedTier = 'slow' | 'leisurely' | 'normal' | 'brisk' | 'running';
-export type SafetyMode = 'cautious' | 'balanced' | 'daring';
-
-export const WALK_SPEED_TIERS: {
-	id: WalkSpeedTier; label: string; kmh: number; desc: string; icon: string;
-}[] = [
-	{ id: 'slow',      label: 'Slow',      kmh: 2,             desc: '2 km/h',   icon: 'assist_walker' },
-	{ id: 'leisurely', label: 'Leisurely', kmh: 4,             desc: '4 km/h',   icon: 'nature_people' },
-	{ id: 'normal',    label: 'Normal',    kmh: BASE_WALK_KMH, desc: '5 km/h',   icon: 'directions_walk' },
-	{ id: 'brisk',     label: 'Brisk',     kmh: 7.5,           desc: '7.5 km/h', icon: 'directions_run' },
-	{ id: 'running',   label: 'Running',   kmh: 11,            desc: '11 km/h',  icon: 'sprint' }
-];
-
-export const SAFETY_MODES: {
-	id: SafetyMode; label: string; desc: string; icon: string;
-}[] = [
-	{ id: 'cautious', label: 'Cautious', desc: '5 extra minutes to spare',  icon: 'shield' },
-	{ id: 'balanced', label: 'Balanced', desc: 'Normal transfer times',     icon: 'balance' },
-	{ id: 'daring',   label: 'Daring',   desc: 'You may have to run. Small delays may be an issue.', icon: 'local_fire_department' }
-];
-
-export interface RoutingOptionValues {
-	walkSpeed: WalkSpeedTier;
-	safety: SafetyMode;
-	minimizeWalking: boolean;
-}
-
-export const DEFAULT_OPTIONS: RoutingOptionValues = {
-	walkSpeed: 'normal',
-	safety: 'balanced',
-	minimizeWalking: false
-};
 const DEFAULTS = DEFAULT_OPTIONS;
 
 function readStorage(): RoutingOptionValues {
@@ -53,10 +28,8 @@ function readStorage(): RoutingOptionValues {
 		if (!raw) return { ...DEFAULTS };
 		const p = JSON.parse(raw) as Partial<RoutingOptionValues>;
 		return {
-			walkSpeed: WALK_SPEED_TIERS.some((t) => t.id === p.walkSpeed)
-				? p.walkSpeed as WalkSpeedTier : DEFAULTS.walkSpeed,
-			safety: SAFETY_MODES.some((m) => m.id === p.safety)
-				? p.safety as SafetyMode : DEFAULTS.safety,
+			walkSpeed: isWalkSpeedTier(p.walkSpeed) ? p.walkSpeed : DEFAULTS.walkSpeed,
+			safety: isSafetyMode(p.safety) ? p.safety : DEFAULTS.safety,
 			minimizeWalking: p.minimizeWalking === true
 		};
 	} catch {
@@ -74,10 +47,6 @@ function writeStorage() {
 	}
 }
 
-function tierKmh(id: WalkSpeedTier): number {
-	return WALK_SPEED_TIERS.find((t) => t.id === id)!.kmh;
-}
-
 export const routingOptions = {
 	get walkSpeed() { return values.walkSpeed; },
 	get safety() { return values.safety; },
@@ -93,56 +62,17 @@ export const routingOptions = {
 			&& !values.minimizeWalking;
 	},
 
-	/** `pedestrianSpeed` plan param (m/s) — null at the normal tier so
-	 * the default query stays byte-identical to today's. */
+	/** Walking pace for the direct walking tab's Valhalla call (m/s) —
+	 * null at the normal tier so the default query stays byte-identical.
+	 * The transit query's option params are derived server-side from the
+	 * value snapshot (optionParams.ts). */
 	get pedestrianSpeedMs(): number | null {
-		if (values.walkSpeed === 'normal') return null;
-		return Math.round((tierKmh(values.walkSpeed) / 3.6) * 1000) / 1000;
-	},
-
-	/** `transferTimeFactor` plan param: walking-speed scaling of the
-	 * imported transfer matrix, composed with daring's halving. Null when
-	 * it would be 1.0. */
-	get transferTimeFactor(): number | null {
-		const f = (BASE_WALK_KMH / tierKmh(values.walkSpeed))
-			* (values.safety === 'daring' ? 0.5 : 1);
-		const rounded = Math.round(f * 10000) / 10000;
-		return rounded === 1 ? null : rounded;
-	},
-
-	/** `additionalTransferTime` plan param (MINUTES) — cautious only. */
-	get additionalTransferMin(): number {
-		return values.safety === 'cautious' ? 5 : 0;
-	},
-
-	/** `minTransferTime` plan param (MINUTES): a one-minute floor on
-	 * every transfer whenever the transfer-time factor drops below 1
-	 * (daring, and the brisk / running tiers on their own). The transfer
-	 * table is quantised to whole minutes, so a factor below 1 truncates
-	 * a one-minute transfer to ZERO — the engine then offers connections
-	 * where alighting and boarding happen at the same instant. That is
-	 * the reckless tier by definition; daring may demand a sprint but
-	 * always leaves a minute (routing-options.md § Connection safety). */
-	get minTransferMin(): number {
-		const f = this.transferTimeFactor;
-		return f != null && f < 1 ? 1 : 0;
-	},
-
-	/** Minimize-walking server params (routing-options.md § Minimize
-	 * walking): the fork's steeper walk-point table plus widened
-	 * ε-alternates so more low-walk variants come back. */
-	get koraWalkPoints(): 'minwalk' | null {
-		return values.minimizeWalking ? 'minwalk' : null;
-	},
-	get alternativesEpsilon(): number {
-		return values.minimizeWalking ? 900 : 540;
-	},
-	get alternativesMax(): number {
-		return values.minimizeWalking ? 5 : 3;
+		return pedestrianSpeedMs(values);
 	},
 
 	/** Plain copy of the current values — ridden along on every routing
-	 * URL write (url.ts serialises only the non-default fields). */
+	 * URL write (url.ts serialises only the non-default fields) and sent
+	 * with every /api/plan request. */
 	snapshot(): RoutingOptionValues {
 		return { ...values };
 	},

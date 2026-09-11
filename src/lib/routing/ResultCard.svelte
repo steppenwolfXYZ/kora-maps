@@ -6,7 +6,7 @@
 		assessTransfers, legDuration, transferCount, usableSeconds, walkElevation, walkMetres,
 		walkSeconds
 	} from './ranking';
-	import { stationPlaceId } from './client';
+	import { stationPlaceId } from './place';
 	import type { Badge, TransferAssessment, TransferTier, Warning, WarningKind, WarningSeverity } from './ranking';
 	import {
 		badgeTextColor, displayLegs, fmtDistance, fmtDuration, fmtElevation, fmtTime,

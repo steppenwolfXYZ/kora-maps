@@ -1,200 +1,100 @@
-import { PUBLIC_MOTIS_URL } from '$env/static/public';
+import type { Endpoint, FilledVia, Itinerary, StationEndpoint, TimeMode } from './types';
+import type { RoutingOptionValues } from './optionParams';
+import { formatPlace, stationPlaceId } from './place';
 
-import type { Endpoint, FilledVia, PlanResponse, StationEndpoint, TimeMode } from './types';
+// Browser client of the app's own planning endpoint, GET /api/plan
+// (server-side-transit-planning.md). The whole search cascade —
+// narrow / wide walking budgets, the time-advance hops, dominance
+// pruning — runs on the server; this issues exactly one request per user
+// action and receives the final list. The browser never talks to MOTIS.
 
-// MOTIS base URL — local dev points at the local MOTIS instance
-// (motis/docker-compose.yml, http://localhost:8080), production at the
-// same-origin nginx proxy (/routing/). Set via PUBLIC_MOTIS_URL in
-// .env / .env.production; inlined at build time.
-const MOTIS_BASE = PUBLIC_MOTIS_URL.replace(/\/$/, '');
+export type Extension = 'earlier' | 'later';
 
-const NUM_ITINERARIES = 5;
-
-/** A non-OK response from the MOTIS /plan endpoint. Carries the HTTP
- * status so state.svelte.ts can pick a user-facing message; the raw
- * server body stays in `body` / `message` for console diagnostics only —
- * it must never be rendered in the UI. */
+/** A non-OK response from /api/plan. `kind` is the server's failure
+ * class (never MOTIS wording); state.svelte.ts maps it to a message. */
 export class PlanRequestError extends Error {
 	status: number;
-	body: string;
-	constructor(status: number, body: string) {
-		super(`MOTIS ${status}: ${body}`);
+	kind: string;
+	constructor(status: number, kind: string) {
+		super(`plan ${status}: ${kind}`);
 		this.name = 'PlanRequestError';
 		this.status = status;
-		this.body = body;
+		this.kind = kind;
 	}
-}
-
-// Station endpoints go to MOTIS as stop IDs ("ch_Parent<uic>"), not
-// coordinates. The forked MOTIS serves WALK offsets for stop-ID
-// endpoints straight from the imported Valhalla footpath matrix — zero
-// Valhalla HTTP calls for that side of the query — and MOTIS still
-// considers walking to nearby stations (the matrix rows include them).
-// Side effect: no spurious first/last WALK leg from the station coord
-// to its own platform, which the old stripStationWalks() workaround
-// existed to trim.
-/** MOTIS place id of a station endpoint. Also the id a via stop is sent
- * as (via-stops.md) and the id an itinerary's leg places carry as
- * `parentId`, so ranking / card code can match legs against vias. */
-export function stationPlaceId(ep: StationEndpoint): string {
-	// pid carries the feed's parent stop id (SLOID scheme); the legacy
-	// Parent<uic> shape only exists in pre-migration timetables.
-	return `ch_${ep.pid ?? `Parent${ep.uic}`}`;
-}
-
-function formatPlace(ep: Endpoint, resolved: [number, number]): string {
-	if (ep.type === 'station') return stationPlaceId(ep);
-	if (ep.type === 'point')   return `${ep.coord[1]},${ep.coord[0]}`;
-	return `${resolved[1]},${resolved[0]}`;
 }
 
 export interface PlanArgs {
 	from: Endpoint;
 	to: Endpoint;
-	mode: TimeMode;
-	time: string | null;
-	/** Ordered via stops (via-stops.md). Filled rows only — at most two,
-	 * the engine's ceiling. Each carries the REQUESTED minimum stay in
+	/** Coord of a `current` endpoint ([lon, lat]); null if neither side
+	 * is `current`. The endpoint never sees "current" — it gets a point. */
+	currentCoord: [number, number] | null;
+	/** Ordered via stops (via-stops.md). Filled rows only — at most the
+	 * engine's ceiling. Each carries the REQUESTED minimum stay in
 	 * minutes; 0 lets the traveller stay on board. */
-	vias?: FilledVia[];
-	/** Coords of `current` endpoints, one per side (undefined if not `current`). */
-	currentCoord?: [number, number] | null;
-	/** Walking budget for the walk from FROM to first stop, and last stop
-	 * to TO, in SECONDS. Server hard-caps at 28800 (8 h). Default is
-	 * narrow (1800 = 30 min) because every extra kilometre of walking
-	 * radius costs real Valhalla matrix time per query; the cascade in
-	 * state.svelte.ts escalates to 7200/28800 when the narrow search
-	 * comes up short. */
-	maxPreTransitTime?: number;
-	maxPostTransitTime?: number;
-	/** Time-window size passed to MOTIS in seconds. Defaults to 900 (15 min)
-	 * for a fast initial query; the cascade in state.svelte.ts widens this
-	 * to 7200 (2 h) once it's advancing `time` forward to accumulate more
-	 * results. */
-	searchWindow?: number;
-	/** Two-tier transfer table (transfer-point-optimization.md): default
-	 * queries search transfers on the capped (30 min) Valhalla table;
-	 * `true` selects the full 2-h table. The cascade sets it whenever it
-	 * runs with the wide walking budget — the sparse-service situations
-	 * where long transfer-walk connections matter. */
-	fullTransfers?: boolean;
-	/** Routing options (routing-options.md). All three omitted at the
-	 * defaults so a default query stays byte-identical to the pre-options
-	 * behavior. `pedestrianSpeedMs` (m/s) rescales the fork's Valhalla
-	 * walking surfaces (offsets + walk legs); `transferTimeFactor` scales
-	 * the transfer matrix at query time (walking speed x daring);
-	 * `additionalTransferMin` (minutes) is cautious mode's fixed slack. */
-	pedestrianSpeedMs?: number | null;
-	transferTimeFactor?: number | null;
-	additionalTransferMin?: number;
-	/** `minTransferTime` (MINUTES): one-minute floor on every transfer
-	 * whenever the factor is below 1, so the transfer table's whole-minute
-	 * quantisation can never truncate a transfer to zero (see
-	 * options.svelte.ts § minTransferMin). */
-	minTransferMin?: number;
-	/** Minimize-walking (routing-options.md § Minimize walking):
-	 * `koraWalkPoints` ('minwalk') selects the fork's steeper walk-point
-	 * table so walking-light journeys survive as their own Pareto
-	 * points; the ε-alternates knobs widen alongside (see below). */
-	koraWalkPoints?: 'minwalk' | null;
-	alternativesEpsilon?: number;
-	alternativesMax?: number;
+	vias: FilledVia[];
+	mode: TimeMode;
+	/** Concrete ISO timestamp — never null; the caller pins "now". */
+	time: string;
+	options: RoutingOptionValues;
+	/** History of the earlier / later clicks on this query, in order. The
+	 * server replays it, so the response is always the whole list. */
+	extensions: Extension[];
+	/** Share fingerprint to verify (connection-sharing.md § Shared view). */
+	share?: string | null;
 }
 
-export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResponse> {
-	const fromResolved: [number, number] = args.from.type === 'current'
-		? (args.currentCoord ?? [0, 0])
-		: args.from.coord;
-	const toResolved: [number, number] = args.to.type === 'current'
-		? (args.currentCoord ?? [0, 0])
-		: args.to.coord;
+export interface PlanResult {
+	itineraries: Itinerary[];
+	/** comfort-walk-baseline.md: the query's unavoidable walking in
+	 * seconds — a ranking knob the cards need. */
+	walkBaselineSec: number;
+	budget: 'narrow' | 'wide';
+	/** Share mode only: the matching itinerary, or null when gone. */
+	shareMatch?: Itinerary | null;
+	/** The server's time ceiling cut the search short. */
+	truncated: boolean;
+}
 
+export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanResult> {
 	const params = new URLSearchParams();
-	params.set('fromPlace', formatPlace(args.from, fromResolved));
-	params.set('toPlace', formatPlace(args.to, toResolved));
-	// fromName/toName: display labels of geocoded point endpoints. MOTIS
-	// ignores unknown params — carried purely so the nginx access log
-	// (and thus the /stats page) sees the human-readable place names.
+	params.set('fromPlace', formatPlace(args.from, args.currentCoord));
+	params.set('toPlace', formatPlace(args.to, args.currentCoord));
+	// fromName/toName: display labels of geocoded point endpoints. The
+	// server ignores them — carried purely so the nginx access log (and
+	// thus the /stats page) sees the human-readable place names.
 	if (args.from.type === 'point' && args.from.displayName)
 		params.set('fromName', args.from.displayName);
 	if (args.to.type === 'point' && args.to.displayName)
 		params.set('toName', args.to.displayName);
 	params.set('arriveBy', args.mode === 'arrive' ? 'true' : 'false');
-	if (args.time) params.set('time', args.time);
-	params.set('numItineraries', String(NUM_ITINERARIES));
-	params.set('maxPreTransitTime', String(args.maxPreTransitTime ?? 1800));
-	params.set('maxPostTransitTime', String(args.maxPostTransitTime ?? 1800));
-	// Via stops (via-stops.md). Stop ids only — the engine rejects
-	// coordinates here, which is why transit vias are always stations.
-	// The station filter is type-level: point vias exist only on the
-	// direct tabs, which never call plan(). The per-via minimum stay
-	// rides along in the same order; 0 means the traveller may stay on
-	// board (no forced vehicle change).
-	const vias = (args.vias ?? []).filter(
-		(v): v is FilledVia & { station: StationEndpoint } =>
-			v.station.type === 'station'
+	params.set('time', args.time);
+	// Stop ids only — the engine rejects coordinates here, which is why
+	// transit vias are always stations. The station filter is type-level:
+	// point vias exist only on the direct tabs, which never call plan().
+	const vias = args.vias.filter(
+		(v): v is FilledVia & { station: StationEndpoint } => v.station.type === 'station'
 	);
 	if (vias.length > 0) {
 		params.set('via', vias.map((v) => stationPlaceId(v.station)).join(','));
 		params.set('viaMinimumStay', vias.map((v) => String(Math.round(v.wait))).join(','));
 	}
-	// `maxTravelTime` is TOTAL itinerary duration (transit + all walking)
-	// in MINUTES — a low value here silently drops Bern↔Lötschental-style
-	// trips where the walking legs alone approach 8 h. 24 h leaves room
-	// for any real cross-CH trip; MOTIS's own limits still cap walking.
-	// Planned via waits are part of that total, so the ceiling has to grow
-	// by them — otherwise a long errand silently returns nothing at all.
-	const dwellMin = vias.reduce((s, v) => s + Math.round(v.wait), 0);
-	params.set('maxTravelTime', String(1440 + dwellMin));
-	// directModes controls the non-transit fallback that MOTIS returns in
-	// `direct[]`. WALK is the default but set it explicitly so a
-	// walk-only itinerary always comes back for merging.
-	params.set('directModes', 'WALK');
-	// MOTIS caps direct (walk-only) itineraries at 30 min by default —
-	// past that, it falls back to weird walking-heavy transit hybrids
-	// (WALK 45m + BUS 0m + WALK 1m). Lift to the 8 h server ceiling.
-	params.set('maxDirectTime', '28800');
-	// Without this flag MOTIS transfers on nigiri's default footpath set
-	// (GTFS transfers.txt — sparse, direction-incomplete) instead of the
-	// fork's imported Valhalla matrix, producing needlessly long transfer
-	// walks (see transfer-point-optimization.md).
-	params.set('useRoutedTransfers', 'true');
-	// Fork-only flag (upstream MOTIS ignores it): select the full 2-h
-	// transfer table instead of the capped default one.
-	if (args.fullTransfers) params.set('koraFullTransfers', 'true');
-	// Fork-only ε-alternates (near-optimal-endpoint-alternatives.md):
-	// besides each Pareto-optimal journey, return egress/access-stop
-	// variants arriving within the slack, as ordinary itineraries — the
-	// pruning in ranking.ts decides which survive. Default 540 s =
-	// ranking.ts's Case-1 overlap window (OVERLAP_TIME_MAX_MS), so the
-	// server returns a slight superset of what layer 2 would ever keep;
-	// max 3 alternates per Pareto point. Minimize-walking widens both
-	// (state.svelte.ts passes the values from options.svelte.ts).
-	params.set('alternativesEpsilon', String(args.alternativesEpsilon ?? 540));
-	params.set('alternativesMax', String(args.alternativesMax ?? 3));
-	if (args.koraWalkPoints) params.set('koraWalkPoints', args.koraWalkPoints);
-	params.set('searchWindow', String(args.searchWindow ?? 900));
-	// Routing options — only sent off their defaults (see PlanArgs).
-	if (args.pedestrianSpeedMs != null)
-		params.set('pedestrianSpeed', String(args.pedestrianSpeedMs));
-	if (args.transferTimeFactor != null)
-		params.set('transferTimeFactor', String(args.transferTimeFactor));
-	if (args.additionalTransferMin)
-		params.set('additionalTransferTime', String(args.additionalTransferMin));
-	if (args.minTransferMin)
-		params.set('minTransferTime', String(args.minTransferMin));
+	// Routing options — only sent off their defaults.
+	if (args.options.walkSpeed !== 'normal') params.set('walkSpeed', args.options.walkSpeed);
+	if (args.options.safety !== 'balanced') params.set('safety', args.options.safety);
+	if (args.options.minimizeWalking) params.set('minWalk', '1');
+	if (args.extensions.length > 0) params.set('extend', args.extensions.join(','));
+	if (args.share) params.set('share', args.share);
 
-	const url = `${MOTIS_BASE}/api/v1/plan?${params.toString()}`;
-	const res = await fetch(url, { signal });
-	if (!res.ok) throw new PlanRequestError(res.status, await res.text().catch(() => res.statusText));
-	// Every walking duration/geometry in the response is Valhalla-computed
-	// server-side by the MOTIS fork (see valhalla-pedestrian-router.md) —
-	// including `leg.duration` on transfer walks, which the fork reports as
-	// Valhalla's own walking seconds rather than the leg's time span. That
-	// span is the transfer table's minute-quantised value after
-	// `transferTimeFactor`, so reading walking time off it made walks shrink
-	// with the safety mode (a 63 m transfer read "0 min" in daring). Nothing
-	// is rewritten here; every consumer takes leg durations at face value.
-	return (await res.json()) as PlanResponse;
+	const res = await fetch(`/api/plan?${params.toString()}`, { signal });
+	if (!res.ok) {
+		let kind = 'unknown';
+		try {
+			kind = String(((await res.json()) as { error?: string }).error ?? kind);
+		} catch {
+			// non-JSON error page (proxy, gateway) — the status is enough
+		}
+		throw new PlanRequestError(res.status, kind);
+	}
+	return (await res.json()) as PlanResult;
 }
-

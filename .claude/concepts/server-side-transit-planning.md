@@ -58,11 +58,18 @@ hop.
   to, vias with waits, leave-at / arrive-by, time (a null time is pinned
   to "now" by the client before sending, as today), and the routing
   options (walk speed, safety, minimize walking).
-- "Earlier" / "later" are the same endpoint with three extra inputs:
-  direction, the walking budget the shown list was built with (narrow or
-  wide), and the fingerprints of the itineraries currently shown, so the
-  server extends the list without repeating entries. The endpoint is
-  stateless — no server-side session for a running search.
+- "Earlier" / "later" are the same endpoint with one extra input: the
+  ordered history of the earlier / later clicks on this query
+  (`extend=later,later,earlier`). The server replays that history —
+  MOTIS is deterministic, so the replay reproduces the list the client
+  shows and then extends it — and responds with the whole list. The
+  endpoint is stateless — no server-side session for a running search;
+  a small in-memory cache of finished cascade states (keyed by query +
+  click history, short-lived) only shortcuts the replay. *(Amended at
+  implementation: the original draft had the client send the walking
+  budget and the shown fingerprints instead. That cannot honour the
+  pruning rules, which judge the new candidates against the full
+  itineraries already shown, not against their fingerprints.)*
 - Share verification on opening a shared connection (the wide-from-the-
   start search that looks for one fingerprint) is a mode of the same
   endpoint: the request names the wanted fingerprint, the response says
@@ -70,10 +77,11 @@ hop.
 
 ### 3. Response contract
 
-- The result list, plus the metadata the client needs to continue: the
-  walking budget the cascade settled on (narrow / wide), and the
-  fingerprints the server merged, so the next "earlier / later" request
-  can pass them back.
+- The result list, the query's walk baseline (a ranking knob the cards
+  need), the walking budget the cascade settled on (narrow / wide), and
+  whether the time ceiling cut the search short. The client needs
+  nothing else to continue — the next "earlier / later" request carries
+  the click history.
 - Errors map to the same user-facing messages as today (unreachable,
   server error, no route), decided by the server so the client never
   interprets MOTIS responses.

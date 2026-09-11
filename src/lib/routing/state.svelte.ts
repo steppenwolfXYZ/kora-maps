@@ -1,22 +1,22 @@
 import { pushState, replaceState } from '$app/navigation';
 import { browser } from '$app/environment';
 import { page } from '$app/state';
-import { plan, PlanRequestError, stationPlaceId } from './client';
+import { plan, PlanRequestError, type Extension } from './client';
 import { DirectRouteError, fetchDirectRoutes } from './valhalla';
 import { itineraryFingerprint } from './fingerprint';
 import {
 	geolocationDenied, geolocationErrorMessage, hasGeolocation,
 	invalidateCurrent, resolveCurrent
 } from './geolocation.svelte';
-import { boardingCount, pruneDominated, walkSeconds } from './ranking';
 import { routingOptions, type RoutingOptionValues } from './options.svelte';
+import { stationPlaceId } from './place';
 import { connectStations } from './connect.svelte';
 import { recentRoutes } from './recents.svelte';
-import { reportShareExpired, shareFingerprint, type ShareData } from './share';
+import { reportShareExpired, type ShareData } from './share';
 import { reverseAddress } from '$lib/geocoding/client';
 import {
 	activeVias, MAX_VIAS, MAX_VIA_WAIT_MIN, plannedDwellSec,
-	type DirectRoute, type Endpoint, type FilledVia, type Itinerary, type PlanResponse,
+	type DirectRoute, type Endpoint, type FilledVia, type Itinerary,
 	type StationEndpoint, type TimeMode, type TravelMode, type Via
 } from './types';
 import { endpointToParam, writeRoutingQuery } from './url';
@@ -70,16 +70,6 @@ let loading = $state(false);
 // Non-null while a loadMoreEarlier / loadMoreLater is in flight; the
 // direction lets the panel disable / label the matching button.
 let loadingMore = $state<'earlier' | 'later' | null>(null);
-// Progress line shown inside the main loader while a query runs. null =
-// the generic "Route options are loading" wording; set to something
-// specific whenever the cascade escalates the walking budget or fires
-// extra hop requests, so long searches explain themselves.
-let loadingStatus = $state<string | null>(null);
-// Set once the running query's published list has SHRUNK — a later hop
-// brought in connections that dominate ones already on screen, so the
-// "N options found" counter ticks backwards. The panel explains the dip
-// instead of leaving it looking like a glitch.
-let loadingPruned = $state(false);
 let error = $state<string | null>(null);
 let hasQueried = $state(false);
 
@@ -142,49 +132,14 @@ let lastQueryKey: string | null = null;
 // entry is still the pushed one.
 let pushedEntry = false;
 
-// Cascade tuning — see performance discussion.
-// Narrow default is 30 min walking: every extra kilometre of walking
-// radius costs real Valhalla matrix time per query in the MOTIS fork
-// (the pre/post offsets are a live one-to-many call for coordinate
-// endpoints). 30 min covers the normal case; the escalation below
-// lifts to the 8 h server cap when the narrow search comes up short.
-const NARROW_PRE_POST_SEC = 1800;   // 30 min — narrow default per query
-const WIDE_PRE_POST_SEC   = 28800;  // 8 h — server hard cap, used on escalation
-const LONG_WAIT_THRESHOLD_SEC = 3600; // 1 h wait triggers pre/post escalation
-const TARGET_RESULT_COUNT = 5;
-// Sparse-service escalation — if the narrow cascade reveals a ≥4 h stretch
-// of daytime (06–21 local) with no service (either between two consecutive
-// results, or between the last result and how far the hop cascade has
-// searched), redo everything with the wide walking budget.
-const SPARSE_GAP_THRESHOLD_SEC = 4 * 3600;
-const DAY_START_HOUR = 6;
-const DAY_END_HOUR = 21;
-// Stage 3 time-advance cascade — MOTIS's nextPageCursor stalls on remote
-// destinations (returns 0 with the same cursor value), so instead of
-// paging via cursor we advance `time` past the last returned itinerary
-// and re-query fresh.
-const HOP_MS = 2 * 3600 * 1000;         // 2 h step when a hop returns empty
-const HOP_SEARCH_WINDOW_SEC = 7200;     // matches HOP_MS so windows don't gap
-const MAX_SPAN_MS = 5 * 24 * 3600 * 1000; // stop after 5 days of advance
-const MAX_EMPTY_STREAK = 3;             // stop after N consecutive empty hops
-
-// Cascade state — shared between runQuery and loadMoreEarlier / loadMoreLater.
-// Not reactive; every mutation of `combined` flows through publishResults()
-// which is the sole writer of the reactive `results` array. `resultTarget`
-// is the current `.slice()` cap and is bumped by TARGET_RESULT_COUNT on
-// every loadMore click.
-let combined: Itinerary[] = [];
-let seenFingerprints = new Set<string>();
+// The search cascade (narrow / wide walking budgets, time-advance hops,
+// dominance pruning) runs on the server — one GET /api/plan per user
+// action returns the final list (server-side-transit-planning.md). What
+// the client keeps is the request's history: the earlier / later clicks
+// on the current query, replayed by the server on every extension so the
+// endpoint stays stateless.
+let extensions: Extension[] = [];
 let resolvedCurrentCoord: [number, number] | null = null;
-let resultTarget = TARGET_RESULT_COUNT;
-// Walking budget the current cascade has settled on. loadMore extends the
-// list with the same reach the visible results were built with — it used
-// to hardcode the wide budget, which (via the pre === WIDE derivation in
-// runHopCascade) also forced the full 2-h transfer table onto every
-// later/earlier click, a slower exhaustive search that dense routes never
-// need. Narrow-budget loadMore hops keep the sparse-gap escalation as a
-// safety net, mirroring the initial cascade's stage 2c.
-let activePrePostSec = NARROW_PRE_POST_SEC;
 
 function abortInFlight() {
 	if (!pendingAbort) return;
@@ -213,18 +168,10 @@ function viaWaitByStop(): Map<string, number> | null {
 }
 
 /** comfort-walk-baseline.md: the query's unavoidable walking (seconds),
- * summed from the fork's per-endpoint minima. A property of the query —
- * every hop, escalation and later load returns the same number, so it is
- * simply re-read from each response; it never depends on which
- * itineraries came back. Reset with the cascade state. */
+ * summed from the fork's per-endpoint minima. A property of the query,
+ * reported by the server with every result list. Reset with the cascade
+ * state. */
 let walkBaselineSec = $state(0);
-
-/** Take the baseline off a plan response. Absent fields (station
- * endpoints report 0; an unreachable endpoint or an older server omits
- * them) contribute nothing. */
-function noteWalkBaseline(res: PlanResponse) {
-	walkBaselineSec = (res.koraMinWalkFrom ?? 0) + (res.koraMinWalkTo ?? 0);
-}
 
 /** Ranking knobs shared by publishResults and the panel's card states. */
 export function rankOptionsFor(): {
@@ -267,12 +214,9 @@ function commitViaEdit(before: string) {
 }
 
 function resetCascadeState() {
-	combined = [];
+	extensions = [];
 	walkBaselineSec = 0;
-	seenFingerprints = new Set();
 	resolvedCurrentCoord = null;
-	resultTarget = TARGET_RESULT_COUNT;
-	activePrePostSec = NARROW_PRE_POST_SEC;
 }
 
 // Recents never store a live "current location" endpoint — it can't
@@ -322,240 +266,17 @@ async function recordRecentRoute(
 	}
 }
 
-function currentSortFn() {
-	// Sort ascending in both modes so the "Earlier connections" (top) /
-	// "Later connections" (bottom) buttons align with the direction they
-	// load — arrive-by used to sort descending, which put earlier-loaded
-	// results at the bottom and the earlier button at the top. Auto-
-	// select compensates by picking the relevant end (last for arrive-by).
-	return mode === 'arrive'
-		? (a: Itinerary, b: Itinerary) => Date.parse(a.startTime) - Date.parse(b.startTime)
-		: (a: Itinerary, b: Itinerary) => Date.parse(a.endTime) - Date.parse(b.endTime);
-}
 
-function publishResults() {
-	// Minimize walking: direct walk itineraries beyond 30 min are never
-	// shown (routing-options.md § Minimize walking — suppression rules).
-	const candidates = routingOptions.minimizeWalking
-		? combined.filter((it) => boardingCount(it) > 0 || walkSeconds(it) <= 1800)
-		: combined;
-	const pruned = pruneDominated(candidates, mode, rankOptionsFor())
-		.sort(currentSortFn());
-	// The cap must keep the end nearest the query time: leave-at sorts by
-	// arrival ascending and keeps the head (earliest arrivals after the
-	// departure time); arrive-by sorts by departure ascending and must keep
-	// the tail (latest departures before the arrival time) — slice(0, N)
-	// there would surface the cascade's earlier hops and drop every
-	// connection near the requested arrival.
-	results = mode === 'arrive'
-		? pruned.slice(-resultTarget)
-		: pruned.slice(0, resultTarget);
-}
-
-/** Progress wording for one hop iteration of the stage-3 cascade: how many
- * options are on screen already and which way we keep looking. Only shown
- * while the main loader is up (loadMore has its own bare inline pill). */
-function setHopStatus(dir: 1 | -1) {
-	if (!loading) return;
-	const n = results.length;
-	const where = dir === 1 ? 'later on' : 'earlier';
-	loadingStatus = n === 0
-		? `No options yet, looking ${dir === 1 ? 'further ahead' : 'further back'}...`
-		: `${n} option${n === 1 ? '' : 's'} found, looking for more options ${where}...`;
-}
-
-/** Hop `time` in `dir` (+1 forward, −1 backward) starting at `startEpoch`
- * and merge fresh itineraries into `combined` until `results.length`
- * reaches `resultTarget`, MAX_EMPTY_STREAK consecutive empty hops fire,
- * or MAX_SPAN_MS from `startEpoch` is exceeded. Publishes intermediate
- * results after every fresh batch. Caller owns `pendingAbort`.
- *
- * Hops are direction-native point queries, independent of the panel's
- * mode (which keeps governing pruning / sorting / display): MOTIS
- * effectively treats arrive-by as "the N connections arriving closest
- * before `time`" — its arrive-by searchWindow handling is unreliable, so
- * window-coverage hops would leave gaps. Forward hops therefore always
- * query leave-at anchored just past the latest known departure; backward
- * hops always query arrive-by anchored just before the earliest known
- * arrival. Each hop nets the N connections adjacent to its anchor.
- *
- * `shouldEscalate` (when provided) is called with the current search
- * frontier — the point up to which we've searched, either the last fresh
- * result's anchor or the empty-hop query time — after every iteration.
- * When it returns true the cascade returns `'escalate'` so the caller can
- * redo the pipeline with a wider walking budget. Otherwise `'done'`. */
-async function runHopCascade(
-	dir: 1 | -1,
-	startEpoch: number,
-	pre: number,
-	post: number,
-	ac: AbortController,
-	shouldEscalate?: (frontierMs: number) => boolean
-): Promise<'done' | 'escalate'> {
-	const hopMode: TimeMode = dir === 1 ? 'leave' : 'arrive';
-	let queryEpoch = startEpoch;
-	let emptyStreak = 0;
-	while (results.length < resultTarget && !ac.signal.aborted) {
-		if (Math.abs(queryEpoch - startEpoch) > MAX_SPAN_MS) break;
-		if (emptyStreak >= MAX_EMPTY_STREAK) break;
-		setHopStatus(dir);
-		const hopTime = new Date(queryEpoch).toISOString();
-		const res = await plan({
-			from: from!, to: to!, vias: queryVias(), mode: hopMode, time: hopTime,
-			currentCoord: resolvedCurrentCoord,
-			maxPreTransitTime: pre,
-			maxPostTransitTime: post,
-			searchWindow: HOP_SEARCH_WINDOW_SEC,
-			// Full 2-h transfer table rides along with the wide walking
-			// budget — both mark "sparse service, search exhaustively"
-			// (transfer-point-optimization.md § Two-tier transfer table).
-			fullTransfers: pre === WIDE_PRE_POST_SEC,
-			pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
-			transferTimeFactor: routingOptions.transferTimeFactor,
-			additionalTransferMin: routingOptions.additionalTransferMin,
-			minTransferMin: routingOptions.minTransferMin,
-			koraWalkPoints: routingOptions.koraWalkPoints,
-			alternativesEpsilon: routingOptions.alternativesEpsilon,
-			alternativesMax: routingOptions.alternativesMax
-		}, ac.signal);
-		if (ac.signal.aborted) return 'done';
-		noteWalkBaseline(res);
-		const items = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-		const unseen = items.filter((it) => !seenFingerprints.has(itineraryFingerprint(it)));
-		// Merge only the adjacent-most items still needed to reach the
-		// target: leave-at hops honor the search window and can return the
-		// full 2 h of connections at once — merging all of them would let
-		// the display slice (head for leave-at, tail for arrive-by) jump to
-		// the batch's far end and replace the visible list instead of
-		// extending it. Items beyond the cap stay unmarked in
-		// seenFingerprints, so a later hop re-fetches them as fresh.
-		const needed = Math.max(1, resultTarget - results.length);
-		const anchorOf = (i: Itinerary) =>
-			Date.parse(dir === 1 ? i.startTime : i.endTime);
-		const ordered = unseen.sort((a, b) => dir === 1
-			? anchorOf(a) - anchorOf(b)
-			: anchorOf(b) - anchorOf(a));
-		const fresh = ordered.slice(0, needed);
-		// Never split a same-minute anchor group across the merge cap: the
-		// next hop starts one minute past this batch's last anchor, so an
-		// unmerged sibling departing (arriving) in the same minute would sit
-		// behind every later hop window and vanish for good (canonical:
-		// a 0-transfer and a 1-transfer option leaving the same minute —
-		// the server sorts the 0-transfer first, and a cap of 1 would
-		// permanently eat its sibling).
-		if (fresh.length > 0) {
-			const edge = anchorOf(fresh[fresh.length - 1]);
-			for (const it of ordered.slice(fresh.length)) {
-				if (anchorOf(it) !== edge) break;
-				fresh.push(it);
-			}
-		}
-		for (const it of fresh) seenFingerprints.add(itineraryFingerprint(it));
-		if (fresh.length === 0) {
-			emptyStreak++;
-			queryEpoch += dir * HOP_MS;
-		} else {
-			emptyStreak = 0;
-			const publishedBefore = results.length;
-			combined = [...combined, ...fresh];
-			publishResults();
-			// Pruning is global over the whole accumulated set, so a merge
-			// can retire more than it adds.
-			if (loading && results.length < publishedBefore) loadingPruned = true;
-			// Advance along the axis the hop mode bounds: leave-at queries
-			// bound departures (startTime), arrive-by queries bound
-			// arrivals (endTime). Anchoring backward hops on startTime
-			// would skip ~a trip duration of connections per hop.
-			const anchors = fresh.map((i) =>
-				Date.parse(dir === 1 ? i.startTime : i.endTime));
-			queryEpoch = (dir === 1 ? Math.max(...anchors) : Math.min(...anchors))
-				+ dir * 60_000;
-		}
-		if (shouldEscalate?.(queryEpoch)) return 'escalate';
-	}
-	return 'done';
-}
-
-/** Length in seconds of the longest continuous slice of [startMs, endMs]
- * that fits entirely inside a single day's 06–21 local-time window. Used
- * to test whether a service gap contains ≥ SPARSE_GAP_THRESHOLD_SEC of
- * "daytime hours when service should be available". */
-function maxDaytimeSliceSec(startMs: number, endMs: number): number {
-	if (endMs <= startMs) return 0;
-	const first = new Date(startMs);
-	first.setHours(0, 0, 0, 0);
-	let max = 0;
-	for (let d = first.getTime(); d < endMs; d += 24 * 3600 * 1000) {
-		const day = new Date(d);
-		const dtStart = new Date(day.getFullYear(), day.getMonth(), day.getDate(), DAY_START_HOUR).getTime();
-		const dtEnd = new Date(day.getFullYear(), day.getMonth(), day.getDate(), DAY_END_HOUR).getTime();
-		const sliceStart = Math.max(startMs, dtStart);
-		const sliceEnd = Math.min(endMs, dtEnd);
-		if (sliceEnd > sliceStart) {
-			const secs = (sliceEnd - sliceStart) / 1000;
-			if (secs > max) max = secs;
-		}
-	}
-	return max;
-}
-
-/** True when the timeline (query time + itinerary anchor times + current
- * cascade frontier) contains a consecutive gap whose daytime slice on any
- * single day reaches SPARSE_GAP_THRESHOLD_SEC. Signals that the narrow
- * walking radius reaches only sparse service and the wide radius should
- * be tried — the trigger fires from both real inter-result gaps and from
- * empty hops (the frontier advances past the last known result). */
-function hasSparseServiceGap(
-	its: Itinerary[],
-	queryTimeMs: number,
-	frontierMs: number,
-	m: TimeMode
-): boolean {
-	const key = m === 'arrive' ? 'endTime' : 'startTime';
-	const anchors = its.map((i) => Date.parse(i[key]));
-	const timeline = [...new Set([queryTimeMs, frontierMs, ...anchors])]
-		.sort((a, b) => a - b);
-	for (let i = 0; i < timeline.length - 1; i++) {
-		if (timeline[i + 1] - timeline[i] < SPARSE_GAP_THRESHOLD_SEC * 1000) continue;
-		if (maxDaytimeSliceSec(timeline[i], timeline[i + 1]) >= SPARSE_GAP_THRESHOLD_SEC) {
-			return true;
-		}
-	}
-	return false;
-}
-
-/** True when any transit leg in the itinerary is preceded by a wait
- * longer than `LONG_WAIT_THRESHOLD_SEC`. Signals that expanding the
- * walking budget might reach a nearer stop with better-timed service. */
-function hasLongWait(it: Itinerary): boolean {
-	const viaWaits = viaWaitByStop();
-	const legs = it.legs;
-	for (let i = 0; i < legs.length; i++) {
-		const leg = legs[i];
-		if (leg.mode === 'WALK') continue;
-		const prev = i > 0 ? legs[i - 1] : null;
-		const prevEnd = prev ? Date.parse(prev.endTime) : Date.parse(it.startTime);
-		// A wait the user asked for at a via is not a signal that the
-		// walking radius is too narrow — only its excess is
-		// (via-stops.md § Planned dwell).
-		const planned = viaWaits && prev
-			? (viaWaits.get(prev.to?.parentId ?? '') ?? viaWaits.get(prev.to?.stopId ?? '') ?? 0)
-			: 0;
-		const wait = (Date.parse(leg.startTime) - prevEnd) / 1000 - planned;
-		if (wait > LONG_WAIT_THRESHOLD_SEC) return true;
-	}
-	return false;
-}
-
-/** Map a failed plan request to a short user-facing message. The raw
- * error (HTTP status + MOTIS response body) goes to the console only —
- * server internals are never rendered in the panel. */
+/** Map a failed plan request to a short user-facing message. The server
+ * reports only a failure class (server-side-transit-planning.md); the raw
+ * error goes to the console. */
 function userFacingError(e: unknown): string {
 	console.error('[routing] query failed:', e);
 	if (e instanceof PlanRequestError) {
-		// A 4xx from MOTIS almost always means an endpoint the current
-		// timetable doesn't know (e.g. a stale stop id in a bookmarked URL).
-		if (e.status >= 400 && e.status < 500)
+		// The engine rejected the query itself — almost always an endpoint
+		// the current timetable doesn't know (e.g. a stale stop id in a
+		// bookmarked URL).
+		if (e.kind === 'rejected' || e.status === 400)
 			return 'Sorry — an error on our side prevented finding the locations for this route.';
 		return 'Sorry — the route search is temporarily unavailable on our side. Please try again later.';
 	}
@@ -637,63 +358,51 @@ function invalidateSelection() {
 	}
 }
 
-/** Extend the result set in one chronological direction. Bumps
- * `resultTarget` by TARGET_RESULT_COUNT and hops until that many more
- * results survive pruning, empty-streak or MAX_SPAN fires. Called only
- * when an initial query has completed with at least one result — the
- * bumped target is naturally reset by resetCascadeState() when a fresh
- * runQuery starts. */
+/** The /api/plan request for the current query and its click history.
+ * `queryTime` is always the pinned concrete timestamp (see
+ * resolvedNowTime). */
+function planArgs(queryTime: string, share: string | null = null) {
+	return {
+		from: from!, to: to!, currentCoord: resolvedCurrentCoord,
+		vias: queryVias(), mode, time: queryTime,
+		options: routingOptions.snapshot(),
+		extensions: [...extensions],
+		share
+	};
+}
+
+/** Extend the result set in one chronological direction: one more
+ * "earlier" / "later" in the request's history, replayed and extended by
+ * the server. The response replaces the whole list. Called only when an
+ * initial query has completed with at least one result — the history is
+ * reset by resetCascadeState() when a fresh runQuery starts. */
 async function loadMoreInDirection(direction: 'earlier' | 'later') {
 	if (loading || loadingMore) return;
 	if (!from || !to || results.length === 0) return;
+	const queryTime = time ?? resolvedNowTime;
+	if (!queryTime) return;
 	abortInFlight();
 	const ac = new AbortController();
 	pendingAbort = ac;
 	loadingMore = direction;
-	resultTarget += TARGET_RESULT_COUNT;
-	const dir: 1 | -1 = direction === 'later' ? 1 : -1;
-	// Direction-native seed (see runHopCascade): forward hops are leave-at
-	// queries anchored just past the latest known departure, backward hops
-	// are arrive-by queries anchored just before the earliest known arrival.
-	// Recomputed for the escalation retry — merged results move the edge.
-	const seedEpoch = () => {
-		const anchors = combined.map((i) =>
-			Date.parse(dir === 1 ? i.startTime : i.endTime));
-		return dir === 1
-			? Math.max(...anchors) + 60_000
-			: Math.min(...anchors) - 60_000;
-	};
-	// Extend with the budget the visible list was built with (see
-	// activePrePostSec). While that is narrow, arm the same sparse-gap
-	// escalation as the initial cascade: service can thin out past the
-	// list's edge (e.g. extending into the night) even when the original
-	// window was dense.
-	const budget = activePrePostSec;
-	const startEpoch = seedEpoch();
+	extensions = [...extensions, direction];
 	try {
-		const outcome = await runHopCascade(
-			dir, startEpoch, budget, budget, ac,
-			budget === NARROW_PRE_POST_SEC
-				? (frontier) => hasSparseServiceGap(combined, startEpoch, frontier, mode)
-				: undefined
-		);
-		// Sparse service past the edge — continue wide (full transfer
-		// table rides along). Unlike stage 2c the shown results are NOT
-		// replaced: only the extension beyond the current edge is
-		// re-searched, so the seed is recomputed from the merged set and
-		// the wide budget sticks for further loadMore clicks.
-		if (outcome === 'escalate' && !ac.signal.aborted) {
-			activePrePostSec = WIDE_PRE_POST_SEC;
-			await runHopCascade(
-				dir, seedEpoch(), WIDE_PRE_POST_SEC, WIDE_PRE_POST_SEC, ac);
-		}
+		const res = await plan(planArgs(queryTime), ac.signal);
+		if (ac.signal.aborted) return;
+		walkBaselineSec = res.walkBaselineSec;
+		results = res.itineraries;
 	} catch (e) {
 		if ((e as Error).name !== 'AbortError') {
+			// The click didn't land — drop it from the history so the next
+			// request doesn't replay a step the list never showed.
+			extensions = extensions.slice(0, -1);
 			error = userFacingError(e);
 		}
 	} finally {
-		if (pendingAbort === ac) pendingAbort = null;
-		loadingMore = null;
+		if (pendingAbort === ac) {
+			pendingAbort = null;
+			loadingMore = null;
+		}
 	}
 }
 
@@ -721,8 +430,6 @@ async function runDirectQuery(key: string) {
 	const m = travelMode as 'bike' | 'walk';
 	error = null;
 	loading = true;
-	loadingStatus = null;
-	loadingPruned = false;
 	hasQueried = true;
 	abortInFlight();
 	const ac = new AbortController();
@@ -777,8 +484,6 @@ async function runDirectQuery(key: string) {
 		if (pendingAbort === ac) {
 			pendingAbort = null;
 			loading = false;
-			loadingStatus = null;
-			loadingPruned = false;
 		}
 	}
 }
@@ -804,8 +509,6 @@ export const routingState = {
 	get results() { return results; },
 	get loading() { return loading; },
 	get loadingMore() { return loadingMore; },
-	get loadingStatus() { return loadingStatus; },
-	get loadingPruned() { return loadingPruned; },
 	get error() { return error; },
 	get hasQueried() { return hasQueried; },
 	get selectedItinerary() { return selectedItinerary; },
@@ -882,8 +585,6 @@ export const routingState = {
 		// query re-runs via the panel's query effect on reopen.
 		loading = false;
 		loadingMore = null;
-		loadingStatus = null;
-		loadingPruned = false;
 		const url = currentUrl();
 		writeUrl(url, {
 			from: null, to: null, vias: [], mode: 'leave', time: null, route: null
@@ -909,8 +610,6 @@ export const routingState = {
 		directSelected = 0;
 		loading = false;
 		loadingMore = null;
-		loadingStatus = null;
-		loadingPruned = false;
 		error = null;
 		hasQueried = false;
 		lastQueryKey = null;
@@ -1340,7 +1039,9 @@ export const routingState = {
 		// run and put it on the URL immediately, so the address always
 		// carries the time the results are computed for (even if the query
 		// errors or comes back empty). State `time` stays null: the panel
-		// keeps showing "now" and a later re-run re-stamps.
+		// keeps showing "now" and a later re-run re-stamps. The server gets
+		// the pinned value too, so a later earlier/later replay anchors on
+		// the same instant.
 		if (!time) {
 			resolvedNowTime = new Date().toISOString();
 			syncUrl();
@@ -1348,8 +1049,6 @@ export const routingState = {
 		const queryTime: string = time ?? resolvedNowTime!;
 		error = null;
 		loading = true;
-		loadingStatus = null;
-		loadingPruned = false;
 		hasQueried = true;
 		abortInFlight();
 		const ac = new AbortController();
@@ -1366,163 +1065,24 @@ export const routingState = {
 				}
 			}
 
-			let pre = NARROW_PRE_POST_SEC;
-			let post = NARROW_PRE_POST_SEC;
-			// Share verification must not depend on the narrow-radius
-			// heuristics: a shared connection with a long first/last-mile
-			// walk would be invisible to the narrow query and read as
-			// expired. Go wide from the start.
-			if (pendingShareFingerprint) {
-				pre = WIDE_PRE_POST_SEC;
-				post = WIDE_PRE_POST_SEC;
-				loadingStatus = 'Looking up the shared connection with a high walking limit...';
-			}
-
-			const doQuery = async (timeArg: string | null, searchWindow?: number) => {
-				return await plan({
-					from: from!, to: to!, vias: queryVias(), mode, time: timeArg,
-					currentCoord: resolvedCurrentCoord,
-					maxPreTransitTime: pre,
-					maxPostTransitTime: post,
-					searchWindow,
-					// Full 2-h transfer table rides along with the wide walking
-					// budget (escalation + share verification) — see
-					// transfer-point-optimization.md § Two-tier transfer table.
-					fullTransfers: pre === WIDE_PRE_POST_SEC,
-					pedestrianSpeedMs: routingOptions.pedestrianSpeedMs,
-					transferTimeFactor: routingOptions.transferTimeFactor,
-					additionalTransferMin: routingOptions.additionalTransferMin,
-					minTransferMin: routingOptions.minTransferMin,
-					koraWalkPoints: routingOptions.koraWalkPoints,
-					alternativesEpsilon: routingOptions.alternativesEpsilon,
-					alternativesMax: routingOptions.alternativesMax
-				}, ac.signal);
-			};
-
-			// Stage 1 — narrow initial query (fast for typical cases).
-			// (The old parallel "clean direct walk" fetch is gone: the MOTIS
-			// fork returns Valhalla geometry, whose arrive-by direct-walk
-			// polylines are correct — the loop-back bug was OSR's.)
-			let res = await doQuery(queryTime);
+			// One request: the server runs the whole cascade — narrow query,
+			// wide retry on its triggers, time-advance hops, pruning — and
+			// returns the final list (server-side-transit-planning.md). A
+			// pending share fingerprint rides along so the server verifies it
+			// against its raw (unpruned) candidate set — dominance pruning
+			// must never turn a still-running connection into a false expiry.
+			const share = pendingShareFingerprint;
+			const res = await plan(planArgs(queryTime, share), ac.signal);
 			if (ac.signal.aborted) return;
-			noteWalkBaseline(res);
-			combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
+			walkBaselineSec = res.walkBaselineSec;
+			results = res.itineraries;
 
-			// Stage 2 — escalate walking budget on trigger:
-			//   (a) narrow query returned no TRANSIT itinerary — a direct
-			//       walk alone must not mask "nothing found": MOTIS always
-			//       returns the walk, so testing for emptiness alone let
-			//       walk-only results suppress the wide retry that would
-			//       have found transit (routing-options.md fallout), or
-			//   (b) any returned itinerary has a >1 h wait at start or
-			//       between transit legs, or
-			//   (c) the narrow results leave a ≥4 h daytime service gap
-			//       after the requested time — MOTIS extends its search
-			//       interval until it has 5 itineraries, so a narrow query
-			//       can "succeed" with next-morning connections only; those
-			//       must not suppress the wide retry that finds same-day
-			//       ones. Same hasSparseServiceGap curve as stage 2c below,
-			//       evaluated here on the stage-1 set (stage 2c alone never
-			//       fires when stage 1 already fills the result list, since
-			//       the hop loop doesn't run then), or
-			//   (d) the best option for the requested timing (earliest
-			//       arrival for leave-at, latest departure for arrive-by)
-			//       is a walk-only itinerary of more than 30 min — a long
-			//       walk "winning" is a strong hint that reachable transit
-			//       sits beyond the narrow radius.
-			// Escalation replaces `combined` (different candidate set with
-			// a wider walking radius, not comparable via merge).
-			const initialEpoch = Date.parse(queryTime);
-			const best = combined.length === 0 ? null : combined.reduce((a, b) =>
-				mode === 'arrive'
-					? (Date.parse(b.startTime) > Date.parse(a.startTime) ? b : a)
-					: (Date.parse(b.endTime) < Date.parse(a.endTime) ? b : a));
-			const bestIsLongWalk = best !== null
-				&& boardingCount(best) === 0 && walkSeconds(best) > 1800;
-			// The reason doubles as the loader's progress line — each trigger
-			// gets its own wording so a slow search says what it is doing.
-			const escalationReason =
-				!combined.some((it) => boardingCount(it) > 0)
-					? 'No connections found in normal mode, trying with a higher walking limit...'
-				: bestIsLongWalk
-					? 'Only a long walk found so far, trying with a higher walking limit...'
-				: combined.some(hasLongWait)
-					? 'Found connections with a long wait, trying with a higher walking limit...'
-				: hasSparseServiceGap(combined, initialEpoch, initialEpoch, mode)
-					? 'Long gap without service found, trying with a higher walking limit...'
-				: null;
-			if (escalationReason) {
-				loadingStatus = escalationReason;
-				pre = WIDE_PRE_POST_SEC;
-				post = WIDE_PRE_POST_SEC;
-				res = await doQuery(queryTime);
-				if (ac.signal.aborted) return;
-				noteWalkBaseline(res);
-				combined = [...(res.itineraries ?? []), ...(res.direct ?? [])];
-			}
-			// Seed the dedupe set now that `combined` has stabilised for stages
-			// 1 + 2 — stage 3 (and any later loadMore) then filters against it.
-			seenFingerprints = new Set(combined.map(itineraryFingerprint));
-			publishResults();
-
-			// Stage 3 — time-advance cascade. MOTIS's nextPageCursor stalls
-			// on remote destinations (returns 0 with an unchanged cursor
-			// value even when later timetable entries exist), so we walk
-			// forward by re-querying with `time` bumped past the last known
-			// result. Dedupe by fingerprint; stop at TARGET_RESULT_COUNT,
-			// MAX_SPAN_MS, or MAX_EMPTY_STREAK consecutive empty hops.
-			const advanceDir: 1 | -1 = mode === 'arrive' ? -1 : 1;
-			// Anchor on the axis the hop mode bounds (see runHopCascade):
-			// departures for forward/leave-at hops, arrivals for
-			// backward/arrive-by hops.
-			const startEpochFrom = (its: Itinerary[]): number => {
-				if (!its.length) return initialEpoch + advanceDir * HOP_MS;
-				const anchors = its.map((i) =>
-					Date.parse(advanceDir === 1 ? i.startTime : i.endTime));
-				return (advanceDir === 1 ? Math.max(...anchors) : Math.min(...anchors))
-					+ advanceDir * 60_000;
-			};
-			// Only arm the sparse-gap escalation check while the narrow
-			// budget is still in effect. If (a)/(b) already escalated to
-			// wide above there is no wider budget to retry with.
-			const shouldEscalate = pre === NARROW_PRE_POST_SEC
-				? (frontier: number) => hasSparseServiceGap(combined, initialEpoch, frontier, mode)
-				: undefined;
-			const outcome = await runHopCascade(
-				advanceDir, startEpochFrom(combined), pre, post, ac, shouldEscalate
-			);
-			if (ac.signal.aborted) return;
-
-			// Stage 2c — sparse-service gap discovered mid-cascade. Redo the
-			// full narrow flow (stage 1 + stage 3) with the wide walking
-			// budget; the wider candidate set is not merge-comparable with
-			// the narrow one.
-			if (outcome === 'escalate') {
-				loadingStatus =
-					'Long gap without service found, searching again with a higher walking limit...';
-				pre = WIDE_PRE_POST_SEC;
-				post = WIDE_PRE_POST_SEC;
-				combined = [];
-				seenFingerprints = new Set();
-				const wideRes = await doQuery(queryTime);
-				if (ac.signal.aborted) return;
-				combined = [...(wideRes.itineraries ?? []), ...(wideRes.direct ?? [])];
-				seenFingerprints = new Set(combined.map(itineraryFingerprint));
-				publishResults();
-				await runHopCascade(advanceDir, startEpochFrom(combined), pre, post, ac);
-				if (ac.signal.aborted) return;
-			}
-
-			// Reconcile a pending share fingerprint (connection-sharing.md
-			// § Shared view). Matched against the raw `combined` set, not the
-			// pruned display list — dominance pruning must never turn a
-			// still-running connection into a false expiry. On a confirmed
-			// no-match, report to the server, which re-verifies before
-			// actually deleting the share files.
-			if (pendingShareFingerprint) {
-				const wanted = pendingShareFingerprint;
+			// Reconcile the pending share fingerprint (connection-sharing.md
+			// § Shared view). On a confirmed no-match, report to the server,
+			// which re-verifies before actually deleting the share files.
+			if (share) {
 				pendingShareFingerprint = null;
-				const match = combined.find((r) => shareFingerprint(r) === wanted);
+				const match = res.shareMatch ?? null;
 				if (match) {
 					selectedItinerary = match;
 					selectedFingerprint = itineraryFingerprint(match);
@@ -1605,9 +1165,6 @@ export const routingState = {
 			if (results.length > 0 && from && to) {
 				void recordRecentRoute(from, to, queryVias(), mode, time);
 			}
-			// Remember the budget this cascade settled on — loadMore extends
-			// with the same reach (see activePrePostSec).
-			activePrePostSec = pre;
 			lastQueryKey = key;
 		} catch (e) {
 			if ((e as Error).name === 'AbortError') return;
@@ -1621,8 +1178,6 @@ export const routingState = {
 			if (pendingAbort === ac) {
 				pendingAbort = null;
 				loading = false;
-				loadingStatus = null;
-				loadingPruned = false;
 			}
 		}
 	},

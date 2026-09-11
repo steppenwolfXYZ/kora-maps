@@ -1,6 +1,6 @@
 // Nginx access-log parser for the /stats page. Reads the per-site
 // combined-format log plus its rotated siblings (.1, .2.gz, …) and
-// aggregates per-day hits, routing plan requests, unique client IPs,
+// aggregates per-day hits, routing queries (/api/plan), unique client IPs,
 // plus the most recent route requests. Place tokens stay unresolved
 // here ("u:<uic>" / "p:<parent stop id>" / "c:<lat>,<lon>") — the page
 // resolves them to station names client-side via stop_search_index.json,
@@ -45,7 +45,7 @@ export interface RouteRequest {
 	from: string;
 	to: string;
 	/** Display labels logged with the request (geocoded point endpoints
-	 *  send fromName/toName along, see client.ts). */
+	 *  send fromName/toName along, see routing/client.ts). */
 	fromName?: string;
 	toName?: string;
 	/** App deep-link from/to tokens (url.ts format: bare UIC or
@@ -146,9 +146,11 @@ export function buildStats(): Stats {
 			d.ips.add(ip);
 			allIps.add(ip);
 
-			// request = "GET /path?query HTTP/1.1"
+			// request = "GET /path?query HTTP/1.1". One /api/plan line is one
+			// user action (server-side-transit-planning.md): the cascade's
+			// MOTIS hops run server-side and never pass through nginx.
 			const target = request.split(' ')[1] ?? '';
-			if (!target.startsWith('/routing/api/v1/plan')) continue;
+			if (!target.startsWith('/api/plan?')) continue;
 			d.plans++;
 			totalPlans++;
 			const qs = target.indexOf('?');

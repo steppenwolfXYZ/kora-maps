@@ -11,7 +11,8 @@
 #
 # One-time server prep (see .claude/rules/deployment.md): docker installed
 # and enabled, ga_koramaps in the docker group, /var/www/koramaps.app/motis/
-# owned by ga_koramaps, nginx location /routing/ proxying to 127.0.0.1:8080.
+# owned by ga_koramaps. No nginx location: the app reaches MOTIS over loopback
+# (MOTIS_INTERNAL_URL) from its own /api/plan endpoint.
 # The forked image has no registry, so it ships as a docker save tarball
 # streamed over SSH — no GHCR / registry setup needed.
 #
