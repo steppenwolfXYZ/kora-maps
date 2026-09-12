@@ -1088,6 +1088,21 @@ paths:
                       shortest walking time in seconds from any sufficiently served stop to
                       the destination endpoint.
                     type: integer
+                  koraSearchedFrom:
+                    description: |
+                      kora fork (search-coverage-window.md): start of the interval the search
+                      actually covered — the requested window plus every contiguous extension
+                      the search made on its own. On the departure axis for `arriveBy=false`,
+                      on the arrival axis for `arriveBy=true`. Half-open together with
+                      `koraSearchedTo`: `[from, to)`.
+                    type: string
+                    format: date-time
+                  koraSearchedTo:
+                    description: |
+                      kora fork (search-coverage-window.md): exclusive end of the covered
+                      interval, see `koraSearchedFrom`.
+                    type: string
+                    format: date-time
 
   /api/v1/one-to-many:
     get:

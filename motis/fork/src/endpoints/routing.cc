@@ -655,10 +655,15 @@ std::pair<n::routing::query, std::optional<n::unixtime_t>> get_start_time(
         tt == nullptr || tt->external_interval().contains(t),
         "query time {} is outside of loaded timetable window {}", t,
         tt ? tt->external_interval() : n::interval<n::unixtime_t>{});
-    auto const window =
-        std::chrono::duration_cast<n::duration_t>(std::chrono::seconds{
-            query.searchWindow_ *
-            (query.arriveBy_ ? -1 : 1)});  // TODO redundant minus
+    // kora fork (search-coverage-window.md): upstream negates the window
+    // for arrive-by and then subtracts it again, which builds the
+    // inverted interval [t + w, t + 1) — nigiri finds no start in it,
+    // extends on its own and terminates as soon as it has enough
+    // results, so `searchWindow` was silently ignored for arrive-by. The
+    // arrive-by interval is [t - w, t + 1) on the arrival axis, the
+    // mirror of leave-at's [t, t + w) on the departure axis.
+    auto const window = std::chrono::duration_cast<n::duration_t>(
+        std::chrono::seconds{query.searchWindow_});
     return {{.start_time_ = query.timetableView_ && tt
                                 ? n::routing::start_time_t{n::interval{
                                       tt->external_interval().clamp(
@@ -1522,6 +1527,13 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
             fmt::format("LATER|{}", to_seconds(search_interval.to_)),
         .koraMinWalkFrom_ = kora_min_walk_from,
         .koraMinWalkTo_ = kora_min_walk_to,
+        // kora fork (search-coverage-window.md): the interval the search
+        // actually covered — requested window plus nigiri's own
+        // contiguous extension — so the app's cascade advances its
+        // coverage by what was searched, never by what was returned.
+        // Same value the page cursors encode, surfaced as timestamps.
+        .koraSearchedFrom_ = search_interval.from_,
+        .koraSearchedTo_ = search_interval.to_,
     };
   }
 

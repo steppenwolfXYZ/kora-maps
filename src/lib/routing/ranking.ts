@@ -31,7 +31,7 @@ const WALK_TAIL_PER_SEC = 0.5;       // shallow slope past the knee
 // times are minute-granular, and a full minute is a real difference on
 // short connections (a 60 s slack let a bus arriving a minute later
 // Pareto-dominate a tram and prune it via the Case 1 comfort test).
-const T_SLACK_MS = 50 * 1000;        // start/end jitter that still counts as "same time"
+export const T_SLACK_MS = 50 * 1000;        // start/end jitter that still counts as "same time"
 // Case 1 (overlapping) marginality thresholds.
 const OVERLAP_TIME_MAX_MS = 9 * 60 * 1000;   // both endpoints must be within 9 min
 const OVERLAP_COMFORT_MAX_PCT = 0.20;        // effective-time worseness ≤ 20%
@@ -54,7 +54,7 @@ const GAP_FLOOR_SEC = 120;
 // dropping a faster walk-heavy one) only fires within this primary-axis
 // distance — beyond it, the faster option is "the only one around" and
 // stays regardless of walking.
-const REVERSE_DISPLACE_MAX_GAP_MS = 3 * 3600 * 1000;
+export const REVERSE_DISPLACE_MAX_GAP_MS = 3 * 3600 * 1000;
 // Usable-time rescue (usable-time.md): a Case-1-dominated A survives
 // when its hassle time (judged duration − usable time) beats every
 // dominator's by this margin AND its judged duration stays within the

@@ -239,4 +239,12 @@ export interface PlanResponse {
 	koraMinWalkFrom?: number;
 	/** Same for the destination side. */
 	koraMinWalkTo?: number;
+	/** Fork-only (search-coverage-window.md): the interval the search
+	 * actually covered as ISO timestamps, half-open `[from, to)` — the
+	 * requested window plus nigiri's own contiguous extension, on the
+	 * departure axis for leave-at and the arrival axis for arrive-by.
+	 * The cascade's sole source of coverage; a server without them is
+	 * an error, never a guess. */
+	koraSearchedFrom?: string;
+	koraSearchedTo?: string;
 }
