@@ -122,11 +122,17 @@
 	}
 
 	// Clicking the input while the dropdown is open closes it (toggle).
-	// mousedown fires before focus, so on a fresh focus timeOpen is still
-	// false here and only the focus handler opens.
-	function onTimeMouseDown() {
-		if (timeOpen) commitDraft();
-		else openTime();
+	// On a fresh click, the browser's default mousedown action would place
+	// the caret at the click point after our select() and collapse the
+	// selection — so suppress it and focus by hand instead.
+	function onTimeMouseDown(e: MouseEvent) {
+		if (timeOpen) {
+			commitDraft();
+		} else {
+			e.preventDefault();
+			timeInputEl?.focus();
+			openTime();
+		}
 	}
 
 	function pickRow(hm: string) {
