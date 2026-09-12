@@ -426,6 +426,61 @@ citybus_promotion:
 stop_side_diagnostic:
   min_bearing_diff_deg: 135.0
 
+# ── City-prefix aliases for display_name (stop-labels.md § City-prefix
+# stripping) ──────────────────────────────────────────────────────────────────
+# Bus / tram stops are named "City, Street"; the city prefix is dropped when a
+# nearby train station carries that city name. Two gaps the station list
+# alone can't close:
+#   - bilingual station names ("Fribourg/Freiburg") while the bus stops use
+#     one language ("Fribourg, …");
+#   - cities whose stations are all suffixed ("Zürich HB", "Basel SBB",
+#     "Davos Platz") so no station is named plainly — without an alias
+#     "Zürich Enge, Bahnhof" collapses to "Bahnhof" instead of "Enge, Bahnhof".
+# Stations named after two towns ("Schaan-Vaduz", "Arth-Goldau") need no
+# alias: each half of a two-part hyphenated station name counts as a full
+# station name automatically.
+# Each key is an extra city name; it counts as the full name of every listed
+# station, at that station's coordinate. Station names must match the train
+# stop's `stop_name` exactly (first comma segment).
+city_prefix_aliases:
+  Zürich:     [Zürich HB]
+  Basel:      [Basel SBB]
+  Fribourg:   [Fribourg/Freiburg]
+  Sierre:     [Sierre/Siders]
+  Murten:     [Murten/Morat]
+  Davos:      [Davos Platz, Davos Dorf]
+  Interlaken: [Interlaken Ost, Interlaken West]
+  Grenchen:   [Grenchen Nord, Grenchen Süd]
+  Klosters:   [Klosters Platz, Klosters Dorf]
+  Worb:       [Worb Dorf, Worb SBB]
+  # Bus-stop prefixes carrying a suffix the station's name omits (canton
+  # code, "am See", a district). Each maps onto the station of the same town;
+  # for the district ones the shortest-prefix rule then keeps the district:
+  # "Aarau Rohr, Gemeindehaus" → "Rohr, Gemeindehaus".
+  Brienz BE:         [Brienz]
+  Bremgarten AG:     [Bremgarten]
+  St-Maurice VS:     [St-Maurice]
+  Oberwald VS:       [Oberwald]
+  Steinibach BE:     [Steinibach]
+  Uetikon am See:    [Uetikon]
+  Wiler bei Seedorf: [Wiler]
+  Steg im Tösstal:   [Steg]
+  Aarau Rohr:        [Aarau]
+  Davos Dischma:     [Davos Platz]
+  Davos Clavadel:    [Davos Platz]
+  St. Moritz Bad:    [St. Moritz]
+  Grindelwald Grund: [Grindelwald]
+  Trin Mulin:        [Trin]
+  Bregenz Hafen:     [Bregenz]
+  # Abbreviated bus-stop prefixes of a station's full name.
+  La Chaux-de-F:     [La Chaux-de-Fonds]
+  Matten b. I.:      [Matten b. Interlaken]
+  Affoltern a.A.:    [Affoltern am Albis]
+  Wettswil a.A.:     [Bonstetten-Wettswil]
+  St-Louis:          [Saint-Louis (Haut-Rhin)]
+  Saas i.P.:         [Saas im Prättigau]
+  Wangen b. Olten:   [Wangen bei Olten]
+
 # ── Line width endpoints per bucket ──────────────────────────────────────────
 # min: width_base for a line at score = 0 (worst_freq); max: at score = 1
 # (best_freq). Train is set wider than other modes. Mountain has min = max

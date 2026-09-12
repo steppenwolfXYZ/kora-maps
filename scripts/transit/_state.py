@@ -37,6 +37,10 @@ OUT_ROUTE_COLOR_INDEX = ROOT / "static" / "map-assets" / "route_color_index.json
 OUT_STOP_EXTENT_FILL = ROOT / "data" / "transit" / "stop_extent_fill.json"
 OUT_CLOSE_ZOOM      = ROOT / "data" / "transit" / "transit_close_zoom.geojson"
 
+# City-prefix aliases for display_name: alias city name -> station names it
+# stands for. See config.yaml `city_prefix_aliases`.
+CITY_PREFIX_ALIASES = _transit_cfg.get("city_prefix_aliases", {}) or {}
+
 # Per-mode platform-length defaults and sanity ranges from config.
 PILL_CFG = _transit_cfg.get("pill_rendering", {})
 

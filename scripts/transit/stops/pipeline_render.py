@@ -901,36 +901,75 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
     # ==========================================================================
     # Bus / tram stops in Swiss GTFS use "City, Streetname" — the city prefix
     # is redundant on the map when a nearby train station labels the city
-    # already. Rule: if the stop's `stop_name.split(",")[0]` matches a train
-    # station's city key (its full first-comma-segment OR its space-split
-    # first word — catches both "Bern" and "Zürich HB" style) within
-    # DISPLAY_NAME_RADIUS_KM, drop the prefix. Rural villages without a
-    # train station keep their name.
+    # already. Rule, per stop, with `prefix = stop_name.split(",")[0]`:
+    #   1. The whole prefix must match a station's city key (its full
+    #      first-comma-segment OR its space-split first word — catches both
+    #      "Bern" and "Zürich HB" style) within DISPLAY_NAME_RADIUS_KM.
+    #   2. Then try the prefix's word-prefixes shortest-first ("Bern" before
+    #      "Bern Wankdorf"). The first one that is the FULL name of a nearby
+    #      train station (or a configured alias of one) is what gets
+    #      stripped — "Bern Wankdorf, Bahnhof" → "Wankdorf, Bahnhof", keeping
+    #      the district that disambiguates it from "Bern, Bahnhof". Only full
+    #      station names qualify here: first-word keys would turn
+    #      "Aesch BL, Dorf" into "BL, Dorf". No hit → the whole prefix goes.
+    # Rural villages without a train station keep their name.
+    # Each half of a two-part hyphenated station name ("Schaan-Vaduz") also
+    # counts as a full name — the station serves both towns. On top,
+    # `city_prefix_aliases` (config.yaml) adds extra city names that count as
+    # the full name of listed stations — bilingual names ("Fribourg" for
+    # "Fribourg/Freiburg"), cities whose stations are all suffixed ("Zürich"
+    # for "Zürich HB"), and suffixed / abbreviated bus-stop prefixes
+    # ("Brienz BE", "Affoltern a.A.").
     from stops.close_zoom.text import strip_city_prefix
     DISPLAY_NAME_RADIUS_KM = 25.0
 
-    def _train_station_city_keys(name):
-        if not name:
-            return set()
-        keys = set()
-        first_segment = name.split(",")[0].strip()
-        if first_segment:
-            keys.add(first_segment.lower())
-            parts = first_segment.split()
-            if parts:
-                keys.add(parts[0].lower())
-        return keys
+    def _train_station_first_segment(name):
+        return (name or "").split(",")[0].strip()
 
-    train_city_lookup = defaultdict(list)
+    train_full_lookup = defaultdict(list)   # full station name -> coords
+    train_city_lookup = defaultdict(list)   # full name + first word -> coords
+    train_coords_by_name = defaultdict(list)
     for feat in dot_features:
         if feat["properties"].get("mode") != "train":
             continue
-        name = feat["properties"].get("stop_name") or ""
+        first_segment = _train_station_first_segment(
+            feat["properties"].get("stop_name"))
+        if not first_segment:
+            continue
         coord = feat["geometry"]["coordinates"]
-        for key in _train_station_city_keys(name):
-            train_city_lookup[key].append(coord)
+        train_coords_by_name[first_segment].append(coord)
+        train_full_lookup[first_segment.lower()].append(coord)
+        train_city_lookup[first_segment.lower()].append(coord)
+        train_city_lookup[first_segment.split()[0].lower()].append(coord)
+        # A station named after two towns ("Schaan-Vaduz", "Arth-Goldau"):
+        # each half is a full name for its own town's bus stops. Exactly two
+        # capitalised parts — "Leysin-Grand-Hôtel" or "Lancy-Pont-Rouge"
+        # are one place and must not yield "Grand" / "Pont" as city names.
+        halves = first_segment.split("-")
+        if len(halves) == 2 and all(h and h[0].isupper() for h in halves):
+            for half in halves:
+                train_full_lookup[half.lower()].append(coord)
+                train_city_lookup[half.lower()].append(coord)
+
+    for alias, station_names in CITY_PREFIX_ALIASES.items():
+        for station_name in station_names:
+            coords = train_coords_by_name.get(station_name)
+            if not coords:
+                print(f"  WARNING: city_prefix_aliases: no train station named "
+                      f"{station_name!r} (alias {alias!r})")
+                continue
+            train_full_lookup[alias.lower()].extend(coords)
+            train_city_lookup[alias.lower()].extend(coords)
+
+    def _nearby(lookup, key, stop_lon, stop_lat):
+        for city_lon, city_lat in lookup.get(key, ()):
+            if haversine_km(stop_lon, stop_lat, city_lon, city_lat) \
+                    <= DISPLAY_NAME_RADIUS_KM:
+                return True
+        return False
 
     n_stripped = 0
+    n_partial = 0
     for feat in dot_features:
         p = feat["properties"]
         name = p.get("stop_name") or ""
@@ -940,21 +979,40 @@ def run_pills(*, line_lookup, line_stops, stop_meta, stop_min_zoom,
         prefix = name.split(",")[0].strip()
         if not prefix:
             continue
-        candidates = train_city_lookup.get(prefix.lower())
-        if not candidates:
-            continue
         stop_lon, stop_lat = feat["geometry"]["coordinates"]
-        for city_lon, city_lat in candidates:
-            if haversine_km(stop_lon, stop_lat, city_lon, city_lat) \
-                    <= DISPLAY_NAME_RADIUS_KM:
-                stripped = strip_city_prefix(name, prefix)
-                if stripped and stripped != name:
-                    p["display_name"] = stripped
-                    n_stripped += 1
+        # The whole prefix must match a nearby station's city key (its full
+        # first-comma-segment or first word); otherwise the stop is a place
+        # without a station of its own and keeps its name.
+        if not _nearby(train_city_lookup, prefix.lower(), stop_lon, stop_lat):
+            continue
+        # Refinement: the shortest word-prefix that is itself a full nearby
+        # station name / alias wins, so the district part survives. Gating
+        # on the whole-prefix match above keeps "Brienz BE, Altersheim" (no
+        # station "Brienz BE") from losing "Brienz" to the other Brienz.
+        city = prefix
+        words = prefix.split()
+        for i in range(1, len(words)):
+            sub = " ".join(words[:i])
+            if not _nearby(train_full_lookup, sub.lower(), stop_lon, stop_lat):
+                continue
+            # What stays behind must read as a district name. A canton code
+            # ("Brienz BE" → "BE"), a lowercase tail ("Uetikon am See" →
+            # "am See") or a parenthesis ("Les Planches (Aigle)") is not one
+            # — those prefixes are the town itself and go entirely.
+            rest = words[i]
+            if rest[0].islower() or rest[0] == "(" \
+                    or (len(rest) == 2 and rest.isupper()):
                 break
+            city = sub
+            n_partial += 1
+            break
+        stripped = strip_city_prefix(name, city)
+        if stripped and stripped != name:
+            p["display_name"] = stripped
+            n_stripped += 1
     print(f"  display_name: {n_stripped:,} stops had their city prefix "
           f"stripped (within {DISPLAY_NAME_RADIUS_KM:.0f} km of a matching "
-          f"train station)")
+          f"train station; {n_partial:,} kept a district part)")
 
     if stop_salience:
         n_applied = 0
