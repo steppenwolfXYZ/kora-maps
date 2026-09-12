@@ -79,6 +79,41 @@ chevrons, swap, reset-to-now. Components add only sizing (padding,
 font-size, margins) and must not re-set color/background, or the hover
 state loses the cascade. Any new small icon button uses this class.
 
+## Route endpoint glyphs
+
+One iconography for "start / stop on the way / destination" everywhere
+the routing endpoints appear, built from a dot and a line
+(`src/lib/routing/routeGlyphs.ts`, `routeGlyphSvg(side, box)`):
+
+| Side | Glyph | Meaning |
+|---|---|---|
+| `from` | `o──` | dot at the outer edge, line running to the inner edge |
+| `via` | `──o──` | line across, dot in the middle |
+| `to` | `──o` | mirror of `from` |
+
+The SVG fills its host box edge to edge with **no padding**, so the line
+really reaches the edge — that is what lets neighbouring glyphs fuse.
+Two arrangements:
+
+- **Side by side** (station / place popup route buttons): from + to in
+  a brand-red segmented pill split by a white hairline, white glyphs;
+  the hairline joins the two line ends into one route line `o──|──o`.
+  The line thickness matches the hairline (2px) so the stroke is
+  continuous. The lead is a small anthracite "Route" text label, never
+  an icon — an icon beside two icon buttons reads as a third, dead
+  control.
+- **Stacked** (map context menu items, the routing panel's From / Via /
+  To field labels): dot flush at the outer edge (`inset` = `r`) so every
+  row spans the same width and the lines align as one column, only the
+  dot moves. Brand red on the plain background — a red chip behind each
+  was tried and found too heavy.
+
+The map's route pins (start / via / goal, `routeLayers.ts`) carry the
+same three glyphs clipped to the pin head: brand-red teardrop, white
+glyph, thin white outline, colors via the `--brand` / `--white` tokens
+(inline SVG in the document, so CSS vars resolve). The old play / stop /
+skip-next shapes are gone everywhere; do not reintroduce them.
+
 ## Loader
 
 The routing "searching" indicator (`RoutingPanel.svelte`): full-width

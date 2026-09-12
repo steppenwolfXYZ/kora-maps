@@ -1,4 +1,5 @@
 import maplibregl from 'maplibre-gl';
+import type { RouteGlyphSide } from './routeGlyphs';
 import type { RouteGeoJSONResult } from './routeGeoJSON';
 
 // Install / update / remove the MapLibre source, layers and DOM markers
@@ -46,8 +47,10 @@ const STOP_STROKE_WIDTH = 1.0;
 // Neutral routing color for the connector body + walking dashes.
 const NEUTRAL_DARK = '#1a1a1a';
 const NEUTRAL_LIGHT = '#ffffff';
-const PIN_FILL = '#1a1a1a';
-const ICON_FILL = '#ff6b7a';
+// Pin palette via the app tokens (ux-guidelines.md: brand colors are never
+// literals) — the marker SVG is inline in the document, so CSS vars resolve.
+const PIN_FILL = 'var(--brand)';
+const ICON_FILL = 'var(--white)';
 
 // Label font weights per tier, mirroring scripts/style/transit_stations.py.
 // The bold set grows with zoom so the ratio of bold-to-regular labels stays
@@ -472,64 +475,54 @@ export function removeRouteLayers(
 	if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
 }
 
-// Start icon: teardrop pin with a play triangle inside. Brand red with a
-// lighter-red glyph. Anchored at bottom so the pin's tip plants on the
-// start coordinate.
+// Route pins: a teardrop whose head carries the same dot-and-line
+// glyphs as the popup's route buttons and the map context menu
+// (routeGlyphs.ts): start `o──`, via `──o──`, goal `──o`. The line is
+// clipped to the pin outline so it runs right to the head's edge, as
+// it runs to the button edge elsewhere. Same pin shape and palette for
+// all three; the glyph is what distinguishes them. Anchored at bottom
+// so the tip plants on the coordinate.
+const PIN_PATH = 'M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z';
+// Head circle: centre (12, 9), radius 8 → its equator spans x 4..20.
+const PIN_HEAD_CX = 12, PIN_HEAD_CY = 9, PIN_HEAD_R = 8;
+const PIN_DOT_R = 3.2, PIN_DOT_INSET = 6.2, PIN_LINE_H = 1.3;
+let pinClipSeq = 0;
+
+function makePinElement(side: RouteGlyphSide, className: string): HTMLDivElement {
+	const wrap = document.createElement('div');
+	wrap.className = className;
+	wrap.style.cssText = [
+		'width: 38px', 'height: 42px', 'pointer-events: none',
+		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
+	].join(';');
+	const left = PIN_HEAD_CX - PIN_HEAD_R, right = PIN_HEAD_CX + PIN_HEAD_R;
+	const cx = side === 'from' ? left + PIN_DOT_INSET
+		: side === 'to' ? right - PIN_DOT_INSET : PIN_HEAD_CX;
+	const lineX = side === 'from' ? cx : left;
+	const lineEnd = side === 'to' ? cx : right;
+	// Clip ids must be unique per document: several pins coexist.
+	const clipId = `route-pin-clip-${++pinClipSeq}`;
+	wrap.innerHTML = `
+		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
+			<defs><clipPath id="${clipId}"><path d="${PIN_PATH}"/></clipPath></defs>
+			<path d="${PIN_PATH}" style="fill: ${PIN_FILL}; stroke: ${ICON_FILL}" stroke-width="0.3"/>
+			<g style="fill: ${ICON_FILL}" clip-path="url(#${clipId})">
+				<rect x="${lineX}" y="${PIN_HEAD_CY - PIN_LINE_H / 2}" width="${lineEnd - lineX}" height="${PIN_LINE_H}"/>
+				<circle cx="${cx}" cy="${PIN_HEAD_CY}" r="${PIN_DOT_R}"/>
+			</g>
+		</svg>
+	`;
+	return wrap;
+}
+
 export function makeStartIconElement(): HTMLDivElement {
-	const wrap = document.createElement('div');
-	wrap.className = 'route-start-icon';
-	wrap.style.cssText = [
-		'width: 38px', 'height: 42px', 'pointer-events: none',
-		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
-	].join(';');
-	wrap.innerHTML = `
-		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
-			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
-			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
-			<path d="M9.5 5 L16.5 9 L9.5 13 Z" fill="${ICON_FILL}"/>
-		</svg>
-	`;
-	return wrap;
+	return makePinElement('from', 'route-start-icon');
 }
 
-// Via icon: teardrop pin with a skip-next glyph (play triangle against a
-// bar) inside — the stop the traveller chose to route through, drawn as a
-// sibling of the start / goal pins rather than as its own kind of marker.
-// Same pin shape and palette; the glyph is what distinguishes the three.
 export function makeViaIconElement(): HTMLDivElement {
-	const wrap = document.createElement('div');
-	wrap.className = 'route-via-icon';
-	wrap.style.cssText = [
-		'width: 38px', 'height: 42px', 'pointer-events: none',
-		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
-	].join(';');
-	wrap.innerHTML = `
-		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
-			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
-			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
-			<path d="M8.3 5 L14.2 9 L8.3 13 Z" fill="${ICON_FILL}"/>
-			<rect x="15" y="5" width="1.7" height="8" fill="${ICON_FILL}"/>
-		</svg>
-	`;
-	return wrap;
+	return makePinElement('via', 'route-via-icon');
 }
 
-// Goal icon: teardrop pin with a stop square inside. Same pin shape and
-// palette as the start icon; the glyph distinguishes the two. Anchor is
-// bottom so the pin's tip plants on the goal coordinate.
 export function makeGoalIconElement(): HTMLDivElement {
-	const wrap = document.createElement('div');
-	wrap.className = 'route-goal-icon';
-	wrap.style.cssText = [
-		'width: 38px', 'height: 42px', 'pointer-events: none',
-		'filter: drop-shadow(0 1px 2px rgba(0,0,0,0.35))'
-	].join(';');
-	wrap.innerHTML = `
-		<svg viewBox="0 0 24 26" xmlns="http://www.w3.org/2000/svg" width="38" height="42">
-			<path d="M12 1 C 7.6 1, 4 4.6, 4 9 C 4 17.5, 11.7 16.2, 12 25 C 12.3 16.2, 20 17.5, 20 9 C 20 4.6, 16.4 1, 12 1 Z"
-			      fill="${PIN_FILL}" stroke="#ffffff" stroke-width="0.3"/>
-			<rect x="8.5" y="5.5" width="7" height="7" fill="${ICON_FILL}"/>
-		</svg>
-	`;
-	return wrap;
+	return makePinElement('to', 'route-goal-icon');
 }

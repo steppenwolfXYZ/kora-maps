@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { routeGlyphSvg, type RouteGlyphBox, type RouteGlyphSide } from './routeGlyphs';
 	import type { Endpoint } from './types';
 	import ViaWaitSelect from './ViaWaitSelect.svelte';
 	import {
@@ -38,6 +39,11 @@
 	// Photon geocoding matches (addresses + POIs) — see geocoding-search.md.
 
 	interface Props {
+		/** Which endpoint the row is — picks the dot-and-line glyph shown
+		 * in place of a text label (routeGlyphs.ts, dot flush at the outer
+		 * edge so the rows' lines align and only the dot moves). */
+		side: RouteGlyphSide;
+		/** Wording for aria-labels only; the visible label is the glyph. */
 		label: string;
 		endpoint: Endpoint | null;
 		placeholder: string;
@@ -67,7 +73,7 @@
 	}
 
 	let {
-		label, endpoint, placeholder, onChange,
+		side, label, endpoint, placeholder, onChange,
 		otherIsCurrent = false, onRefreshCurrent,
 		mixedRanking = false,
 		via = false, wait = 0, onWait
@@ -156,6 +162,9 @@
 	function formatCoord(c: [number, number]): string {
 		return `${c[1].toFixed(4)}, ${c[0].toFixed(4)}`;
 	}
+
+	const LABEL_GLYPH_BOX: RouteGlyphBox = { w: 30, h: 16, r: 5.5, inset: 5.5, line: 2 };
+	const labelSvg = $derived(routeGlyphSvg(side, LABEL_GLYPH_BOX));
 
 	function labelFor(ep: Endpoint | null): string {
 		if (!ep) return '';
@@ -356,7 +365,7 @@
 </script>
 
 <div class="ep-row" bind:this={rowEl}>
-	<span class="ep-label">{label}</span>
+	<span class="ep-label" role="img" aria-label={label}>{@html labelSvg}</span>
 	{#if editing || !endpoint}
 		<input
 			bind:this={inputEl}
@@ -485,13 +494,20 @@
 
 	.ep-label {
 		flex: 0 0 auto;
-		font-size: 0.7rem;
-		font-weight: 600;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		/* Uppercase micro-title — anthracite per ux-guidelines.md. */
-		color: var(--anthracite);
+		display: flex;
+		align-items: center;
+		/* Same column width the text label had, so the value column stays
+		   aligned across From / Via / To rows. */
 		width: var(--control-size);
+		/* Route glyph in brand red — same as the context menu and the map
+		   pins, so the endpoint iconography reads as one system. */
+		color: var(--brand);
+	}
+	.ep-label :global(svg) {
+		display: block;
+		width: 30px;
+		height: 16px;
+		fill: currentColor;
 	}
 
 	.ep-input {

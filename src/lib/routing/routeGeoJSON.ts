@@ -248,6 +248,8 @@ export function buildRouteGeoJSON(
 						role: 'passthrough',
 						leg_index: i,
 						stop_name: st.name ?? '',
+						// Station key for the click popup (popups.md § Route stops).
+						parent_uic: uic ?? '',
 						stop_tier: normalizedTier,
 						stop_min_zoom: minZoomFor(tier)
 					}

@@ -32,7 +32,9 @@ let savedRouteLinePaints: Map<string, Record<string, unknown>> | null = null;
 // While a route is displayed, every map stop-symbology layer is hidden
 // so the map's default dots/pills don't misalign against the route's
 // own MOTIS-coord discs. Original visibilities restored on exit.
-let savedRouteStopVisibilities: Map<string, string> | null = null;
+let savedRouteStopFilters: Map<string, { filter: unknown; visibility: string }> | null = null;
+// Matches no feature — see applyBasemapFocus on why stops hide this way.
+const HIDE_ALL_FILTER = ['==', ['literal', 1], 0];
 
 // Camera padding for route framing (routing-map-details-split.md §
 // Camera framing). Desktop keeps the left-heavy padding that clears
@@ -184,25 +186,37 @@ export function applyBasemapFocus(map: maplibregl.Map, owner: 'route' | 'direct'
 	// labels, indicators, close-zoom backdrops). Route stops render
 	// from our own source at MOTIS's exact coordinates, and the map's
 	// merged-UIC positions don't line up — showing both looks like a
-	// doubled, misaligned station. Save current visibility per layer so
-	// exit can restore whatever the view mode / dev override had set.
+	// doubled, misaligned station. Hidden by a never-matching FILTER,
+	// not `visibility: none`: MapLibre drops the tiles of a source no
+	// visible layer uses, and the station popup on a route stop reads
+	// its badges / departures from those tiles (popups.md § Route
+	// stops). A filtered layer keeps its source loaded and draws
+	// nothing. The standard view hides the same layers by visibility,
+	// which would unload the tiles just the same — so route mode also
+	// forces them visible while the filter blanks them. Save filter and
+	// visibility per layer so exit restores whatever the view mode / dev
+	// override had set.
 	// Close-zoom pill-arrows stay visible during route mode — they carry
 	// the specific line/platform info at z17+ that the route's own
 	// discs don't. Everything else in the stop-symbology set hides.
 	const layersToHide = STOP_SYMBOLOGY_LAYERS.filter(
 		(id) => !id.startsWith('close-zoom-pill-')
 	);
-	if (!savedRouteStopVisibilities) {
-		savedRouteStopVisibilities = new Map();
+	if (!savedRouteStopFilters) {
+		savedRouteStopFilters = new Map();
 		for (const id of layersToHide) {
 			if (!map.getLayer(id)) continue;
 			const vis = map.getLayoutProperty(id, 'visibility');
-			savedRouteStopVisibilities.set(id, (vis as string) ?? 'visible');
+			savedRouteStopFilters.set(id, {
+				filter: map.getFilter(id) ?? null,
+				visibility: (vis as string) ?? 'visible'
+			});
 		}
 	}
 	for (const id of layersToHide) {
 		if (!map.getLayer(id)) continue;
-		map.setLayoutProperty(id, 'visibility', 'none');
+		map.setFilter(id, HIDE_ALL_FILTER as any);
+		map.setLayoutProperty(id, 'visibility', 'visible');
 	}
 }
 
@@ -225,12 +239,13 @@ export function restoreBasemapFocus(map: maplibregl.Map, owner: 'route' | 'direc
 		}
 		savedRouteLinePaints = null;
 	}
-	if (savedRouteStopVisibilities) {
-		for (const [id, vis] of savedRouteStopVisibilities) {
+	if (savedRouteStopFilters) {
+		for (const [id, saved] of savedRouteStopFilters) {
 			if (!map.getLayer(id)) continue;
-			map.setLayoutProperty(id, 'visibility', vis as any);
+			map.setFilter(id, (saved.filter ?? null) as any);
+			map.setLayoutProperty(id, 'visibility', saved.visibility as any);
 		}
-		savedRouteStopVisibilities = null;
+		savedRouteStopFilters = null;
 	}
 }
 
@@ -282,6 +297,6 @@ export function disposeRouteOverlay() {
 	routeMarkers?.goal?.remove();
 	routeMarkers = null;
 	savedRouteLinePaints = null;
-	savedRouteStopVisibilities = null;
+	savedRouteStopFilters = null;
 	focusOwner = null;
 }

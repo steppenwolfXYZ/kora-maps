@@ -701,6 +701,7 @@
 		<div class="rp-row">
 			<EndpointInput
 				bind:this={fromInput}
+				side="from"
 				label="From"
 				endpoint={routingState.from}
 				placeholder="Start"
@@ -728,6 +729,7 @@
 				<EndpointInput
 					bind:this={viaInputs[i]}
 					via
+					side="via"
 					label="Via"
 					endpoint={v.station}
 					placeholder={direct ? 'Place on the way' : 'Stop on the way'}
@@ -749,6 +751,7 @@
 		<div class="rp-row">
 			<EndpointInput
 				bind:this={toInput}
+				side="to"
 				label="To"
 				endpoint={routingState.to}
 				placeholder="Destination"

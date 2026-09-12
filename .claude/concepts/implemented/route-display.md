@@ -20,9 +20,10 @@ Transit routing (MOTIS) returns a sequence of legs describing a chosen journey. 
 ### Stops on the route
 
 - **Transfer stop** (change of vehicle) — two neutral discs, one for the arrival platform and one for the departure platform, connected by a neutral connector. Discs and connector all in the same neutral routing color; leg colors live only on the polylines that touch each disc.
-- **First boarding** — always a single neutral disc at the boarding stop (same styling as a transfer disc, no connector). The **start icon** (small filled circle) marks the walk's origin when a walk precedes the transit leg, and overlays the disc when the journey starts at the station itself.
-- **Final alighting** (mirror of first boarding) — always a single neutral disc at the alighting stop. The **goal icon** (checkered flag) marks the walk's endpoint when a walk follows the transit leg, and overlays the disc when the journey ends at the station itself.
+- **First boarding** — always a single neutral disc at the boarding stop (same styling as a transfer disc, no connector). The **start pin** (brand-red teardrop with the `o──` route glyph, see ux-guidelines.md § Route endpoint glyphs) marks the walk's origin when a walk precedes the transit leg, and overlays the disc when the journey starts at the station itself.
+- **Final alighting** (mirror of first boarding) — always a single neutral disc at the alighting stop. The **goal pin** (same teardrop with the `──o` glyph) marks the walk's endpoint when a walk follows the transit leg, and overlays the disc when the journey ends at the station itself. Vias get the `──o──` pin.
 - **Pass-through stops** — stops the vehicle serves within a leg without the passenger transferring: small neutral dots along the polyline.
+- **Clickable** — discs and pass-through dots open the station popup exactly as the map's own stop features do outside route mode (popups.md § Route stops), so a station on the route can still be inspected and used as a routing endpoint.
 - **Disc position** — every disc snaps to the leg polyline, preferably at the polyline endpoint (the arrival disc at the end of the arriving leg's polyline; the departure disc at the start of the departing leg's polyline). Same "snap to line" logic used in pill design.
 
 ### Everything else on the map
@@ -45,7 +46,7 @@ Transit routing (MOTIS) returns a sequence of legs describing a chosen journey. 
 
 - URL param `?route=…` carrying the itinerary fingerprint.
 - Route-scoped "neutral routing color" for discs, connectors, walking dashes, and pass-through dots — one shared color, decided during implementation.
-- `start` and `goal` icons: filled circle and checkered flag respectively.
+- `start`, `via` and `goal` pins: one brand-red teardrop carrying the `o──` / `──o──` / `──o` route glyph (ux-guidelines.md § Route endpoint glyphs; originally a filled circle and a checkered flag).
 
 ## Constraints
 

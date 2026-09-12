@@ -12,10 +12,12 @@ import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type Routing
 //   fromKind, toKind — 'address' | 'poi', display hint for the endpoint
 //                     pill's icon. Only carried when the paired from/to is
 //                     a coord AND a kind is known.
-//   via             — ordered via tokens, comma-separated (via-stops.md):
+//   via             — ordered via tokens, `;`-separated (via-stops.md):
 //                     UIC for stations, `lat,lng` for point vias (direct
 //                     tabs only). Only filled rows; empty panel rows are
-//                     never written.
+//                     never written. The separator is not `,` because the
+//                     coordinate token carries one itself (legacy
+//                     comma-joined station lists still parse).
 //   viaWait         — requested minimum stay per via in minutes, same order
 //                     and length as `via`. Transit only; omitted when every
 //                     wait is 0.
@@ -58,6 +60,24 @@ export const URL_MIN_WALK = 'minWalk';
 /** Endpoint serialisation: coord as `lat,lng` (7 fractional digits, ≈1 cm).
  * `station` needs the lookup callback so a UIC round-trips through the
  * search index at parse time. `point` and `current` need no lookup. */
+/** Coordinate endpoint token: `lat,lng`, two floats, possibly negative. */
+const COORD_TOKEN_RE = /^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/;
+
+/** List separator of the `via` / `viaWait` params. Not `,` — a point via's
+ * coordinate token contains one, so a comma-joined list could not be
+ * split back apart. */
+const VIA_SEP = ';';
+
+/** Split a `via` / `viaWait` list. Links written before the separator
+ * change joined station UICs with `,`; such a list is still accepted as
+ * long as it is not itself a single coordinate token. */
+function splitViaList(raw: string): string[] {
+	if (!raw.includes(VIA_SEP) && raw.includes(',') && !COORD_TOKEN_RE.test(raw)) {
+		return raw.split(',');
+	}
+	return raw.split(VIA_SEP);
+}
+
 export function endpointToParam(ep: Endpoint): string {
 	if (ep.type === 'station') return ep.uic;
 	if (ep.type === 'point') return `${ep.coord[1].toFixed(7)},${ep.coord[0].toFixed(7)}`;
@@ -86,8 +106,7 @@ export function paramToEndpoint(
 ): Endpoint | null {
 	if (!raw) return null;
 	if (raw === 'me') return { type: 'current' };
-	// lat,lng — two floats, possibly negative.
-	const m = raw.match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
+	const m = raw.match(COORD_TOKEN_RE);
 	if (m) {
 		const lat = Number(m[1]);
 		const lng = Number(m[2]);
@@ -122,9 +141,9 @@ export function paramToEndpoint(
 export function paramsToVias(url: URL, lookup?: StationLookup): Via[] {
 	const raw = url.searchParams.get(URL_VIA);
 	if (!raw || !lookup) return [];
-	const waits = (url.searchParams.get(URL_VIA_WAIT) ?? '').split(',');
+	const waits = splitViaList(url.searchParams.get(URL_VIA_WAIT) ?? '');
 	const out: Via[] = [];
-	raw.split(',').forEach((tok, i) => {
+	splitViaList(raw).forEach((tok, i) => {
 		const token = tok.trim();
 		if (!token || token === 'me') return;
 		const ep = paramToEndpoint(token, lookup);
@@ -270,16 +289,16 @@ export function writeRoutingQuery(url: URL, q: {
 	const toKind = pointKind(q.to);
 	if (toKind) url.searchParams.set(URL_TO_KIND, toKind);
 	else url.searchParams.delete(URL_TO_KIND);
-	// Vias ride as two parallel comma-separated lists — station vias as
+	// Vias ride as two parallel `;`-separated lists — station vias as
 	// UIC, point vias (direct tabs only) in the coordinate token form
 	// From / To already use. `viaWait` is transit-only and written only
 	// when at least one wait is non-zero, so the pure "route through
 	// here" case leaves the address as short as it was before.
 	const vias = hasQuery ? (q.vias ?? []) : [];
 	if (vias.length > 0) {
-		url.searchParams.set(URL_VIA, vias.map((v) => endpointToParam(v.station)).join(','));
+		url.searchParams.set(URL_VIA, vias.map((v) => endpointToParam(v.station)).join(VIA_SEP));
 		if (!direct && vias.some((v) => v.wait > 0)) {
-			url.searchParams.set(URL_VIA_WAIT, vias.map((v) => String(v.wait)).join(','));
+			url.searchParams.set(URL_VIA_WAIT, vias.map((v) => String(v.wait)).join(VIA_SEP));
 		} else {
 			url.searchParams.delete(URL_VIA_WAIT);
 		}

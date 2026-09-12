@@ -1,6 +1,6 @@
 // Map popup interaction wiring (popups.md): the hover cursor, the click
 // orchestration (feature queries in priority order debug → station →
-// pill-arrow → line, payload extraction), and the delegated click
+// route stop → pill-arrow → line, payload extraction), and the delegated click
 // handlers inside the popup HTML ([data-line-detail] badges,
 // [data-route-endpoint] buttons). Feature actions are injected as
 // callbacks so this module stays free of routing / line-detail state.
@@ -40,6 +40,16 @@ export interface RouteEndpointRequest {
 export interface PopupCallbacks {
 	onEnterLineDetail: (sel: LineDetailSelection) => void;
 	onRouteEndpoint: (side: 'from' | 'to', req: RouteEndpointRequest) => void;
+	/** Layer ids of the route overlay's stop features (discs, pass-through
+	 * dots and their name labels). While a route is displayed the map's
+	 * own stop symbology is hidden, so these are what a click on a
+	 * station actually hits; they carry `parent_uic` + `stop_name` and
+	 * open the station popup (popups.md § Route stops). Injected because
+	 * this module must not import the routing overlay. The layers exist
+	 * only while a route is shown, so they are re-checked per event
+	 * rather than at install. The label layer's 4px text-padding is
+	 * small enough that no text-bbox test is applied to it. */
+	routeStopLayers?: string[];
 }
 
 /** Pointer cursor when hovering transit lines and stops. Uses a single
@@ -62,7 +72,9 @@ export function installHoverCursor(map: maplibregl.Map) {
 	// stop dot in particular is optional (see popups.md).
 	const activeHoverLayers = hoverLayers.filter((id) => !!map.getLayer(id));
 	map.on('mousemove', (e) => {
-		const feats = map.queryRenderedFeatures(e.point, { layers: activeHoverLayers });
+		const feats = map.queryRenderedFeatures(e.point, {
+			layers: [...activeHoverLayers, ...liveRouteStopLayers(map)]
+		});
 		let hit = false;
 		for (const f of feats) {
 			if (isLabelLayer(f.layer?.id)) {
@@ -87,6 +99,12 @@ export function installHoverCursor(map: maplibregl.Map) {
 
 let popup: maplibregl.Popup | null = null;
 let callbacks: PopupCallbacks | null = null;
+
+/** The route stop layers currently present in the style (see
+ * PopupCallbacks.routeStopLayers). */
+function liveRouteStopLayers(map: maplibregl.Map): string[] {
+	return (callbacks?.routeStopLayers ?? []).filter((id) => !!map.getLayer(id));
+}
 
 function closePopup() {
 	if (popup) { popup.remove(); popup = null; }
@@ -189,7 +207,7 @@ function featureCoord(geometry: unknown): [number, number] | null {
  * pills (z ≥ 14) use the base fields. */
 function stationPopupData(
 	map: maplibregl.Map,
-	f: maplibregl.MapGeoJSONFeature
+	f: Pick<maplibregl.MapGeoJSONFeature, 'properties' | 'geometry'>
 ): StationPopupData {
 	const p = f.properties as Record<string, unknown>;
 	const coord = featureCoord(f.geometry);
@@ -208,6 +226,67 @@ function stationPopupData(
 
 function stationUic(p: Record<string, unknown>): string {
 	return String(p.parent_station ?? String(p.stop_id ?? '').split(':')[0] ?? '');
+}
+
+/** Station popup payload for a route-overlay stop feature (disc,
+ * pass-through dot or label). The route feature knows only the station
+ * key, name and MOTIS coordinate; the badges and departures/h live on
+ * the map's stop features, whose layers draw nothing in route mode — so
+ * they are looked up in the stop tiles' *source* features (the overlay
+ * hides those layers by filter precisely so their tiles stay loaded)
+ * rather than the rendered ones. Pills are preferred at the
+ * zooms they draw at, far-zoom dots below (their per-zoom absorber
+ * fields are honoured by stationPopupData). Without a source hit the
+ * popup degrades to name + route buttons, as for a search hit. The
+ * popup anchors on the route feature's own coord — that is the disc the
+ * user clicked. */
+function routeStopPopupData(
+	map: maplibregl.Map,
+	f: maplibregl.MapGeoJSONFeature
+): StationPopupData {
+	const p = f.properties as Record<string, unknown>;
+	const uic = String(p.parent_uic ?? '');
+	const name = String(p.stop_name ?? '');
+	const coord = featureCoord(f.geometry);
+	const fallback: StationPopupData = {
+		stopName: name, uic, coord, depHr: null, linesRaw: null
+	};
+	if (!uic) return fallback;
+	const hit = sourceStationFeature(map, uic);
+	if (!hit) return fallback;
+	const data = stationPopupData(map, hit);
+	return { ...data, stopName: data.stopName || name, coord: coord ?? data.coord };
+}
+
+/** Find the map's own stop feature for a station key among the loaded
+ * source tiles of the stop layers — pill source first from z14 up,
+ * dot sources first below. Sources and source-layers are read off the
+ * registered layers so no source id is re-declared here. */
+function sourceStationFeature(
+	map: maplibregl.Map,
+	uic: string
+): maplibregl.GeoJSONFeature | null {
+	const ordered = map.getZoom() >= 14
+		? [...TRANSIT_STOP_PILL_LAYERS, ...TRANSIT_STOP_DOT_LAYERS]
+		: [...TRANSIT_STOP_DOT_LAYERS, ...TRANSIT_STOP_PILL_LAYERS];
+	const seen = new Set<string>();
+	for (const id of ordered) {
+		const layer = map.getLayer(id) as
+			({ source?: string; sourceLayer?: string } | undefined);
+		if (!layer?.source) continue;
+		const key = `${layer.source}/${layer.sourceLayer ?? ''}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		const feats = map.querySourceFeatures(layer.source, { sourceLayer: layer.sourceLayer });
+		for (const f of feats) {
+			const q = f.properties as Record<string, unknown> | null;
+			if (!q) continue;
+			if (!(q.lines_json || q.dep_hr !== undefined)) continue;
+			if (stationUic(q) !== uic) continue;
+			return f;
+		}
+	}
+	return null;
 }
 
 /** Wire the map's click popups. Registers the feature-action callbacks
@@ -276,6 +355,23 @@ export function installClickPopups(map: maplibregl.Map, cb: PopupCallbacks) {
 			showPopup(map, e.lngLat,
 				buildStationPopupHtml(stationPopupData(map, stopFeature)));
 			return;
+		}
+
+		// Route stops (popups.md § Route stops): while a route is shown the
+		// map's stop layers are hidden, so a station click lands on the
+		// overlay's disc / pass-through dot instead.
+		const routeStopLayersNow = liveRouteStopLayers(map);
+		if (routeStopLayersNow.length) {
+			const hits = map.queryRenderedFeatures(e.point, { layers: routeStopLayersNow });
+			const rf = hits.find((f) => {
+				const q = f.properties as Record<string, unknown> | null;
+				return !!(q && (q.parent_uic || q.stop_name));
+			});
+			if (rf) {
+				showPopup(map, e.lngLat,
+					buildStationPopupHtml(routeStopPopupData(map, rf)));
+				return;
+			}
 		}
 
 		// Pill-arrow popup (z17+). See popups.md § Pill-arrow popup.

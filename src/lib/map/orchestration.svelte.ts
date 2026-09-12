@@ -17,6 +17,7 @@ import {
 	enterRouteOverlay, exitRouteOverlay, disposeRouteOverlay,
 	focusRouteLeg, frameItinerary
 } from '../routing/routeOverlay';
+import { ROUTE_DISC_LAYER, ROUTE_LABEL_LAYER, ROUTE_PASSTHROUGH_LAYER } from '../routing/routeLayers';
 import {
 	enterDirectRouteOverlay, exitDirectRouteOverlay, disposeDirectRouteOverlay,
 	directOverlayActive, frameDirectRoutes, frameSelectedDirectRoute
@@ -261,7 +262,8 @@ function whenStyleReady(map: maplibregl.Map, apply: () => void): () => void {
 export function wireMapFeatures(map: maplibregl.Map) {
 	installClickPopups(map, {
 		onEnterLineDetail: (sel) => enterLineDetail(sel),
-		onRouteEndpoint: handleRouteEndpoint
+		onRouteEndpoint: handleRouteEndpoint,
+		routeStopLayers: [ROUTE_DISC_LAYER, ROUTE_PASSTHROUGH_LAYER, ROUTE_LABEL_LAYER]
 	});
 
 	// Deep-link resolution runs in parallel with style load; the fetch

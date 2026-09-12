@@ -3,18 +3,20 @@
 // MapLibre feature objects. This is the seam for a later migration to
 // Svelte-rendered popups: only the render layer here would be swapped.
 
+import { routeGlyphSvg, type RouteGlyphBox } from '$lib/routing/routeGlyphs';
+
 const fmt = (v: unknown) => v == null ? '–' : String(v);
 const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // ── Route from / to buttons ─────────────────────────────────────────────
-// Shared by the station, pill-arrow and place popups. One gray group
-// pill holds a route icon plus a brand-red segmented pill whose two
-// halves — split by a white hairline — carry the same play triangle /
-// stop square the map's start and goal pins use (drawn as inline SVG:
-// the icon font's subset has no `stop` glyph, and reusing the pin
-// shapes keeps the pair identical everywhere). Labels live in the
-// tooltip only. Endpoint payload is decoded by handlers.ts §
-// wirePopupRouteClicks.
+// Shared by the station, pill-arrow and place popups. A "Route" label
+// sits beside a brand-red segmented pill (no group chrome) whose two
+// halves — split by a white hairline — read together as one route
+// line `o──|──o` (glyphs from routing/routeGlyphs.ts; the hairline
+// joins the two line ends). The lead is text, not an icon: an icon
+// beside two icon buttons reads as a third, dead control. Button
+// labels live in the tooltip only. Endpoint payload is decoded by
+// handlers.ts § wirePopupRouteClicks.
 
 export interface RouteButtonEndpoint {
 	/** Merged UIC — omitted for non-station places. */
@@ -24,18 +26,19 @@ export interface RouteButtonEndpoint {
 }
 
 const ROUTE_BTN_CSS = `
-		.popup-route-group { display: inline-flex; align-items: center; gap: 9px; margin-top: 10px; padding: 6px 6px 6px 12px; background: var(--gray-100); border-radius: var(--radius-pill); }
-		.popup-route-lead { font-size: 22px; line-height: 1; color: var(--anthracite); flex: 0 0 auto; }
+		.popup-route-group { display: inline-flex; align-items: center; gap: 9px; margin-top: 10px; }
+		.popup-route-lead { font-size: 13px; font-weight: 600; line-height: 1; color: var(--anthracite); flex: 0 0 auto; }
 		.popup-route-pill { display: inline-flex; background: var(--brand); border-radius: var(--radius-pill); overflow: hidden; }
 		.popup-route-btn { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 28px; padding: 0; border: none; background: transparent; color: var(--white); cursor: pointer; transition: background 0.12s ease; }
-		.popup-route-btn + .popup-route-btn { border-left: 1.5px solid var(--white); }
+		.popup-route-btn + .popup-route-btn { border-left: 2px solid var(--white); }
 		.popup-route-btn:hover { background: var(--brand-hover); }
-		.popup-route-btn svg { width: 13px; height: 13px; display: block; fill: currentColor; }`;
+		.popup-route-btn svg { width: 100%; height: 100%; display: block; fill: currentColor; }`;
 
-// Same shapes as makeStartIconElement / makeGoalIconElement in
-// routing/routeLayers.ts, normalised to a 12×12 box.
-const PLAY_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.4 L10.2 6 L3 10.6 Z"/></svg>';
-const STOP_SVG = '<svg viewBox="0 0 12 12" aria-hidden="true"><rect x="2.4" y="2.4" width="7.2" height="7.2"/></svg>';
+// Box = the 34×28 button; line thickness matches the 2px hairline so
+// the three pieces fuse into one stroke.
+const GLYPH_BOX: RouteGlyphBox = { w: 34, h: 28, r: 5, inset: 12, line: 2 };
+const FROM_SVG = routeGlyphSvg('from', GLYPH_BOX);
+const TO_SVG = routeGlyphSvg('to', GLYPH_BOX);
 
 function routeButtonsHtml(ep: RouteButtonEndpoint | null): string {
 	if (!ep) return '';
@@ -46,10 +49,10 @@ function routeButtonsHtml(ep: RouteButtonEndpoint | null): string {
 		`<button class="popup-route-btn" type="button" title="${tip}" aria-label="${tip}"`
 		+ ` data-route-side="${side}" data-route-endpoint="${payload}">${glyph}</button>`;
 	return `<div class="popup-route-group">`
-		+ `<span class="popup-route-lead material-symbols-outlined" aria-hidden="true">directions</span>`
+		+ `<span class="popup-route-lead">Route</span>`
 		+ `<span class="popup-route-pill">`
-		+ btn('from', PLAY_SVG, 'Route from here')
-		+ btn('to', STOP_SVG, 'Route to here')
+		+ btn('from', FROM_SVG, 'Route from here')
+		+ btn('to', TO_SVG, 'Route to here')
 		+ `</span></div>`;
 }
 

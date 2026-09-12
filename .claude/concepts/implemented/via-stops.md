@@ -76,8 +76,10 @@ wasted travel time.
 ### Panel UI
 
 - The endpoint block becomes an ordered list of rows: From, zero to two
-  Via rows, To. Via rows are styled as the existing endpoint rows, with
-  the label `Via`.
+  Via rows, To. Via rows are styled as the existing endpoint rows. Row
+  labels are the route glyphs (`o──` / `──o──` / `──o`, ux-guidelines.md
+  § Route endpoint glyphs), not text; the words From / Via / To survive
+  only in the rows' aria-labels.
 - Every row carries a **`+`** button at its right end meaning **insert a
   stop after this row**:
   - on the From row and on a Via row it inserts a new, empty Via row
@@ -116,6 +118,9 @@ wasted travel time.
   same serialisation the From / To station endpoints already use — and
   **`viaWait`** — the wait minutes, one per via, in the same order.
   `viaWait` is written only when at least one wait is non-zero.
+- Point vias (direct tabs) use the coordinate token of From / To, which
+  contains a comma — so the list separator of both parameters is `;`,
+  not `,`. Older comma-joined station-only links still parse.
 - Both parameters are written on every via or wait change, and a cold
   load of such a URL reproduces the chain and issues the query.
 - The via chain and its waits are part of the query fingerprint, so two

@@ -2,6 +2,7 @@
 	import { routingState } from './state.svelte';
 	import type { Endpoint } from './types';
 	import { reverseAddress } from '$lib/geocoding/client';
+	import { routeGlyphSvg, type RouteGlyphBox } from './routeGlyphs';
 
 	interface Props {
 		/** Screen-space anchor (x, y) or null when hidden. */
@@ -19,15 +20,30 @@
 	// order.
 	let pickSeq = 0;
 
-	async function pickAsPoint(side: 'from' | 'to') {
+	// Item glyphs (routeGlyphs.ts, dot flush at the outer edge): from
+	// `o────`, via `──o──`, to `────o` in brand red on the plain menu
+	// background (a red chip behind each was tried and found too heavy).
+	const GLYPH_BOX: RouteGlyphBox = { w: 30, h: 20, r: 6, inset: 6, line: 2 };
+	const FROM_SVG = routeGlyphSvg('from', GLYPH_BOX);
+	const VIA_SVG = routeGlyphSvg('via', GLYPH_BOX);
+	const TO_SVG = routeGlyphSvg('to', GLYPH_BOX);
+
+	// A map point can only be a via on the direct tabs — transit vias are
+	// stations (types.ts ViaEndpoint), so the entry is hidden there rather
+	// than offered and silently dropped by setVia.
+	const canAddVia = $derived(routingState.travelMode !== 'transit' && routingState.canAddVia);
+
+	async function pickAsPoint(side: 'from' | 'to' | 'via') {
 		if (!anchor) return;
 		const coord: [number, number] = [anchor.lng, anchor.lat];
 		const seq = ++pickSeq;
 		// Focus override: the picked endpoint arrives async (reverse geocode),
 		// so at open time both fields are empty — point the cursor at the
-		// side the pick won't fill.
+		// side the pick won't fill. A via fills neither, so the panel's own
+		// defaults apply (current location may prefill From).
 		if (!routingState.open) {
-			routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from' });
+			if (side === 'via') routingState.openPanel();
+			else routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from' });
 		}
 		onClose();
 		// Resolve the address first, then set the endpoint once — setting it
@@ -45,7 +61,14 @@
 			? { type: 'point', coord, displayName: name, kind: 'address' }
 			: { type: 'point', coord };
 		if (side === 'from') routingState.setFrom(ep);
-		else routingState.setTo(ep);
+		else if (side === 'to') routingState.setTo(ep);
+		else {
+			// Appended as the last via — the row is created and filled in one
+			// go so no empty row flashes in the panel during the geocode.
+			const index = routingState.vias.length;
+			routingState.insertViaAt(index);
+			routingState.setVia(index, ep);
+		}
 	}
 </script>
 
@@ -56,18 +79,18 @@
 		role="menu"
 	>
 		<button role="menuitem" onclick={() => pickAsPoint('from')}>
-			<!-- Same play / stop glyphs as the map's start and goal pins
-			     (routeLayers.ts) and the popup route buttons. -->
-			<svg class="mcm-icon" viewBox="0 0 12 12" aria-hidden="true">
-				<path d="M3 1.4 L10.2 6 L3 10.6 Z" />
-			</svg>
-			Route from here
+			<span class="mcm-glyph">{@html FROM_SVG}</span>
+			<span>Route <b>from</b> here</span>
 		</button>
+		{#if canAddVia}
+			<button role="menuitem" onclick={() => pickAsPoint('via')}>
+				<span class="mcm-glyph">{@html VIA_SVG}</span>
+				<span>Route <b>via</b> here</span>
+			</button>
+		{/if}
 		<button role="menuitem" onclick={() => pickAsPoint('to')}>
-			<svg class="mcm-icon" viewBox="0 0 12 12" aria-hidden="true">
-				<rect x="2.4" y="2.4" width="7.2" height="7.2" />
-			</svg>
-			Route to here
+			<span class="mcm-glyph">{@html TO_SVG}</span>
+			<span>Route <b>to</b> here</span>
 		</button>
 	</div>
 {/if}
@@ -78,6 +101,9 @@
 		z-index: 30;
 		background: var(--white);
 		border-radius: 0.5rem;
+		/* Top-left corner stays square: it sits exactly on the click
+		   point and so points at it. */
+		border-top-left-radius: 0;
 		box-shadow: var(--shadow-popover);
 		padding: 0.25rem 0;
 		font-family: var(--font-ui);
@@ -98,11 +124,19 @@
 		cursor: pointer;
 	}
 	.mcm button:hover { background: var(--gray-75); }
+	.mcm button b { font-weight: 600; }
 
-	.mcm-icon {
-		width: 0.8rem;
-		height: 0.8rem;
+	.mcm-glyph {
+		display: block;
+		width: 30px;
+		height: 20px;
 		flex: 0 0 auto;
-		fill: var(--brand);
+		color: var(--brand);
+	}
+	.mcm-glyph :global(svg) {
+		display: block;
+		width: 100%;
+		height: 100%;
+		fill: currentColor;
 	}
 </style>

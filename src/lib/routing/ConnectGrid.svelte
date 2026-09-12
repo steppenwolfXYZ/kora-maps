@@ -376,11 +376,11 @@
 		pointer-events: none;
 	}
 	.drag-line line {
-		stroke: var(--brand);
+		stroke: var(--white);
 		stroke-width: 2.5;
 		stroke-linecap: round;
 	}
 	.drag-line circle {
-		fill: var(--brand);
+		fill: var(--white);
 	}
 </style>
