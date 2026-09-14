@@ -23,6 +23,29 @@ export type TimeMode = 'leave' | 'arrive';
  * param values; absent means transit. */
 export type TravelMode = 'transit' | 'bike' | 'walk';
 
+/** One turn-by-turn step of a direct route, as Valhalla reports it —
+ * the raw material of bicycle navigation (bicycle-navigation.md
+ * § Maneuver banner). Indices point into the route's `coords`. */
+export interface RouteManeuver {
+	/** Valhalla maneuver type (its `TripLeg_Maneuver_Type` enum: 10 = right,
+	 * 15 = left, 26 = roundabout enter, 40 = stairs, 4/5/6 = destination…). */
+	type: number;
+	/** Instruction text ("Turn right onto Bahnhofstrasse."), English.
+	 * Empty when instructions were not requested. */
+	instruction: string;
+	/** Metres covered by this step (from its begin index to the next
+	 * maneuver's begin index). */
+	lengthM: number;
+	/** Seconds the engine budgets for this step. */
+	timeSec: number;
+	beginIndex: number;
+	endIndex: number;
+	/** Bike only: the step is walked (pushed bike / stairs). */
+	pushed: boolean;
+	/** Aboard a water ferry (type 28 with the ferry flag). */
+	ferry: boolean;
+}
+
 /** One direct cycling / walking route returned by Valhalla — either the
  * primary route or an alternate (pedestrian-bicycle-routing.md § Query &
  * alternatives). Elevation-derived fields are null when the Valhalla
@@ -76,6 +99,10 @@ export interface DirectRoute {
 	 * map draws these ranges dotted. Empty for walk routes and rides
 	 * without pushed sections. */
 	pushedRanges: [number, number][];
+	/** Turn-by-turn steps in route order (bicycle-navigation.md). Always
+	 * present; instruction text only for bike routes (walk routes request
+	 * maneuvers without text — walking navigation is a separate project). */
+	maneuvers: RouteManeuver[];
 }
 
 /** The `station` variant of Endpoint, pulled out because transit via

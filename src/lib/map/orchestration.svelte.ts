@@ -31,6 +31,11 @@ import {
 } from '../linedetail/lineIndex';
 import { mapUi } from './uiState.svelte';
 import type { ViewMode } from './layers';
+import { navigation } from '../navigation/state.svelte';
+import { enterNavCamera, exitNavCamera, followRider } from '../navigation/camera';
+import { RiderMarker } from '../navigation/positionMarker';
+import { NavStartControl } from '../navigation/NavStartControl';
+import { isNarrow } from '../routing/layout';
 
 let routeColorIndex: Map<string, string> | null = null;
 let routeStationIndex: Map<string, StationEntry> | null = null;
@@ -46,6 +51,20 @@ let closingRouteViaBack = false;
 let directBasemapForced = false;
 let preDirectView: ViewMode = 'standard';
 let preDirectContours = false;
+
+// Bicycle navigation (bicycle-navigation.md): the top-right start
+// control, the rider marker, and whether the next camera move is the
+// entry move (eased) rather than a follow step (linear).
+let navStartControl: NavStartControl | null = null;
+let riderMarker: RiderMarker | null = null;
+let navFirstMove = true;
+
+/** Start navigating the selected cycling route — the top-right control
+ * and the card button both land here. */
+function startNavigationFromSelection() {
+	const r = routingState.selectedDirectRoute;
+	if (r && r.mode === 'bike') void navigation.start(r);
+}
 
 /** Fed to createKoraMap so its hashchange listener knows when a
  * feature's history.back() close is consuming the hash step. */
@@ -183,18 +202,87 @@ export function setupMapOrchestration() {
 	// (restore-on-reopen) but takes them off the map, so the effect
 	// gates on `open` — unlike the transit overlay, whose selection is
 	// cleared by closePanel.
+	// While navigating, the overlay shows the navigated route alone
+	// (bicycle-navigation.md) — it replaces the planned one after a
+	// recalculation — without framing or a start pin; the follow
+	// camera owns the view. Leaving navigation hands the planned set
+	// back, which re-frames it as a fresh set.
 	$effect(() => {
-		const routes = routingState.directRoutes;
-		const sel = routingState.directSelected;
-		const active = routingState.open
+		const navRoute = navigation.active ? navigation.route : null;
+		const routes = navRoute ? [navRoute] : routingState.directRoutes;
+		const sel = navRoute ? 0 : routingState.directSelected;
+		const active = navRoute !== null || (
+			routingState.open
 			&& routingState.travelMode !== 'transit'
-			&& routes.length > 0;
+			&& routes.length > 0
+		);
 		const map = mapUi.mapRef;
 		if (!map) return;
 		return whenStyleReady(map, () => {
-			if (active) enterDirectRouteOverlay(map, routes, sel);
-			else exitDirectRouteOverlay(map);
+			if (active) {
+				enterDirectRouteOverlay(map, routes, sel, {
+					autoFrame: navRoute === null, startPin: navRoute === null
+				});
+			} else {
+				exitDirectRouteOverlay(map);
+			}
 		});
+	});
+
+	// Navigation on the map (bicycle-navigation.md § Follow-me map):
+	// raise the pitch ceiling, and treat any user gesture on the map as
+	// "stop following" — programmatic camera moves carry no
+	// originalEvent, so the follow steps themselves never trip it.
+	$effect(() => {
+		const map = mapUi.mapRef;
+		if (!map || !navigation.active) return;
+		const saved = enterNavCamera(map);
+		navFirstMove = true;
+		const onUserMove = (e: { originalEvent?: Event }) => {
+			if (e.originalEvent) navigation.suspendFollow();
+		};
+		map.on('movestart', onUserMove);
+		return () => {
+			map.off('movestart', onUserMove);
+			riderMarker?.remove();
+			riderMarker = null;
+			// The cleanup also runs when the map itself goes (style reload
+			// → mapRef null), after map.remove() — nothing to restore then.
+			if (mapUi.mapRef === map) exitNavCamera(map, saved);
+		};
+	});
+
+	// Every fix moves the rider marker; while following it also moves
+	// the camera. Resuming follow (re-center control, foreground return)
+	// re-runs this with the last fix.
+	$effect(() => {
+		const map = mapUi.mapRef;
+		const fix = navigation.fix;
+		const heading = navigation.heading;
+		const following = navigation.following;
+		if (!map || !navigation.active || !fix) return;
+		if (!riderMarker) riderMarker = new RiderMarker(map, fix.coord);
+		riderMarker.update(fix.coord, heading);
+		if (following) {
+			followRider(map, fix.coord, heading, navFirstMove);
+			navFirstMove = false;
+		}
+	});
+
+	// The top-right start control shows while a cycling route is
+	// selected and no ride is running. On a narrow screen with the sheet
+	// expanded to the full panel the column is covered — hide it there
+	// rather than float it over the panel.
+	$effect(() => {
+		if (!mapUi.mapRef) return;
+		const r = routingState.selectedDirectRoute;
+		const visible = !navigation.active
+			&& routingState.open
+			&& r?.mode === 'bike'
+			&& !lineDetailState.selection
+			&& !(isNarrow() && routingState.directSheetExpanded);
+		navStartControl?.setVisible(visible);
+		navStartControl?.setBusy(navigation.starting);
 	});
 
 	// Direct cycling / walking tabs read the map as a base map: while
@@ -271,6 +359,11 @@ export function wireMapFeatures(map: maplibregl.Map) {
 		routeStopLayers: [ROUTE_DISC_LAYER, ROUTE_PASSTHROUGH_LAYER, ROUTE_LABEL_LAYER]
 	});
 
+	// Start-navigation control, last in the top-right column (below the
+	// locate button). Visibility is driven by the effect above.
+	navStartControl = new NavStartControl(startNavigationFromSelection);
+	map.addControl(navStartControl, 'top-right');
+
 	// Deep-link resolution runs in parallel with style load; the fetch
 	// runs alongside tile/glyph loading and is awaited inside the
 	// map.on('load') handler below.
@@ -326,6 +419,10 @@ export function wireMapFeatures(map: maplibregl.Map) {
 			enterDirectRouteOverlay(map,
 				routingState.directRoutes, routingState.directSelected);
 		}
+
+		// A ride persisted before a reload resumes once the map can show
+		// it (bicycle-navigation.md § Entering and leaving).
+		void navigation.tryResume();
 	});
 }
 
@@ -336,4 +433,6 @@ export function resetMapFeatures() {
 	disposeRouteOverlay();
 	disposeDirectRouteOverlay();
 	closingRouteViaBack = false;
+	navStartControl = null;
+	riderMarker = null;
 }

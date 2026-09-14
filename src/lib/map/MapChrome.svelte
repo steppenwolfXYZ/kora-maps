@@ -12,6 +12,8 @@
 	import RouteMapHeader from '../routing/RouteMapHeader.svelte';
 	import MapContextMenu from '../routing/MapContextMenu.svelte';
 	import LineDetailBar from '../linedetail/LineDetailBar.svelte';
+	import NavigationOverlay from '../navigation/NavigationOverlay.svelte';
+	import { navigation } from '../navigation/state.svelte';
 	import { routingState } from '../routing/state.svelte';
 	import { lineDetailState } from '../linedetail/state.svelte';
 	import { isNarrow } from '../routing/layout';
@@ -25,12 +27,22 @@
 <svelte:window
 	onkeydown={(e) => {
 		if (e.key !== 'Escape') return;
-		if (routingState.mapMode) routingState.exitMapMode();
+		if (navigation.active) navigation.stop();
+		else if (routingState.mapMode) routingState.exitMapMode();
 		else if (lineDetailState.selection) exitLineDetailView();
 	}}
 	onresize={() => { if (!isNarrow() && routingState.mapMode) routingState.exitMapMode(); }}
 />
 
+{#if navigation.active}
+	<!-- Bicycle navigation (bicycle-navigation.md): banner, summary and
+	     re-center control own the screen; the planning chrome below
+	     stays mounted but hidden, so the panel's state survives the
+	     ride and reappears on exit. -->
+	<NavigationOverlay />
+{/if}
+
+<div class="planning-chrome" class:navigating={navigation.active}>
 <LineDetailBar onClose={exitLineDetailView} />
 
 {#if routingState.mapMode}
@@ -91,14 +103,15 @@
 
 <MapContextMenu anchor={mapUi.contextAnchor} onClose={() => (mapUi.contextAnchor = null)} />
 
-{#if mapUi.toast}
-	<div class="map-toast" role="alert">{mapUi.toast}</div>
-{/if}
-
 <a class="brand-overlay" href="/about" aria-label="About Kora Maps">
 	<img src="/icon.svg" alt="" draggable="false" />
 	<span class="beta-pill">Beta</span>
 </a>
+</div>
+
+{#if mapUi.toast}
+	<div class="map-toast" role="alert">{mapUi.toast}</div>
+{/if}
 
 {#if PUBLIC_ENVIRONMENT !== 'production'}
 	<div class="zoom-badge" aria-label="Current zoom level">
@@ -107,6 +120,16 @@
 {/if}
 
 <style>
+	/* Wrapper only — no box of its own, so the absolutely positioned
+	   chrome inside keeps .map-wrap as its containing block. Hidden as
+	   a whole while navigating. */
+	.planning-chrome {
+		display: contents;
+	}
+	.planning-chrome.navigating {
+		display: none;
+	}
+
 	.top-controls {
 		position: absolute;
 		top: 1rem;

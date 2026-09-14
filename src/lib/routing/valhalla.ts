@@ -1,7 +1,7 @@
 import { PUBLIC_VALHALLA_URL } from '$env/static/public';
 
 import { decodePolyline } from './polyline';
-import type { DirectRoute } from './types';
+import type { DirectRoute, RouteManeuver } from './types';
 
 // Valhalla client for the direct cycling / walking routes of the routing
 // panel (pedestrian-bicycle-routing.md). Local dev points straight at the
@@ -78,6 +78,10 @@ interface ValhallaManeuver {
 	type: number;
 	/** Length in the requested units (kilometres here). */
 	length?: number;
+	/** Seconds. */
+	time?: number;
+	/** Text instruction — present with `directions_type: 'instructions'`. */
+	instruction?: string;
 	street_names?: string[];
 	/** Present and true on water-ferry maneuvers; absent on car-shuttle
 	 * (rail ferry) maneuvers — the two kinds share the maneuver type. */
@@ -249,6 +253,7 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 	// rider never climbs and inflate the ascent totals).
 	const crossingRanges: [number, number][] = [];
 	const pushedRanges: [number, number][] = [];
+	const maneuvers: RouteManeuver[] = [];
 	for (const leg of legs) {
 		// Ranges are per-leg shape indices; offset them into the
 		// concatenated coords (two break locations → one leg anyway).
@@ -265,6 +270,18 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 			elevationComplete = false;
 		}
 		for (const m of leg.maneuvers ?? []) {
+			if (typeof m.begin_shape_index === 'number' && typeof m.end_shape_index === 'number') {
+				maneuvers.push({
+					type: m.type,
+					instruction: (m.instruction ?? '').trim(),
+					lengthM: (m.length ?? 0) * 1000,
+					timeSec: m.time ?? 0,
+					beginIndex: legStart + m.begin_shape_index,
+					endIndex: legStart + m.end_shape_index,
+					pushed: mode === 'bike' && m.travel_mode === 'pedestrian',
+					ferry: m.type === MANEUVER_FERRY_ENTER && m.ferry === true
+				});
+			}
 			if (m.type === MANEUVER_STEPS_ENTER && typeof m.length === 'number') {
 				stairsM += m.length * 1000;
 			}
@@ -322,6 +339,7 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 		shuttleM: Math.round(shuttleM),
 		ferryCrossings,
 		pushedRanges,
+		maneuvers,
 		requestedFrom: args.from,
 		requestedTo: args.to,
 		requestedVias: args.vias ?? []
@@ -353,9 +371,13 @@ async function requestRoutes(
 		alternates,
 		units: 'kilometers',
 		elevation_interval: ELEVATION_INTERVAL_M,
-		// Maneuvers only (no instruction text) — needed for the stairs /
-		// ferry / pushed-section detection; keeps the response small.
-		directions_type: 'maneuvers'
+		// Bike routes carry instruction text — the navigation banner reads
+		// it (bicycle-navigation.md § Maneuver banner). Walk routes request
+		// maneuvers only (stairs / ferry / pushed-section detection needs
+		// them; no text keeps the response small — walking navigation is
+		// a separate project). Instructions never change the route itself.
+		directions_type: args.mode === 'bike' ? 'instructions' : 'maneuvers',
+		language: 'en-US'
 	};
 	// No explicit Content-Type on purpose: fetch then sends text/plain,
 	// which is a CORS "simple request" — no OPTIONS preflight, which the
@@ -446,4 +468,17 @@ export async function fetchDirectRoutes(
 	}
 	if (promoted) routes.unshift(promoted);
 	return routes;
+}
+
+/** One route, no alternates, no crossing variants — the navigation
+ * recalculation (bicycle-navigation.md § Off-route detection): from the
+ * rider's current position to the original destination through the
+ * vias still ahead, with the same costing the planned route used. Null
+ * when the engine finds nothing. */
+export async function fetchNavigationRoute(
+	args: DirectRouteArgs,
+	signal?: AbortSignal
+): Promise<DirectRoute | null> {
+	const routes = await requestRoutes(args, null, 0, signal);
+	return routes[0] ?? null;
 }

@@ -6,6 +6,7 @@
 
 import maplibregl from 'maplibre-gl';
 import { markGeolocationDenied } from '../routing/geolocation.svelte';
+import { navigation } from '../navigation/state.svelte';
 import { applyViewMode, bakeViewModeVisibility } from './layers';
 import { readPositionHash, writePositionHash } from './positionHash';
 import { addContourLayers } from './contours';
@@ -68,7 +69,11 @@ export function createKoraMap(
 	// gestures and programmatic jumps alike; hashchange covers manual
 	// URL edits and back/forward (replaceState never fires hashchange,
 	// so the two can't feed back into each other).
-	map.on('moveend', () => writePositionHash(map));
+	// Not while navigating: the follow camera moves every second, and a
+	// URL rewrite per fix is churn for nothing — the view is the rider's
+	// position, not a place worth a link. The next planning-mode move
+	// re-syncs.
+	map.on('moveend', () => { if (!navigation.active) writePositionHash(map); });
 	map.on('movestart', mapUi.closeMenuOnSmallScreen);
 	map.on('movestart', () => (mapUi.contextAnchor = null));
 	map.on('click', mapUi.closeMenuOnSmallScreen);

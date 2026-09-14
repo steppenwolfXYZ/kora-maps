@@ -4,6 +4,7 @@
 	import { fmtDistance, fmtDuration } from './itineraryFormat';
 	import { isNarrow } from './layout';
 	import { routingState } from './state.svelte';
+	import { navigation } from '../navigation/state.svelte';
 
 	// One card per direct cycling / walking route
 	// (pedestrian-bicycle-routing.md § Result cards): duration, distance,
@@ -106,6 +107,21 @@
 			{index === 0 ? 'Suggested route' : `Alternative ${index}`}
 		</span>
 		<div class="card-actions">
+			{#if route.mode === 'bike' && selected}
+				<!-- Navigation entry point on the selected cycling route
+				     (bicycle-navigation.md § Entering and leaving). -->
+				<button
+					class="card-nav"
+					type="button"
+					aria-label="Start navigation"
+					title="Start navigation"
+					disabled={navigation.starting}
+					onclick={(e) => { e.stopPropagation(); void navigation.start(route); }}
+				>
+					<span class="material-symbols-outlined" aria-hidden="true">navigation</span>
+					Navigate
+				</button>
+			{/if}
 			<button
 				class="card-map"
 				type="button"
@@ -242,6 +258,36 @@
 		align-items: center;
 		margin: -0.3rem -0.15rem -0.3rem 0;
 	}
+	/* Primary action: red at rest, red fill on hover (ux-guidelines.md). */
+	.card-nav {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		margin-right: 0.35rem;
+		padding: 0.2rem 0.6rem 0.2rem 0.45rem;
+		border: 1px solid var(--brand);
+		border-radius: var(--radius-pill);
+		background: transparent;
+		color: var(--brand);
+		font: inherit;
+		font-size: 0.78rem;
+		font-weight: 600;
+		line-height: 1.2;
+		cursor: pointer;
+	}
+	.card-nav :global(.material-symbols-outlined) {
+		font-size: 1rem;
+		line-height: 1;
+	}
+	.card-nav:hover {
+		background: var(--brand);
+		color: var(--white);
+	}
+	.card-nav:disabled {
+		opacity: 0.6;
+		cursor: progress;
+	}
+
 	/* Same red map accent as the transit cards. */
 	.card-map {
 		flex: 0 0 auto;

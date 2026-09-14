@@ -7,6 +7,7 @@
 	import 'maplibre-gl/dist/maplibre-gl.css';
 	import { Protocol } from 'pmtiles';
 	import { routingState } from './routing/state.svelte';
+	import { navigation } from './navigation/state.svelte';
 	import MapChrome from './map/MapChrome.svelte';
 	import { createKoraMap } from './map/createMap';
 	import {
@@ -34,7 +35,12 @@
 	});
 </script>
 
-<div class="map-wrap" class:routing-active={routingState.open} class:routing-map-mode={routingState.mapMode}>
+<div
+	class="map-wrap"
+	class:routing-active={routingState.open}
+	class:routing-map-mode={routingState.mapMode}
+	class:navigating={navigation.active}
+>
 	<div bind:this={container} class="map"></div>
 	<MapChrome />
 </div>

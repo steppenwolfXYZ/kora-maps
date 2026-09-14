@@ -104,7 +104,11 @@ function connectorArc(a: [number, number], b: [number, number]): [number, number
 	return pts;
 }
 
-function buildData(routes: DirectRoute[], selected: number): GeoJSON.FeatureCollection {
+function buildData(
+	routes: DirectRoute[],
+	selected: number,
+	startPin: boolean
+): GeoJSON.FeatureCollection {
 	// Selected route last — within one layer, later features paint on
 	// top, so the full-color route always covers the muted alternates.
 	const order = routes
@@ -123,10 +127,11 @@ function buildData(routes: DirectRoute[], selected: number): GeoJSON.FeatureColl
 	// (alternates share the endpoints; three near-identical stubs would
 	// just smear). Skipped when the snap landed on the pin.
 	const selRoute = routes[Math.min(selected, routes.length - 1)];
-	for (const [pin, snap] of [
-		[selRoute.requestedFrom, selRoute.coords[0]],
+	const stubs: [[number, number], [number, number]][] = [
 		[selRoute.requestedTo, selRoute.coords[selRoute.coords.length - 1]]
-	] as [[number, number], [number, number]][]) {
+	];
+	if (startPin) stubs.unshift([selRoute.requestedFrom, selRoute.coords[0]]);
+	for (const [pin, snap] of stubs) {
 		const dM = Math.hypot(
 			(pin[0] - snap[0]) * 111320 * Math.cos((pin[1] * Math.PI) / 180),
 			(pin[1] - snap[1]) * 111320
@@ -327,22 +332,35 @@ export function frameSelectedDirectRoute(getMap: () => maplibregl.Map | null) {
 	frameDirectBounds(getMap, [...r.bbox], 15, padding);
 }
 
+export interface DirectOverlayOptions {
+	/** Frame a fresh route set (default). Navigation passes false — the
+	 * follow-me camera owns the view (bicycle-navigation.md). */
+	autoFrame?: boolean;
+	/** Plant the start pin + its connector stub (default). Navigation
+	 * passes false: a recalculated route "starts" wherever the rider
+	 * was, which is no place for a pin. */
+	startPin?: boolean;
+}
+
 /** Install or update the overlay. Fresh route sets (a new query) apply
  * the basemap focus and auto-frame; a selection change only re-orders /
  * re-tags the features. Idempotent. */
 export function enterDirectRouteOverlay(
 	map: maplibregl.Map,
 	routes: DirectRoute[],
-	selected: number
+	selected: number,
+	opts: DirectOverlayOptions = {}
 ) {
 	if (routes.length === 0) return;
+	const autoFrame = opts.autoFrame ?? true;
+	const startPin = opts.startPin ?? true;
 	const mode = routes[0].mode;
 	const fresh = lastRoutes !== routes;
 	lastRoutes = routes;
 
 	applyBasemapFocus(map, 'direct');
 
-	const data = buildData(routes, Math.min(selected, routes.length - 1));
+	const data = buildData(routes, Math.min(selected, routes.length - 1), startPin);
 	const src = map.getSource(DIRECT_SOURCE) as maplibregl.GeoJSONSource | undefined;
 	if (!src) {
 		map.addSource(DIRECT_SOURCE, { type: 'geojson', data });
@@ -375,6 +393,7 @@ export function enterDirectRouteOverlay(
 		markers.start.setLngLat(start);
 		markers.goal.setLngLat(goal);
 	}
+	markers.start.getElement().style.display = startPin ? '' : 'none';
 	// Via pins — same teardrop family as the transit route overlay's via
 	// markers. The count can change between queries, so surplus pins drop
 	// and missing ones are added; existing ones just move.
@@ -395,7 +414,7 @@ export function enterDirectRouteOverlay(
 	// in the strip above it (padding accounts for the sheet; a fresh
 	// query always collapses it, so the null expanded case can't occur,
 	// but guard anyway).
-	if (fresh) {
+	if (fresh && autoFrame) {
 		const padding = directFramePadding();
 		if (padding !== null) {
 			frameDirectBounds(() => map, unionBBox(routes), 15, padding);
