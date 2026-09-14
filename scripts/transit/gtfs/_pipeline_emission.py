@@ -189,7 +189,7 @@ for (line_key, agency_id, tg_id), variant_map in drawable_groups.items():
             continue
 
         # Per-variant freq for thickness — see
-        # .claude/concepts/seasonal-regional-bus-rescue.md
+        # .claude/concepts/trip-group-rare-variant-filter.md
         # § "Per-variant freq for line thickness". Falls back to group
         # freq if the variant has no per-variant data (shouldn't happen
         # since trip_buf populates both, but safe).

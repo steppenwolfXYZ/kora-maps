@@ -99,7 +99,9 @@ This machine's Python 3 binary is `python3` (Homebrew-managed, currently 3.12). 
 Installing packages goes through `python3 -m pip install --user --break-system-packages <pkg>` because Homebrew Python enforces PEP 668. The only non-stdlib dependency the pipeline currently needs is `PyYAML`.
 
 ## Rebuild command
-After any transit pipeline change, suggest `./scripts/rebuild_transit.sh --start N` where N is the lowest step whose inputs you actually changed (see the step list in `.claude/rules/transit.md`). Each step's output is the next step's input, so `--start N` runs steps N..8 contiguously — starting lower than needed just wastes time, especially on pfaedle. Never suggest running individual Python scripts.
+After any transit pipeline change, suggest a rebuild from step N, where N is the lowest step whose inputs you actually changed (see the step list in `.claude/rules/transit.md`). Each step's output is the next step's input, so a rebuild always runs steps N..8 contiguously — starting lower than needed just wastes time, especially on pfaedle. Never suggest running individual Python scripts.
+
+Which machine: for N ≥ 6 (emit-only) suggest `./scripts/rebuild_transit.sh --start N` on the Mac, provided the Mac has fetched since Kranich's last build — a default `fetch_build.sh` delivers every input steps 6–8 read. For N < 6, or when the result should go to production, suggest committing, pulling on Kranich, then `./scripts/remote_build.sh --only-pipeline --pipeline-from N --skip-gtfs`, and say that this deploys the result (`.claude/rules/deployment.md` § Which machine rebuilds what).
 
 ## Fixing bugs
 Fix stop placement bugs by correcting the algorithm in `06_score_and_match.py`, not by tightening snap-distance thresholds in `07_extract_stops.py`. Tightening thresholds papers over a data quality problem instead of fixing it.
@@ -134,7 +136,7 @@ Do NOT include implementation steps, code snippets, or file/line references. Tho
 
 **Stop after writing or updating a concept doc.** The concept is the deliverable for that turn. Do not chain straight into implementation — the user needs to read it, possibly amend it, and may want to commit other work first. Wait for explicit re-authorisation ("implement", "go ahead", "do it" etc.) referring to the implementation. Authorisation to "write a concept", "extend the concept", or "update the concept" covers the doc edit only, not the code that follows.
 
-**Reference concept docs by filename only**, not by path (e.g. `` `seasonal-regional-bus-rescue.md` ``, not `` `.claude/concepts/implemented/seasonal-regional-bus-rescue.md` ``). Filenames are unique across the subfolders, so moving a concept between `concepts/`, `implemented/`, `later/`, `deferred/`, and `superseded/` doesn't invalidate references. `later/` holds concepts intended for later from the start (never scheduled for immediate implementation); `deferred/` holds concepts that were once meant to be implemented and then put on hold.
+**Reference concept docs by filename only**, not by path (e.g. `` `trip-group-rare-variant-filter.md` ``, not `` `.claude/concepts/implemented/trip-group-rare-variant-filter.md` ``). Filenames are unique across the subfolders, so moving a concept between `concepts/`, `implemented/`, `later/`, `deferred/`, and `superseded/` doesn't invalidate references. `later/` holds concepts intended for later from the start (never scheduled for immediate implementation); `deferred/` holds concepts that were once meant to be implemented and then put on hold.
 
 ## Memory / rules
 Do not use the auto-memory system. If something is worth remembering across sessions, propose updating a file in `.claude/rules/` and let the user commit it.

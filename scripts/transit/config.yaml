@@ -650,6 +650,15 @@ min_active_days_regional_bus: 90
 unique_stop_min_distance_m: 1000
 unique_stop_min_share_pct: 0.02
 
+# Per-variant rare-variant filter for standard (non-rescued) groups
+# (trip-group-rare-variant-filter.md). A variant is kept when its weighted
+# share of the group is >= 10%, OR its own annual f_weighted (trips/h per
+# direction) exceeds `rare_variant_min_freq`, OR it exceeds
+# `rare_variant_best_fraction` × the group's strongest variant. Depot runs
+# measured <= 0.15 trips/h, real branches >= 0.7 — keep the floor between.
+rare_variant_min_freq: 0.3
+rare_variant_best_fraction: 0.5
+
 # ── Frequency sampling ───────────────────────────────────────────────────────
 # Sample dates the low-frequency filter measures trip counts on, generated
 # once by scripts/transit/generate_sample_dates.py (seed + blackouts live in

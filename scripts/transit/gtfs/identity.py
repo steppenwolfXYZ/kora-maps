@@ -297,7 +297,7 @@ def stream_stop_times(trips, stop_coords, svc_dates, trip_frequencies, stop_meta
     )
     # var_freq[(tg_key, var_key)][season] = [core_sum, eve_sum, we_sum] —
     # parallel to tg_freq but aggregated per variant for per-direction
-    # thickness; see .claude/concepts/seasonal-regional-bus-rescue.md
+    # thickness; see .claude/concepts/trip-group-rare-variant-filter.md
     # § "Per-variant freq for line thickness".
     var_freq: dict = defaultdict(
         lambda: {s: [0, 0, 0] for s in SEASONS}

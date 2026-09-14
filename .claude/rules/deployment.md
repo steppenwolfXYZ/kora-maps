@@ -142,7 +142,7 @@ importing a feed it had never been sent.
 | `assets` | `static/map-assets/` | ~470 MB | pmtiles, style.json, search/line/color indexes, glyph fonts |
 | `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + the footpath matrix CSV |
 | `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
-| `lookup` | `data/` (raw feed + derived) | ~400 MB | the whole GTFS feed, diagnostics, identity, OSM way extracts |
+| `lookup` | `data/` (raw + filtered feeds, derived) | ~550 MB on the wire | both GTFS feeds whole, atlas CSV, diagnostics, identity, all OSM way extracts |
 | `routed` | `data/gtfs_routed/` + `data/gtfs_motis/stops.txt` | ~6.2 GB | pfaedle's feed — input to `--start 6` and to a Mac re-import |
 
 **The matrix ships with the indexes.** It used to be opt-in
@@ -189,7 +189,13 @@ The rest of `lookup` is unchanged: `data/transit/**/*.json`
 (`gtfs_groups_full.json` above all, now including the `diagnostics/`
 subdirectory), `stop_identity.json`, and the OSM extracts (`rail_ways`,
 `tram_ways`, `platform_ways`, `builtup_grid_100m`, `quay_anchors`).
-`--street-ways` adds `street_ways.geojson` (152 MB). The country PBFs
+`street_ways.geojson` (152 MB raw, ~30 MB on the wire) is included by
+default since 2026-09; `--street-ways` is accepted and ignored. Also in the
+group since then: `data/gtfs_filtered/` whole (`--delete`, gated on its
+`stop_times.txt`; ~250 MB on the wire, disk delta ~zero) and the atlas
+traffic-point CSV (~3 MB) — step 7 reads both, and a lone
+`stop_identity.json` out of the filtered feed was exactly the partial-table
+transfer the rule above forbids. The country PBFs
 (12.7 GB, unreadable without osmium) still stay here.
 
 **Re-importing MOTIS on the Mac is normally unnecessary.** The `motis` group
@@ -280,15 +286,36 @@ yields "no import".
 
 ## Which machine rebuilds what
 
-The deciding question is how long the rebuild takes, not what it touches.
+The deciding question is whether the Mac holds every input of the steps
+being run at the vintage Kranich last built with — and then how long the
+rebuild takes.
 
-**Short rebuilds (under ~20-30 min): the Mac does them.** Staying on one
-machine avoids a round trip, and the Mac is where the code already is.
-
-**Long rebuilds: Kranich does them**, driven from the Mac with one command:
+**Emit-only rebuilds (steps 6–8, `rebuild_transit.sh --start 6`): either
+machine, once the Mac has fetched.** A default `fetch_build.sh` delivers
+every input those steps read at Kranich's vintage: the routed feed, the
+whole filtered feed (step 7's pre-pfaedle `stops.txt`), the atlas CSV, and
+all OSM way extracts including `street_ways.geojson`. Until 2026-09 the last
+three were not fetched, so a Mac emit run joined a current routed feed
+against last release's quays and an older street network — it ran without
+error and produced a mixed-vintage map. That gap is closed; the guard that
+remains is the fetch itself: **do not run steps 6–8 on the Mac on data
+older than Kranich's last build.** The Mac run stays local (the pipeline
+never deploys from the Mac); to publish, run it on Kranich instead, after
+committing and pulling there:
 
 ```
-./scripts/remote_build.sh [--osm] [--only-pipeline | --only-routing] [--skip-gtfs]
+./scripts/remote_build.sh --only-pipeline --pipeline-from 6 --skip-gtfs
+```
+
+Emit-only is ~11 min there, and the result ships to production at the end
+of the build — there is no remote dry run.
+
+**Anything that starts below step 6** — pfaedle, the OSM cut, the GTFS
+chain, the routing branch, full refreshes — is Kranich's, driven from the
+Mac with one command:
+
+```
+./scripts/remote_build.sh [--osm] [--only-pipeline | --only-routing] [--skip-gtfs] [--pipeline-from N]
 ```
 
 That launches the build detached on Kranich, streams its log here, waits for

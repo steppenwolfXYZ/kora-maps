@@ -26,7 +26,7 @@ The city_bus / regional_bus split is number-based and deliberately conservative:
 - The decision is made **once per line group** over the union of all its variants' geometry (both directions, all branches), so all variants of a line agree on the mode.
 - A promoted group behaves as city_bus **everywhere downstream**: bucket-dependent frequency gates and score endpoints, line color and width curves, `mode` on all emitted features, the mode component of `line_key`, stop membership strings, pill rendering, and the search index. No artifact may carry a mixed or stale mode for a promoted line.
 - Lines whose geometry pfaedle could not shape are not evaluated and keep their number-based class.
-- Groups containing seasonal-rescue variants (see `seasonal-regional-bus-rescue.md`) are **not evaluated**: the rescue exists only for regional buses, and the existing rule drops rescued variants that classify as city bus — promoting such a group would silently delete it from the map instead of recoloring it.
+- Groups containing seasonal-rescue variants (see `trip-group-rare-variant-filter.md` § Seasonal regional-bus rescue) are **not evaluated**: the rescue exists only for regional buses, and the existing rule drops rescued variants that classify as city bus — promoting such a group would silently delete it from the map instead of recoloring it.
 
 ### Config
 

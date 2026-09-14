@@ -30,6 +30,10 @@ unique_stop_min_distance_m = float(
 unique_stop_min_share_pct = float(
     cfg.get("unique_stop_min_share_pct", 0.02)
 )
+rare_variant_min_freq = float(cfg.get("rare_variant_min_freq", 0.3))
+rare_variant_best_fraction = float(
+    cfg.get("rare_variant_best_fraction", 0.5)
+)
 
 def min_active_days_for(bucket: str) -> int:
     return min_active_days_by_bucket.get(bucket, min_active_days_default)
@@ -349,8 +353,9 @@ for sg_id, members in supergroup_members.items():
 for tg_key in rare_group_dropped:
     groups.pop(tg_key, None)
 
-# filter_outcomes[tg_key] = {var_key: (outcome, threshold_pct_used)}
-# where outcome ∈ {"kept", "rare_variant", "short_active_period"} and
+# filter_outcomes[tg_key] = {var_key: (outcome, passed_by)}
+# where outcome ∈ {"kept", "rare_variant", "short_active_period"},
+# passed_by is the rare-variant clause that kept it (None on drops) and
 # var_key = (merged_set, direction_key).
 diag_filter: dict = {}
 
@@ -361,15 +366,18 @@ for tg_key, dropped in short_active_variants.items():
     for var_key in dropped:
         bucket_entry[var_key] = ("short_active_period", None)
 
-# Rare-variant filter — two phases for groups with at least one
-# regional_bus_rescued variant; legacy single-phase otherwise. See
-# .claude/concepts/seasonal-regional-bus-rescue.md.
+# Rare-variant filter — see .claude/concepts/trip-group-rare-variant-filter.md.
 #
-# Phase 1 (share gate):
-#   - Rescued-bearing group: 10% per window (annual/winter/summer). No 5%
-#     fallback. A variant is "kept-by-share" if it clears 10% in any
-#     window.
-#   - Other group: legacy 10%/5%-fallback against the annual window only.
+# Phase 1:
+#   - Standard group (no regional_bus_rescued variant): a variant is kept
+#     if its annual weighted share ≥ 10%, OR its own annual f_weighted
+#     > rare_variant_min_freq, OR its own f_weighted >
+#     rare_variant_best_fraction × the group's strongest variant. If no
+#     variant passes any clause, all are kept. No 5% fallback.
+#   - Rescued-bearing group: 10% share per window (annual/winter/summer),
+#     no frequency clauses (a seasonal variant's annual f_weighted is near
+#     zero by construction). A variant is "kept-by-share" if it clears
+#     10% in any window.
 # Phase 2 (built only after phase 1 has run for every group):
 #   - global_kept_uics = union of parent UICs served by any kept-by-share
 #     variant across the whole dataset.
@@ -382,27 +390,42 @@ for tg_key, dropped in short_active_variants.items():
 #
 # Diagnostics:
 #   rare_variant_window_passed[(tg_key, var_key)] ∈
-#     {"annual", "winter", "summer", "unique_stop", None}
-#   rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10 / 0.05 /
-#     None (None for unique_stop rescues or for drops).
+#     {"annual", "winter", "summer", None} — window of a share pass.
+#   rare_variant_passed_by[(tg_key, var_key)] ∈
+#     {"share", "min_freq", "best_fraction", "unique_stop", "keep_all", None}
 rare_variant_window_passed: dict = {}
-rare_variant_threshold_pct_passed: dict = {}
+rare_variant_passed_by: dict = {}
 
 def _pct_pass(counts: dict, vmap_keys, pct: float) -> set:
     total = sum(counts.values())
     threshold = max(1, total * pct)
     return {vk for vk in vmap_keys if counts.get(vk, 0) >= threshold}
 
-def _legacy_rare_variant(counts: dict, vmap_keys) -> tuple:
-    """Annual 10% then 5% fallback; if both pass nothing, keep all."""
-    for pct in (0.10, 0.05):
-        kept = _pct_pass(counts, vmap_keys, pct)
-        if kept:
-            return kept, pct
-    return set(vmap_keys), None
+def _variant_annual_fw(tg_key, var_key) -> float:
+    seasonal = var_freq_seasonal.get((tg_key, var_key)) or {}
+    raw = seasonal.get("annual")
+    return weighted_freq(raw) if raw else 0.0
 
-# ── Phase 1: standard share gate for every group ─────────────────────
+def _standard_rare_variant(tg_key, counts: dict, vmap_keys) -> dict:
+    """Share ≥ 10%, else absolute freq floor, else fraction of the group's
+    strongest variant. Returns {var_key: passed_by}; empty dict means
+    nothing passed (caller keeps all)."""
+    by_share = _pct_pass(counts, vmap_keys, 0.10)
+    fw = {vk: _variant_annual_fw(tg_key, vk) for vk in vmap_keys}
+    best = max(fw.values(), default=0.0)
+    passed: dict = {}
+    for vk in vmap_keys:
+        if vk in by_share:
+            passed[vk] = "share"
+        elif fw[vk] > rare_variant_min_freq:
+            passed[vk] = "min_freq"
+        elif best > 0 and fw[vk] > best * rare_variant_best_fraction:
+            passed[vk] = "best_fraction"
+    return passed
+
+# ── Phase 1: share / frequency gate for every group ──────────────────
 kept_by_share: dict = {}  # tg_key → set(var_key)
+n_min_freq = n_best_fraction = n_keep_all = 0
 for tg_key, vmap in list(groups.items()):
     is_rescued_group = bool(regional_bus_rescued.get(tg_key))
     if is_rescued_group:
@@ -417,15 +440,27 @@ for tg_key, vmap in list(groups.items()):
                 if var_key in per_window_kept[s]:
                     kept.add(var_key)
                     rare_variant_window_passed[(tg_key, var_key)] = s
-                    rare_variant_threshold_pct_passed[(tg_key, var_key)] = 0.10
+                    rare_variant_passed_by[(tg_key, var_key)] = "share"
                     break
         kept_by_share[tg_key] = kept
     else:
-        kept, pct = _legacy_rare_variant(variant_counts[tg_key], vmap)
-        kept_by_share[tg_key] = kept
-        for var_key in kept:
-            rare_variant_window_passed[(tg_key, var_key)] = "annual"
-            rare_variant_threshold_pct_passed[(tg_key, var_key)] = pct
+        passed = _standard_rare_variant(tg_key, variant_counts[tg_key], vmap)
+        if not passed:
+            passed = {vk: "keep_all" for vk in vmap}
+            n_keep_all += 1
+        kept_by_share[tg_key] = set(passed)
+        for var_key, why in passed.items():
+            rare_variant_passed_by[(tg_key, var_key)] = why
+            if why == "share":
+                rare_variant_window_passed[(tg_key, var_key)] = "annual"
+            elif why == "min_freq":
+                n_min_freq += 1
+            elif why == "best_fraction":
+                n_best_fraction += 1
+print(f"  Rare-variant filter: {n_min_freq:,} variants kept by the "
+      f"{rare_variant_min_freq} trips/h floor, {n_best_fraction:,} by "
+      f"{rare_variant_best_fraction}× best variant, "
+      f"{n_keep_all:,} groups kept whole (nothing passed)")
 
 # ── Phase 2: global kept-by-share parent UIC set ─────────────────────
 # var_key[0] is the merged-stop frozenset = the variant's parent UICs.
@@ -485,8 +520,7 @@ for tg_key, vmap in groups.items():
         if not passes_floor:
             continue
         kept.add(var_key)
-        rare_variant_window_passed[(tg_key, var_key)] = "unique_stop"
-        rare_variant_threshold_pct_passed[(tg_key, var_key)] = None
+        rare_variant_passed_by[(tg_key, var_key)] = "unique_stop"
         n_unique_stop_rescued += 1
 if n_unique_stop_rescued:
     print(f"  {n_unique_stop_rescued:,} variants rescued by unique-stop rule")
@@ -494,17 +528,25 @@ if n_unique_stop_rescued:
 # ── Apply kept_by_share to groups + populate diag_filter ─────────────
 for tg_key, vmap in list(groups.items()):
     kept = kept_by_share.get(tg_key, set())
-    if kept and kept != set(vmap.keys()):
+    if not kept:
+        # Nothing passed (rescued-bearing group with no share pass in any
+        # window and no unique-stop rescue): keep the whole group rather
+        # than erase a real but sparse line.
+        kept = set(vmap.keys())
+        for var_key in kept:
+            rare_variant_passed_by.setdefault((tg_key, var_key), "keep_all")
+    if kept != set(vmap.keys()):
         groups[tg_key] = {vk: vmap[vk] for vk in kept}
     bucket_entry = diag_filter.setdefault(tg_key, {})
     for var_key in vmap:
         if var_key in kept:
             bucket_entry[var_key] = (
                 "kept",
-                rare_variant_threshold_pct_passed.get((tg_key, var_key)),
+                rare_variant_passed_by.get((tg_key, var_key)),
             )
         else:
             rare_variant_window_passed.setdefault((tg_key, var_key), None)
+            rare_variant_passed_by.setdefault((tg_key, var_key), None)
             bucket_entry[var_key] = ("rare_variant", None)
 
 # Trip groups dropped by the supergroup filter never reached the per-variant
@@ -527,7 +569,7 @@ for tg_key in rare_group_dropped:
 # The winning window's raw freq becomes the group's effective freq for
 # downstream emission and salience — line thickness / visibility track
 # in-season cadence rather than annual dilution.
-# See .claude/concepts/seasonal-regional-bus-rescue.md.
+# See .claude/concepts/trip-group-rare-variant-filter.md.
 drawable_groups = {}
 freq_gate_window_passed: dict = {}  # tg_key → "annual"|"winter"|"summer"|None
 best_freq_map, worst_freq_map = _frequencies()
@@ -730,10 +772,9 @@ for _parent_tg_key in list(drawable_groups.keys()):
             _rvwp = rare_variant_window_passed.pop((_parent_tg_key, _vk), None)
             if _rvwp is not None:
                 rare_variant_window_passed[(_new_tg_key, _vk)] = _rvwp
-            _rvpct = rare_variant_threshold_pct_passed.pop(
-                (_parent_tg_key, _vk), None)
-            if _rvpct is not None:
-                rare_variant_threshold_pct_passed[(_new_tg_key, _vk)] = _rvpct
+            _rvpb = rare_variant_passed_by.pop((_parent_tg_key, _vk), None)
+            if _rvpb is not None:
+                rare_variant_passed_by[(_new_tg_key, _vk)] = _rvpb
 
         tg_total_weight[_new_tg_key] = sum(variant_counts[_new_tg_key].values())
 
@@ -746,7 +787,7 @@ for _parent_tg_key in list(drawable_groups.keys()):
         diag_filter[_new_tg_key] = {
             vk: _parent_diag_filter.get(vk,
                 ("kept",
-                 rare_variant_threshold_pct_passed.get((_new_tg_key, vk))))
+                 rare_variant_passed_by.get((_new_tg_key, vk))))
             for vk in _comp_vars
         }
 

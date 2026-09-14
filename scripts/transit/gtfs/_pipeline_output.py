@@ -508,7 +508,7 @@ for tg_key, var_outcomes in diag_filter.items():
     variant_weighted_total_for_group = sum(variant_counts[tg_key].values())
 
     variants_out = []
-    for var_key, (filt_outcome, threshold_pct) in var_outcomes.items():
+    for var_key, (filt_outcome, passed_by) in var_outcomes.items():
         merged_set, direction_key = var_key
         ms_trips = original_vmap.get(var_key, [])
         stations: list = []
@@ -559,7 +559,7 @@ for tg_key, var_outcomes in diag_filter.items():
             "first_terminus": first_terminus,
             "last_terminus": last_terminus,
             "kept_by_variant_filter": kept_by_filter,
-            "rare_variant_threshold_pct": threshold_pct,
+            "rare_variant_passed_by": passed_by,
             "rare_variant_window_passed":
                 rare_variant_window_passed.get((tg_key, var_key)),
             "regional_bus_rescued": var_key in regional_bus_rescued.get(tg_key, ()),

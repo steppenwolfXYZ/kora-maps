@@ -17,8 +17,8 @@
 #   assets    static/map-assets/     ~470 MB  pmtiles, style, indexes, glyphs
 #   motis     motis/data/            ~6.3 GB  nigiri/OSR/shapes indexes + matrix
 #   valhalla  valhalla/data/         ~1.0 GB  tile extract + admins
-#   lookup    data/ (raw feed +      ~400 MB  whole GTFS feed, diagnostics,
-#             derived tables)                 identity + OSM way extracts
+#   lookup    data/ (raw + filtered  ~550 MB  both GTFS feeds, atlas CSV,
+#             feeds, derived tables) on wire  diagnostics, OSM way extracts
 #   routed    data/gtfs_routed/ +    ~6.2 GB  pfaedle's feed; input to
 #             data/gtfs_motis/                --start 6 and to a re-import
 #
@@ -49,7 +49,6 @@ REMOTE_PATH="${REMOTE_PATH%/}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 SYNC_GROUPS="assets,motis,valhalla,lookup,routed"
-STREET_WAYS=0
 FULL_VALHALLA=0
 FORCE=0
 DRY_RUN=0
@@ -60,7 +59,7 @@ while [ $# -gt 0 ]; do
 		--only)           SYNC_GROUPS="$2"; shift 2 ;;
 		--only=*)         SYNC_GROUPS="${1#*=}"; shift ;;
 		--no-routed)      SYNC_GROUPS="${SYNC_GROUPS//,routed/}"; shift ;;
-		--street-ways)    STREET_WAYS=1; shift ;;
+		--street-ways)    shift ;;  # accepted and ignored: street_ways.geojson is default now
 		--full-valhalla)  FULL_VALHALLA=1; shift ;;
 		--force)          FORCE=1; shift ;;
 		--dry-run|-n)     DRY_RUN=1; RSYNC_ARGS+=("$1"); shift ;;
@@ -258,9 +257,25 @@ if want lookup; then
 			-- "data/gtfs/"
 	fi
 
-	if rhave "data/gtfs_filtered/stop_identity.json"; then
-		pull "stop identity → data/gtfs_filtered/" "data/gtfs_filtered/" -z \
-			-- "data/gtfs_filtered/stop_identity.json"
+	# The filtered feed (step 04's output) comes over WHOLE as well, for
+	# the same reason. Step 07 reads its stops.txt for the pre-pfaedle
+	# stop attributes and step 05 routes it, so a lone stop_identity.json
+	# — the previous transfer — left this Mac's emit steps joining a
+	# current routed feed against last release's quays. ~3.4 GB raw,
+	# ~250 MB on the wire, disk delta ~zero (overwrites in place).
+	if have lookup "data/gtfs_filtered/stop_times.txt"; then
+		pull "filtered GTFS feed → data/gtfs_filtered/" "data/gtfs_filtered/" \
+			-z --delete \
+			-- "data/gtfs_filtered/"
+	fi
+
+	# Atlas traffic-point CSV (quay length + compass direction, read by
+	# step 07's stop attributes). Downloaded by step 01, which the Mac
+	# never runs any more — without this it would stay at whatever the
+	# Mac last fetched itself. 22 MB raw, ~3 MB on the wire.
+	if rhave "data/atlas/actual-date-world-traffic-point.csv"; then
+		pull "atlas traffic points → data/atlas/" "data/atlas/" -z \
+			-- "data/atlas/actual-date-world-traffic-point.csv"
 	fi
 
 	# NB: data/gtfs_motis/stops.txt is deliberately NOT fetched here — it
@@ -269,11 +284,12 @@ if want lookup; then
 	# independent file on its own would put the data machine's new stops
 	# on top of this Mac's old stop_times.
 
+	# street_ways.geojson (152 MB raw, ~30 MB on the wire) used to be
+	# opt-in; it is step 07's bus stop-extent network, so leaving it out
+	# meant an emit-only rebuild here walked last month's streets.
 	OSM_EXTRACTS=()
 	OSM_WANTED=(rail_ways.geojson tram_ways.geojson platform_ways.geojson
-	            builtup_grid_100m.json quay_anchors.json)
-	# 152 MB; only worth it if you inspect bus geometry regularly.
-	if [ "$STREET_WAYS" -eq 1 ]; then OSM_WANTED+=(street_ways.geojson); fi
+	            builtup_grid_100m.json quay_anchors.json street_ways.geojson)
 	for f in "${OSM_WANTED[@]}"; do
 		if rhave "data/osm/$f"; then OSM_EXTRACTS+=("data/osm/$f"); fi
 	done

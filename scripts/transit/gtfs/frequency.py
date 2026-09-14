@@ -19,7 +19,7 @@ from common import CFG_PATH
 _SAMPLE_DATES_CACHE: dict = {}
 
 # Seasonal windows for the regional-bus rescue multi-window gates. See
-# .claude/concepts/seasonal-regional-bus-rescue.md. Months are inclusive
+# .claude/concepts/trip-group-rare-variant-filter.md. Months are inclusive
 # (1..12). "winter" = Jan-Mar covers the heart of the ski season; "summer" =
 # Jun-Aug covers the core alpine season. A bus running Dec-Apr passes via
 # winter, Jun-Oct via summer; one running only in December does not pass.
