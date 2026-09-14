@@ -429,7 +429,9 @@ if [[ $DEPLOY -eq 1 ]]; then
   # Smoke-test what was actually shipped.
   if [[ $DO_ROUTING -eq 1 ]]; then
     banner "Production smoke test"
-    SMOKE='https://koramaps.app/routing/api/v1/plan?fromPlace=47.378,8.540&toPlace=47.424,8.508&arriveBy=false&numItineraries=1&directModes=WALK'
+    # Through the app's own endpoint: MOTIS is loopback-only in production,
+    # there is no nginx /routing/ location. /api/plan requires a concrete time.
+    SMOKE="https://koramaps.app/api/plan?fromPlace=47.378,8.540&toPlace=47.424,8.508&arriveBy=false&time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     ok=0
     for i in $(seq 1 12); do
       if curl -sf "$SMOKE" | grep -q '"itineraries"'; then ok=1; break; fi

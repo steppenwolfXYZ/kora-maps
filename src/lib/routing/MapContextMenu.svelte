@@ -37,12 +37,17 @@
 		if (!anchor) return;
 		const coord: [number, number] = [anchor.lng, anchor.lat];
 		const seq = ++pickSeq;
+		// "Route to here" with an empty From: start from the current location
+		// so the route loads as soon as the point lands (no start to type).
+		const fromPrefilled = side === 'to' && routingState.prefillCurrentFrom();
 		// Focus override: the picked endpoint arrives async (reverse geocode),
 		// so at open time both fields are empty — point the cursor at the
 		// side the pick won't fill. A via fills neither, so the panel's own
-		// defaults apply (current location may prefill From).
+		// defaults apply (current location may prefill From). With From
+		// prefilled both fields end up set, so nothing gets focus.
 		if (!routingState.open) {
 			if (side === 'via') routingState.openPanel();
+			else if (fromPrefilled) routingState.openPanel({ prefillCurrent: false, focus: null });
 			else routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from' });
 		}
 		onClose();

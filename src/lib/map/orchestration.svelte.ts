@@ -118,7 +118,12 @@ function handleRouteEndpoint(side: 'from' | 'to', req: RouteEndpointRequest) {
 		? { type: 'station', uic: hit.u, name: String(req.name || hit.n), coord: req.coord, mode: hit.m, pid: hit.p }
 		: { type: 'point', coord: req.coord, displayName: String(req.name ?? '') || undefined };
 	if (side === 'from') routingState.setFrom(ep);
-	else routingState.setTo(ep);
+	else {
+		// Route to here with an empty From: start from the current location
+		// so both endpoints are set and the route loads right away.
+		routingState.prefillCurrentFrom();
+		routingState.setTo(ep);
+	}
 	if (!routingState.open) routingState.openPanel({ prefillCurrent: false });
 }
 

@@ -533,7 +533,7 @@ export const routingState = {
 		return results;
 	},
 
-	openPanel(opts?: { prefillCurrent?: boolean; focus?: 'from' | 'to' }) {
+	openPanel(opts?: { prefillCurrent?: boolean; focus?: 'from' | 'to' | null }) {
 		if (panelOpen) return;
 		panelOpen = true;
 		// Fresh open with no state: prefill From with current location (concept
@@ -547,9 +547,23 @@ export const routingState = {
 		}
 		// Cursor lands in the first empty endpoint field (From filled with
 		// current location → To). Context menu overrides via opts.focus since
-		// its endpoint arrives async, after the panel is already open.
-		focusRequest = opts?.focus ?? (!from ? 'from' : !to ? 'to' : null);
+		// its endpoint arrives async, after the panel is already open; an
+		// explicit null means "no focus" (both endpoints are about to be
+		// filled, nothing to type).
+		focusRequest = opts?.focus !== undefined ? opts.focus : (!from ? 'from' : !to ? 'to' : null);
 		syncUrl();
+	},
+
+	/** "Route to here" entry points (popup button, map context menu): when
+	 * From is still empty and geolocation is usable, fill it with the
+	 * current location so the route loads right away instead of waiting
+	 * for a start to be typed. Returns whether From was filled. A From the
+	 * user already set is never overwritten. */
+	prefillCurrentFrom(): boolean {
+		if (from || !hasGeolocation() || geolocationDenied()) return false;
+		from = { type: 'current' };
+		syncUrl();
+		return true;
 	},
 
 	/** One-shot read of the requested endpoint focus (set by openPanel). */
