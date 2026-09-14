@@ -88,13 +88,13 @@
 
 {#if !navigation.following}
 	<button
-		class="nav-recenter control-disc"
+		class="nav-recenter"
 		type="button"
-		aria-label="Re-center on your position"
 		title="Re-center on your position"
 		onclick={() => navigation.resumeFollow()}
 	>
 		<span class="material-symbols-outlined" aria-hidden="true">my_location</span>
+		Re-center
 	</button>
 {/if}
 
@@ -248,15 +248,31 @@
 		color: var(--warn);
 	}
 
+	/* Left side, above the summary — a labelled pill in the map-control
+	   family (white, shadow, red glyph; red fill on hover). */
 	.nav-recenter {
 		position: absolute;
-		right: 1rem;
+		left: 1rem;
 		bottom: calc(4.6rem + env(safe-area-inset-bottom, 0px));
 		z-index: 3;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		height: var(--control-size);
+		padding: 0 0.85rem 0 0.6rem;
+		border: none;
+		border-radius: var(--radius-pill);
+		background: var(--white);
+		box-shadow: var(--shadow-control);
 		color: var(--brand);
+		font-family: var(--font-ui);
+		font-size: 0.85rem;
+		font-weight: 600;
+		cursor: pointer;
 	}
 	.nav-recenter .material-symbols-outlined {
-		font-size: 1.25rem;
+		font-size: 1.2rem;
+		line-height: 1;
 	}
 	.nav-recenter:hover {
 		background: var(--brand);

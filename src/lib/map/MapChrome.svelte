@@ -14,6 +14,17 @@
 	import LineDetailBar from '../linedetail/LineDetailBar.svelte';
 	import NavigationOverlay from '../navigation/NavigationOverlay.svelte';
 	import { navigation } from '../navigation/state.svelte';
+
+	// Start-navigation entry point (bicycle-navigation.md § Entering and
+	// leaving): shown while a cycling route is selected and no ride is
+	// running. The narrow-screen full panel covers this spot, so the
+	// expanded direct sheet hides it via CSS.
+	let navStartRoute = $derived(
+		!navigation.active && routingState.open && !lineDetailState.selection
+			&& routingState.selectedDirectRoute?.mode === 'bike'
+			? routingState.selectedDirectRoute
+			: null
+	);
 	import { routingState } from '../routing/state.svelte';
 	import { lineDetailState } from '../linedetail/state.svelte';
 	import { isNarrow } from '../routing/layout';
@@ -44,6 +55,20 @@
 
 <div class="planning-chrome" class:navigating={navigation.active}>
 <LineDetailBar onClose={exitLineDetailView} />
+
+{#if navStartRoute}
+	{@const route = navStartRoute}
+	<button
+		class="nav-start"
+		class:sheet-expanded={routingState.directSheetExpanded}
+		type="button"
+		disabled={navigation.starting}
+		onclick={() => void navigation.start(route)}
+	>
+		<span class="material-symbols-outlined" aria-hidden="true">navigation</span>
+		Navigate
+	</button>
+{/if}
 
 {#if routingState.mapMode}
 	<!-- Mobile fullscreen map mode: the summary header owns the top of
@@ -152,6 +177,58 @@
 	}
 	.top-controls.hidden-in-map-mode {
 		display: none;
+	}
+
+	/* Start navigation: a labelled pill left of the zoom bar (the top-right
+	   MapLibre column: 1rem margin + one control width + 0.5rem gap).
+	   Primary action — red at rest, red fill on hover. */
+	.nav-start {
+		position: absolute;
+		top: 1rem;
+		right: calc(1rem + var(--control-size) + 0.5rem);
+		z-index: 2;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		height: var(--control-size);
+		padding: 0 0.85rem 0 0.6rem;
+		border: none;
+		border-radius: var(--radius-pill);
+		background: var(--white);
+		box-shadow: var(--shadow-control);
+		color: var(--brand);
+		font-family: var(--font-ui);
+		font-size: 0.85rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.nav-start .material-symbols-outlined {
+		font-size: 1.2rem;
+		line-height: 1;
+	}
+	.nav-start:hover {
+		background: var(--brand);
+		color: var(--white);
+	}
+	.nav-start:disabled {
+		opacity: 0.6;
+		cursor: progress;
+	}
+	/* Narrow screens: the top-right column is hidden while routing, so
+	   the pill takes the corner itself; the expanded full-height panel
+	   covers it, so it hides there. */
+	@media (max-width: 699px) {
+		:global(.map-wrap.routing-active:not(.routing-map-mode)) .nav-start {
+			right: 1rem;
+		}
+		:global(.map-wrap.routing-active) .nav-start.sheet-expanded {
+			display: none;
+		}
+		/* Fullscreen map mode: below the summary header, like the
+		   MapLibre column (app.css § MapLibre controls). */
+		:global(.map-wrap.routing-map-mode) .nav-start {
+			top: 5.2rem;
+		}
 	}
 
 	/* Round routing entry point — base disc styling from .control-disc

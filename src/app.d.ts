@@ -27,6 +27,10 @@ declare global {
 			 * fingerprint so browser back closes the route overlay and
 			 * forward restores it. */
 			routeSelection?: string;
+			/** Present while bicycle navigation is active (bicycle-
+			 * navigation.md): entering pushes an entry carrying it, so
+			 * browser back leaves navigation and nothing else. */
+			navigation?: boolean;
 		}
 	}
 }

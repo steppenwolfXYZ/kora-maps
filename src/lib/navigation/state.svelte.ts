@@ -8,6 +8,8 @@
 // from here.
 
 import { browser } from '$app/environment';
+import { pushState } from '$app/navigation';
+import { page } from '$app/state';
 import type { DirectRoute } from '../routing/types';
 import { fetchNavigationRoute } from '../routing/valhalla';
 import { geolocationErrorMessage, markGeolocationDenied } from '../routing/geolocation.svelte';
@@ -83,6 +85,11 @@ let recalcAbort: AbortController | null = null;
 let arrivalTimer: ReturnType<typeof setTimeout> | null = null;
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 let startedAt = 0;
+// Whether this ride pushed its history entry (page.state.navigation).
+// Browser back pops it → the orchestration effect ends navigation; an
+// explicit stop consumes it with history.back() so the entry never
+// lingers as a dead forward step.
+let pushedEntry = false;
 
 let guidance: Guidance | null = $derived.by(() => {
 	if (!route || !geometry) return null;
@@ -287,6 +294,14 @@ async function start(r: DirectRoute, resume = false): Promise<void> {
 	fix = null;
 	installRoute(r);
 	applyFix(first);
+	// Starting away from the planned route (concept § Entering and
+	// leaving): no five-second hold — reroute from where the rider is
+	// right now. The persisted route is the planned one until the new
+	// route lands (recalculate() persists it).
+	if (!arrived && offRouteM > OFF_ROUTE_DIST_M) {
+		offRoute = true;
+		void recalculate();
+	}
 	persist();
 
 	wakeLock = new ScreenWakeLock();
@@ -300,6 +315,12 @@ async function start(r: DirectRoute, resume = false): Promise<void> {
 	});
 	clockTimer = setInterval(() => { now = Date.now(); }, CLOCK_TICK_MS);
 	document.addEventListener('visibilitychange', onVisibility);
+	// Same URL, one entry deeper: back leaves navigation and nothing
+	// else. Navigation never rides in the URL itself (concept § Entering
+	// and leaving). A resume after a reload lands on the entry that
+	// already carries the flag — don't stack a second one.
+	if (!page.state.navigation) pushState('', { ...page.state, navigation: true });
+	pushedEntry = true;
 	starting = false;
 }
 
@@ -307,6 +328,11 @@ async function start(r: DirectRoute, resume = false): Promise<void> {
  * stops here — planning mode keeps its on-demand location behaviour. */
 function stop(): void {
 	if (!active && !starting) return;
+	// Decide before tearing down: an explicit stop while our entry is
+	// still on top pops it; a stop triggered BY a back navigation finds
+	// the flag already gone and must not step back a second time.
+	const consumeEntry = pushedEntry && page.state.navigation === true;
+	pushedEntry = false;
 	active = false;
 	starting = false;
 	stopWatch?.();
@@ -332,6 +358,7 @@ function stop(): void {
 	updateFailed = false;
 	following = true;
 	clearPersisted();
+	if (consumeEntry) history.back();
 }
 
 /** Resume a ride persisted before a reload (concept § Entering and

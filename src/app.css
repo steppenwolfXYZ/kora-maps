@@ -141,44 +141,12 @@ body {
 }
 
 /* ── Bicycle navigation (bicycle-navigation.md) ───────────────────────────
-   The start control lives in MapLibre's top-right column (an IControl,
-   NavStartControl.ts), so its look is set here beside the other
-   vendor-DOM rules. Primary action: red glyph at rest, red fill on
-   hover, like the route button. */
-.map-wrap .kora-nav-start[hidden] {
-	display: none;
-}
-.map-wrap .kora-nav-start .nav-start-btn {
-	color: var(--brand);
-}
-.map-wrap .kora-nav-start .nav-start-btn .material-symbols-outlined {
-	font-size: 1.25rem;
-	line-height: 1;
-}
-.map-wrap .kora-nav-start .nav-start-btn:hover {
-	background: var(--brand);
-	color: var(--white);
-}
-.map-wrap .kora-nav-start .nav-start-btn.busy {
-	opacity: 0.6;
-	cursor: progress;
-}
+   The start button and the re-center pill are Svelte components
+   (MapChrome / NavigationOverlay); only the vendor-DOM rules live here. */
 
 /* While a ride is active the map controls and the scale bar go — the
    banner, summary and re-center control are the only chrome. */
 .map-wrap.navigating .maplibregl-ctrl-top-right,
 .map-wrap.navigating .maplibregl-ctrl-bottom-left {
 	display: none;
-}
-
-/* Narrow routing-active hides the whole top-right column (rule above);
-   the start control alone stays, so the direct-mode bottom sheet keeps
-   its entry point at the top-right of the map. */
-@media (max-width: 699px) {
-	.map-wrap.routing-active:not(.routing-map-mode):not(.navigating) .maplibregl-ctrl-top-right {
-		display: block;
-	}
-	.map-wrap.routing-active:not(.routing-map-mode) .maplibregl-ctrl-top-right > .maplibregl-ctrl:not(.kora-nav-start) {
-		display: none;
-	}
 }

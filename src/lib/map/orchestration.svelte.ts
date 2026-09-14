@@ -34,8 +34,6 @@ import type { ViewMode } from './layers';
 import { navigation } from '../navigation/state.svelte';
 import { enterNavCamera, exitNavCamera, followRider } from '../navigation/camera';
 import { RiderMarker } from '../navigation/positionMarker';
-import { NavStartControl } from '../navigation/NavStartControl';
-import { isNarrow } from '../routing/layout';
 
 let routeColorIndex: Map<string, string> | null = null;
 let routeStationIndex: Map<string, StationEntry> | null = null;
@@ -52,19 +50,11 @@ let directBasemapForced = false;
 let preDirectView: ViewMode = 'standard';
 let preDirectContours = false;
 
-// Bicycle navigation (bicycle-navigation.md): the top-right start
-// control, the rider marker, and whether the next camera move is the
-// entry move (eased) rather than a follow step (linear).
-let navStartControl: NavStartControl | null = null;
+// Bicycle navigation (bicycle-navigation.md): the rider marker, and
+// whether the next camera move is the entry move (eased) rather than a
+// follow step (linear).
 let riderMarker: RiderMarker | null = null;
 let navFirstMove = true;
-
-/** Start navigating the selected cycling route — the top-right control
- * and the card button both land here. */
-function startNavigationFromSelection() {
-	const r = routingState.selectedDirectRoute;
-	if (r && r.mode === 'bike') void navigation.start(r);
-}
 
 /** Fed to createKoraMap so its hashchange listener knows when a
  * feature's history.back() close is consuming the hash step. */
@@ -229,6 +219,13 @@ export function setupMapOrchestration() {
 		});
 	});
 
+	// Browser back while navigating pops the entry pushed on start
+	// (page.state.navigation) → end the ride. Forward-restoring a stale
+	// entry does nothing: the ride is over.
+	$effect(() => {
+		if (!page.state.navigation && navigation.active) navigation.stop();
+	});
+
 	// Navigation on the map (bicycle-navigation.md § Follow-me map):
 	// raise the pitch ceiling, and treat any user gesture on the map as
 	// "stop following" — programmatic camera moves carry no
@@ -267,22 +264,6 @@ export function setupMapOrchestration() {
 			followRider(map, fix.coord, heading, navFirstMove);
 			navFirstMove = false;
 		}
-	});
-
-	// The top-right start control shows while a cycling route is
-	// selected and no ride is running. On a narrow screen with the sheet
-	// expanded to the full panel the column is covered — hide it there
-	// rather than float it over the panel.
-	$effect(() => {
-		if (!mapUi.mapRef) return;
-		const r = routingState.selectedDirectRoute;
-		const visible = !navigation.active
-			&& routingState.open
-			&& r?.mode === 'bike'
-			&& !lineDetailState.selection
-			&& !(isNarrow() && routingState.directSheetExpanded);
-		navStartControl?.setVisible(visible);
-		navStartControl?.setBusy(navigation.starting);
 	});
 
 	// Direct cycling / walking tabs read the map as a base map: while
@@ -359,11 +340,6 @@ export function wireMapFeatures(map: maplibregl.Map) {
 		routeStopLayers: [ROUTE_DISC_LAYER, ROUTE_PASSTHROUGH_LAYER, ROUTE_LABEL_LAYER]
 	});
 
-	// Start-navigation control, last in the top-right column (below the
-	// locate button). Visibility is driven by the effect above.
-	navStartControl = new NavStartControl(startNavigationFromSelection);
-	map.addControl(navStartControl, 'top-right');
-
 	// Deep-link resolution runs in parallel with style load; the fetch
 	// runs alongside tile/glyph loading and is awaited inside the
 	// map.on('load') handler below.
@@ -433,6 +409,5 @@ export function resetMapFeatures() {
 	disposeRouteOverlay();
 	disposeDirectRouteOverlay();
 	closingRouteViaBack = false;
-	navStartControl = null;
 	riderMarker = null;
 }

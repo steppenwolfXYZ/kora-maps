@@ -91,19 +91,42 @@ Edges are weighted by a three-tier quality model:
   bike lanes, dedicated bike paths (e.g. through a park). Slight
   bonus, deliberately small: it must never justify meaningful
   detours.
-- **fine** (the plateau) — painted bike lanes, low-traffic streets,
-  no-through-traffic streets. All approximately equal cost; none may
-  meaningfully outweigh another. Among fine options, shorter/faster
-  wins.
+- **fine** (the plateau) — low-traffic streets, no-through-traffic
+  streets, painted bike lanes in 30 km/h zones. All approximately
+  equal cost; none may meaningfully outweigh another. Among fine
+  options, shorter/faster wins.
+- **through roads with paint** — a painted bike lane or a sharrow on a
+  through-traffic road at 50 km/h or more sits slightly below the
+  plateau, not on it: a painted lane a touch worse than a quiet street
+  (about 1.05), a sharrow — a bike pictogram in the car lane itself,
+  `cycleway=shared_lane`, no lane of one's own — clearly worse (about
+  1.15) but still better than no infrastructure at all. Each lane per
+  direction beyond the first adds a further step (about 0.2): a
+  multi-lane street with paint is not a quiet street with paint. Bus
+  lanes do not count (see the crossing rule). Faster roads scale these
+  factors up along the same speed curve as the bare tier. (Previously
+  every painted or shared lane sat on the plateau, which let the
+  five-lane Laupenstrasse with its sharrow tie with the Mühlematt
+  quiet-street corridor — the second Bern benchmark case.)
 - **bad** — through-traffic roads without bike infrastructure, priced
   by their speed limit rather than their road class: Swiss city roads
   are never extremely dangerous for bikes. 30 km/h zones carry no
-  penalty at all whatever the class; 50 km/h a slim penalty; 60 km/h
-  noticeably more; 80 km/h the full bad-road factor — strong enough to
-  avoid when an alternative exists, not so strong that absurd detours
-  win. Lane count is deliberately NOT a signal: an extra mapped lane is
-  usually a bus lane, and riding beside a bus lane is safer, not more
-  dangerous.
+  penalty at all whatever the class; 50 km/h a noticeable penalty
+  (about 1.4); 60 km/h more; 80 km/h the full bad-road factor — strong
+  enough to avoid when an alternative exists, not so strong that
+  absurd detours win. Each lane per direction beyond the first adds
+  the same step as on painted roads. Bus lanes never count as lanes:
+  the OSM preprocessing subtracts bus/PSV lanes from the lane tags
+  before the tile build, since riding beside a bus lane is safer, not
+  more dangerous.
+- **Service roads** (`highway=service`: bus-only links, depot and
+  parking aisles, driveways) are ridable and carry only a small
+  per-metre surcharge (about 1.2 on riding time), enough that the
+  search does not wander through a depot by accident, never enough to
+  cost a route a 25 m link. There is deliberately NO flat entry fee:
+  the engine's stock 15 s fee on entering a service road was inherited
+  unnoticed and made a short bus-only link between Hirschengraben and
+  Bubenbergplatz decide the Bern Eichmattweg → Aarbergergasse case.
 
 Additional signals:
 
@@ -124,20 +147,32 @@ Additional signals:
   names; the natural flow changes name while the name turns and
   yields — Mühlemattstrasse / Philosophenweg is the canonical case),
   so category + geometry is the deliberate proxy.
-- **Crossing penalty:** a turning transition where both roads are
-  through-traffic class costs extra — but only at a real crossing
-  (four or more through-class arms at the junction), scaled by the
-  widest through arm's lane count: a small base for a single-lane
-  crossing, a strong step per additional lane — every further lane is
-  what makes a crossing genuinely hostile. Bus lanes do not count: the
-  OSM preprocessing subtracts bus/PSV lanes from the lane tags before
-  the tile build (a bus lane does not make a crossing harder). A T-junction is not a crossing: turning left into
-  a branching road pays only the ordinary turn cost (canonical:
-  Simmentalstrasse → Frutigenstrasse in Spiezwiler). Right turns are
-  exempt, and so are roundabouts — a Kreisel is the safe way across a
-  big road, not a crossing to avoid. For straight-ahead passage along
-  a through road, a traffic signal at the node may serve as the proxy
-  for "a real crossing of two big roads".
+- **Crossing penalty:** entering a through-traffic road at a real
+  crossing costs extra. The junction decides, never the road being
+  left: a cyclist arriving from a quiet street, a cycle track beside
+  the main road, or a footway crosses the same carriageway as one
+  arriving on the main road (canonical: Tscharnerstrasse → Eigerplatz,
+  and the Effingerstrasse cycle track → Seilerstrasse, both of which
+  the original both-roads-through rule let pass for free). A real
+  crossing has four or more through-class arms at the junction; the
+  penalty scales with the widest through arm's lane count per
+  direction: a small base for a single-lane crossing, a strong step
+  per additional lane — every further lane is what makes a crossing
+  genuinely hostile. Bus lanes do not count: the OSM preprocessing
+  subtracts bus/PSV lanes from the lane tags before the tile build (a
+  bus lane does not make a crossing harder). The turn direction scales
+  the penalty: turning across (left) pays it in full; straight on from
+  a side arm pays half, since the graph cannot tell whether the
+  carriageway is crossed; turning with traffic (right) pays a quarter —
+  reduced, not exempt, a big junction is unpleasant whichever way you
+  turn. A T-junction (three through arms) is free when its widest arm
+  has one lane per direction (canonical: Simmentalstrasse →
+  Frutigenstrasse in Spiezwiler) and pays three quarters of the
+  crossing penalty when it has two or more. Roundabouts stay exempt —
+  a Kreisel is the safe way across a big road, not a crossing to
+  avoid. For straight-ahead passage along a through road, a traffic
+  signal at the node may serve as the proxy for "a real crossing of
+  two big roads".
 - **Official bicycle routes** (OSM cycle-route relations) are
   slightly favored: membership gives an edge a small bonus in the
   same spirit as the *great* tier — enough to tip the balance between
@@ -278,7 +313,12 @@ at 0, 0.25 and 1:
 - Every tuning iteration runs against the full set; a change ships
   only if no pair regresses.
 - Every bad route discovered in hand-testing is added as a new pair
-  before it is fixed.
+  before it is fixed. Second Bern pair: Eichmattweg → Aarbergergasse,
+  where the Mühlematt corridor must win over Belpstrasse › Seilerstrasse
+  › Laupenstrasse; before the junction-based crossing rule, the painted-
+  road factors and the service-road change, the two tied within 1 %
+  and the alternates list still carried the Zieglerstrasse route at
+  30 % worse cost.
 
 ### Quality bar
 
