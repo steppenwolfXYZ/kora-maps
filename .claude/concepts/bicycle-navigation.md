@@ -46,8 +46,9 @@ missing is the mode itself.
   the screen), tilted, and zoomed to a close street-level view. The
   rider's position sits in the lower part of the viewport so most of
   the screen shows what lies ahead.
-- **Route lock.** While the position is within the off-route distance
-  of the route, the marker sits on the projected point of the route and
+- **Route lock.** While the position is within a few metres of the
+  route (tighter than the off-route distance, widened only by a poor
+  accuracy figure), the marker sits on the projected point of the route and
   the arrow points along the route there — a turn shows the instant the
   projection passes the corner, with no lag and no jitter. All
   decisions (off-route, switching to an alternative, arrival) keep
@@ -59,9 +60,10 @@ missing is the mode itself.
   gated only against position jitter. Below that (standing at a light)
   the compass heading is used if the device offers one. GPS course
   always wins over the compass while it is valid — compasses are
-  frequently miscalibrated. Standing still off the route without a
-  compass for a few seconds drops the heading: the marker shows the
-  plain position dot until movement resumes.
+  frequently miscalibrated. Standing still without a compass for a few
+  seconds drops the heading, on or off the route: the marker shows the
+  plain position dot until movement resumes — an arrow always means a
+  known direction.
 - Heading and position changes are smoothed so the map does not
   jitter between fixes.
 - **Dynamic zoom and tilt.** The camera frames the road up to the next
@@ -74,7 +76,17 @@ missing is the mode itself.
   hysteresis so noisy distances never make the camera hunt, and ease
   continuously between fixes rather than stepping.
 - The rider is drawn as a distinct position marker with a direction
-  indicator; the existing route pins stay.
+  indicator; the existing route pins stay. While following, that
+  marker is a fixed element on the screen — large, in the lower part of
+  the viewport with only padding below it — and the map glides
+  underneath, so it never jumps between position fixes. While following
+  is suspended it is a marker on the map at the rider's position. The
+  handover between the two (start, re-center) is one continuous
+  motion: the map marker rides the camera move into place, growing to
+  the fixed arrow's size, and the fixed element appears only once the
+  camera is at rest exactly there. The
+  locate control's own dot is hidden during navigation (the control
+  stays active).
 - **Panning away:** any map gesture (drag, pinch, rotate) suspends
   following without ending navigation. A "re-center" control appears
   while following is suspended; tapping it resumes following. The
@@ -102,9 +114,13 @@ missing is the mode itself.
   time** and **estimated arrival time**, all recomputed as the rider
   advances. Remaining values derive from the rider's projected
   position along the route, not from the last recalculation.
+- The trip summary also names the destination as the rider entered
+  it.
 - **Arrival:** when the rider is within a short distance of the
-  destination, the banner switches to an arrival message. Navigation
-  ends automatically after a short delay, or immediately via the ×.
+  destination, the banner switches to an arrival state showing the
+  destination name large — that is what the rider is now looking for —
+  and offers a Finish button. Navigation never ends on its own; Finish
+  or the × ends it.
 
 ### 4. Off-route detection and recalculation
 
@@ -116,8 +132,10 @@ missing is the mode itself.
   evidence of being off-route.
 - A recalculation requests a new route from the current position to
   the original destination with the same options the planned route
-  used (avoid-stairs, walk/ride speed). Via points already passed are
-  dropped; those still ahead are kept.
+  used (avoid-stairs, walk/ride speed), and from the rider's current
+  direction of travel: turning back is a priced U-turn the engine
+  reports as the first maneuver, never a silent reversal. Via points
+  already passed are dropped; those still ahead are kept.
 - Recalculations are rate-limited to **one per 10 s** at most, so a
   rider wandering through a square does not fire a burst of requests.
 - The new route replaces the navigated route on the map and in the
@@ -146,7 +164,11 @@ missing is the mode itself.
 - Alternatives are refreshed on every recalculation and whenever the
   rider passes the point where the current alternative diverges — that
   point is behind them, so the alternative is spent. No polling, no
-  refresh on a timer.
+  refresh on a timer. Shown alternatives are **sticky**: a refresh may
+  add to the set but removes one only when it is spent, taken, or has
+  become the navigated route itself.
+- No alternatives within the last few hundred metres before the goal:
+  none are fetched and none shown.
 - One alternative at a time is enough; a second is tolerable. The one
   shown should diverge **early**: alternatives that part from the route
   further ahead will be offered by a later refresh anyway. When nothing

@@ -14,6 +14,7 @@
 	import LineDetailBar from '../linedetail/LineDetailBar.svelte';
 	import NavigationOverlay from '../navigation/NavigationOverlay.svelte';
 	import { navigation } from '../navigation/state.svelte';
+	import { endpointLabel } from '../routing/recents.svelte';
 
 	// Start-navigation entry point (bicycle-navigation.md § Entering and
 	// leaving): shown while a cycling route is selected and no ride is
@@ -63,7 +64,11 @@
 		class:sheet-expanded={routingState.directSheetExpanded}
 		type="button"
 		disabled={navigation.starting}
-		onclick={() => void navigation.start(route, routingState.directRoutes.filter((r) => r !== route))}
+		onclick={() => void navigation.start(
+			route,
+			routingState.directRoutes.filter((r) => r !== route),
+			routingState.to ? endpointLabel(routingState.to) : ''
+		)}
 	>
 		<span class="material-symbols-outlined" aria-hidden="true">navigation</span>
 		Navigate
@@ -136,8 +141,17 @@
 
 {#if mapUi.toast}
 	<div class="map-toast" class:error={mapUi.toastLevel === 'error'} role="alert">
-		{#if mapUi.toastTitle}<strong class="map-toast-title">{mapUi.toastTitle}</strong>{/if}
-		{mapUi.toast}
+		<div class="map-toast-body">
+			{#if mapUi.toastTitle}<strong class="map-toast-title">{mapUi.toastTitle}</strong>{/if}
+			{mapUi.toast}
+		</div>
+		<button
+			class="map-toast-close"
+			type="button"
+			aria-label="Dismiss"
+			title="Dismiss"
+			onclick={mapUi.dismissToast}
+		>×</button>
 	</div>
 {/if}
 
@@ -275,14 +289,39 @@
 		color: var(--white);
 		font-family: var(--font-ui);
 		font-size: 0.85rem;
-		padding: 0.45rem 0.9rem;
+		padding: 0.45rem 0.6rem 0.45rem 0.9rem;
 		border-radius: var(--radius-pill);
-		pointer-events: none;
 		backdrop-filter: blur(4px);
 		-webkit-backdrop-filter: blur(4px);
 		max-width: min(85vw, 24rem);
-		text-align: center;
+		text-align: left;
 		z-index: 40;
+		display: flex;
+		align-items: flex-start;
+		gap: 0.5rem;
+	}
+	.map-toast-body {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+	/* White × on the dark / red ground — not the gray .icon-btn family. */
+	.map-toast-close {
+		flex: 0 0 auto;
+		width: 1.6rem;
+		height: 1.6rem;
+		margin: -0.15rem -0.15rem -0.15rem 0;
+		border: none;
+		border-radius: var(--radius-pill);
+		background: transparent;
+		color: var(--white);
+		font-size: 1.25rem;
+		line-height: 1;
+		cursor: pointer;
+		opacity: 0.85;
+	}
+	.map-toast-close:hover {
+		background: rgba(255, 255, 255, 0.18);
+		opacity: 1;
 	}
 	/* Error level: brand red, larger, higher up, a bold title over the
 	   plain message — must not be missed. */
@@ -290,7 +329,7 @@
 		bottom: 6rem;
 		background: var(--brand);
 		font-size: 0.92rem;
-		padding: 0.7rem 1.1rem;
+		padding: 0.7rem 0.7rem 0.7rem 1.1rem;
 		border-radius: 0.8rem;
 		box-shadow: var(--shadow-popover);
 		max-width: min(90vw, 26rem);

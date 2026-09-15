@@ -180,8 +180,12 @@ body {
 }
 
 /* While a ride is active the map controls and the scale bar go — the
-   banner, summary and re-center control are the only chrome. */
+   banner, summary and re-center control are the only chrome. The
+   locate control's blue dot and accuracy circle hide too (the control
+   stays active): the rider marker is the position now. */
 .map-wrap.navigating .maplibregl-ctrl-top-right,
-.map-wrap.navigating .maplibregl-ctrl-bottom-left {
+.map-wrap.navigating .maplibregl-ctrl-bottom-left,
+.map-wrap.navigating .maplibregl-user-location-dot,
+.map-wrap.navigating .maplibregl-user-location-accuracy-circle {
 	display: none;
 }

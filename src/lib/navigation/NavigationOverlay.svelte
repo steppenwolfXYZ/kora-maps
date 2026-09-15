@@ -1,8 +1,11 @@
 <script lang="ts">
 	// The chrome of bicycle navigation (bicycle-navigation.md): the
 	// maneuver banner at the top (with the × that ends the ride), the
-	// trip summary at the bottom, and the re-center control while
-	// following is suspended.
+	// trip summary with the destination at the bottom, the re-center
+	// control while following is suspended, and — while following — the
+	// rider's own arrow as a fixed screen element the map glides under
+	// (the camera puts the position exactly there, camera.ts
+	// RIDER_BOTTOM_PX).
 	// Rendered by MapChrome in place of all other chrome while a ride
 	// is active; everything it shows derives from navigation state.
 	import { navigation } from './state.svelte';
@@ -46,9 +49,14 @@
 		<div class="nb-row">
 			<div class="nb-icon">{@html maneuverIconSvg('destination')}</div>
 			<div class="nb-main">
-				<div class="nb-dist">You have arrived</div>
-				<div class="nb-text">Navigation ends in a moment</div>
+				<div class="nb-text">You have arrived</div>
+				{#if navigation.destinationName}
+					<div class="nb-dist nb-dest">{navigation.destinationName}</div>
+				{/if}
 			</div>
+		</div>
+		<div class="nb-finish-row">
+			<button class="nb-finish" type="button" onclick={() => navigation.stop()}>Finish</button>
 		</div>
 	{:else if g}
 		<div class="nb-row">
@@ -98,14 +106,44 @@
 	</button>
 {/if}
 
+{#if navigation.following && !navigation.followTransition}
+	<!-- The rider, fixed on screen while following: arrow with a heading,
+	     dot without. Same drawing as the map marker (positionMarker.ts),
+	     which stands in until the camera has brought the rider here. -->
+	<div
+		class="nav-arrow"
+		aria-hidden="true"
+		style:transform="translateX(-50%) scaleY({Math.cos((navigation.viewPitch * Math.PI) / 180).toFixed(3)})"
+	>
+		{#if navigation.heading !== null}
+			<svg viewBox="0 0 64 64">
+				<path d="M32 6 L51 54 L32 43 L13 54 Z" class="nav-arrow-shape" />
+			</svg>
+		{:else}
+			<svg viewBox="0 0 64 64">
+				<circle cx="32" cy="32" r="20" class="nav-arrow-shape" />
+				<circle cx="32" cy="32" r="6.5" class="nav-arrow-dot" />
+			</svg>
+		{/if}
+	</div>
+{/if}
+
 <div class="nav-summary">
-	{#if g && !arrived}
-		<span class="ns-time">{approximate ? '~' : ''}{fmtDuration(g.remainingSec)}</span>
-		<span class="ns-meta">
-			{fmtDistance(g.remainingM)} · arrive {fmtClock(g.etaMs)}
-		</span>
-	{:else if arrived}
-		<span class="ns-time">Arrived</span>
+	<div class="ns-numbers">
+		{#if g && !arrived}
+			<span class="ns-time">{approximate ? '~' : ''}{fmtDuration(g.remainingSec)}</span>
+			<span class="ns-meta">
+				{fmtDistance(g.remainingM)} · arrive {fmtClock(g.etaMs)}
+			</span>
+		{:else if arrived}
+			<span class="ns-time">Arrived</span>
+		{/if}
+	</div>
+	{#if navigation.destinationName}
+		<div class="ns-dest">
+			<span class="material-symbols-outlined" aria-hidden="true">sports_score</span>
+			<span class="ns-dest-text">{navigation.destinationName}</span>
+		</div>
 	{/if}
 </div>
 
@@ -189,6 +227,33 @@
 		line-height: 1.25;
 		color: var(--gray-700);
 		overflow-wrap: anywhere;
+	}
+	/* Arrived: the destination is the big line — it is what the rider
+	   is now looking for on the ground. */
+	.nb-dest {
+		font-size: 1.35rem;
+		line-height: 1.15;
+		overflow-wrap: anywhere;
+	}
+	.nb-finish-row {
+		display: flex;
+		justify-content: flex-end;
+		padding: 0 1rem 0.85rem;
+	}
+	/* Primary action: brand red fill, white text. */
+	.nb-finish {
+		padding: 0.5rem 1.4rem;
+		border: none;
+		border-radius: var(--radius-pill);
+		background: var(--brand);
+		color: var(--white);
+		font-family: var(--font-ui);
+		font-size: 0.95rem;
+		font-weight: 600;
+		cursor: pointer;
+	}
+	.nb-finish:hover {
+		background: var(--brand-hover);
 	}
 	.nb-chip {
 		align-self: flex-start;
@@ -279,6 +344,36 @@
 		color: var(--white);
 	}
 
+	/* The rider on screen: centre 150px above the bottom edge (camera.ts
+	   RIDER_BOTTOM_PX), plus the safe area. Brand-red shape with a white
+	   outline, no circle around the arrow. */
+	.nav-arrow {
+		position: absolute;
+		left: 50%;
+		bottom: calc(150px - 44px + env(safe-area-inset-bottom, 0px));
+		width: 88px;
+		height: 88px;
+		transform: translateX(-50%);
+		transform-origin: 50% 50%;
+		transition: transform 0.9s linear;
+		z-index: 3;
+		pointer-events: none;
+		filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+	}
+	.nav-arrow svg {
+		width: 100%;
+		height: 100%;
+	}
+	.nav-arrow-shape {
+		fill: var(--brand);
+		stroke: var(--white);
+		stroke-width: 3;
+		stroke-linejoin: round;
+	}
+	.nav-arrow-dot {
+		fill: var(--white);
+	}
+
 	.nav-summary {
 		position: absolute;
 		left: 50%;
@@ -286,15 +381,37 @@
 		transform: translateX(-50%);
 		z-index: 3;
 		display: flex;
+		flex-direction: column;
 		align-items: center;
-		gap: 0.6rem;
+		gap: 0.15rem;
 		max-width: calc(100vw - 1.5rem);
 		padding: 0.5rem 1.1rem;
 		background: var(--white);
-		border-radius: var(--radius-pill);
+		border-radius: 1.2rem;
 		box-shadow: var(--shadow-control);
 		font-family: var(--font-ui);
 		white-space: nowrap;
+	}
+	.ns-numbers {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+	}
+	.ns-dest {
+		display: flex;
+		align-items: center;
+		gap: 0.25rem;
+		max-width: 100%;
+		font-size: 0.8rem;
+		color: var(--gray-600);
+	}
+	.ns-dest .material-symbols-outlined {
+		font-size: 1rem;
+		color: var(--brand);
+	}
+	.ns-dest-text {
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.ns-time {
 		font-size: 1.15rem;

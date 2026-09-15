@@ -35,9 +35,8 @@ const OFF_ROUTE_HOLD_MS = 5000;
 const RECALC_MIN_INTERVAL_MS = 10_000;
 const RECALC_RETRY_MAX_MS = 60_000;
 /** Within this of the destination the ride counts as arrived; the
- * arrival message lingers before navigation ends on its own. */
+ * banner then offers Finish — navigation never ends on its own. */
 const ARRIVAL_RADIUS_M = 25;
-const ARRIVAL_LINGER_MS = 8000;
 /** Heading sources, in order of trust (concept § Follow-me map). On the
  * route (fix within OFF_ROUTE_DIST_M) the marker locks to the projected
  * point and the arrow takes the route's own bearing there — turns show
@@ -62,6 +61,12 @@ const STOP_HOLD_MS = 4000;
 /** Route bearing is read from the projected point to this far ahead
  * along the route, so a jagged shape doesn't twitch the arrow. */
 const ROUTE_BEARING_AHEAD_M = 6;
+/** Route lock is tighter than off-route detection: within this of the
+ * line the marker snaps onto it — widened only when the fix's own
+ * accuracy is worse, and never beyond the cap. */
+const LOCK_DIST_M = 8;
+const LOCK_ACCURACY_FACTOR = 0.8;
+const LOCK_DIST_MAX_M = 20;
 /** A via counts as passed once progress is this far beyond it. */
 const VIA_PASSED_MARGIN_M = 30;
 /** A fix older than this makes the banner say so. */
@@ -94,6 +99,13 @@ const ALT_FETCH_MIN_INTERVAL_MS = 10_000;
 const ALT_RETRY_AFTER_M = 300;
 const ALT_RETRY_TOO_CLOSE_M = 150;
 const ALT_RETRY_NONE_M = 1000;
+/** No alternatives within the last stretch before the goal — parting
+ * there is pointless, and the fetches would be too. */
+const ALT_GOAL_CUTOFF_M = 300;
+/** Merging a refresh into the shown set: a candidate this close in
+ * parting point and duration to a shown one is the same alternative. */
+const ALT_DUP_DIVERGE_M = 25;
+const ALT_DUP_TIME_SEC = 20;
 
 /** An alternative shown beside the navigated route. */
 export interface NavAlternative {
@@ -114,11 +126,22 @@ export interface NavAlternative {
 let active = $state(false);
 let starting = $state(false);
 let route = $state.raw<DirectRoute | null>(null);
+// Where the ride goes, as the rider named it — the bottom island shows
+// it throughout, the banner large on arrival.
+let destinationName = $state('');
 let fix = $state.raw<PositionFix | null>(null);
 // What the marker and camera use: the projected point while locked to
 // the route, the raw fix otherwise.
 let displayCoord = $state.raw<LonLat | null>(null);
 let onRoute = $state(false);
+// True while the camera is still travelling to the rider after a
+// re-center (or the start): the marker rides the map into place and
+// the fixed on-screen arrow takes over only once the camera is there.
+let followTransition = $state(false);
+// The camera's pitch while following (set by the orchestration): the
+// fixed on-screen arrow squashes by cos(pitch), like a marker lying on
+// the tilted map, so it is the same shape as the map marker.
+let viewPitch = $state(0);
 let heading = $state<number | null>(null);
 let following = $state(true);
 let progressM = $state(0);
@@ -152,7 +175,6 @@ let lastRecalcAt = 0;
 let retryDelayMs = RECALC_MIN_INTERVAL_MS;
 let nextRetryAt = 0;
 let recalcAbort: AbortController | null = null;
-let arrivalTimer: ReturnType<typeof setTimeout> | null = null;
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 let startedAt = 0;
 // Progress (metres along the navigated route) at which the alternatives
@@ -178,7 +200,7 @@ let guidance: Guidance | null = $derived.by(() => {
 function persist() {
 	if (!browser || !route) return;
 	try {
-		localStorage.setItem(STORAGE_KEY, JSON.stringify({ route, startedAt }));
+		localStorage.setItem(STORAGE_KEY, JSON.stringify({ route, startedAt, destinationName }));
 	} catch {
 		// Storage full or unavailable — the ride just won't survive a reload.
 	}
@@ -201,6 +223,18 @@ function installRoute(r: DirectRoute, g?: RouteGeometry) {
 	offSince = null;
 	maneuverIdx = initialManeuverIndex(r);
 	if (fix) applyFix(fix);
+	// Shown alternatives are sticky (concept § Live alternatives): a new
+	// navigated route re-measures them rather than dropping them; only
+	// one that no longer parts from it (it IS the route now) goes.
+	if (alternatives.length > 0) {
+		const kept: NavAlternative[] = [];
+		for (const a of alternatives) {
+			const d = divergence(geometry, a.route);
+			if (!d || progressM > d.divergeM + ALT_SPENT_MARGIN_M) continue;
+			kept.push({ ...a, divergeM: d.divergeM, altDivergeM: d.altDivergeM, bubbleCoord: d.bubbleCoord });
+		}
+		alternatives = kept;
+	}
 }
 
 /** Bearing of the route at metres `cumM` along it, read over a short
@@ -251,7 +285,13 @@ function updateHeadingFromFix(f: PositionFix) {
 	const moved = (f.speedMs ?? 0) >= COURSE_MIN_SPEED_MS
 		|| track.some((t) => f.at - t.at <= STOP_WINDOW_MS && distanceM(t.coord, f.coord) >= stopMove);
 	if (moved) lastMoveAt = f.at;
-	if (f.at - lastMoveAt > STOP_HOLD_MS && f.at - lastCompassAt > COMPASS_FRESH_MS) heading = null;
+	if (isStill(f.at)) heading = null;
+}
+
+/** Standing still with nothing to tell the direction from: no
+ * movement within the hold and no live compass. */
+function isStill(at: number): boolean {
+	return at - lastMoveAt > STOP_HOLD_MS && at - lastCompassAt > COMPASS_FRESH_MS;
 }
 
 /** Compass samples arrive at tens of hertz; they only reach the
@@ -262,8 +302,10 @@ function onCompass(deg: number) {
 	compassHeading = deg;
 	const t = Date.now();
 	lastCompassAt = t;
-	// Locked to the route, the arrow follows the route, not the phone.
-	if (onRoute) return;
+	// Locked to the route, the arrow follows the route, not the phone —
+	// except from a standstill, where the compass is the only direction
+	// there is (the next fix re-locks the arrow to the route).
+	if (onRoute && heading !== null) return;
 	if (t - lastCompassApplyAt < COMPASS_APPLY_MS) return;
 	if (t - lastCourseAt <= COURSE_STALE_MS) return;
 	lastCompassApplyAt = t;
@@ -290,11 +332,14 @@ function applyFix(f: PositionFix) {
 	// Route lock (concept § Follow-me map): on the route, the marker
 	// sits on the projected point and the arrow takes the route's
 	// bearing there. Decisions below keep using the raw fix.
-	if (proj.distM <= OFF_ROUTE_DIST_M) {
+	const lockDist = Math.min(LOCK_DIST_MAX_M, Math.max(LOCK_DIST_M, f.accuracyM * LOCK_ACCURACY_FACTOR));
+	if (proj.distM <= lockDist) {
 		onRoute = true;
 		displayCoord = proj.point;
-		const rb = routeBearingAt(geometry, proj.cumM, proj.point);
-		if (rb !== null) heading = rb;
+		// The route's bearing only while there is a direction at all —
+		// standing still on the route shows the dot, not an arrow.
+		const rb = isStill(f.at) ? null : routeBearingAt(geometry, proj.cumM, proj.point);
+		heading = rb;
 	} else {
 		onRoute = false;
 		displayCoord = f.coord;
@@ -395,12 +440,15 @@ function divergence(
  * schedule a refresh for when the earliest of them comes within reach. */
 function adoptAlternatives(cands: DirectRoute[], refSec: number, fromPlanning = false) {
 	if (!geometry) return;
-	const kept: NavAlternative[] = [];
+	// Shown ones stay (sticky); new ones join up to ALT_MAX.
+	const kept: NavAlternative[] = [...alternatives];
+	const goalCutoffM = geometry.totalM - ALT_GOAL_CUTOFF_M;
 	let earliestRejectedM: number | null = null;
 	let tooClose = false;
 	for (const c of cands) {
 		const d = divergence(geometry, c);
 		if (!d) continue;
+		if (d.divergeM > goalCutoffM) continue;
 		const ahead = d.divergeM - progressM;
 		if (ahead < ALT_MIN_AHEAD_M) {
 			tooClose = true;
@@ -410,13 +458,19 @@ function adoptAlternatives(cands: DirectRoute[], refSec: number, fromPlanning = 
 			if (earliestRejectedM === null || d.divergeM < earliestRejectedM) earliestRejectedM = d.divergeM;
 			continue;
 		}
+		const deltaSec = c.durationSec - refSec;
+		const dup = kept.some((k) =>
+			Math.abs(k.divergeM - d.divergeM) < ALT_DUP_DIVERGE_M
+			&& Math.abs(k.deltaSec - deltaSec) < ALT_DUP_TIME_SEC);
+		if (dup) continue;
 		kept.push({
 			route: c, geometry: d.geometry, divergeM: d.divergeM, altDivergeM: d.altDivergeM,
-			bubbleCoord: d.bubbleCoord, deltaSec: c.durationSec - refSec
+			bubbleCoord: d.bubbleCoord, deltaSec
 		});
 	}
-	kept.sort((a, b) => a.divergeM - b.divergeM);
-	alternatives = kept.slice(0, ALT_MAX);
+	alternatives = kept
+		.slice(0, Math.max(alternatives.length, ALT_MAX))
+		.sort((a, b) => a.divergeM - b.divergeM);
 	// Nothing kept → when to look again. Planned candidates that are
 	// already behind / too close say nothing about the road ahead: fetch
 	// from the current position right away. Fetched ones parting too
@@ -439,6 +493,8 @@ function adoptAlternatives(cands: DirectRoute[], refSec: number, fromPlanning = 
  * on failure — alternatives are a bonus; a retry is due further on. */
 async function refreshAlternatives() {
 	if (!route || !fix || !geometry || recalculating) return;
+	// Nothing to look for within the last stretch before the goal.
+	if (geometry.totalM - progressM < ALT_GOAL_CUTOFF_M) return;
 	const t = Date.now();
 	if (t - altFetchAt < ALT_FETCH_MIN_INTERVAL_MS) {
 		nextAltRefreshM = progressM;
@@ -452,7 +508,8 @@ async function refreshAlternatives() {
 		?? route.durationSec;
 	try {
 		const routes = await fetchNavigationRoutes({
-			mode: 'bike', from: fix.coord, to: route.requestedTo, vias: remainingVias(route)
+			mode: 'bike', from: fix.coord, to: route.requestedTo, vias: remainingVias(route),
+			fromHeading: heading
 		}, ac.signal);
 		if (ac.signal.aborted || !active) return;
 		adoptAlternatives(routes, remainingSec);
@@ -506,7 +563,10 @@ async function recalculate() {
 			mode: 'bike',
 			from: f.coord,
 			to: r0.requestedTo,
-			vias: remainingVias(r0)
+			vias: remainingVias(r0),
+			// From the direction of travel: turning back is a U-turn the
+			// engine prices and reports, not a silent reversal.
+			fromHeading: heading
 		}, ac.signal);
 		if (ac.signal.aborted || !active) return;
 		const r = routes[0];
@@ -534,6 +594,8 @@ async function recalculate() {
 	}
 }
 
+/** Arrived: the banner switches to the destination and offers Finish;
+ * the ride ends only on that button (or the ×). */
 function arrive() {
 	arrived = true;
 	offRoute = false;
@@ -543,7 +605,6 @@ function arrive() {
 	nextAltRefreshM = null;
 	recalcAbort?.abort();
 	altAbort?.abort();
-	arrivalTimer = setTimeout(() => stop(), ARRIVAL_LINGER_MS);
 }
 
 function onWatchError(err: GeolocationPositionError) {
@@ -572,7 +633,12 @@ function onVisibility() {
  * planning view's other alternatives to `r`: they start the ride's
  * live alternatives; without them (a resume) the first fetch is due
  * on the next fix. */
-async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []): Promise<void> {
+async function start(
+	r: DirectRoute,
+	resume = false,
+	planned: DirectRoute[] = [],
+	destination = ''
+): Promise<void> {
 	if (active || starting || r.mode !== 'bike') return;
 	starting = true;
 	const compassPermission = requestCompassPermission();
@@ -586,8 +652,10 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 		return;
 	}
 	if (!resume) startedAt = Date.now();
+	if (!resume) destinationName = destination;
 	active = true;
 	following = true;
+	followTransition = true;
 	arrived = false;
 	updateFailed = false;
 	heading = null;
@@ -679,8 +747,6 @@ function stop(): void {
 	altAbort = null;
 	alternatives = [];
 	nextAltRefreshM = null;
-	if (arrivalTimer) clearTimeout(arrivalTimer);
-	arrivalTimer = null;
 	if (clockTimer) clearInterval(clockTimer);
 	clockTimer = null;
 	if (browser) document.removeEventListener('visibilitychange', onVisibility);
@@ -694,6 +760,7 @@ function stop(): void {
 	offRoute = false;
 	updateFailed = false;
 	following = true;
+	followTransition = false;
 	clearPersisted();
 	if (consumeEntry) history.back();
 }
@@ -702,7 +769,7 @@ function stop(): void {
  * leaving). Silently does nothing without a fresh, sane record. */
 async function tryResume(): Promise<boolean> {
 	if (!browser || active || starting) return false;
-	let saved: { route?: DirectRoute; startedAt?: number } | null = null;
+	let saved: { route?: DirectRoute; startedAt?: number; destinationName?: string } | null = null;
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (!raw) return false;
@@ -720,6 +787,7 @@ async function tryResume(): Promise<boolean> {
 		return false;
 	}
 	startedAt = saved.startedAt;
+	destinationName = typeof saved.destinationName === 'string' ? saved.destinationName : '';
 	await start(r, true);
 	if (!active) clearPersisted();
 	return active;
@@ -729,6 +797,7 @@ export const navigation = {
 	get active() { return active; },
 	get starting() { return starting; },
 	get route() { return route; },
+	get destinationName() { return destinationName; },
 	get fix() { return fix; },
 	/** Marker / camera position: projected onto the route while locked
 	 * to it, the raw fix otherwise. */
@@ -736,6 +805,9 @@ export const navigation = {
 	get onRoute() { return onRoute; },
 	get heading() { return heading; },
 	get following() { return following; },
+	get followTransition() { return followTransition; },
+	get viewPitch() { return viewPitch; },
+	setViewPitch(p: number) { viewPitch = p; },
 	get progressM() { return progressM; },
 	get offRoute() { return offRoute; },
 	get offRouteM() { return offRouteM; },
@@ -747,8 +819,11 @@ export const navigation = {
 	get positionStale() { return fix !== null && now - fix.at > POSITION_STALE_MS; },
 
 	/** Start from the planning view: `planned` = the other shown
-	 * alternatives, which seed the live alternatives. */
-	start(r: DirectRoute, planned: DirectRoute[] = []) { return start(r, false, planned); },
+	 * alternatives, which seed the live alternatives; `destination` =
+	 * the destination as the rider named it. */
+	start(r: DirectRoute, planned: DirectRoute[] = [], destination = '') {
+		return start(r, false, planned, destination);
+	},
 	stop,
 	tryResume,
 
@@ -757,6 +832,11 @@ export const navigation = {
 		if (active) following = false;
 	},
 	resumeFollow() {
+		if (!following) followTransition = true;
 		following = true;
+	},
+	/** The camera has arrived at the rider (orchestration, on moveend). */
+	endFollowTransition() {
+		followTransition = false;
 	}
 };

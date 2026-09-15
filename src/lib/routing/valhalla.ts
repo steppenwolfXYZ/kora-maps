@@ -41,6 +41,10 @@ const ELEVATION_NOISE_M = 5;
  * mid-route by entering at their terminals. */
 const SNAP_FILTER = { exclude_ferry: true };
 
+/** How far the origin edge may point away from the rider's heading and
+ * still be the one the route starts on. */
+const ORIGIN_HEADING_TOLERANCE_DEG = 60;
+
 /** A non-OK response from the Valhalla /route endpoint. Carries the HTTP
  * status so state.svelte.ts can pick a user-facing message; the raw body
  * stays for console diagnostics only. */
@@ -70,6 +74,11 @@ export interface DirectRouteArgs {
 	 * walking legs at the user's set speed tier. Omitted → engine default
 	 * (5.1 km/h, the same base the transit stack uses). */
 	walkSpeedKmh?: number | null;
+	/** Navigation only: the rider's current heading (degrees, 0 = north)
+	 * at the origin. The engine then routes from the direction of travel
+	 * — turning around is a priced U-turn maneuver, not a free reversal
+	 * (bicycle-navigation.md § Off-route detection). */
+	fromHeading?: number | null;
 }
 
 // ── Valhalla /route response (subset) ────────────────────────────────────
@@ -359,7 +368,12 @@ async function requestRoutes(
 		costing_options: options,
 		...(excludePolygons ? { exclude_polygons: excludePolygons } : {}),
 		locations: [
-			{ lat: args.from[1], lon: args.from[0], type: 'break', search_filter: SNAP_FILTER },
+			{
+				lat: args.from[1], lon: args.from[0], type: 'break', search_filter: SNAP_FILTER,
+				...(args.fromHeading != null
+					? { heading: Math.round(args.fromHeading), heading_tolerance: ORIGIN_HEADING_TOLERANCE_DEG }
+					: {})
+			},
 			...(args.vias ?? []).map(([lon, lat]) => ({
 				lat,
 				lon,

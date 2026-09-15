@@ -14,10 +14,15 @@ const ZOOM_FAR = 15.5;
 const PITCH_NEAR = 58;
 const PITCH_FAR = 42;
 const NAV_MAX_PITCH = 60;
-/** The rider sits this fraction of the viewport height below centre. */
-const RIDER_OFFSET_FRACTION = 0.22;
+/** While following, the rider is drawn as a fixed screen element this
+ * far above the bottom edge (NavigationOverlay's .nav-arrow — keep in
+ * sync); the camera places the position exactly there. */
+export const RIDER_BOTTOM_PX = 150;
+/** Fixed arrow box vs map-marker box — the handover scale. */
+export const RIDER_FIXED_PX = 88;
+export const RIDER_MARKER_PX = 64;
 /** Screen space the banner takes off the top of the road view. */
-const BANNER_PX = 110;
+const BANNER_PX = 130;
 /** Metres kept beyond the maneuver point so the turn itself is framed,
  * not just reached. */
 const AHEAD_MARGIN_M = 40;
@@ -62,7 +67,7 @@ export function enterNavCamera(map: maplibregl.Map): NavCameraSaved {
  * maneuver point always stays inside the view. */
 function zoomForAhead(map: maplibregl.Map, lat: number, metresAhead: number): number {
 	const h = map.getContainer().clientHeight;
-	const pxAhead = Math.max(120, h * (0.5 + RIDER_OFFSET_FRACTION) - BANNER_PX);
+	const pxAhead = Math.max(120, h - RIDER_BOTTOM_PX - BANNER_PX);
 	const metresPerPx = metresAhead / pxAhead;
 	return Math.log2((EARTH_CIRCUMFERENCE_M * Math.cos((lat * Math.PI) / 180)) / (512 * metresPerPx));
 }
@@ -77,13 +82,15 @@ function targetZoom(map: maplibregl.Map, lat: number, ctx: FollowContext): numbe
 	return Math.min(ZOOM_NEAR, Math.max(ZOOM_FAR, z));
 }
 
+/** Eases the camera onto the rider; returns the pitch it is heading
+ * for, so the fixed on-screen arrow can wear the same perspective. */
 export function followRider(
 	map: maplibregl.Map,
 	coord: [number, number],
 	heading: number | null,
 	firstMove: boolean,
 	ctx: FollowContext
-) {
+): number {
 	const target = targetZoom(map, coord[1], ctx);
 	if (firstMove) zoom = target;
 	else if (Math.abs(target - zoom) >= ZOOM_DEADBAND) zoom += (target - zoom) * ZOOM_APPROACH;
@@ -95,12 +102,13 @@ export function followRider(
 		bearing: heading ?? map.getBearing(),
 		pitch,
 		zoom,
-		offset: [0, h * RIDER_OFFSET_FRACTION],
+		offset: [0, h / 2 - RIDER_BOTTOM_PX],
 		duration: firstMove ? FIRST_MOVE_MS : FOLLOW_MS,
 		essential: true
 	};
 	if (!firstMove) opts.easing = (t) => t;
 	map.easeTo(opts);
+	return pitch;
 }
 
 /** Back to the flat, north-up planning view. The pitch ceiling can only

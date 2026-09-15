@@ -5,6 +5,7 @@
 	import { isNarrow } from './layout';
 	import { routingState } from './state.svelte';
 	import { navigation } from '../navigation/state.svelte';
+	import { endpointLabel } from './recents.svelte';
 
 	// One card per direct cycling / walking route
 	// (pedestrian-bicycle-routing.md § Result cards): duration, distance,
@@ -118,7 +119,11 @@
 					disabled={navigation.starting}
 					onclick={(e) => {
 						e.stopPropagation();
-						void navigation.start(route, routingState.directRoutes.filter((r) => r !== route));
+						void navigation.start(
+							route,
+							routingState.directRoutes.filter((r) => r !== route),
+							routingState.to ? endpointLabel(routingState.to) : ''
+						);
 					}}
 				>
 					<span class="material-symbols-outlined" aria-hidden="true">navigation</span>

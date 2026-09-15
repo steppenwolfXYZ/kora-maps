@@ -52,6 +52,12 @@ class MapUiState {
 		if (this.menuOpen && window.innerWidth <= MENU_AUTOCLOSE_MAX_WIDTH) this.menuOpen = false;
 	};
 
+	dismissToast = () => {
+		this.toast = null;
+		if (this.toastTimer) clearTimeout(this.toastTimer);
+		this.toastTimer = null;
+	};
+
 	showToast = (message: string, level: 'info' | 'error' = 'info', title: string | null = null) => {
 		this.toast = message;
 		this.toastLevel = level;

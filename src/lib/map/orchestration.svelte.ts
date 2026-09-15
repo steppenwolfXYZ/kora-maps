@@ -32,7 +32,9 @@ import {
 import { mapUi } from './uiState.svelte';
 import type { ViewMode } from './layers';
 import { navigation } from '../navigation/state.svelte';
-import { enterNavCamera, exitNavCamera, followRider } from '../navigation/camera';
+import {
+	enterNavCamera, exitNavCamera, followRider, RIDER_BOTTOM_PX, RIDER_FIXED_PX, RIDER_MARKER_PX
+} from '../navigation/camera';
 import { RiderMarker } from '../navigation/positionMarker';
 import { makeAlternativeBubble } from '../navigation/alternativeBubble';
 
@@ -56,6 +58,10 @@ let preDirectContours = false;
 // follow step (linear).
 let riderMarker: RiderMarker | null = null;
 let navFirstMove = true;
+// Was the last follow-effect run in following mode — to notice the
+// detach edge and glide the marker out from the fixed arrow's spot.
+let wasFollowing = false;
+const DETACH_MS = 400;
 // Time-difference bubbles on the live alternatives (bicycle-navigation.md
 // § Live alternatives), one DOM marker each.
 let altBubbles: maplibregl.Marker[] = [];
@@ -266,14 +272,47 @@ export function setupMapOrchestration() {
 		const heading = navigation.heading;
 		const following = navigation.following;
 		if (!map || !navigation.active || !fix || !coord) return;
+		const transition = navigation.followTransition;
 		if (!riderMarker) riderMarker = new RiderMarker(map, coord);
 		riderMarker.update(coord, heading);
+		// Detach edge: the fixed arrow vanishes and the map marker takes
+		// over — start it where the fixed arrow was and glide it onto the
+		// true position while it shrinks, so nothing jumps.
+		const detaching = wasFollowing && !following && !transition;
+		wasFollowing = following;
+		if (detaching) {
+			const h = map.getContainer().clientHeight;
+			const w = map.getContainer().clientWidth;
+			const at = map.unproject([w / 2, h - RIDER_BOTTOM_PX]);
+			riderMarker.glideFrom([at.lng, at.lat], coord, DETACH_MS);
+		}
+		// Following: the overlay's fixed arrow marks the rider and the map
+		// glides under it — the map marker would only jump per fix. During
+		// the transition (start, re-center) the map marker rides the map
+		// into place, growing to the fixed arrow's size, and the fixed
+		// arrow takes over at the exact spot once the camera has arrived.
+		riderMarker.setVisible(!following || transition);
+		riderMarker.setScale(following ? RIDER_FIXED_PX / RIDER_MARKER_PX : 1, following ? 1200 : DETACH_MS);
 		if (following) {
-			followRider(map, coord, heading, navFirstMove, {
+			const pitch = followRider(map, coord, heading, navFirstMove || transition, {
 				distanceToNextM: navigation.guidance?.distanceToNextM ?? null,
 				speedMs: fix.speedMs
 			});
+			navigation.setViewPitch(pitch);
 			navFirstMove = false;
+			// A fix arriving mid-transition starts a new ease, and the
+			// interrupted one fires its moveend at once — so end the
+			// transition only when the camera is truly at rest.
+			if (transition) {
+				const settled = () => {
+					requestAnimationFrame(() => {
+						if (!navigation.active) return;
+						if (map.isMoving()) map.once('moveend', settled);
+						else navigation.endFollowTransition();
+					});
+				};
+				map.once('moveend', settled);
+			}
 		}
 	});
 
@@ -436,5 +475,6 @@ export function resetMapFeatures() {
 	disposeDirectRouteOverlay();
 	closingRouteViaBack = false;
 	riderMarker = null;
+	wasFollowing = false;
 	altBubbles = [];
 }
