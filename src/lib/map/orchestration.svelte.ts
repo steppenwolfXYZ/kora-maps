@@ -34,6 +34,7 @@ import type { ViewMode } from './layers';
 import { navigation } from '../navigation/state.svelte';
 import { enterNavCamera, exitNavCamera, followRider } from '../navigation/camera';
 import { RiderMarker } from '../navigation/positionMarker';
+import { makeAlternativeBubble } from '../navigation/alternativeBubble';
 
 let routeColorIndex: Map<string, string> | null = null;
 let routeStationIndex: Map<string, StationEntry> | null = null;
@@ -55,6 +56,9 @@ let preDirectContours = false;
 // follow step (linear).
 let riderMarker: RiderMarker | null = null;
 let navFirstMove = true;
+// Time-difference bubbles on the live alternatives (bicycle-navigation.md
+// § Live alternatives), one DOM marker each.
+let altBubbles: maplibregl.Marker[] = [];
 
 /** Fed to createKoraMap so its hashchange listener knows when a
  * feature's history.back() close is consuming the hash step. */
@@ -199,7 +203,9 @@ export function setupMapOrchestration() {
 	// back, which re-frames it as a fresh set.
 	$effect(() => {
 		const navRoute = navigation.active ? navigation.route : null;
-		const routes = navRoute ? [navRoute] : routingState.directRoutes;
+		const routes = navRoute
+			? [navRoute, ...navigation.alternatives.map((a) => a.route)]
+			: routingState.directRoutes;
 		const sel = navRoute ? 0 : routingState.directSelected;
 		const active = navRoute !== null || (
 			routingState.open
@@ -211,7 +217,8 @@ export function setupMapOrchestration() {
 		return whenStyleReady(map, () => {
 			if (active) {
 				enterDirectRouteOverlay(map, routes, sel, {
-					autoFrame: navRoute === null, startPin: navRoute === null
+					autoFrame: navRoute === null, startPin: navRoute === null,
+					interactive: navRoute === null
 				});
 			} else {
 				exitDirectRouteOverlay(map);
@@ -261,9 +268,27 @@ export function setupMapOrchestration() {
 		if (!riderMarker) riderMarker = new RiderMarker(map, fix.coord);
 		riderMarker.update(fix.coord, heading);
 		if (following) {
-			followRider(map, fix.coord, heading, navFirstMove);
+			followRider(map, fix.coord, heading, navFirstMove, {
+				distanceToNextM: navigation.guidance?.distanceToNextM ?? null,
+				speedMs: fix.speedMs
+			});
 			navFirstMove = false;
 		}
+	});
+
+	// One bubble per live alternative, at its parting point, saying how
+	// much slower or faster it is. Rebuilt whenever the set changes.
+	$effect(() => {
+		const map = mapUi.mapRef;
+		const alts = navigation.active ? navigation.alternatives : [];
+		for (const b of altBubbles) b.remove();
+		altBubbles = [];
+		if (!map) return;
+		for (const a of alts) altBubbles.push(makeAlternativeBubble(map, a.bubbleCoord, a.deltaSec));
+		return () => {
+			for (const b of altBubbles) b.remove();
+			altBubbles = [];
+		};
 	});
 
 	// Direct cycling / walking tabs read the map as a base map: while
@@ -410,4 +435,5 @@ export function resetMapFeatures() {
 	disposeDirectRouteOverlay();
 	closingRouteViaBack = false;
 	riderMarker = null;
+	altBubbles = [];
 }

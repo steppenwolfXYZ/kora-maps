@@ -63,7 +63,7 @@
 		class:sheet-expanded={routingState.directSheetExpanded}
 		type="button"
 		disabled={navigation.starting}
-		onclick={() => void navigation.start(route)}
+		onclick={() => void navigation.start(route, routingState.directRoutes.filter((r) => r !== route))}
 	>
 		<span class="material-symbols-outlined" aria-hidden="true">navigation</span>
 		Navigate

@@ -11,7 +11,7 @@ import { browser } from '$app/environment';
 import { pushState } from '$app/navigation';
 import { page } from '$app/state';
 import type { DirectRoute } from '../routing/types';
-import { fetchNavigationRoute } from '../routing/valhalla';
+import { fetchNavigationRoutes } from '../routing/valhalla';
 import { geolocationErrorMessage, markGeolocationDenied } from '../routing/geolocation.svelte';
 import { mapUi } from '../map/uiState.svelte';
 import {
@@ -50,6 +50,47 @@ const POSITION_STALE_MS = 30_000;
 const STORAGE_KEY = 'kora.navigation';
 const RESUME_MAX_AGE_MS = 12 * 3600 * 1000;
 const CLOCK_TICK_MS = 15_000;
+/** Live alternatives (concept § Live alternatives): at most this many
+ * shown; only ones parting from the navigated route between MIN_AHEAD
+ * and EARLY_MAX metres ahead count as early enough; a candidate point
+ * further than DIVERGE_M from the navigated route marks the parting;
+ * an alternative is spent SPENT_MARGIN past its parting point; the
+ * bubble sits BUBBLE_AHEAD metres down the alternative from there. */
+const ALT_MAX = 2;
+const ALT_MIN_AHEAD_M = 40;
+const ALT_EARLY_MAX_M = 1500;
+const ALT_DIVERGE_M = 25;
+const ALT_SPENT_MARGIN_M = 30;
+const ALT_BUBBLE_AHEAD_M = 70;
+/** Switching by riding: the rider must be past the alternative's own
+ * parting point by this much, within OFF_ROUTE_DIST_M of it, and
+ * clearly nearer to it than to the navigated route — near the parting
+ * point both routes are close, and a jittery fix must not switch. */
+const ALT_SWITCH_PAST_M = 20;
+const ALT_SWITCH_NEARER_FACTOR = 0.5;
+const ALT_FETCH_MIN_INTERVAL_MS = 10_000;
+/** Refresh scheduling when nothing was kept: after a failed fetch;
+ * when candidates parted too close ahead to act on; when no candidate
+ * parted at all (the engine offered nothing) — retry further on. */
+const ALT_RETRY_AFTER_M = 300;
+const ALT_RETRY_TOO_CLOSE_M = 150;
+const ALT_RETRY_NONE_M = 1000;
+
+/** An alternative shown beside the navigated route. */
+export interface NavAlternative {
+	route: DirectRoute;
+	geometry: RouteGeometry;
+	/** Metres along the navigated route where the alternative parts. */
+	divergeM: number;
+	/** The same point measured along the alternative itself. */
+	altDivergeM: number;
+	/** Where the time-difference bubble sits: on the alternative, a
+	 * little past the parting point. */
+	bubbleCoord: LonLat;
+	/** Seconds slower (+) or faster (−) than staying on the navigated
+	 * route. */
+	deltaSec: number;
+}
 
 let active = $state(false);
 let starting = $state(false);
@@ -66,6 +107,7 @@ let arrived = $state(false);
 let maneuverIdx = $state(0);
 // Wall clock for the ETA; bumped on every fix and by a slow ticker.
 let now = $state(0);
+let alternatives = $state.raw<NavAlternative[]>([]);
 
 // Non-reactive internals. `geometry` always changes together with
 // `route` (installRoute sets it first), so deriveds keyed on `route`
@@ -85,6 +127,13 @@ let recalcAbort: AbortController | null = null;
 let arrivalTimer: ReturnType<typeof setTimeout> | null = null;
 let clockTimer: ReturnType<typeof setInterval> | null = null;
 let startedAt = 0;
+// Progress (metres along the navigated route) at which the alternatives
+// are fetched again; null = nothing scheduled. Set when the shown ones
+// are spent, when the earliest rejected candidate comes within reach,
+// or after a switch.
+let nextAltRefreshM: number | null = null;
+let altFetchAt = 0;
+let altAbort: AbortController | null = null;
 // Whether this ride pushed its history entry (page.state.navigation).
 // Browser back pops it → the orchestration effect ends navigation; an
 // explicit stop consumes it with history.back() so the entry never
@@ -110,10 +159,11 @@ function clearPersisted() {
 	try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
 }
 
-/** Swap in a route (start, or a recalculation): rebuild the geometry,
- * reset progress and the off-route judgement, re-project the last fix. */
-function installRoute(r: DirectRoute) {
-	geometry = buildGeometry(r.coords);
+/** Swap in a route (start, a recalculation, a switch to an
+ * alternative): rebuild the geometry, reset progress and the off-route
+ * judgement, re-project the last fix. */
+function installRoute(r: DirectRoute, g?: RouteGeometry) {
+	geometry = g ?? buildGeometry(r.coords);
 	route = r;
 	progressM = 0;
 	offRouteM = 0;
@@ -155,6 +205,34 @@ function applyFix(f: PositionFix) {
 	maneuverIdx = advanceManeuverIndex(route, geometry, progressM, maneuverIdx);
 
 	if (arrived) return;
+
+	// Taking an alternative is done by riding it (concept § Live
+	// alternatives): off the navigated route but on a shown alternative
+	// past its parting point → that alternative is the route now. No
+	// hold, no request.
+	const precise = f.accuracyM < proj.distM;
+	if (proj.distM > OFF_ROUTE_DIST_M && precise) {
+		const taken = alternatives.find((a) => {
+			const ap = projectOntoRoute(a.geometry, f.coord, null);
+			return ap.distM <= OFF_ROUTE_DIST_M
+				&& ap.distM < proj.distM * ALT_SWITCH_NEARER_FACTOR
+				&& ap.cumM > a.altDivergeM + ALT_SWITCH_PAST_M;
+		});
+		if (taken) {
+			switchToAlternative(taken);
+			return;
+		}
+	}
+	// Spent alternatives (parting point behind the rider) go; with none
+	// left a refresh is due.
+	if (alternatives.some((a) => progressM > a.divergeM + ALT_SPENT_MARGIN_M)) {
+		alternatives = alternatives.filter((a) => progressM <= a.divergeM + ALT_SPENT_MARGIN_M);
+		if (alternatives.length === 0) nextAltRefreshM = progressM;
+	}
+	if (nextAltRefreshM !== null && progressM >= nextAltRefreshM && !recalculating) {
+		nextAltRefreshM = null;
+		void refreshAlternatives();
+	}
 	const toGoal = distanceM(f.coord, route.requestedTo);
 	const nearEnd = geometry.totalM - progressM < ARRIVAL_RADIUS_M && proj.distM < OFF_ROUTE_DIST_M;
 	if (toGoal < ARRIVAL_RADIUS_M || nearEnd) {
@@ -183,6 +261,125 @@ function applyFix(f: PositionFix) {
 	}
 }
 
+/** Where `cand` parts from the navigated route: walk the candidate
+ * from its start while it stays on the navigated route; the first
+ * point clearly off it marks the parting. Null when it never parts
+ * (it IS the navigated route) or when it is off from its very first
+ * point (no shared start — nothing to part from). */
+function divergence(
+	main: RouteGeometry,
+	cand: DirectRoute
+): { divergeM: number; altDivergeM: number; bubbleCoord: LonLat; geometry: RouteGeometry } | null {
+	const cg = buildGeometry(cand.coords);
+	let prevCum: number | null = null;
+	let lastOn = -1;
+	for (let i = 0; i < cand.coords.length; i += 2) {
+		const p = projectOntoRoute(main, cand.coords[i], prevCum);
+		if (p.distM > ALT_DIVERGE_M) {
+			if (lastOn < 0 || prevCum === null) return null;
+			const target = cg.cum[lastOn] + ALT_BUBBLE_AHEAD_M;
+			let j = lastOn;
+			while (j < cg.coords.length - 1 && cg.cum[j] < target) j++;
+			return {
+				divergeM: prevCum, altDivergeM: cg.cum[lastOn],
+				bubbleCoord: cg.coords[j], geometry: cg
+			};
+		}
+		prevCum = p.cumM;
+		lastOn = i;
+	}
+	return null;
+}
+
+/** Turn engine candidates into the shown alternatives (concept § Live
+ * alternatives): keep those parting early enough ahead of the rider,
+ * earliest first, at most ALT_MAX. `refSec` is the time the navigated
+ * route needs from the candidates' common start, so a candidate's
+ * delta compares like with like. Candidates parting too far ahead
+ * schedule a refresh for when the earliest of them comes within reach. */
+function adoptAlternatives(cands: DirectRoute[], refSec: number, fromPlanning = false) {
+	if (!geometry) return;
+	const kept: NavAlternative[] = [];
+	let earliestRejectedM: number | null = null;
+	let tooClose = false;
+	for (const c of cands) {
+		const d = divergence(geometry, c);
+		if (!d) continue;
+		const ahead = d.divergeM - progressM;
+		if (ahead < ALT_MIN_AHEAD_M) {
+			tooClose = true;
+			continue;
+		}
+		if (ahead > ALT_EARLY_MAX_M) {
+			if (earliestRejectedM === null || d.divergeM < earliestRejectedM) earliestRejectedM = d.divergeM;
+			continue;
+		}
+		kept.push({
+			route: c, geometry: d.geometry, divergeM: d.divergeM, altDivergeM: d.altDivergeM,
+			bubbleCoord: d.bubbleCoord, deltaSec: c.durationSec - refSec
+		});
+	}
+	kept.sort((a, b) => a.divergeM - b.divergeM);
+	alternatives = kept.slice(0, ALT_MAX);
+	// Nothing kept → when to look again. Planned candidates that are
+	// already behind / too close say nothing about the road ahead: fetch
+	// from the current position right away. Fetched ones parting too
+	// close are worth a retry a little further on; ones parting too far
+	// become early enough once the rider approaches; none at all — the
+	// engine may offer some later on.
+	if (alternatives.length > 0) nextAltRefreshM = null;
+	else if (tooClose) nextAltRefreshM = fromPlanning ? progressM : progressM + ALT_RETRY_TOO_CLOSE_M;
+	else if (earliestRejectedM !== null) nextAltRefreshM = earliestRejectedM - ALT_EARLY_MAX_M;
+	else nextAltRefreshM = progressM + ALT_RETRY_NONE_M;
+	console.debug('[navigation] alternatives', {
+		candidates: cands.length, kept: alternatives.length, tooClose,
+		earliestRejectedM, nextAltRefreshM, progressM: Math.round(progressM)
+	});
+}
+
+/** Fetch alternatives from the current position without touching the
+ * navigated route: every returned route is a candidate, the one that
+ * coincides with the navigated route drops out in `divergence`. Silent
+ * on failure — alternatives are a bonus; a retry is due further on. */
+async function refreshAlternatives() {
+	if (!route || !fix || !geometry || recalculating) return;
+	const t = Date.now();
+	if (t - altFetchAt < ALT_FETCH_MIN_INTERVAL_MS) {
+		nextAltRefreshM = progressM;
+		return;
+	}
+	altFetchAt = t;
+	altAbort?.abort();
+	const ac = new AbortController();
+	altAbort = ac;
+	const remainingSec = computeGuidance(route, geometry, progressM, maneuverIdx, t)?.remainingSec
+		?? route.durationSec;
+	try {
+		const routes = await fetchNavigationRoutes({
+			mode: 'bike', from: fix.coord, to: route.requestedTo, vias: remainingVias(route)
+		}, ac.signal);
+		if (ac.signal.aborted || !active) return;
+		adoptAlternatives(routes, remainingSec);
+	} catch (e) {
+		if ((e as Error).name === 'AbortError' || !active) return;
+		nextAltRefreshM = progressM + ALT_RETRY_AFTER_M;
+	} finally {
+		if (altAbort === ac) altAbort = null;
+	}
+}
+
+/** The rider is on `alt`: it becomes the navigated route. The other
+ * alternatives were judged against the old route and go; a refresh is
+ * due on the next fix (rate-limited like every fetch). */
+function switchToAlternative(alt: NavAlternative) {
+	alternatives = [];
+	altAbort?.abort();
+	installRoute(alt.route, alt.geometry);
+	updateFailed = false;
+	nextAltRefreshM = 0;
+	persist();
+}
+
 /** The requested vias still ahead of the rider — judged on the current
  * route, since that is where progress is measured. */
 function remainingVias(r: DirectRoute): LonLat[] {
@@ -207,19 +404,25 @@ async function recalculate() {
 	recalcAbort?.abort();
 	const ac = new AbortController();
 	recalcAbort = ac;
+	altAbort?.abort();
 	try {
-		const r = await fetchNavigationRoute({
+		const routes = await fetchNavigationRoutes({
 			mode: 'bike',
 			from: f.coord,
 			to: r0.requestedTo,
 			vias: remainingVias(r0)
 		}, ac.signal);
 		if (ac.signal.aborted || !active) return;
+		const r = routes[0];
 		if (!r) throw new Error('No route found from the current position');
 		installRoute(r);
 		updateFailed = false;
 		retryDelayMs = RECALC_MIN_INTERVAL_MS;
 		nextRetryAt = 0;
+		// The alternates came with the same request (concept § Live
+		// alternatives: refreshed on every recalculation).
+		altFetchAt = Date.now();
+		adoptAlternatives(routes.slice(1), r.durationSec);
 		persist();
 	} catch (e) {
 		if ((e as Error).name === 'AbortError' || !active) return;
@@ -240,7 +443,10 @@ function arrive() {
 	offRoute = false;
 	offSince = null;
 	updateFailed = false;
+	alternatives = [];
+	nextAltRefreshM = null;
 	recalcAbort?.abort();
+	altAbort?.abort();
 	arrivalTimer = setTimeout(() => stop(), ARRIVAL_LINGER_MS);
 }
 
@@ -266,8 +472,11 @@ function onVisibility() {
 /** Begin guiding `r`. Needs a location fix first: on denial or timeout
  * nothing changes and the existing location error message shows
  * (concept § Entering and leaving). Call from the user's gesture — the
- * compass permission request must run inside it. */
-async function start(r: DirectRoute, resume = false): Promise<void> {
+ * compass permission request must run inside it. `planned` are the
+ * planning view's other alternatives to `r`: they start the ride's
+ * live alternatives; without them (a resume) the first fetch is due
+ * on the next fix. */
+async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []): Promise<void> {
 	if (active || starting || r.mode !== 'bike') return;
 	starting = true;
 	const compassPermission = requestCompassPermission();
@@ -292,15 +501,22 @@ async function start(r: DirectRoute, resume = false): Promise<void> {
 	retryDelayMs = RECALC_MIN_INTERVAL_MS;
 	nextRetryAt = 0;
 	fix = null;
+	alternatives = [];
+	nextAltRefreshM = null;
+	altFetchAt = 0;
 	installRoute(r);
 	applyFix(first);
 	// Starting away from the planned route (concept § Entering and
 	// leaving): no five-second hold — reroute from where the rider is
 	// right now. The persisted route is the planned one until the new
-	// route lands (recalculate() persists it).
+	// route lands (recalculate() persists it, and brings alternatives).
 	if (!arrived && offRouteM > OFF_ROUTE_DIST_M) {
 		offRoute = true;
 		void recalculate();
+	} else if (planned.length > 0) {
+		adoptAlternatives(planned, r.durationSec, true);
+	} else {
+		nextAltRefreshM = progressM;
 	}
 	persist();
 
@@ -344,6 +560,10 @@ function stop(): void {
 	recalcAbort?.abort();
 	recalcAbort = null;
 	recalculating = false;
+	altAbort?.abort();
+	altAbort = null;
+	alternatives = [];
+	nextAltRefreshM = null;
 	if (arrivalTimer) clearTimeout(arrivalTimer);
 	arrivalTimer = null;
 	if (clockTimer) clearInterval(clockTimer);
@@ -402,9 +622,12 @@ export const navigation = {
 	get updateFailed() { return updateFailed; },
 	get arrived() { return arrived; },
 	get guidance() { return guidance; },
+	get alternatives() { return alternatives; },
 	get positionStale() { return fix !== null && now - fix.at > POSITION_STALE_MS; },
 
-	start,
+	/** Start from the planning view: `planned` = the other shown
+	 * alternatives, which seed the live alternatives. */
+	start(r: DirectRoute, planned: DirectRoute[] = []) { return start(r, false, planned); },
 	stop,
 	tryResume,
 

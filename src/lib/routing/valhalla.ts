@@ -470,15 +470,17 @@ export async function fetchDirectRoutes(
 	return routes;
 }
 
-/** One route, no alternates, no crossing variants — the navigation
- * recalculation (bicycle-navigation.md § Off-route detection): from the
- * rider's current position to the original destination through the
- * vias still ahead, with the same costing the planned route used. Null
- * when the engine finds nothing. */
-export async function fetchNavigationRoute(
+/** The navigation query (bicycle-navigation.md § Off-route detection,
+ * § Live alternatives): from the rider's current position to the
+ * original destination through the vias still ahead, with the same
+ * costing the planned route used. One request — the primary route
+ * first, then the engine's alternates (none with vias: two-location
+ * queries only). No ferry / shuttle avoidance variants: a rider mid-way
+ * takes what the engine judges best. Empty when nothing routes. */
+export async function fetchNavigationRoutes(
 	args: DirectRouteArgs,
 	signal?: AbortSignal
-): Promise<DirectRoute | null> {
-	const routes = await requestRoutes(args, null, 0, signal);
-	return routes[0] ?? null;
+): Promise<DirectRoute[]> {
+	const alternates = (args.vias?.length ?? 0) > 0 ? 0 : NUM_ALTERNATES;
+	return requestRoutes(args, null, alternates, signal);
 }

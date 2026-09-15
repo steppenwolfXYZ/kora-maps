@@ -116,7 +116,10 @@
 					aria-label="Start navigation"
 					title="Start navigation"
 					disabled={navigation.starting}
-					onclick={(e) => { e.stopPropagation(); void navigation.start(route); }}
+					onclick={(e) => {
+						e.stopPropagation();
+						void navigation.start(route, routingState.directRoutes.filter((r) => r !== route));
+					}}
 				>
 					<span class="material-symbols-outlined" aria-hidden="true">navigation</span>
 					Navigate

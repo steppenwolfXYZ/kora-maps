@@ -144,6 +144,41 @@ body {
    The start button and the re-center pill are Svelte components
    (MapChrome / NavigationOverlay); only the vendor-DOM rules live here. */
 
+/* Time-difference bubble on a live alternative (a DOM marker,
+   alternativeBubble.ts): chrome-styled pill with a small tail. Slower
+   alternatives read in the warn color, faster ones in anthracite. */
+.map-wrap .nav-alt-bubble {
+	position: relative;
+	display: inline-block;
+	padding: 0.2rem 0.55rem;
+	border-radius: var(--radius-pill);
+	background: var(--white);
+	box-shadow: var(--shadow-control);
+	color: var(--anthracite);
+	font-family: var(--font-ui);
+	font-size: 0.78rem;
+	font-weight: 700;
+	line-height: 1.2;
+	white-space: nowrap;
+	pointer-events: none;
+	font-variant-numeric: tabular-nums;
+}
+.map-wrap .nav-alt-bubble::after {
+	content: '';
+	position: absolute;
+	left: 50%;
+	bottom: -5px;
+	width: 10px;
+	height: 10px;
+	transform: translateX(-50%) rotate(45deg);
+	background: var(--white);
+	border-radius: 2px;
+	z-index: -1;
+}
+.map-wrap .nav-alt-bubble.slower {
+	color: var(--warn);
+}
+
 /* While a ride is active the map controls and the scale bar go — the
    banner, summary and re-center control are the only chrome. */
 .map-wrap.navigating .maplibregl-ctrl-top-right,

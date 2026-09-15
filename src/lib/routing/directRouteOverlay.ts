@@ -48,6 +48,10 @@ let markers: {
 let installedMode: 'bike' | 'walk' | null = null;
 let handlersInstalled = false;
 let lastRoutes: DirectRoute[] | null = null;
+// Navigation shows its alternatives muted but not clickable — a
+// rider's hands are on the bars (bicycle-navigation.md § Live
+// alternatives); the line click then does nothing.
+let interactive = true;
 
 function unionBBox(routes: DirectRoute[]): [number, number, number, number] | null {
 	let bb: [number, number, number, number] | null = null;
@@ -154,10 +158,12 @@ function removeLayers(map: maplibregl.Map) {
 }
 
 function onLineClick(e: maplibregl.MapLayerMouseEvent) {
+	if (!interactive) return;
 	const idx = e.features?.[0]?.properties?.idx;
 	if (typeof idx === 'number') routingState.selectDirectRoute(idx);
 }
 function onLineEnter(e: maplibregl.MapLayerMouseEvent) {
+	if (!interactive) return;
 	e.target.getCanvas().style.cursor = 'pointer';
 }
 function onLineLeave(e: maplibregl.MapLayerMouseEvent) {
@@ -340,6 +346,9 @@ export interface DirectOverlayOptions {
 	 * passes false: a recalculated route "starts" wherever the rider
 	 * was, which is no place for a pin. */
 	startPin?: boolean;
+	/** Lines select their card on click (default). Navigation passes
+	 * false. */
+	interactive?: boolean;
 }
 
 /** Install or update the overlay. Fresh route sets (a new query) apply
@@ -354,6 +363,7 @@ export function enterDirectRouteOverlay(
 	if (routes.length === 0) return;
 	const autoFrame = opts.autoFrame ?? true;
 	const startPin = opts.startPin ?? true;
+	interactive = opts.interactive ?? true;
 	const mode = routes[0].mode;
 	const fresh = lastRoutes !== routes;
 	lastRoutes = routes;
