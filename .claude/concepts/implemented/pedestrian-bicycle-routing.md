@@ -66,6 +66,37 @@ One card per route, analogous to the transit connection cards:
 - Card layout must leave room for future additions (surface quality,
   share of dedicated paths, …) without redesign.
 
+### 3a. Narrow-screen layout (revised)
+
+The first version docked the panel at the bottom of the screen as a
+bottom sheet once a cycling / walking query had run. That was reverted:
+moving the panel to the other edge changed nothing about its size and
+only made the position jump. The panel stays at the top, where it was
+before the query and where the transit tab keeps it.
+
+- **Collapsed search once a route is loaded.** After a query the
+  editing chrome (mode tabs, endpoint inputs, action row) collapses
+  into one summary row: from → to plus an edit button. Tapping the row
+  or the button expands the editing chrome again in place; running a
+  fresh query collapses it again. The panel does not move.
+- **Result cards below the summary row**, as in the transit tab. The
+  panel's height is capped so a strip of map stays visible below it.
+- **Resize handle on the bottom edge** of the collapsed panel — the
+  same grab bar the bottom sheet had, mirrored: dragging down grows
+  the result list over the map, dragging up shrinks it back to the
+  default cap. The override lasts until the panel expands or the
+  query changes.
+- **Map button on a card enters fullscreen map mode** for that route,
+  exactly as the transit connection cards do (see
+  `routing-map-details-split.md` § Mobile): the panel hides, the map
+  fills the viewport under the summary header, × in the header returns
+  to the list. The button's previous narrow-screen action — collapse
+  the panel back to the bottom sheet — is gone with the sheet.
+- Camera framing after a query and after expanding the panel targets
+  the visible strip of map, i.e. the area below the panel, not above.
+- Desktop is unaffected: the side panel keeps its full editing chrome
+  and cards regardless of query state.
+
 ### 4. Bicycle costing behavior
 
 - **Hills cost their honest time.** The engine models an everyday

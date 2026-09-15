@@ -6,6 +6,7 @@
 // the Material subset would need a dozen new entries for one feature.
 
 import { ROUNDABOUT_EXIT_BEARING, type ManeuverKind, type RoundaboutExit } from './guidance';
+import { routeGlyphSvg } from '../routing/routeGlyphs';
 
 // All drawn on the 24-unit grid with a 2.4 stroke and round caps; every
 // arrow shaft enters from the bottom (the rider's own position) and the
@@ -33,8 +34,6 @@ const RIGHT_PATHS: Record<string, string> = {
 		+ 'M8 10 10.5 5h3.5l2 5M14 5l-2.5 5L10.5 5',
 	// Four steps rising to the right.
 	stairs: 'M3 20h4.5v-4.5H12V11h4.5V6.5H21',
-	// Pole with a swallow-tailed flag.
-	destination: 'M6 21V3M6 4h11.5l-3 4.5 3 4.5H6',
 	// Cabin with the up / down call arrows.
 	elevator: 'M6.5 3h11v18h-11zM9.5 10l2.5-2.5 2.5 2.5M9.5 14l2.5 2.5 2.5-2.5'
 };
@@ -114,6 +113,13 @@ function roundaboutSvg(exit: RoundaboutExit): string {
 }
 
 export function maneuverIconSvg(kind: ManeuverKind): string {
+	// The destination is the app's own "to" glyph (`──o`, routeGlyphs.ts)
+	// — the same mark as the route pin and the panel's To row — filled
+	// in the current color like the stroked arrows.
+	if (kind === 'destination') {
+		return routeGlyphSvg('to', { w: 24, h: 24, r: 4, inset: 5.5, line: 2.4 })
+			.replace('<svg ', '<svg style="fill:currentColor" ');
+	}
 	if (kind === 'roundabout') return roundaboutSvg('straight');
 	if (kind.startsWith('roundabout-')) return roundaboutSvg(kind.slice(11) as RoundaboutExit);
 	const base = MIRRORED[kind];

@@ -11,6 +11,7 @@
 	import { navigation } from './state.svelte';
 	import { fmtNavDistance, instructionText } from './guidance';
 	import { maneuverIconSvg } from './maneuverIcons';
+	import { routeGlyphSvg } from '../routing/routeGlyphs';
 	import { fmtDistance, fmtDuration } from '../routing/itineraryFormat';
 
 	let g = $derived(navigation.guidance);
@@ -141,7 +142,7 @@
 	</div>
 	{#if navigation.destinationName}
 		<div class="ns-dest">
-			<span class="material-symbols-outlined" aria-hidden="true">sports_score</span>
+			<span class="ns-dest-glyph">{@html routeGlyphSvg('to', { w: 18, h: 12, r: 3, inset: 3.5, line: 2 })}</span>
 			<span class="ns-dest-text">{navigation.destinationName}</span>
 		</div>
 	{/if}
@@ -318,7 +319,8 @@
 	.nav-recenter {
 		position: absolute;
 		left: 1rem;
-		bottom: calc(4.6rem + env(safe-area-inset-bottom, 0px));
+		/* Clear of the two-row summary island below it. */
+		bottom: calc(6.6rem + env(safe-area-inset-bottom, 0px));
 		z-index: 3;
 		display: inline-flex;
 		align-items: center;
@@ -405,9 +407,16 @@
 		font-size: 0.8rem;
 		color: var(--gray-600);
 	}
-	.ns-dest .material-symbols-outlined {
-		font-size: 1rem;
-		color: var(--brand);
+	/* The "to" glyph (`──o`) — the app's destination mark, brand red. */
+	.ns-dest-glyph {
+		display: inline-flex;
+		width: 18px;
+		height: 12px;
+	}
+	.ns-dest-glyph :global(svg) {
+		width: 100%;
+		height: 100%;
+		fill: var(--brand);
 	}
 	.ns-dest-text {
 		overflow: hidden;

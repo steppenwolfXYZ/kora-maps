@@ -293,7 +293,10 @@
 		border-radius: var(--radius-pill);
 		backdrop-filter: blur(4px);
 		-webkit-backdrop-filter: blur(4px);
-		max-width: min(85vw, 24rem);
+		/* Nearly the full width on a phone so a sentence rarely wraps;
+		   bounded on wide screens. */
+		width: max-content;
+		max-width: min(calc(100vw - 1.5rem), 28rem);
 		text-align: left;
 		z-index: 40;
 		display: flex;
@@ -332,7 +335,7 @@
 		padding: 0.7rem 0.7rem 0.7rem 1.1rem;
 		border-radius: 0.8rem;
 		box-shadow: var(--shadow-popover);
-		max-width: min(90vw, 26rem);
+		max-width: min(calc(100vw - 1.5rem), 30rem);
 	}
 	.map-toast-title {
 		display: block;
