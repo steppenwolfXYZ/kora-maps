@@ -135,7 +135,10 @@
 </div>
 
 {#if mapUi.toast}
-	<div class="map-toast" role="alert">{mapUi.toast}</div>
+	<div class="map-toast" class:error={mapUi.toastLevel === 'error'} role="alert">
+		{#if mapUi.toastTitle}<strong class="map-toast-title">{mapUi.toastTitle}</strong>{/if}
+		{mapUi.toast}
+	</div>
 {/if}
 
 {#if PUBLIC_ENVIRONMENT !== 'production'}
@@ -280,6 +283,23 @@
 		max-width: min(85vw, 24rem);
 		text-align: center;
 		z-index: 40;
+	}
+	/* Error level: brand red, larger, higher up, a bold title over the
+	   plain message — must not be missed. */
+	.map-toast.error {
+		bottom: 6rem;
+		background: var(--brand);
+		font-size: 0.92rem;
+		padding: 0.7rem 1.1rem;
+		border-radius: 0.8rem;
+		box-shadow: var(--shadow-popover);
+		max-width: min(90vw, 26rem);
+	}
+	.map-toast-title {
+		display: block;
+		font-weight: 700;
+		font-size: 1rem;
+		margin-bottom: 0.15rem;
 	}
 
 	.zoom-badge {

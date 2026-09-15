@@ -93,10 +93,22 @@ export function requestCompassPermission(): Promise<string> {
  * the stop function. Prefers the absolute event where the platform
  * offers it; iOS exposes its heading as webkitCompassHeading on the
  * plain event. Fires nothing on devices without a magnetometer. */
-export function watchCompass(onHeading: (deg: number) => void): () => void {
+export function watchCompass(
+	onHeading: (deg: number) => void,
+	/** Called once if events arrive with their values stripped — Brave
+	 * with motion sensors blocked fires them empty rather than not at
+	 * all. A device without a magnetometer fires nothing and never
+	 * triggers this. */
+	onBlocked?: () => void
+): () => void {
 	if (typeof window === 'undefined') return () => {};
+	let blockedReported = false;
 	const handler = (ev: DeviceOrientationEvent) => {
 		const wk = (ev as any).webkitCompassHeading;
+		if (ev.alpha === null && typeof wk !== 'number' && !blockedReported) {
+			blockedReported = true;
+			onBlocked?.();
+		}
 		if (typeof wk === 'number' && Number.isFinite(wk)) {
 			onHeading(wk);
 			return;

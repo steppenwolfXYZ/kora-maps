@@ -46,16 +46,22 @@ missing is the mode itself.
   the screen), tilted, and zoomed to a close street-level view. The
   rider's position sits in the lower part of the viewport so most of
   the screen shows what lies ahead.
-- Heading comes from the GPS course whenever the rider is moving fast
-  enough for the course to be meaningful; otherwise from the bearing of
-  the rider's own movement over the last metres, once the displacement
-  clearly exceeds the position accuracy (turns register even at
-  walking pace, and no speed field is needed). Below that (standing at
-  a light) the compass heading is used if the device offers one. GPS
-  course always wins over the compass while it is valid — compasses
-  are frequently miscalibrated. Standing still without a compass for a
-  few seconds drops the heading: the marker shows the plain position
-  dot until movement resumes.
+- **Route lock.** While the position is within the off-route distance
+  of the route, the marker sits on the projected point of the route and
+  the arrow points along the route there — a turn shows the instant the
+  projection passes the corner, with no lag and no jitter. All
+  decisions (off-route, switching to an alternative, arrival) keep
+  using the raw position.
+- Off the route, heading comes from the GPS course whenever the rider
+  is moving fast enough for the course to be meaningful; otherwise from
+  the bearing of the rider's own movement over the last two seconds —
+  a time window, so walking and riding resolve a turn equally fast —
+  gated only against position jitter. Below that (standing at a light)
+  the compass heading is used if the device offers one. GPS course
+  always wins over the compass while it is valid — compasses are
+  frequently miscalibrated. Standing still off the route without a
+  compass for a few seconds drops the heading: the marker shows the
+  plain position dot until movement resumes.
 - Heading and position changes are smoothed so the map does not
   jitter between fixes.
 - **Dynamic zoom and tilt.** The camera frames the road up to the next

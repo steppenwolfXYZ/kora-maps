@@ -26,9 +26,14 @@ class MapUiState {
 	// Map context menu (right-click / long-press). See MapContextMenu.svelte
 	// and transit-routing.md § Entry points / Map context menu.
 	contextAnchor = $state<{ x: number; y: number; lng: number; lat: number } | null>(null);
-	// Transient error toast (currently only fed by the locate button's
-	// geolocation errors). Re-showing resets the timer.
+	// Transient toast: the locate button's and navigation's geolocation
+	// errors, navigation's sensor hints. `error` level renders red and
+	// stays longer — for messages the user must not miss. Re-showing
+	// resets the timer.
 	toast = $state<string | null>(null);
+	toastLevel = $state<'info' | 'error'>('info');
+	/** Bold title line above the message (error toasts). */
+	toastTitle = $state<string | null>(null);
 	private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 	setView = (mode: ViewMode) => {
@@ -47,10 +52,13 @@ class MapUiState {
 		if (this.menuOpen && window.innerWidth <= MENU_AUTOCLOSE_MAX_WIDTH) this.menuOpen = false;
 	};
 
-	showToast = (message: string) => {
+	showToast = (message: string, level: 'info' | 'error' = 'info', title: string | null = null) => {
 		this.toast = message;
+		this.toastLevel = level;
+		this.toastTitle = title;
 		if (this.toastTimer) clearTimeout(this.toastTimer);
-		this.toastTimer = setTimeout(() => { this.toast = null; this.toastTimer = null; }, 4000);
+		const ms = level === 'error' ? 7000 : 4000;
+		this.toastTimer = setTimeout(() => { this.toast = null; this.toastTimer = null; }, ms);
 	};
 }
 

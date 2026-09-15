@@ -262,13 +262,14 @@ export function setupMapOrchestration() {
 	$effect(() => {
 		const map = mapUi.mapRef;
 		const fix = navigation.fix;
+		const coord = navigation.displayCoord;
 		const heading = navigation.heading;
 		const following = navigation.following;
-		if (!map || !navigation.active || !fix) return;
-		if (!riderMarker) riderMarker = new RiderMarker(map, fix.coord);
-		riderMarker.update(fix.coord, heading);
+		if (!map || !navigation.active || !fix || !coord) return;
+		if (!riderMarker) riderMarker = new RiderMarker(map, coord);
+		riderMarker.update(coord, heading);
 		if (following) {
-			followRider(map, fix.coord, heading, navFirstMove, {
+			followRider(map, coord, heading, navFirstMove, {
 				distanceToNextM: navigation.guidance?.distanceToNextM ?? null,
 				speedMs: fix.speedMs
 			});

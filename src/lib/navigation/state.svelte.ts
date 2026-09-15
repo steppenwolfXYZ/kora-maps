@@ -38,22 +38,30 @@ const RECALC_RETRY_MAX_MS = 60_000;
  * arrival message lingers before navigation ends on its own. */
 const ARRIVAL_RADIUS_M = 25;
 const ARRIVAL_LINGER_MS = 8000;
-/** Heading sources, in order of trust (concept § Follow-me map): the
- * platform's course when it reports a speed of at least this; otherwise
- * the bearing of the rider's own movement over the recent track, once
- * the displacement clearly exceeds the position accuracy; the compass
- * only while both are stale. Standing still without a compass for
+/** Heading sources, in order of trust (concept § Follow-me map). On the
+ * route (fix within OFF_ROUTE_DIST_M) the marker locks to the projected
+ * point and the arrow takes the route's own bearing there — turns show
+ * the instant the projection passes the corner. Off it: the platform's
+ * course when it reports a speed of at least COURSE_MIN_SPEED_MS;
+ * otherwise the bearing of the rider's own movement over the last
+ * MOVE_WINDOW_MS — time, not distance, so walking and riding resolve a
+ * turn equally fast — gated only against jitter; the compass while both
+ * are stale. Standing still off-route without a compass for
  * STOP_HOLD_MS drops the heading — the marker becomes the dot again. */
 const COURSE_MIN_SPEED_MS = 1.0;
 const COURSE_STALE_MS = 4000;
 const COMPASS_APPLY_MS = 500;
 const COMPASS_FRESH_MS = 3000;
 const TRACK_WINDOW_MS = 15_000;
-const TRACK_MIN_MOVE_M = 8;
-const TRACK_ACCURACY_FACTOR = 0.6;
+const MOVE_WINDOW_MS = 2000;
+const MOVE_MIN_M = 2;
+const MOVE_ACCURACY_FACTOR = 0.25;
 const STOP_WINDOW_MS = 5000;
 const STOP_MIN_MOVE_M = 3;
 const STOP_HOLD_MS = 4000;
+/** Route bearing is read from the projected point to this far ahead
+ * along the route, so a jagged shape doesn't twitch the arrow. */
+const ROUTE_BEARING_AHEAD_M = 6;
 /** A via counts as passed once progress is this far beyond it. */
 const VIA_PASSED_MARGIN_M = 30;
 /** A fix older than this makes the banner say so. */
@@ -107,6 +115,10 @@ let active = $state(false);
 let starting = $state(false);
 let route = $state.raw<DirectRoute | null>(null);
 let fix = $state.raw<PositionFix | null>(null);
+// What the marker and camera use: the projected point while locked to
+// the route, the raw fix otherwise.
+let displayCoord = $state.raw<LonLat | null>(null);
+let onRoute = $state(false);
 let heading = $state<number | null>(null);
 let following = $state(true);
 let progressM = $state(0);
@@ -155,6 +167,8 @@ let altAbort: AbortController | null = null;
 // explicit stop consumes it with history.back() so the entry never
 // lingers as a dead forward step.
 let pushedEntry = false;
+// The motion-sensor hint shows once per session, not on every start.
+let sensorHintShown = false;
 
 let guidance: Guidance | null = $derived.by(() => {
 	if (!route || !geometry) return null;
@@ -189,6 +203,21 @@ function installRoute(r: DirectRoute, g?: RouteGeometry) {
 	if (fix) applyFix(fix);
 }
 
+/** Bearing of the route at metres `cumM` along it, read over a short
+ * stretch ahead. */
+function routeBearingAt(g: RouteGeometry, cumM: number, from: LonLat): number | null {
+	const target = cumM + ROUTE_BEARING_AHEAD_M;
+	let j = 0;
+	while (j < g.cum.length - 1 && g.cum[j] < target) j++;
+	const ahead = g.coords[j];
+	if (distanceM(from, ahead) < 0.5) {
+		// At the very end of the route: use the last segment's direction.
+		const n = g.coords.length;
+		return n >= 2 ? bearingDeg(g.coords[n - 2], g.coords[n - 1]) : null;
+	}
+	return bearingDeg(from, ahead);
+}
+
 function updateHeadingFromFix(f: PositionFix) {
 	track.push(f);
 	while (track.length > 0 && f.at - track[0].at > TRACK_WINDOW_MS) track.shift();
@@ -198,15 +227,14 @@ function updateHeadingFromFix(f: PositionFix) {
 	if (f.courseDeg !== null && f.courseDeg >= 0 && (f.speedMs ?? 0) >= COURSE_MIN_SPEED_MS) {
 		course = f.courseDeg;
 	} else {
-		// Movement bearing: from the most recent earlier fix that lies
-		// clearly outside this fix's accuracy circle — the last stretch
-		// actually walked or ridden, so a turn registers within metres.
-		const minMove = Math.max(TRACK_MIN_MOVE_M, f.accuracyM * TRACK_ACCURACY_FACTOR);
-		for (let i = track.length - 2; i >= 0; i--) {
-			if (distanceM(track[i].coord, f.coord) >= minMove) {
-				course = bearingDeg(track[i].coord, f.coord);
+		// Movement bearing over the last MOVE_WINDOW_MS: the newest fix
+		// at least that old, gated against jitter only.
+		const ref = [...track].reverse().find((t) => f.at - t.at >= MOVE_WINDOW_MS);
+		if (ref) {
+			const minMove = Math.max(MOVE_MIN_M, f.accuracyM * MOVE_ACCURACY_FACTOR);
+			if (distanceM(ref.coord, f.coord) >= minMove) {
+				course = bearingDeg(ref.coord, f.coord);
 				trust = 0.5;
-				break;
 			}
 		}
 	}
@@ -234,6 +262,8 @@ function onCompass(deg: number) {
 	compassHeading = deg;
 	const t = Date.now();
 	lastCompassAt = t;
+	// Locked to the route, the arrow follows the route, not the phone.
+	if (onRoute) return;
 	if (t - lastCompassApplyAt < COMPASS_APPLY_MS) return;
 	if (t - lastCourseAt <= COURSE_STALE_MS) return;
 	lastCompassApplyAt = t;
@@ -244,12 +274,31 @@ function onCompass(deg: number) {
 function applyFix(f: PositionFix) {
 	fix = f;
 	now = f.at;
+	// Movement / course / stop bookkeeping runs on every fix, so the
+	// fallback heading is current the moment the route lock lets go.
 	updateHeadingFromFix(f);
-	if (!route || !geometry) return;
+	if (!route || !geometry) {
+		displayCoord = f.coord;
+		onRoute = false;
+		return;
+	}
 	const proj = projectOntoRoute(geometry, f.coord, progressM);
 	progressM = proj.cumM;
 	offRouteM = proj.distM;
 	maneuverIdx = advanceManeuverIndex(route, geometry, progressM, maneuverIdx);
+
+	// Route lock (concept § Follow-me map): on the route, the marker
+	// sits on the projected point and the arrow takes the route's
+	// bearing there. Decisions below keep using the raw fix.
+	if (proj.distM <= OFF_ROUTE_DIST_M) {
+		onRoute = true;
+		displayCoord = proj.point;
+		const rb = routeBearingAt(geometry, proj.cumM, proj.point);
+		if (rb !== null) heading = rb;
+	} else {
+		onRoute = false;
+		displayCoord = f.coord;
+	}
 
 	if (arrived) return;
 
@@ -500,7 +549,7 @@ function arrive() {
 function onWatchError(err: GeolocationPositionError) {
 	if (err.code === 1) {
 		markGeolocationDenied();
-		mapUi.showToast('Location permission denied — navigation ended.');
+		mapUi.showToast('Location permission was revoked. Pick a start manually to plan again.', 'error', 'Navigation ended');
 		stop();
 	}
 	// Timeouts and transient unavailability recover on their own; the
@@ -532,7 +581,7 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 		first = await getFirstFix();
 	} catch (e) {
 		if ((e as { code?: number })?.code === 1) markGeolocationDenied();
-		mapUi.showToast(geolocationErrorMessage(e));
+		mapUi.showToast(geolocationErrorMessage(e), 'error', 'Navigation needs your location');
 		starting = false;
 		return;
 	}
@@ -577,10 +626,23 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 	void wakeLock.acquire();
 	stopWatch = watchPosition(applyFix, onWatchError);
 	void compassPermission.then((outcome) => {
+		// A refused permission (iOS prompt, Brave) or events with their
+		// values stripped (Brave with motion sensors blocked) both mean
+		// no compass: say so once, since the fix is a browser setting.
+		const hint = () => {
+			if (sensorHintShown || !active) return;
+			sensorHintShown = true;
+			mapUi.showToast(
+				'Allow them in the browser\'s site settings so the map can show your '
+				+ 'direction while standing still.',
+				'error',
+				'Motion sensors are blocked'
+			);
+		};
+		if (outcome === 'denied') hint();
 		// Listen whenever the API exists: only iOS withholds events
-		// without a grant, and a listener that never fires costs nothing
-		// (Brave fires the event with its values stripped — same thing).
-		if (outcome !== 'no-api' && active && !stopCompass) stopCompass = watchCompass(onCompass);
+		// without a grant, and a listener that never fires costs nothing.
+		if (outcome !== 'no-api' && active && !stopCompass) stopCompass = watchCompass(onCompass, hint);
 	});
 	clockTimer = setInterval(() => { now = Date.now(); }, CLOCK_TICK_MS);
 	document.addEventListener('visibilitychange', onVisibility);
@@ -625,6 +687,8 @@ function stop(): void {
 	route = null;
 	geometry = null;
 	fix = null;
+	displayCoord = null;
+	onRoute = false;
 	heading = null;
 	arrived = false;
 	offRoute = false;
@@ -666,6 +730,10 @@ export const navigation = {
 	get starting() { return starting; },
 	get route() { return route; },
 	get fix() { return fix; },
+	/** Marker / camera position: projected onto the route while locked
+	 * to it, the raw fix otherwise. */
+	get displayCoord() { return displayCoord; },
+	get onRoute() { return onRoute; },
 	get heading() { return heading; },
 	get following() { return following; },
 	get progressM() { return progressM; },
