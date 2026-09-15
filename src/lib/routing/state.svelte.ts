@@ -94,13 +94,14 @@ let expandedFingerprint = $state<string | null>(null);
 // left via the header's back / details buttons or by the selection
 // clearing (browser back, ×, input change).
 let mapModeFlag = $state(false);
-// Direct-mode bottom sheet on narrow screens: with cycling / walking
-// results the map is the primary content, so the panel docks at the
-// bottom as a compact sheet. `true` = the user expanded it back to the
-// full panel to edit the query; collapses again on every fresh query.
-// Only meaningful while the direct tab has queried — CSS scopes the
-// sheet layout to narrow viewports.
-let directSheetExpanded = $state(false);
+// Direct-mode collapsed search on narrow screens
+// (pedestrian-bicycle-routing.md § Narrow-screen layout): once a
+// cycling / walking query ran, the panel stays at the top but folds its
+// editing chrome into a from→to summary row. `true` = the user expanded
+// the editing chrome again; collapses again on every fresh query. Only
+// meaningful while the direct tab has queried — CSS scopes the collapsed
+// layout to narrow viewports.
+let directSearchExpanded = $state(false);
 
 // Shared-connection view (connection-sharing.md § Shared view). `sharedShare`
 // holds the share document while a /s/<id> landing drives the panel;
@@ -437,9 +438,9 @@ async function runDirectQuery(key: string) {
 	resetCascadeState();
 	directRoutes = [];
 	directSelected = 0;
-	// A fresh query always lands collapsed — the map with the new routes
-	// is what the user asked for.
-	directSheetExpanded = false;
+	// A fresh query always lands collapsed — the results and the map
+	// with the new routes are what the user asked for.
+	directSearchExpanded = false;
 	try {
 		if (from!.type === 'current' || to!.type === 'current') {
 			try { resolvedCurrentCoord = await resolveCurrent(); }
@@ -503,7 +504,7 @@ export const routingState = {
 		if (travelMode === 'transit') return null;
 		return directRoutes[directSelected] ?? null;
 	},
-	get directSheetExpanded() { return directSheetExpanded; },
+	get directSearchExpanded() { return directSearchExpanded; },
 	get time() { return time; },
 	get timeVersion() { return timeVersion; },
 	get results() { return results; },
@@ -805,14 +806,17 @@ export const routingState = {
 		directSelected = index;
 	},
 
-	/** Expand the narrow-screen direct-mode bottom sheet back to the full
-	 * panel (edit the query); collapse returns to the docked sheet. */
-	expandDirectSheet() {
-		directSheetExpanded = true;
+	/** Expand the narrow-screen direct-mode collapsed search row back to
+	 * the full editing chrome (edit the query). It collapses again with
+	 * the next query. */
+	expandDirectSearch() {
+		directSearchExpanded = true;
 	},
 
-	collapseDirectSheet() {
-		directSheetExpanded = false;
+	/** Fold the editing chrome back into the summary row without a new
+	 * query (the collapse button at the right of the mode tabs). */
+	collapseDirectSearch() {
+		directSearchExpanded = false;
 	},
 
 	setMode(m: TimeMode) {

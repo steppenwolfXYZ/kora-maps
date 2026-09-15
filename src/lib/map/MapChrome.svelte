@@ -18,8 +18,9 @@
 
 	// Start-navigation entry point (bicycle-navigation.md § Entering and
 	// leaving): shown while a cycling route is selected and no ride is
-	// running. The narrow-screen full panel covers this spot, so the
-	// expanded direct sheet hides it via CSS.
+	// running. On narrow screens the top-anchored panel covers the top
+	// corner, so the pill moves to the map strip below it, and the
+	// expanded (content-height) editing chrome hides it via CSS.
 	let navStartRoute = $derived(
 		!navigation.active && routingState.open && !lineDetailState.selection
 			&& routingState.selectedDirectRoute?.mode === 'bike'
@@ -61,7 +62,7 @@
 	{@const route = navStartRoute}
 	<button
 		class="nav-start"
-		class:sheet-expanded={routingState.directSheetExpanded}
+		class:search-expanded={routingState.directSearchExpanded}
 		type="button"
 		disabled={navigation.starting}
 		onclick={() => void navigation.start(
@@ -83,19 +84,7 @@
 	<RouteMapHeader />
 {/if}
 {#if routingState.open}
-	<!-- direct-sheet: narrow-screen bottom sheet for cycling / walking
-	     results — the wrapper flips to the bottom edge so the map above
-	     stays visible and interactive (rule in the narrow media query;
-	     desktop layout is unaffected by the class). -->
-	<div
-		class="top-controls"
-		class:hidden-in-map-mode={routingState.mapMode}
-		class:direct-sheet={
-			routingState.travelMode !== 'transit'
-			&& routingState.hasQueried
-			&& !routingState.directSheetExpanded
-		}
-	>
+	<div class="top-controls" class:hidden-in-map-mode={routingState.mapMode}>
 		<RoutingPanel
 			onFocusLeg={focusSelectedLeg}
 			onEnterMapMode={frameSelectedItinerary}
@@ -231,14 +220,18 @@
 		opacity: 0.6;
 		cursor: progress;
 	}
-	/* Narrow screens: the top-right column is hidden while routing, so
-	   the pill takes the corner itself; the expanded full-height panel
-	   covers it, so it hides there. */
+	/* Narrow screens: the routing panel owns the top of the screen, so
+	   the pill sits in the map strip below it (bottom-right corner; the
+	   MapLibre column is hidden while the list is open). The expanded
+	   editing chrome is content-height and can cover the whole map, so
+	   the pill hides there. */
 	@media (max-width: 699px) {
 		:global(.map-wrap.routing-active:not(.routing-map-mode)) .nav-start {
+			top: auto;
+			bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
 			right: 1rem;
 		}
-		:global(.map-wrap.routing-active) .nav-start.sheet-expanded {
+		:global(.map-wrap.routing-active) .nav-start.search-expanded {
 			display: none;
 		}
 		/* Fullscreen map mode: below the summary header, like the
@@ -271,12 +264,6 @@
 			top: 0;
 			left: 0;
 			right: 0;
-		}
-		/* Direct-mode bottom sheet: the wrapper hugs the bottom edge (its
-		   height is the sheet's own), leaving the map above it live. */
-		:global(.map-wrap.routing-active) .top-controls.direct-sheet {
-			top: auto;
-			bottom: 0;
 		}
 	}
 

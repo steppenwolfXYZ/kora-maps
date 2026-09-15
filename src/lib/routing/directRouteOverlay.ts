@@ -293,33 +293,36 @@ function addLayers(map: maplibregl.Map, mode: 'bike' | 'walk') {
 	}
 }
 
-/** Camera padding for direct-route framing. Narrow screens dock the
- * result cards as a bottom sheet (max 46dvh — keep in sync with
- * .routing-panel.sheet in RoutingPanel.svelte), so the bottom clearance
- * covers it. With the sheet expanded to the full editing panel
- * (content-height, top-anchored) the map only peeks out below it —
- * frame into that measured strip, or return null when the strip is too
- * small for a camera move to be worth anything. Desktop (undefined)
- * keeps the shared left-panel padding. */
-const MIN_EXPANDED_STRIP_PX = 140;
+/** Camera padding for direct-route framing. Narrow screens keep the
+ * panel at the top: collapsed to the summary row + result cards it is
+ * capped at 46dvh (keep in sync with .routing-panel.collapsed in
+ * RoutingPanel.svelte) but the grab handle can have grown it, and
+ * expanded to the full editing chrome it is content-height — either way
+ * the map only peeks out below it, so frame into that measured strip,
+ * or return null when the strip is too small for a camera move to be
+ * worth anything. Fullscreen map mode hides the panel and only the
+ * summary header needs clearing. Desktop (undefined) keeps the shared
+ * left-panel padding. */
+const MIN_STRIP_PX = 140;
+const MAP_MODE_HEADER_CLEARANCE = 96;
 function directFramePadding(): maplibregl.PaddingOptions | null | undefined {
 	if (!isNarrow()) return undefined;
+	if (routingState.mapMode) {
+		return { top: MAP_MODE_HEADER_CLEARANCE, bottom: 48, left: 40, right: 40 };
+	}
 	const panel = document.querySelector('.routing-panel');
 	const ph = panel ? Math.round(panel.getBoundingClientRect().height) : 0;
-	if (routingState.directSheetExpanded) {
-		if (window.innerHeight - ph < MIN_EXPANDED_STRIP_PX) return null;
-		return { top: ph + 16, bottom: 24, left: 40, right: 40 };
-	}
-	// Collapsed sheet: measured too — the drag handle can have grown it
-	// past the default 46dvh. The default is the floor (during a query
-	// the loading sheet is shorter than the results will be).
-	const bottom = Math.max(ph, Math.round(window.innerHeight * 0.46));
-	if (window.innerHeight - bottom < MIN_EXPANDED_STRIP_PX) return null;
-	return { top: 64, bottom: bottom + 24, left: 40, right: 40 };
+	// Collapsed: the default cap is the floor (during a query the loading
+	// panel is shorter than the results will be).
+	const top = routingState.directSearchExpanded
+		? ph
+		: Math.max(ph, Math.round(window.innerHeight * 0.46));
+	if (window.innerHeight - top < MIN_STRIP_PX) return null;
+	return { top: top + 16, bottom: 24, left: 40, right: 40 };
 }
 
 /** Frame the union bbox of all shown alternatives — the direct-mode
- * analogue of frameItinerary (card map icon / sheet expand / desktop
+ * analogue of frameItinerary (card map icon / search expand / desktop
  * reframe). */
 export function frameDirectRoutes(getMap: () => maplibregl.Map | null) {
 	const padding = directFramePadding();
@@ -420,8 +423,8 @@ export function enterDirectRouteOverlay(
 	});
 
 	// Auto-frame on a fresh query only. Narrow screens frame too — the
-	// bottom sheet leaves the map visible, so the new routes must land
-	// in the strip above it (padding accounts for the sheet; a fresh
+	// collapsed panel leaves a strip of map visible below it, so the new
+	// routes must land there (padding accounts for the panel; a fresh
 	// query always collapses it, so the null expanded case can't occur,
 	// but guard anyway).
 	if (fresh && autoFrame) {

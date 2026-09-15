@@ -36,35 +36,48 @@
 	// § Mode tabs): no time controls, no options, no vias; results are
 	// DirectRouteCards instead of the transit connection cards.
 	let direct = $derived(routingState.travelMode !== 'transit');
-	// Narrow-screen bottom sheet: once a direct query ran, the map is the
-	// primary content, so the panel docks at the bottom as a compact
-	// sheet (collapsed = editing chrome hidden, a from→to summary row on
-	// top). The class only takes effect inside the narrow media query;
+	// Narrow-screen collapsed search (pedestrian-bicycle-routing.md
+	// § Narrow-screen layout): once a direct query ran, the panel stays
+	// at the top but hides its editing chrome behind a from→to summary
+	// row, with the result cards below and a strip of map under the
+	// panel. The class only takes effect inside the narrow media query;
 	// desktop keeps the side panel regardless.
-	let sheet = $derived(
-		direct && routingState.hasQueried && !routingState.directSheetExpanded
+	let collapsed = $derived(
+		direct && routingState.hasQueried && !routingState.directSearchExpanded
 	);
 
-	/** Expand the bottom sheet to the full editing panel. The expanded
-	 * panel is content-height, so a strip of map may stay visible below
-	 * it — re-frame the routes into that strip once the layout has
-	 * settled (the framing measures the panel; see directFramePadding). */
-	async function expandSheet() {
-		routingState.expandDirectSheet();
+	/** Expand the collapsed search row to the full editing chrome. The
+	 * expanded panel is content-height, so a strip of map may stay
+	 * visible below it — re-frame the routes into that strip once the
+	 * layout has settled (the framing measures the panel; see
+	 * directFramePadding). */
+	async function expandSearch() {
+		routingState.expandDirectSearch();
 		await tick();
 		onFrameDirectRoutes?.();
 	}
 
-	// ── Sheet resize drag ──────────────────────────────────────────────
-	// The grab handle drags the collapsed sheet taller: from the default
-	// 46dvh up to the height where the card list needs no scrollbar (the
-	// no-scroll cap is measured at drag start so the handle tracks the
-	// finger without hysteresis). The override rides in --sheet-h on the
-	// panel — sheet mode only; the expanded panel ignores it — and drops
-	// with the panel remount. Pointer capture keeps the drag alive once
-	// the finger leaves the handle.
+	/** Fold the editing chrome back into the summary row without
+	 * re-querying (the button at the right of the mode tabs; narrow
+	 * only). The panel shrinks to the collapsed cap, so re-frame into
+	 * the larger map strip. */
+	async function collapseSearch() {
+		routingState.collapseDirectSearch();
+		await tick();
+		onFrameDirectRoutes?.();
+	}
+
+	// ── Collapsed-panel resize drag ────────────────────────────────────
+	// The grab handle on the panel's bottom edge drags the collapsed
+	// panel taller: from the default 46dvh down to the height where the
+	// card list needs no scrollbar (the no-scroll cap is measured at drag
+	// start so the handle tracks the finger without hysteresis). The
+	// override rides in --panel-h on the panel — collapsed only; the
+	// expanded panel ignores it — and drops with the panel remount.
+	// Pointer capture keeps the drag alive once the finger leaves the
+	// handle.
 	let panelEl: HTMLDivElement | null = $state(null);
-	let sheetDragHeight = $state<number | null>(null);
+	let dragHeight = $state<number | null>(null);
 	let grabStartY = 0;
 	let grabStartH = 0;
 	let grabMaxH = 0;
@@ -83,11 +96,12 @@
 
 	function grabMove(e: PointerEvent) {
 		if (!(e.currentTarget as HTMLElement).hasPointerCapture(e.pointerId)) return;
-		// Shrinking stops at the default sheet height (or the start height
-		// when the content never reached it).
+		// Dragging down grows the panel; shrinking stops at the default
+		// collapsed height (or the start height when the content never
+		// reached it).
 		const min = Math.min(Math.round(window.innerHeight * 0.46), grabStartH);
-		sheetDragHeight = Math.max(
-			min, Math.min(grabMaxH, grabStartH + (grabStartY - e.clientY)));
+		dragHeight = Math.max(
+			min, Math.min(grabMaxH, grabStartH + (e.clientY - grabStartY)));
 	}
 
 	// Shared-only mode (connection-sharing.md § Shared view) renders just the
@@ -587,48 +601,36 @@
 
 <div
 	class="routing-panel"
-	class:sheet
+	class:collapsed
 	bind:this={panelEl}
-	style:--sheet-h={sheetDragHeight !== null ? `${sheetDragHeight}px` : null}
+	style:--panel-h={dragHeight !== null ? `${dragHeight}px` : null}
 	role="dialog"
 	aria-label="Route planning"
 >
-	{#if sheet}
-		<!-- Resize handle (narrow only): dragging grows the sheet up to
-		     the no-scroll height of the card list. Its own full-width
-		     row so the bar centers on the panel, not on the summary
-		     button beside the edit/close controls. -->
-		<div
-			class="rp-sheet-grab-row"
-			onpointerdown={grabDown}
-			onpointermove={grabMove}
-			aria-hidden="true"
-		>
-			<span class="rp-sheet-grab"></span>
-		</div>
-		<!-- Sheet header (narrow only, hidden by CSS on desktop): the
-		     from→to summary — a tap target that expands back to the
-		     full panel for editing — plus the edit pencil and close ×. -->
-		<div class="rp-sheet-head">
+	{#if collapsed}
+		<!-- Collapsed search row (narrow only, hidden by CSS on desktop):
+		     the from→to summary — a tap target that expands the editing
+		     chrome again — plus the edit pencil and close ×. -->
+		<div class="rp-collapsed-head">
 			<button
-				class="rp-sheet-summary"
-				onclick={() => void expandSheet()}
+				class="rp-collapsed-summary"
+				onclick={() => void expandSearch()}
 				aria-label="Edit the route"
 				title="Edit the route"
 			>
-				<span class="rp-sheet-eps">
-					<span class="rp-sheet-ep">
+				<span class="rp-collapsed-eps">
+					<span class="rp-collapsed-ep">
 						{routingState.from ? endpointLabel(routingState.from) : ''}
 					</span>
-					<span class="material-symbols-outlined rp-sheet-arrow" aria-hidden="true">chevron_right</span>
-					<span class="rp-sheet-ep">
+					<span class="material-symbols-outlined rp-collapsed-arrow" aria-hidden="true">chevron_right</span>
+					<span class="rp-collapsed-ep">
 						{routingState.to ? endpointLabel(routingState.to) : ''}
 					</span>
 				</span>
 			</button>
 			<button
-				class="rp-sheet-edit icon-btn"
-				onclick={() => void expandSheet()}
+				class="rp-collapsed-edit icon-btn"
+				onclick={() => void expandSearch()}
 				aria-label="Edit the route"
 				title="Edit the route"
 			>
@@ -691,6 +693,18 @@
 			<span class="material-symbols-outlined" aria-hidden="true">directions_walk</span>
 			Walking
 		</button>
+		{#if direct && routingState.hasQueried && routingState.directSearchExpanded}
+			<!-- Collapse the editing chrome back to the summary row
+			     (narrow only, hidden by CSS on desktop). -->
+			<button
+				class="rp-collapse icon-btn"
+				onclick={() => void collapseSearch()}
+				aria-label="Hide the route editor"
+				title="Hide the route editor"
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">unfold_less</span>
+			</button>
+		{/if}
 	</div>
 
 	<!-- Endpoint rows (via-stops.md § Panel UI). The "+" of each row sits
@@ -967,6 +981,20 @@
 		</div>
 	</div>
 	{/if}
+	{#if collapsed}
+		<!-- Resize handle on the panel's bottom edge (narrow only):
+		     dragging down grows the panel up to the no-scroll height of
+		     the card list. Its own full-width row so the bar centers on
+		     the panel. -->
+		<div
+			class="rp-grab-row"
+			onpointerdown={grabDown}
+			onpointermove={grabMove}
+			aria-hidden="true"
+		>
+			<span class="rp-grab"></span>
+		</div>
+	{/if}
 </div>
 
 <style>
@@ -1001,72 +1029,76 @@
 			max-height: 100dvh;
 			border-radius: 0;
 		}
-		/* Direct-mode bottom sheet (collapsed): the map owns the screen,
-		   the result cards dock at the bottom. MapChrome anchors the
-		   wrapper to the bottom edge (.top-controls.direct-sheet); here
-		   the panel drops its editing chrome, caps its height and rounds
-		   the top corners. The gradient hairline stays on the top edge. */
-		.routing-panel.sheet {
+		/* Direct-mode collapsed search: the panel keeps its place at the
+		   top, drops its editing chrome behind the summary row, caps its
+		   height so a strip of map stays visible below, and rounds the
+		   bottom corners over that strip. The gradient hairline stays on
+		   the top edge. */
+		.routing-panel.collapsed {
 			flex: 0 1 auto;
-			/* --sheet-h is the drag-resize override (see grabMove). */
-			max-height: var(--sheet-h, 46vh);
-			max-height: var(--sheet-h, 46dvh);
-			border-radius: 0.9rem 0.9rem 0 0;
-			box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.22);
-			padding-top: 0.3rem;
-			padding-bottom: calc(0.85rem + env(safe-area-inset-bottom, 0px));
+			/* --panel-h is the drag-resize override (see grabMove). */
+			max-height: var(--panel-h, 46vh);
+			max-height: var(--panel-h, 46dvh);
+			border-radius: 0 0 0.9rem 0.9rem;
+			box-shadow: 0 4px 20px rgba(0, 0, 0, 0.22);
+			padding-bottom: 0.3rem;
 			gap: 0.45rem;
 		}
-		.routing-panel.sheet .rp-head,
-		.routing-panel.sheet .rp-travel,
-		.routing-panel.sheet .rp-endpoints,
-		.routing-panel.sheet .rp-direct-row,
-		.routing-panel.sheet .rp-results-sep {
+		.routing-panel.collapsed .rp-head,
+		.routing-panel.collapsed .rp-travel,
+		.routing-panel.collapsed .rp-endpoints,
+		.routing-panel.collapsed .rp-direct-row,
+		.routing-panel.collapsed .rp-results-sep {
 			display: none;
 		}
-		.routing-panel.sheet .rp-sheet-grab-row,
-		.routing-panel.sheet .rp-sheet-head {
+		.routing-panel.collapsed .rp-grab-row,
+		.routing-panel.collapsed .rp-collapsed-head {
 			display: flex;
+		}
+		/* Higher specificity than the base display:none rule below,
+		   which comes later in source order. */
+		.routing-panel .rp-travel .rp-collapse {
+			display: inline-flex;
 		}
 	}
 
-	/* Resize handle row — rendered only in sheet state, shown only on
-	   narrow viewports (rule above). touch-action: none keeps the drag
-	   from turning into a page scroll. */
-	.rp-sheet-grab-row {
+	/* Resize handle row — rendered only in the collapsed state, shown
+	   only on narrow viewports (rule above). touch-action: none keeps
+	   the drag from turning into a page scroll. */
+	.rp-grab-row {
 		display: none;
 		justify-content: center;
-		padding: 0.1rem 0 0.15rem;
+		padding: 0.15rem 0 0.1rem;
 		margin: 0 -0.85rem;
 		touch-action: none;
 		cursor: grab;
 	}
-	.rp-sheet-grab {
+	.rp-grab {
 		width: 2.4rem;
 		height: 0.28rem;
 		border-radius: var(--radius-pill);
 		background: var(--gray-250);
 	}
 
-	/* Sheet header — rendered only in sheet state, but shown only on
-	   narrow viewports (the rule above); desktop keeps the side panel
-	   and never sees it. */
-	.rp-sheet-head {
+	/* Collapsed search row — rendered only in the collapsed state, but
+	   shown only on narrow viewports (the rule above); desktop keeps the
+	   side panel and never sees it. */
+	.rp-collapsed-head {
 		display: none;
 		align-items: center;
 		gap: 0.35rem;
 	}
 	/* Base look + hover from .icon-btn (app.css); sizing only here. */
-	.rp-sheet-edit {
+	.rp-collapsed-edit {
 		flex: 0 0 auto;
 		padding: 0.15rem 0.3rem;
 	}
-	.rp-sheet-edit :global(.material-symbols-outlined) {
+	.rp-collapsed-edit :global(.material-symbols-outlined) {
 		font-size: 1.1rem;
 		line-height: 1;
 		display: block;
 	}
-	.rp-sheet-summary {
+	.rp-collapsed-summary {
 		flex: 1 1 auto;
 		min-width: 0;
 		display: flex;
@@ -1078,7 +1110,7 @@
 		cursor: pointer;
 		text-align: left;
 	}
-	.rp-sheet-eps {
+	.rp-collapsed-eps {
 		display: flex;
 		align-items: center;
 		gap: 0.15rem;
@@ -1087,13 +1119,13 @@
 		font-weight: 600;
 		color: var(--gray-800);
 	}
-	.rp-sheet-ep {
+	.rp-collapsed-ep {
 		min-width: 0;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.rp-sheet-arrow {
+	.rp-collapsed-arrow {
 		flex: 0 0 auto;
 		font-size: 1rem;
 		color: var(--gray-400);
@@ -1180,7 +1212,7 @@
 		gap: 1.1rem;
 		border-bottom: 1px solid var(--gray-100);
 	}
-	.rp-travel button {
+	.rp-travel button:not(.rp-collapse) {
 		position: relative;
 		display: inline-flex;
 		align-items: center;
@@ -1196,18 +1228,32 @@
 		padding: 0.25rem 0.1rem 0.4rem;
 		cursor: pointer;
 	}
-	.rp-travel button :global(.material-symbols-outlined) {
+	.rp-travel button:not(.rp-collapse) :global(.material-symbols-outlined) {
 		font-size: 1.05rem;
 		line-height: 1;
 	}
-	.rp-travel button:hover {
+	.rp-travel button:not(.rp-collapse):hover {
 		color: var(--brand);
 	}
-	.rp-travel button.active {
+	.rp-travel button:not(.rp-collapse).active {
 		color: var(--anthracite);
 	}
+	/* Collapse-search button: right-aligned in the tabs row, shown only
+	   on narrow viewports (rule in the media query). Base look + hover
+	   from .icon-btn (app.css); sizing only here. */
+	.rp-travel .rp-collapse {
+		display: none;
+		margin-left: auto;
+		align-self: center;
+		padding: 0.1rem 0.25rem;
+	}
+	.rp-travel .rp-collapse :global(.material-symbols-outlined) {
+		font-size: 1.2rem;
+		line-height: 1;
+		display: block;
+	}
 	/* Sits on the container's baseline rule (bottom: -1px covers it). */
-	.rp-travel button.active::after {
+	.rp-travel button:not(.rp-collapse).active::after {
 		content: '';
 		position: absolute;
 		left: 0;

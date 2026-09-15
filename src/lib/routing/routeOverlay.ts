@@ -106,7 +106,8 @@ export function frameItinerary(
 
 /** Deferred whole-bbox framing — shared with the direct cycling /
  * walking overlay (directRouteOverlay.ts), which passes its own padding
- * on narrow screens (bottom sheet instead of the map-mode header). */
+ * on narrow screens (the top-anchored collapsed panel or the map-mode
+ * header, whichever is showing). */
 export function frameDirectBounds(
 	getMap: () => maplibregl.Map | null,
 	bb: [number, number, number, number] | null,

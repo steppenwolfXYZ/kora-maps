@@ -35,12 +35,13 @@
 		onFrameRoute?.();
 	}
 
-	// Map icon: on mobile collapse the panel back to the bottom sheet
-	// (the map above it is the point); on desktop reframe the overview.
+	// Map icon: on mobile enter fullscreen map mode for this route, as
+	// the transit connection cards do (routing-map-details-split.md
+	// § Mobile); on desktop reframe the overview.
 	function showOnMap(e: Event) {
 		e.stopPropagation();
 		routingState.selectDirectRoute(index);
-		if (isNarrow()) routingState.collapseDirectSheet();
+		if (isNarrow()) routingState.enterMapMode();
 		onFrameRoutes?.();
 	}
 
@@ -315,13 +316,15 @@
 		color: var(--brand);
 	}
 	.card-map:hover { background: #f3e2e5; }
-	/* Selected route: the map icon wears the active state on every
-	   width — on mobile the bottom sheet shows the map alongside, so
-	   the filled button marks "this is the route on the map" (and a
-	   tap's sticky :hover no longer leaves the light-red in-between). */
-	.card.selected .card-map { background: var(--brand); }
-	.card.selected .card-map :global(.material-symbols-outlined) { color: var(--white); }
-	.card.selected .card-map:hover { background: var(--brand-hover); }
+	/* This card is the one on the map: invert to a red disc with a white
+	   glyph so the active state reads at a glance. Desktop only, as on
+	   the transit cards — on mobile the icon is the fullscreen-map entry,
+	   not a "shown on the map" marker. */
+	@media (min-width: 700px) {
+		.card.selected .card-map { background: var(--brand); }
+		.card.selected .card-map :global(.material-symbols-outlined) { color: var(--white); }
+		.card.selected .card-map:hover { background: var(--brand-hover); }
+	}
 
 	.drc-stats {
 		display: flex;

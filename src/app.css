@@ -108,12 +108,6 @@ body {
 	margin: 0 0 0.4rem;
 }
 
-/* Hide the scale bar while routing — the panel already dominates the
-   left column and the ruler competes visually with the results. */
-.map-wrap.routing-active .maplibregl-ctrl-bottom-left .maplibregl-ctrl-scale {
-	display: none;
-}
-
 /* Keep the (i) credits out from under the routing panel on desktop:
    bound the bottom-right control strip to the space right of the
    panel (22 rem + margins) so expanded attribution text wraps
