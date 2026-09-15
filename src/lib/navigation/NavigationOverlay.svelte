@@ -84,20 +84,6 @@
 	{#if status}
 		<div class="nb-status" class:warn={status.warn}>{status.text}</div>
 	{/if}
-	<!-- TEMPORARY compass diagnostic for phone tests — remove once the
-	     compass behaviour is understood. -->
-	{#if true}
-		{@const c = navigation.compassDebug}
-		<div class="nb-status nb-debug">
-			compass {c.permission} · {c.samples} samples
-			{#if c.last}
-				· {c.last.type} · α {c.last.alpha === null ? 'null' : c.last.alpha.toFixed(0)}
-				· abs {c.last.absolute ? 'y' : 'n'}
-				· wk {c.last.webkitHeading === null ? 'null' : c.last.webkitHeading.toFixed(0)}
-			{/if}
-			· heading {navigation.heading === null ? 'null' : navigation.heading.toFixed(0)}
-		</div>
-	{/if}
 </div>
 
 {#if !navigation.following}
@@ -260,11 +246,6 @@
 	.nb-status.warn {
 		background: color-mix(in srgb, var(--warn) 12%, var(--white));
 		color: var(--warn);
-	}
-	.nb-debug {
-		font-family: var(--font-mono);
-		font-size: 0.68rem;
-		text-align: left;
 	}
 
 	/* Left side, above the summary — a labelled pill in the map-control

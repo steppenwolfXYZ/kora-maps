@@ -47,11 +47,15 @@ missing is the mode itself.
   rider's position sits in the lower part of the viewport so most of
   the screen shows what lies ahead.
 - Heading comes from the GPS course whenever the rider is moving fast
-  enough for the course to be meaningful. Below that speed (standing
-  at a light, walking the bike) the compass heading is used if the
-  device offers one; if neither is available the last known heading
-  is kept. GPS course always wins over the compass while it is valid —
-  compasses are frequently miscalibrated.
+  enough for the course to be meaningful; otherwise from the bearing of
+  the rider's own movement over the last metres, once the displacement
+  clearly exceeds the position accuracy (turns register even at
+  walking pace, and no speed field is needed). Below that (standing at
+  a light) the compass heading is used if the device offers one. GPS
+  course always wins over the compass while it is valid — compasses
+  are frequently miscalibrated. Standing still without a compass for a
+  few seconds drops the heading: the marker shows the plain position
+  dot until movement resumes.
 - Heading and position changes are smoothed so the map does not
   jitter between fixes.
 - **Dynamic zoom and tilt.** The camera frames the road up to the next

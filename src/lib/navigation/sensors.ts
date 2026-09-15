@@ -89,33 +89,14 @@ export function requestCompassPermission(): Promise<string> {
 	}
 }
 
-export interface CompassSample {
-	type: string;
-	alpha: number | null;
-	absolute: boolean;
-	webkitHeading: number | null;
-}
-
 /** Compass heading updates in degrees (0 = north, clockwise); returns
  * the stop function. Prefers the absolute event where the platform
  * offers it; iOS exposes its heading as webkitCompassHeading on the
  * plain event. Fires nothing on devices without a magnetometer. */
-export function watchCompass(
-	onHeading: (deg: number) => void,
-	/** TEMPORARY diagnostic (bicycle-navigation.md): every raw event,
-	 * usable or not, so a phone test can show what the platform
-	 * delivers. */
-	onSample?: (s: CompassSample) => void
-): () => void {
+export function watchCompass(onHeading: (deg: number) => void): () => void {
 	if (typeof window === 'undefined') return () => {};
 	const handler = (ev: DeviceOrientationEvent) => {
 		const wk = (ev as any).webkitCompassHeading;
-		onSample?.({
-			type: ev.type,
-			alpha: typeof ev.alpha === 'number' ? ev.alpha : null,
-			absolute: ev.absolute === true,
-			webkitHeading: typeof wk === 'number' ? wk : null
-		});
 		if (typeof wk === 'number' && Number.isFinite(wk)) {
 			onHeading(wk);
 			return;

@@ -15,7 +15,7 @@ import { fetchNavigationRoutes } from '../routing/valhalla';
 import { geolocationErrorMessage, markGeolocationDenied } from '../routing/geolocation.svelte';
 import { mapUi } from '../map/uiState.svelte';
 import {
-	blendHeading, buildGeometry, distanceM, projectOntoRoute,
+	bearingDeg, blendHeading, buildGeometry, distanceM, projectOntoRoute,
 	type LonLat, type RouteGeometry
 } from './geometry';
 import {
@@ -23,7 +23,7 @@ import {
 } from './guidance';
 import {
 	getFirstFix, requestCompassPermission, ScreenWakeLock, watchCompass, watchPosition,
-	type CompassSample, type PositionFix
+	type PositionFix
 } from './sensors';
 
 /** Off-route once the projected distance exceeds this for OFF_ROUTE_HOLD_MS
@@ -38,11 +38,22 @@ const RECALC_RETRY_MAX_MS = 60_000;
  * arrival message lingers before navigation ends on its own. */
 const ARRIVAL_RADIUS_M = 25;
 const ARRIVAL_LINGER_MS = 8000;
-/** GPS course is trusted only above this speed; below it the compass
- * takes over once the last good course is older than COURSE_STALE_MS. */
-const COURSE_MIN_SPEED_MS = 1.5;
+/** Heading sources, in order of trust (concept § Follow-me map): the
+ * platform's course when it reports a speed of at least this; otherwise
+ * the bearing of the rider's own movement over the recent track, once
+ * the displacement clearly exceeds the position accuracy; the compass
+ * only while both are stale. Standing still without a compass for
+ * STOP_HOLD_MS drops the heading — the marker becomes the dot again. */
+const COURSE_MIN_SPEED_MS = 1.0;
 const COURSE_STALE_MS = 4000;
 const COMPASS_APPLY_MS = 500;
+const COMPASS_FRESH_MS = 3000;
+const TRACK_WINDOW_MS = 15_000;
+const TRACK_MIN_MOVE_M = 8;
+const TRACK_ACCURACY_FACTOR = 0.6;
+const STOP_WINDOW_MS = 5000;
+const STOP_MIN_MOVE_M = 3;
+const STOP_HOLD_MS = 4000;
 /** A via counts as passed once progress is this far beyond it. */
 const VIA_PASSED_MARGIN_M = 30;
 /** A fix older than this makes the banner say so. */
@@ -108,11 +119,6 @@ let maneuverIdx = $state(0);
 // Wall clock for the ETA; bumped on every fix and by a slow ticker.
 let now = $state(0);
 let alternatives = $state.raw<NavAlternative[]>([]);
-// TEMPORARY compass diagnostic shown in the banner: how the permission
-// resolved, how many raw events arrived and what the last one carried.
-let compassDebug = $state<{ permission: string; samples: number; last: CompassSample | null }>({
-	permission: 'not asked', samples: 0, last: null
-});
 
 // Non-reactive internals. `geometry` always changes together with
 // `route` (installRoute sets it first), so deriveds keyed on `route`
@@ -123,7 +129,12 @@ let stopCompass: (() => void) | null = null;
 let wakeLock: ScreenWakeLock | null = null;
 let compassHeading: number | null = null;
 let lastCourseAt = 0;
+let lastCompassAt = 0;
 let lastCompassApplyAt = 0;
+// Recent fixes (TRACK_WINDOW_MS) for the movement bearing and the
+// standing-still judgement.
+let track: PositionFix[] = [];
+let lastMoveAt = 0;
 let offSince: number | null = null;
 let lastRecalcAt = 0;
 let retryDelayMs = RECALC_MIN_INTERVAL_MS;
@@ -179,10 +190,40 @@ function installRoute(r: DirectRoute, g?: RouteGeometry) {
 }
 
 function updateHeadingFromFix(f: PositionFix) {
-	if (f.courseDeg !== null && (f.speedMs ?? 0) >= COURSE_MIN_SPEED_MS) {
-		lastCourseAt = f.at;
-		heading = heading === null ? f.courseDeg : blendHeading(heading, f.courseDeg, 0.6);
+	track.push(f);
+	while (track.length > 0 && f.at - track[0].at > TRACK_WINDOW_MS) track.shift();
+
+	let course: number | null = null;
+	let trust = 0.6;
+	if (f.courseDeg !== null && f.courseDeg >= 0 && (f.speedMs ?? 0) >= COURSE_MIN_SPEED_MS) {
+		course = f.courseDeg;
+	} else {
+		// Movement bearing: from the most recent earlier fix that lies
+		// clearly outside this fix's accuracy circle — the last stretch
+		// actually walked or ridden, so a turn registers within metres.
+		const minMove = Math.max(TRACK_MIN_MOVE_M, f.accuracyM * TRACK_ACCURACY_FACTOR);
+		for (let i = track.length - 2; i >= 0; i--) {
+			if (distanceM(track[i].coord, f.coord) >= minMove) {
+				course = bearingDeg(track[i].coord, f.coord);
+				trust = 0.5;
+				break;
+			}
+		}
 	}
+	if (course !== null) {
+		lastCourseAt = f.at;
+		lastMoveAt = f.at;
+		heading = heading === null ? course : blendHeading(heading, course, trust);
+		return;
+	}
+	// No course: still moving at all? Small displacements within the
+	// stop window keep the last heading; a true standstill without a
+	// live compass drops it, and the marker shows the dot.
+	const stopMove = Math.max(STOP_MIN_MOVE_M, f.accuracyM * 0.5);
+	const moved = (f.speedMs ?? 0) >= COURSE_MIN_SPEED_MS
+		|| track.some((t) => f.at - t.at <= STOP_WINDOW_MS && distanceM(t.coord, f.coord) >= stopMove);
+	if (moved) lastMoveAt = f.at;
+	if (f.at - lastMoveAt > STOP_HOLD_MS && f.at - lastCompassAt > COMPASS_FRESH_MS) heading = null;
 }
 
 /** Compass samples arrive at tens of hertz; they only reach the
@@ -192,6 +233,7 @@ function updateHeadingFromFix(f: PositionFix) {
 function onCompass(deg: number) {
 	compassHeading = deg;
 	const t = Date.now();
+	lastCompassAt = t;
 	if (t - lastCompassApplyAt < COMPASS_APPLY_MS) return;
 	if (t - lastCourseAt <= COURSE_STALE_MS) return;
 	lastCompassApplyAt = t;
@@ -502,6 +544,9 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 	heading = null;
 	compassHeading = null;
 	lastCourseAt = 0;
+	lastCompassAt = 0;
+	lastMoveAt = 0;
+	track = [];
 	lastRecalcAt = 0;
 	retryDelayMs = RECALC_MIN_INTERVAL_MS;
 	nextRetryAt = 0;
@@ -531,16 +576,11 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 	}
 	void wakeLock.acquire();
 	stopWatch = watchPosition(applyFix, onWatchError);
-	compassDebug = { permission: 'pending', samples: 0, last: null };
 	void compassPermission.then((outcome) => {
-		compassDebug = { ...compassDebug, permission: outcome };
 		// Listen whenever the API exists: only iOS withholds events
-		// without a grant, and a listener that never fires costs nothing.
-		if (outcome !== 'no-api' && active && !stopCompass) {
-			stopCompass = watchCompass(onCompass, (s) => {
-				compassDebug = { ...compassDebug, samples: compassDebug.samples + 1, last: s };
-			});
-		}
+		// without a grant, and a listener that never fires costs nothing
+		// (Brave fires the event with its values stripped — same thing).
+		if (outcome !== 'no-api' && active && !stopCompass) stopCompass = watchCompass(onCompass);
 	});
 	clockTimer = setInterval(() => { now = Date.now(); }, CLOCK_TICK_MS);
 	document.addEventListener('visibilitychange', onVisibility);
@@ -636,8 +676,6 @@ export const navigation = {
 	get arrived() { return arrived; },
 	get guidance() { return guidance; },
 	get alternatives() { return alternatives; },
-	/** TEMPORARY diagnostic. */
-	get compassDebug() { return compassDebug; },
 	get positionStale() { return fix !== null && now - fix.at > POSITION_STALE_MS; },
 
 	/** Start from the planning view: `planned` = the other shown
