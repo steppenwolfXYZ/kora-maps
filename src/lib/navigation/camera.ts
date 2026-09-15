@@ -39,7 +39,9 @@ const ZOOM_APPROACH = 0.5;
 /** Camera moves at the position update cadence, eased linearly so
  * consecutive fixes chain into one continuous motion. */
 const FOLLOW_MS = 900;
-const FIRST_MOVE_MS = 1200;
+/** The entry / re-center move; the handover to the fixed arrow happens
+ * when this has elapsed (orchestration). */
+export const FIRST_MOVE_MS = 1200;
 const EARTH_CIRCUMFERENCE_M = 40075016.686;
 
 export interface NavCameraSaved {

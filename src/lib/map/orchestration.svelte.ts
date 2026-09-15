@@ -33,7 +33,8 @@ import { mapUi } from './uiState.svelte';
 import type { ViewMode } from './layers';
 import { navigation } from '../navigation/state.svelte';
 import {
-	enterNavCamera, exitNavCamera, followRider, RIDER_BOTTOM_PX, RIDER_FIXED_PX, RIDER_MARKER_PX
+	enterNavCamera, exitNavCamera, followRider, FIRST_MOVE_MS,
+	RIDER_BOTTOM_PX, RIDER_FIXED_PX, RIDER_MARKER_PX
 } from '../navigation/camera';
 import { RiderMarker } from '../navigation/positionMarker';
 import { makeAlternativeBubble } from '../navigation/alternativeBubble';
@@ -54,10 +55,11 @@ let preDirectView: ViewMode = 'standard';
 let preDirectContours = false;
 
 // Bicycle navigation (bicycle-navigation.md): the rider marker, and
-// whether the next camera move is the entry move (eased) rather than a
-// follow step (linear).
+// whether the current follow transition has issued its one long entry
+// ease (later fixes during the transition take the short linear ease,
+// so the camera converges rather than restarting).
 let riderMarker: RiderMarker | null = null;
-let navFirstMove = true;
+let transitionEaseIssued = false;
 // Was the last follow-effect run in following mode — to notice the
 // detach edge and glide the marker out from the fixed arrow's spot.
 let wasFollowing = false;
@@ -247,7 +249,7 @@ export function setupMapOrchestration() {
 		const map = mapUi.mapRef;
 		if (!map || !navigation.active) return;
 		const saved = enterNavCamera(map);
-		navFirstMove = true;
+		transitionEaseIssued = false;
 		const onUserMove = (e: { originalEvent?: Event }) => {
 			if (e.originalEvent) navigation.suspendFollow();
 		};
@@ -293,25 +295,20 @@ export function setupMapOrchestration() {
 		// arrow takes over at the exact spot once the camera has arrived.
 		riderMarker.setVisible(!following || transition);
 		riderMarker.setScale(following ? RIDER_FIXED_PX / RIDER_MARKER_PX : 1, following ? 1200 : DETACH_MS);
+		if (!transition) transitionEaseIssued = false;
 		if (following) {
-			const pitch = followRider(map, coord, heading, navFirstMove || transition, {
+			const longMove = transition && !transitionEaseIssued;
+			const pitch = followRider(map, coord, heading, longMove, {
 				distanceToNextM: navigation.guidance?.distanceToNextM ?? null,
 				speedMs: fix.speedMs
 			});
 			navigation.setViewPitch(pitch);
-			navFirstMove = false;
-			// A fix arriving mid-transition starts a new ease, and the
-			// interrupted one fires its moveend at once — so end the
-			// transition only when the camera is truly at rest.
-			if (transition) {
-				const settled = () => {
-					requestAnimationFrame(() => {
-						if (!navigation.active) return;
-						if (map.isMoving()) map.once('moveend', settled);
-						else navigation.endFollowTransition();
-					});
-				};
-				map.once('moveend', settled);
+			// The handover to the fixed arrow comes when the entry ease has
+			// run its course — not "when the camera rests", which while
+			// riding never happens: fixes arrive faster than eases end.
+			if (longMove) {
+				transitionEaseIssued = true;
+				setTimeout(() => navigation.endFollowTransition(), FIRST_MOVE_MS + 50);
 			}
 		}
 	});
@@ -476,5 +473,6 @@ export function resetMapFeatures() {
 	closingRouteViaBack = false;
 	riderMarker = null;
 	wasFollowing = false;
+	transitionEaseIssued = false;
 	altBubbles = [];
 }
