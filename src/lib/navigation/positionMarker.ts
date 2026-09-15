@@ -6,7 +6,7 @@
 
 import maplibregl from 'maplibre-gl';
 
-const SIZE = 52;
+const SIZE = 64;
 
 export class RiderMarker {
 	private marker: maplibregl.Marker;
@@ -21,11 +21,12 @@ export class RiderMarker {
 			'filter: drop-shadow(0 1px 3px rgba(0,0,0,0.45))'
 		].join(';');
 		el.innerHTML = `
-			<svg viewBox="0 0 52 52" width="${SIZE}" height="${SIZE}" xmlns="http://www.w3.org/2000/svg">
+			<svg viewBox="0 0 64 64" width="${SIZE}" height="${SIZE}" xmlns="http://www.w3.org/2000/svg">
 				<g class="nav-rider-dot">
-					<circle cx="26" cy="26" r="11" style="fill: var(--brand); stroke: var(--white)" stroke-width="3"/>
+					<circle cx="32" cy="32" r="20" style="fill: var(--brand); stroke: var(--white)" stroke-width="3.5"/>
+					<circle cx="32" cy="32" r="6.5" style="fill: var(--white)"/>
 				</g>
-				<path class="nav-rider-arrow" d="M26 4 L42 44 L26 35 L10 44 Z"
+				<path class="nav-rider-arrow" d="M32 6 L51 54 L32 43 L13 54 Z"
 					style="fill: var(--brand); stroke: var(--white)" stroke-width="3" stroke-linejoin="round"/>
 			</svg>`;
 		this.arrow = el.querySelector('.nav-rider-arrow')!;

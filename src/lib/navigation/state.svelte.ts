@@ -532,9 +532,11 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 	void wakeLock.acquire();
 	stopWatch = watchPosition(applyFix, onWatchError);
 	compassDebug = { permission: 'pending', samples: 0, last: null };
-	void compassPermission.then((ok) => {
-		compassDebug = { ...compassDebug, permission: ok ? 'granted' : 'denied' };
-		if (ok && active && !stopCompass) {
+	void compassPermission.then((outcome) => {
+		compassDebug = { ...compassDebug, permission: outcome };
+		// Listen whenever the API exists: only iOS withholds events
+		// without a grant, and a listener that never fires costs nothing.
+		if (outcome !== 'no-api' && active && !stopCompass) {
 			stopCompass = watchCompass(onCompass, (s) => {
 				compassDebug = { ...compassDebug, samples: compassDebug.samples + 1, last: s };
 			});

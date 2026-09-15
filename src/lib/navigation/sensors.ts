@@ -69,16 +69,24 @@ export function watchPosition(
 
 /** iOS requires an explicit permission for device orientation, and the
  * request must run inside a user gesture — call this synchronously from
- * the start button's handler. Resolves false when denied or when the
- * platform has no such API (then the plain event may still work). */
-export function requestCompassPermission(): Promise<boolean> {
-	if (typeof window === 'undefined') return Promise.resolve(false);
+ * the start button's handler. Resolves to what happened: `implicit`
+ * (no permission API — Android, desktop: events just fire), `granted`
+ * / `denied` from the prompt, `no-api`, or `error:<name>` when the
+ * call itself threw (typically: not inside a user gesture). Only iOS
+ * withholds events without a grant, so the caller listens regardless
+ * unless the API is missing altogether. */
+export function requestCompassPermission(): Promise<string> {
+	if (typeof window === 'undefined') return Promise.resolve('no-api');
 	const DOE = (window as any).DeviceOrientationEvent;
-	if (!DOE) return Promise.resolve(false);
-	if (typeof DOE.requestPermission !== 'function') return Promise.resolve(true);
-	return DOE.requestPermission()
-		.then((state: string) => state === 'granted')
-		.catch(() => false);
+	if (!DOE) return Promise.resolve('no-api');
+	if (typeof DOE.requestPermission !== 'function') return Promise.resolve('implicit');
+	try {
+		return DOE.requestPermission()
+			.then((state: string) => (state === 'granted' ? 'granted' : 'denied'))
+			.catch((e: unknown) => `error:${(e as Error)?.name ?? 'unknown'}`);
+	} catch (e) {
+		return Promise.resolve(`error:${(e as Error)?.name ?? 'unknown'}`);
+	}
 }
 
 export interface CompassSample {
