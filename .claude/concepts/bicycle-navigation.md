@@ -54,6 +54,15 @@ missing is the mode itself.
   compasses are frequently miscalibrated.
 - Heading and position changes are smoothed so the map does not
   jitter between fixes.
+- **Dynamic zoom and tilt.** The camera frames the road up to the next
+  change of direction: on the approach it sits far enough out that the
+  upcoming maneuver point is in view, it tightens as the rider reaches
+  the turn, and once the turn is passed it widens again toward the
+  following one. Speed adds a second term — faster riding sits a little
+  further out. Tilt follows zoom: flatter when far out, steeper when
+  close. Zoom and tilt stay within a fixed near/far band, change with
+  hysteresis so noisy distances never make the camera hunt, and ease
+  continuously between fixes rather than stepping.
 - The rider is drawn as a distinct position marker with a direction
   indicator; the existing route pins stay.
 - **Panning away:** any map gesture (drag, pinch, rotate) suspends
@@ -102,11 +111,39 @@ missing is the mode itself.
 - Recalculations are rate-limited to **one per 10 s** at most, so a
   rider wandering through a square does not fire a burst of requests.
 - The new route replaces the navigated route on the map and in the
-  banner without interrupting following. Alternatives are not
-  requested during navigation.
+  banner without interrupting following. Alternatives are requested
+  alongside a recalculation and drawn per § 4a; they never replace the
+  navigated route on their own.
 - Until a recalculation succeeds, guidance continues on the old route:
   the banner shows the next maneuver of the old route relative to the
   rider's projection, and the summary marks itself as approximate.
+
+### 4a. Live alternatives
+
+- While navigating, the alternatives to the current route are drawn on
+  the map in the same muted treatment the planning view uses for
+  alternatives. They are not interactive — a rider's hands are on the
+  bars.
+- **Taking an alternative is done by riding it.** When the rider leaves
+  the navigated route, the off-route check first tests whether the
+  rider is following a shown alternative; if so, that alternative
+  becomes the navigated route on the spot, with no request to the
+  engine. Only a rider on neither route triggers a recalculation.
+- Each shown alternative carries a small bubble near the point where it
+  parts from the navigated route, stating the time difference relative
+  to it ("+3 min", "−1 min"). The bubble is styled like the app's own
+  chrome, not a map label.
+- Alternatives are refreshed on every recalculation and whenever the
+  rider passes the point where the current alternative diverges — that
+  point is behind them, so the alternative is spent. No polling, no
+  refresh on a timer.
+- One alternative at a time is enough; a second is tolerable. The one
+  shown should diverge **early**: alternatives that part from the route
+  further ahead will be offered by a later refresh anyway. When nothing
+  diverges early enough, nothing is shown — alternatives are never
+  forced.
+- Alternatives never change the banner: guidance always follows the
+  navigated route until the rider has actually switched.
 
 ### 5. Keeping the screen on
 

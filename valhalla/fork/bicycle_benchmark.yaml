@@ -38,6 +38,29 @@ pairs:
       use_roads 0 / 0.25 / 1. No returned route touched Mühlematt or
       Monbijou.
 
+  - id: bern-eichmatt-aarbergergasse
+    from: [7.4301984, 46.9406065]   # Eichmattweg 7, Bern
+    to: [7.4410569, 46.9499783]     # Aarbergergasse, Bern
+    description: >
+      Weissenbühl → old town. Same start as the Viktoriastrasse case, but
+      the destination sits right behind the station, so the Belpstrasse ›
+      Seilerstrasse › Laupenstrasse corridor is as short as the Mühlematt
+      one. The sensible ride is still Mühlemattstrasse › Bundesgasse ›
+      Hirschengraben: Belpstrasse ends in the Effingerstrasse crossing
+      (two multi-lane roads), Seilerstrasse joins the five-lane
+      Laupenstrasse on a sharrow. The Zieglerstrasse route (2.1 km, all
+      main roads) is not a reasonable alternative either.
+    must_include: [Mühlematt]
+    must_exclude: [Belpstrasse, Laupenstrasse, Zieglerstrasse]
+    baseline: >
+      Kora fork as of 2026-09-14 (pre-fix): Belpstrasse route primary at
+      cost 548 vs Mühlematt 552 — a tie decided by upstream's 15 s
+      service-road fee on the Hirschengraben › Bubenbergplatz bus link
+      and four name-change maneuver penalties at Eigerplatz, while the
+      Effingerstrasse crossing, the Laupenstrasse right turn and the
+      sharrow all went unpriced. Zieglerstrasse listed as alternate at
+      cost 709.
+
   - id: bern-eichmatt-koeniz
     from: [7.4301984, 46.9406065]   # Eichmattweg 7, Bern
     to: [7.4142401, 46.9232213]     # Migros, Köniz

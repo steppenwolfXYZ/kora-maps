@@ -118,7 +118,13 @@ Edges are weighted by a three-tier quality model:
   the same step as on painted roads. Bus lanes never count as lanes:
   the OSM preprocessing subtracts bus/PSV lanes from the lane tags
   before the tile build, since riding beside a bus lane is safer, not
-  more dangerous.
+  more dangerous. The speed that prices a road is the POSTED limit
+  (the `maxspeed` the tiles keep alongside the edge), never the edge's
+  own travel speed: the tile build replaces that with a density-inferred
+  default (23 km/h on an urban primary), which read every city through
+  road as a 30 zone and silently switched this tier off until
+  2026-09-14. Untagged through roads assume the Swiss in-town 50 unless
+  the inferred speed says the road is faster.
 - **Service roads** (`highway=service`: bus-only links, depot and
   parking aisles, driveways) are ridable and carry only a small
   per-metre surcharge (about 1.2 on riding time), enough that the
@@ -250,6 +256,22 @@ Additional signals:
   staircase stays a last resort through sheer honest slowness. A
   costing option excludes them entirely — this backs the V1-mandatory
   avoid-stairs toggle.
+- **Turn restrictions** bind a bicycle only where the maneuver crosses
+  traffic that matters. A bike can always dismount, so a restriction
+  never forbids a movement outright — it can only force a push around
+  the corner, which is what a wrongly mapped `no_right_turn` produced
+  in Heimberg (a 17 m sidewalk loop to dodge a sign that applies to
+  nobody; OSRM, Google and Apple all turn right there). With-traffic
+  turns are therefore never restricted, and any other restricted turn
+  is obeyed only when a road posted above 30 km/h meets at the junction
+  (for a left or U-turn every road at the node counts, since oncoming
+  traffic is crossed either way; straight on, only the intersecting
+  roads). Paths, cycleways, 30-zone streets and untagged quiet streets
+  do not count. This holds for all-mode restrictions and for
+  mode-specific ones alike (`except=psv`, the Heimberg case, is the
+  latter). Via-way restrictions (multi-edge, in practice U-turn bans on
+  dual carriageways) are ignored for bikes altogether: the engine
+  evaluates them outside the costing, and a bike can dismount anyway.
 - **Pushed-bike access** — a core requirement, not a follow-up: without
   it whole neighbourhoods route nonsensically (the Bern benchmark's
   Zieglerstrasse crossing is the canonical case). Any edge that is

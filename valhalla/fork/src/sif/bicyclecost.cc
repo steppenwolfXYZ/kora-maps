@@ -81,16 +81,65 @@ constexpr float kFineFactor = 1.00f;       // painted lanes, quiet streets, livi
 constexpr float kSharedPathFactor = 1.10f; // paths shared with pedestrians (still fine)
 // A through road WITHOUT bike infrastructure is priced by its speed, not
 // its road class: Swiss city roads are never extremely dangerous for
-// bikes. 30 km/h zones carry no penalty at all whatever the class, 50 is
-// a slim penalty, 60 noticeably more, 80 the full bad-road factor.
-// Piecewise linear between the points; the edge speed is Valhalla's
-// posted/assumed speed for the road.
+// bikes. 30 km/h zones carry no penalty at all whatever the class, 50 a
+// noticeable penalty, 60 more, 80 the full bad-road factor. Piecewise
+// linear between the points over the POSTED limit (posted_speed below):
+// the directed edge's own speed() is NOT the limit in our tiles — the
+// tile build's default-speeds table replaces it with a density-inferred
+// travel speed (23 km/h on an urban primary), which read every city
+// through road as a 30 zone and silently switched this tier off.
 constexpr float kBareSpeedPoints[][2] = {
     {30.0f, 1.00f},
-    {50.0f, 1.30f},
+    {50.0f, 1.40f},
     {60.0f, 1.60f},
     {80.0f, 2.20f},
 };
+// A through road WITH paint at kPaintSpeedKph or faster sits slightly
+// below the plateau, not on it: a painted lane a touch worse than a quiet
+// street, a sharrow (cycleway=shared_lane — a pictogram in the car lane,
+// no lane of one's own) clearly worse but still better than nothing.
+// Below that speed paint stays on the plateau. Faster roads scale both
+// along the bare curve (factor × bare(speed) / bare(kPaintSpeedKph)).
+// Previously every painted or shared lane sat on the plateau, which let
+// the five-lane Laupenstrasse with its sharrow tie with the Mühlematt
+// quiet-street corridor (bern-eichmatt-aarbergergasse).
+constexpr uint32_t kPaintSpeedKph = 50;
+constexpr float kPaintedLaneFactor = 1.05f;
+constexpr float kSharrowFactor = 1.15f;
+// Every lane per direction beyond the first adds this to a painted or
+// bare through road's factor: a multi-lane street with paint is not a
+// quiet street with paint. Bus lanes never count — the OSM preprocessing
+// subtracts bus/PSV lanes from the lane tags before the tile build.
+constexpr float kExtraLaneStep = 0.20f;
+// Service roads (bus-only links, depot and parking aisles, driveways):
+// ridable, a small per-metre surcharge so the search does not wander
+// through a depot by accident, never enough to cost a route a 25 m
+// link. Deliberately no flat entry fee — upstream's 15 s service_penalty
+// (zeroed in GetBaseCostOptsConfig) was inherited unnoticed and made a
+// short bus-only link decide a Bern city ride.
+constexpr float kServiceRoadFactor = 1.20f;
+// Posted limit assumed for a through road without a maxspeed tag: the
+// Swiss in-town default. Outside towns the tiles' inferred speed is
+// higher than this and wins (see posted_speed).
+constexpr uint32_t kUnpostedThroughSpeedKph = 50;
+
+// ── Turn restrictions ───────────────────────────────────────────────────
+// A bike can always dismount, so an OSM turn restriction never forbids a
+// bicycle movement — it can only force a push around the corner, which
+// is what a wrongly mapped no_right_turn produced in Heimberg (17 m of
+// sidewalk to dodge a sign that applies to nobody). The fork therefore
+// obeys a (via-node) turn restriction only where the maneuver actually
+// crosses traffic that matters: never for with-traffic turns, and
+// otherwise only when a road posted above kQuietStreetMaxKph meets at
+// the junction (paths, cycleways and 30-zone streets do not count;
+// untagged quiet streets are assumed 30). This covers simple (all-mode)
+// restrictions and complex via-node ones alike — a restriction with an
+// exception (except=psv, the Heimberg case) is stored as complex. The
+// base class evaluates complex restrictions in a non-virtual method, so
+// the constructor switches that off and Allowed() re-does the via-node
+// case itself; via-way restrictions (multi-edge, in practice U-turn bans
+// on dual carriageways) are thereby ignored for bikes altogether.
+constexpr uint32_t kQuietStreetMaxKph = 30;
 // A road tagged bicycle=use_sidepath has a parallel cycleway; riding the
 // carriageway anyway is priced like a fast bare road regardless of speed.
 constexpr float kUseSidepathFactor = 2.20f;
@@ -324,24 +373,37 @@ constexpr float kTurnSecByType[] = {
 constexpr float kDeviationPenaltySec = 3.0f;
 
 // ── Crossings (cost seconds added at the transition) ────────────────────
-// Applied when BOTH the road being left and the road being entered are
-// through-traffic class AND the junction is a real crossing: at least
-// four through-class arms. A T-junction (three arms) pays only the
-// ordinary turn cost — turning left into a branching road is not a
-// crossing (canonical: Simmentalstrasse → Frutigenstrasse in
-// Spiezwiler). The penalty scales with the widest through arm: a small
-// base for a single-lane crossing plus a strong step per additional
-// lane in one direction — crossing a one-lane road is routine, every
-// further lane is what makes a crossing genuinely hostile. (Lane counts
-// come from the tiles; the OSM preprocessing subtracts bus lanes before
-// the tile build, since a bus lane does not make a crossing harder —
-// until the next tile rebuild bus lanes still count.) Right turns
-// (with-traffic side) are exempt, and so are roundabouts — a Kreisel is
-// the safe way across a big road, not a crossing to avoid. A junction
-// the costing cannot inspect (tile boundary) charges nothing.
+// Applied when the road being ENTERED is through-traffic class and the
+// junction is a real crossing. The junction decides, never the road being
+// left: a cyclist arriving from a quiet street, a cycle track beside the
+// main road or a footway crosses the same carriageway as one arriving
+// on the main road (canonical: Tscharnerstrasse → Eigerplatz, and the
+// Effingerstrasse cycle track → Seilerstrasse — both free under the
+// original both-roads-through rule). The penalty scales with the widest
+// through arm: a small base for a single-lane crossing plus a strong
+// step per additional lane in one direction — crossing a one-lane road
+// is routine, every further lane is what makes a crossing genuinely
+// hostile. (Lane counts come from the tiles; the OSM preprocessing
+// subtracts bus lanes before the tile build, since a bus lane does not
+// make a crossing harder.) The turn direction scales it: turning across
+// (left) pays in full, straight on from a side arm half (the graph
+// cannot tell whether the carriageway is crossed), turning with traffic
+// (right) a quarter — reduced, not exempt: a big junction is unpleasant
+// whichever way you turn. Four or more through arms are a crossing; a
+// T-junction (three) is free when its widest arm has one lane per
+// direction (canonical: Simmentalstrasse → Frutigenstrasse in
+// Spiezwiler) and pays kCrossingTeeShare when it has two or more.
+// Roundabouts are exempt — a Kreisel is the safe way across a big road,
+// not a crossing to avoid. Straight on ALONG a through road is not a
+// crossing of it; there a traffic signal at the node is the proxy for
+// "two big roads cross here". A junction the costing cannot inspect
+// (tile boundary) charges nothing.
 constexpr float kCrossingTurnBaseSec = 8.0f;
 constexpr float kCrossingTurnPerLaneSec = 12.0f;
 constexpr float kCrossingStraightSignalPenalty = 30.0f; // straight on, across a signal
+constexpr float kCrossingRightShare = 0.25f;        // turning with traffic
+constexpr float kCrossingSideStraightShare = 0.5f;  // straight on from a side arm
+constexpr float kCrossingTeeShare = 0.75f;          // multi-lane T-junction
 // Entering a genuinely fast bare road (≥ this speed, no bike
 // infrastructure) from a quiet street: a small nudge on top of the
 // speed factor, which does the real work.
@@ -457,6 +519,10 @@ BaseCostingOptionsConfig GetBaseCostOptsConfig() {
   // motor_vehicle=destination does not restrict bicycles at all. A
   // request can still send destination_only_penalty explicitly.
   cfg.dest_only_penalty_.def = 0.0f;
+  // kora fork: no flat service-road entry fee either — service roads are
+  // priced per metre by kServiceRoadFactor. A request can still send
+  // service_penalty explicitly.
+  cfg.service_penalty_.def = 0.0f;
   cfg.disable_toll_booth_ = true;
   cfg.disable_rail_ferry_ = true;
   cfg.use_living_streets_.def = kDefaultUseLivingStreets;
@@ -467,7 +533,7 @@ const BaseCostingOptionsConfig kBaseCostOptsConfig = GetBaseCostOptsConfig();
 
 // ── kora fork: tier classification ──────────────────────────────────────
 
-enum class Tier : uint8_t { kGreat, kFine, kSharedPath, kBad };
+enum class Tier : uint8_t { kGreat, kFine, kSharedPath, kPaintedLane, kSharrow, kService, kBad };
 
 // Pedestrian-first uses that a bicycle may nevertheless be allowed on.
 inline bool is_path_like(Use use) {
@@ -502,7 +568,22 @@ inline bool is_through(baldr::RoadClass rc, Use use) {
          use != Use::kLivingStreet;
 }
 
-inline Tier classify(const DirectedEdge* edge) {
+// kora fork: the road's posted limit, from EdgeInfo (the directed edge's
+// speed() is the tile build's inferred travel speed, useless as a danger
+// signal — see kBareSpeedPoints). Untagged or unlimited → the in-town
+// default, unless the inferred speed says the road is faster (rural).
+inline uint32_t posted_speed(const graph_tile_ptr& tile, const DirectedEdge* edge) {
+  uint32_t limit = 0;
+  if (tile != nullptr) {
+    limit = tile->edgeinfo(edge).speed_limit();
+  }
+  if (limit == 0 || limit == baldr::kUnlimitedSpeedLimit) {
+    return std::max(kora::kUnpostedThroughSpeedKph, edge->speed());
+  }
+  return limit;
+}
+
+inline Tier classify(const graph_tile_ptr& tile, const DirectedEdge* edge) {
   const Use use = edge->use();
   const CycleLane lane = edge->cyclelane();
   if (use == Use::kCycleway) {
@@ -516,20 +597,25 @@ inline Tier classify(const DirectedEdge* edge) {
   if (use == Use::kLivingStreet || use == Use::kTrack) {
     return Tier::kFine; // tracks: the surface term prices the gravel
   }
+  if (use == Use::kServiceRoad || use == Use::kDriveway || use == Use::kParkingAisle) {
+    return Tier::kService; // small per-metre surcharge, no entry fee
+  }
   if (edge->use_sidepath()) {
     return Tier::kBad;
   }
   if (lane == CycleLane::kSeparated) {
     return Tier::kGreat;
   }
-  // NO lane-count rule: a lanes=3 tag is usually a bus lane in a 30/50
-  // zone, and riding beside a bus lane is safer, not more dangerous.
-  // Speed prices bare roads (tier_factor); paint puts them on the plateau.
   if (!is_through(edge->classification(), use)) {
-    return Tier::kFine; // residential, unclassified, service: the quiet streets
+    return Tier::kFine; // residential, unclassified: the quiet streets
   }
+  // Paint on a through road: on the plateau in a 30 zone, slightly below
+  // it from kPaintSpeedKph (tier_factor adds the lane steps).
   if (lane == CycleLane::kDedicated || lane == CycleLane::kShared) {
-    return Tier::kFine; // painted lane on a through road: on the plateau, not above it
+    if (posted_speed(tile, edge) < kora::kPaintSpeedKph) {
+      return Tier::kFine;
+    }
+    return lane == CycleLane::kDedicated ? Tier::kPaintedLane : Tier::kSharrow;
   }
   return Tier::kBad; // bare through road — priced by speed in tier_factor
 }
@@ -562,7 +648,13 @@ inline uint32_t effective_grade(const DirectedEdge* edge) {
   return wg;
 }
 
-inline float tier_factor(Tier tier, const DirectedEdge* edge) {
+// kora fork: lanes per direction beyond the first, as a factor step.
+inline float extra_lane_step(const DirectedEdge* edge) {
+  const uint32_t lanes = std::max(1u, edge->lanecount());
+  return kora::kExtraLaneStep * static_cast<float>(lanes - 1);
+}
+
+inline float tier_factor(const graph_tile_ptr& tile, Tier tier, const DirectedEdge* edge) {
   switch (tier) {
     case Tier::kGreat:
       return kora::kGreatFactor;
@@ -570,9 +662,19 @@ inline float tier_factor(Tier tier, const DirectedEdge* edge) {
       return kora::kFineFactor;
     case Tier::kSharedPath:
       return kora::kSharedPathFactor;
+    case Tier::kService:
+      return kora::kServiceRoadFactor;
+    case Tier::kPaintedLane:
+    case Tier::kSharrow: {
+      const float base = tier == Tier::kPaintedLane ? kora::kPaintedLaneFactor : kora::kSharrowFactor;
+      const float speed_scale =
+          bare_speed_factor(posted_speed(tile, edge)) / bare_speed_factor(kora::kPaintSpeedKph);
+      return base * speed_scale + extra_lane_step(edge);
+    }
     case Tier::kBad:
     default:
-      return edge->use_sidepath() ? kora::kUseSidepathFactor : bare_speed_factor(edge->speed());
+      return edge->use_sidepath() ? kora::kUseSidepathFactor
+                                  : bare_speed_factor(posted_speed(tile, edge)) + extra_lane_step(edge);
   }
 }
 
@@ -689,6 +791,129 @@ inline JunctionArms junction_arms(const graph_tile_ptr& tile,
   return j;
 }
 
+// kora fork: the posted limit of a junction arm for the turn-restriction
+// test — untagged arms count as the in-town default only when they are
+// through roads; a quiet street without a sign is a 30 zone.
+inline uint32_t crossed_arm_speed(const graph_tile_ptr& tile, const DirectedEdge* arm) {
+  const uint32_t limit = tile->edgeinfo(arm).speed_limit();
+  if (limit == 0 || limit == baldr::kUnlimitedSpeedLimit) {
+    return is_through(arm->classification(), arm->use()) ? kora::kUnpostedThroughSpeedKph
+                                                          : kora::kQuietStreetMaxKph;
+  }
+  return limit;
+}
+
+// kora fork: the node an outgoing directed edge of `tile` leaves from,
+// found by its position in the tile's edge array (nodes are stored in
+// edge-index order). Level-safe where a predecessor label is not: at a
+// hierarchy transition the search expands the node's counterpart on
+// another level with the same label, so pred.endnode() then names a node
+// of a different tile. Null when the edge is not in this tile.
+inline const NodeInfo* node_of_edge(const graph_tile_ptr& tile, const DirectedEdge* edge) {
+  const uint32_t ecount = tile->header()->directededgecount();
+  if (ecount == 0) {
+    return nullptr;
+  }
+  const DirectedEdge* first = tile->directededge(0);
+  if (edge < first || edge >= first + ecount) {
+    return nullptr;
+  }
+  const uint32_t idx = static_cast<uint32_t>(edge - first);
+  uint32_t lo = 0, hi = tile->header()->nodecount();
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2;
+    const NodeInfo* n = tile->node(mid);
+    if (idx < n->edge_index()) {
+      hi = mid;
+    } else if (idx >= n->edge_index() + n->edge_count()) {
+      lo = mid + 1;
+    } else {
+      return n;
+    }
+  }
+  return nullptr;
+}
+
+// kora fork: does a turn restriction on this maneuver matter for a bike?
+// (See kQuietStreetMaxKph.) `from_arm` / `to_arm` are the outgoing edges
+// at the node that represent the road left and the road entered; for a
+// left or U-turn every road at the node counts (oncoming traffic is
+// crossed either way), straight on only the intersecting ones.
+inline bool turn_restriction_matters(const graph_tile_ptr& tile,
+                                     const NodeInfo* node,
+                                     const DirectedEdge* from_arm,
+                                     const DirectedEdge* to_arm,
+                                     Turn::Type turn) {
+  const bool right = node->drive_on_right();
+  if (is_exempt_turn(turn, right)) {
+    return false; // with traffic: crosses nothing
+  }
+  const bool straight = is_straight_on(turn, right);
+  const uint32_t ei = node->edge_index();
+  const uint32_t ec = node->edge_count();
+  if (ei + ec > tile->header()->directededgecount()) {
+    return true; // cannot inspect: obey
+  }
+  const DirectedEdge* e = tile->directededge(ei);
+  for (uint32_t i = 0; i < ec; ++i, ++e) {
+    if (e->is_shortcut() || (straight && (e == from_arm || e == to_arm))) {
+      continue;
+    }
+    const Use use = e->use();
+    if (use == Use::kCycleway || is_path_like(use) || use == Use::kSteps ||
+        use == Use::kPedestrianCrossing || use == Use::kLivingStreet) {
+      continue;
+    }
+    if (crossed_arm_speed(tile, e) > kora::kQuietStreetMaxKph) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// kora fork: is a complex VIA-NODE restriction between the predecessor
+// and the keyed edge active — by the base class's own rules (forward:
+// key = the edge entered, match on `from`; reverse: key = the reverse
+// tree's outgoing edge, match on `to`; timed restrictions count only on
+// timed queries; probable ones per restriction_probability)? Via-way
+// restrictions are skipped (see kQuietStreetMaxKph).
+inline bool via_node_restriction_active(const graph_tile_ptr& tile,
+                                        const bool forward,
+                                        const baldr::GraphId& key,
+                                        const baldr::GraphId& pred_edgeid,
+                                        const uint32_t access_mask,
+                                        const uint8_t restriction_probability,
+                                        const uint64_t current_time,
+                                        const uint32_t tz_index) {
+  for (const auto& cr : tile->GetComplexRestrictions(forward, key, access_mask)) {
+    if (cr.via_count() != 0) {
+      continue;
+    }
+    if ((cr.type() == baldr::RestrictionType::kNoProbable ||
+         cr.type() == baldr::RestrictionType::kOnlyProbable) &&
+        (restriction_probability == 0 || restriction_probability > cr.probability())) {
+      continue;
+    }
+    const baldr::GraphId other = forward ? cr.from_graphid() : cr.to_graphid();
+    if (other != pred_edgeid) {
+      continue;
+    }
+    if (cr.has_dt()) {
+      if (!current_time ||
+          !baldr::DateTime::is_conditional_active(cr.dt_type(), cr.begin_hrs(), cr.begin_mins(),
+                                                  cr.end_hrs(), cr.end_mins(), cr.dow(),
+                                                  cr.begin_week(), cr.begin_month(),
+                                                  cr.begin_day_dow(), cr.end_week(), cr.end_month(),
+                                                  cr.end_day_dow(), current_time,
+                                                  baldr::DateTime::get_tz_db().from_index(tz_index))) {
+        continue;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 // The crossing rule, shared by both transition directions.
 // from_rc / from_use describe the edge being left, `to` the edge entered.
 inline float crossing_penalty(baldr::RoadClass from_rc,
@@ -706,24 +931,44 @@ inline float crossing_penalty(baldr::RoadClass from_rc,
   const bool right = node->drive_on_right();
   const bool from_through = is_through(from_rc, from_use);
   const bool to_through = is_through(to->classification(), to->use());
-  if (from_through && to_through && !is_exempt_turn(turn, right)) {
-    if (is_straight_on(turn, right)) {
-      if (node->traffic_signal()) {
-        penalty += kora::kCrossingStraightSignalPenalty;
+  if (to_through) {
+    // Share of the crossing penalty by turn direction (see the kora
+    // block): across in full, with traffic a quarter, straight on from
+    // a side arm half. Straight on ALONG a through road is not a
+    // crossing of it — there the signal proxy applies instead.
+    float share = 1.0f;
+    if (is_exempt_turn(turn, right)) {
+      share = kora::kCrossingRightShare;
+    } else if (is_straight_on(turn, right)) {
+      if (from_through) {
+        share = 0.0f;
+        if (node->traffic_signal()) {
+          penalty += kora::kCrossingStraightSignalPenalty;
+        }
+      } else {
+        share = kora::kCrossingSideStraightShare;
       }
-    } else {
-      // Turning across: only at a real crossing (4+ through arms);
-      // base rate plus a step per lane beyond the first on the widest
-      // through arm.
+    }
+    if (share > 0.0f) {
+      // The junction decides, whatever we arrived on: 4+ through arms
+      // are a crossing; a multi-lane T-junction a reduced one; base
+      // rate plus a step per lane beyond the first on the widest arm.
       const JunctionArms j = junction_arms(tile, node, to);
-      if (j.valid && j.through_arms >= 4) {
-        penalty += kora::kCrossingTurnBaseSec +
-                   kora::kCrossingTurnPerLaneSec * static_cast<float>(j.max_lanes - 1);
+      if (j.valid) {
+        float junction_share = 0.0f;
+        if (j.through_arms >= 4) {
+          junction_share = 1.0f;
+        } else if (j.through_arms == 3 && j.max_lanes >= 2) {
+          junction_share = kora::kCrossingTeeShare;
+        }
+        penalty += share * junction_share *
+                   (kora::kCrossingTurnBaseSec +
+                    kora::kCrossingTurnPerLaneSec * static_cast<float>(j.max_lanes - 1));
       }
     }
   }
-  if (!from_through && classify(to) == Tier::kBad && !to->use_sidepath() &&
-      to->speed() >= kora::kEnterBadSpeedKph) {
+  if (!from_through && classify(tile, to) == Tier::kBad && !to->use_sidepath() &&
+      posted_speed(tile, to) >= kora::kEnterBadSpeedKph) {
     penalty += kora::kEnterBadPenalty;
   }
   return penalty;
@@ -917,6 +1162,7 @@ public:
   float use_roads_;          // kora fork: parsed for API compatibility, inert
   float avoid_bad_surfaces_; // Preference of avoiding bad surfaces for the bike type
   bool exclude_steps_;       // kora fork: refuse stairs outright (avoid-stairs toggle)
+  bool request_ignores_turns_; // kora fork: the request asked to ignore turn restrictions
 
   // Average speed (kph) on smooth, flat roads.
   float speed_;
@@ -1001,6 +1247,12 @@ BicycleCost::BicycleCost(const Costing& costing)
   // kora fork: use_roads is kept only so requests that send it stay valid.
   use_roads_ = costing_options.use_roads();
   exclude_steps_ = costing_options.exclude_steps();
+  // kora fork: turn restrictions are judged by Allowed() with the
+  // crossing test (see kQuietStreetMaxKph); the base class's complex-
+  // restriction check is not virtual, so it is switched off here. A
+  // request-level ignore keeps its meaning through request_ignores_turns_.
+  request_ignores_turns_ = ignore_turn_restrictions_;
+  ignore_turn_restrictions_ = true;
 
   // Populate the grade penalties (based on use_hills factor - value between 0 and 1)
   // kora fork: the steep-discomfort table (pushing territory only) scaled
@@ -1040,9 +1292,30 @@ bool BicycleCost::Allowed(const baldr::DirectedEdge* edge,
   if ((!IsAccessible(edge) && !is_pushed(edge)) || edge->is_shortcut() ||
       (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
        pred.mode() == TravelMode::kBicycle) ||
-      (!ignore_turn_restrictions_ && (pred.restrictions() & (1 << edge->localedgeidx()))) ||
       IsUserAvoidEdge(edgeid) || CheckExclusions<true>(edge, pred)) {
     return false;
+  }
+  // kora fork: a via-node turn restriction — simple or complex — binds
+  // only where the maneuver crosses traffic that matters
+  // (turn_restriction_matters). `tile` holds `edge`, hence the node it
+  // leaves from.
+  if (!request_ignores_turns_) {
+    const bool simple = (pred.restrictions() & (1 << edge->localedgeidx())) != 0;
+    const bool complex =
+        !simple && (edge->end_restriction() & access_mask_) &&
+        via_node_restriction_active(tile, true, edgeid, pred.edgeid(), access_mask_,
+                                    restriction_probability_, current_time, tz_index);
+    if (simple || complex) {
+      const NodeInfo* node = node_of_edge(tile, edge);
+      if (node == nullptr) {
+        return false; // cannot inspect the junction: obey
+      }
+      const DirectedEdge* from_arm = tile->directededge(node->edge_index() + pred.opp_local_idx());
+      if (turn_restriction_matters(tile, node, from_arm, edge,
+                                   edge->turntype(pred.opp_local_idx()))) {
+        return false;
+      }
+    }
   }
 
   // Disallow transit connections
@@ -1092,9 +1365,39 @@ bool BicycleCost::AllowedReverse(const baldr::DirectedEdge* edge,
       opp_edge->use() == Use::kPlatformConnection ||
       (!pred.deadend() && pred.opp_local_idx() == edge->localedgeidx() &&
        pred.mode() == TravelMode::kBicycle) ||
-      (!ignore_turn_restrictions_ && (opp_edge->restrictions() & (1 << pred.opp_local_idx()))) ||
       IsUserAvoidEdge(opp_edgeid) || CheckExclusions<false>(opp_edge, pred)) {
     return false;
+  }
+  // kora fork: same turn-restriction test as Allowed(), seen from the
+  // reverse tree. Forward, the move is opp_edge → the edge at
+  // pred.opp_local_idx() on the node opp_edge ends at; `edge` is that
+  // node's outgoing arm opposing opp_edge and the key of the reverse
+  // complex-restriction index. `tile` holds opp_edge; the node is
+  // inspected only when `edge` lies in the same tile (otherwise: obey).
+  if (!request_ignores_turns_) {
+    const bool simple = (opp_edge->restrictions() & (1 << pred.opp_local_idx())) != 0;
+    const bool may_be_complex = !simple && (edge->start_restriction() & access_mask_);
+    if (simple || may_be_complex) {
+      const NodeInfo* node = node_of_edge(tile, edge);
+      if (node == nullptr) {
+        return false;
+      }
+      bool restricted = simple;
+      if (may_be_complex) {
+        const uint32_t idx = static_cast<uint32_t>(edge - tile->directededge(0));
+        const baldr::GraphId edge_id(tile->id().tileid(), tile->id().level(), idx);
+        restricted = via_node_restriction_active(tile, false, edge_id, pred.edgeid(), access_mask_,
+                                                 restriction_probability_, current_time, tz_index);
+      }
+      if (restricted) {
+        const DirectedEdge* to_arm = tile->directededge(node->edge_index() + pred.opp_local_idx());
+        const DirectedEdge* from_arm = tile->directededge(node->edge_index() + edge->localedgeidx());
+        if (turn_restriction_matters(tile, node, from_arm, to_arm,
+                                     to_arm->turntype(edge->localedgeidx()))) {
+          return false;
+        }
+      }
+    }
   }
 
   // kora fork: the avoid-stairs toggle.
@@ -1122,7 +1425,7 @@ bool BicycleCost::AllowedReverse(const baldr::DirectedEdge* edge,
 // (in seconds) to traverse the edge.
 Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
                            const baldr::GraphId& edgeid,
-                           const graph_tile_ptr&,
+                           const graph_tile_ptr& tile,
                            const baldr::TimeInfo&,
                            uint8_t&) const {
   // kora fork: stairs — hauling time plus committing fees at the length
@@ -1187,7 +1490,7 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   // kora fork: tier factor + official-route bonus + hills + surface.
   const uint32_t grade = effective_grade(edge);
-  float factor = tier_factor(classify(edge), edge);
+  float factor = tier_factor(tile, classify(tile, edge), edge);
   // T2 terrain: ridable in principle, a last resort in practice.
   if (edge->sac_scale() == SacScale::kMountainHiking) {
     factor *= kora::kSacT2CostFactor;
