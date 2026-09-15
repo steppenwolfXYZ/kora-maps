@@ -23,7 +23,7 @@ import {
 } from './guidance';
 import {
 	getFirstFix, requestCompassPermission, ScreenWakeLock, watchCompass, watchPosition,
-	type PositionFix
+	type CompassSample, type PositionFix
 } from './sensors';
 
 /** Off-route once the projected distance exceeds this for OFF_ROUTE_HOLD_MS
@@ -108,6 +108,11 @@ let maneuverIdx = $state(0);
 // Wall clock for the ETA; bumped on every fix and by a slow ticker.
 let now = $state(0);
 let alternatives = $state.raw<NavAlternative[]>([]);
+// TEMPORARY compass diagnostic shown in the banner: how the permission
+// resolved, how many raw events arrived and what the last one carried.
+let compassDebug = $state<{ permission: string; samples: number; last: CompassSample | null }>({
+	permission: 'not asked', samples: 0, last: null
+});
 
 // Non-reactive internals. `geometry` always changes together with
 // `route` (installRoute sets it first), so deriveds keyed on `route`
@@ -526,8 +531,14 @@ async function start(r: DirectRoute, resume = false, planned: DirectRoute[] = []
 	}
 	void wakeLock.acquire();
 	stopWatch = watchPosition(applyFix, onWatchError);
+	compassDebug = { permission: 'pending', samples: 0, last: null };
 	void compassPermission.then((ok) => {
-		if (ok && active && !stopCompass) stopCompass = watchCompass(onCompass);
+		compassDebug = { ...compassDebug, permission: ok ? 'granted' : 'denied' };
+		if (ok && active && !stopCompass) {
+			stopCompass = watchCompass(onCompass, (s) => {
+				compassDebug = { ...compassDebug, samples: compassDebug.samples + 1, last: s };
+			});
+		}
 	});
 	clockTimer = setInterval(() => { now = Date.now(); }, CLOCK_TICK_MS);
 	document.addEventListener('visibilitychange', onVisibility);
@@ -623,6 +634,8 @@ export const navigation = {
 	get arrived() { return arrived; },
 	get guidance() { return guidance; },
 	get alternatives() { return alternatives; },
+	/** TEMPORARY diagnostic. */
+	get compassDebug() { return compassDebug; },
 	get positionStale() { return fix !== null && now - fix.at > POSITION_STALE_MS; },
 
 	/** Start from the planning view: `planned` = the other shown

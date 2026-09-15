@@ -1,12 +1,12 @@
-// The rider's position marker (bicycle-navigation.md § Follow-me map):
-// a brand-red disc with a white heading chevron, rotated in map space
-// so it points along the direction of travel however the camera turns.
-// Without a heading the chevron gives way to a plain dot — the marker
-// then just says "here", not "this way".
+// The rider's position marker (bicycle-navigation.md § Follow-me map).
+// Without a heading: a brand-red dot with a white ring — "here". With
+// one: a large brand-red navigation arrow with a white outline, rotated
+// in map space so it points along the direction of travel however the
+// camera turns — in attached mode that is straight up.
 
 import maplibregl from 'maplibre-gl';
 
-const SIZE = 40;
+const SIZE = 52;
 
 export class RiderMarker {
 	private marker: maplibregl.Marker;
@@ -18,13 +18,15 @@ export class RiderMarker {
 		el.className = 'nav-rider';
 		el.style.cssText = [
 			`width: ${SIZE}px`, `height: ${SIZE}px`, 'pointer-events: none',
-			'filter: drop-shadow(0 1px 3px rgba(0,0,0,0.4))'
+			'filter: drop-shadow(0 1px 3px rgba(0,0,0,0.45))'
 		].join(';');
 		el.innerHTML = `
-			<svg viewBox="0 0 40 40" width="${SIZE}" height="${SIZE}" xmlns="http://www.w3.org/2000/svg">
-				<circle cx="20" cy="20" r="13" style="fill: var(--brand); stroke: var(--white)" stroke-width="3"/>
-				<path class="nav-rider-arrow" d="M20 9.5 L27 22 L20 18.5 L13 22 Z" style="fill: var(--white)"/>
-				<circle class="nav-rider-dot" cx="20" cy="20" r="4" style="fill: var(--white)"/>
+			<svg viewBox="0 0 52 52" width="${SIZE}" height="${SIZE}" xmlns="http://www.w3.org/2000/svg">
+				<g class="nav-rider-dot">
+					<circle cx="26" cy="26" r="11" style="fill: var(--brand); stroke: var(--white)" stroke-width="3"/>
+				</g>
+				<path class="nav-rider-arrow" d="M26 4 L42 44 L26 35 L10 44 Z"
+					style="fill: var(--brand); stroke: var(--white)" stroke-width="3" stroke-linejoin="round"/>
 			</svg>`;
 		this.arrow = el.querySelector('.nav-rider-arrow')!;
 		this.dot = el.querySelector('.nav-rider-dot')!;
