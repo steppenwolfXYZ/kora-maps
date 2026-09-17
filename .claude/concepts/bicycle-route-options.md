@@ -128,14 +128,20 @@ today's model. Default: Balanced.
 ### 4a. Speed-dependent turns and the fast e-bike
 
 - **Turns scale with speed.** The flat per-turn seconds (right 3 s,
-  left 4 s, U-turn 8 s at 20 km/h; left and right differ little on
-  narrow streets, the crossing rule prices big junctions) are sized for
-  a 20 km/h rider and scale with the rider's flat speed, in time and
-  cost: braking into a tight corner and getting back up to speed costs
-  more the faster one rides. Leisurely 0.75×, fast and e-bike 1.2×,
-  professional 1.4×, fast e-bike 1.5× (its motor gets it back up to
-  speed quickly). This gives the pace ruler depth without a knob of its
-  own.
+  left 4 s, U-turn 8 s; left and right differ little on narrow streets,
+  the crossing rule prices big junctions) are sized for a 25 km/h rider
+  and scale with the rider's flat speed, in time and cost: braking into
+  a tight corner and getting back up to speed costs more the faster one
+  rides (the physics: ~1.5 s at 20 km/h, ~3 s at 25, ~6.5 s at 30).
+  Leisurely 0.5×, normal 0.75×, fast and e-bike 1×, professional and
+  fast e-bike 1.25× (the motor gets it back up to speed quickly). This
+  gives the pace ruler depth without a knob of its own.
+- **Turns onto a cycle route are (nearly) free at the calm stops.** A
+  signed route's own corners must not price it out of following it. A
+  turn into an official cycle-route edge pays only a share of the turn
+  penalty (junction stop time with its stress, plus the flat seconds):
+  25 % at Relaxed, nothing at Quiet, full elsewhere. The deviation cost
+  is unaffected.
 - **Fast e-bike on roads up to 50 km/h.** At 45 km/h the rider moves
   with the traffic of a 50 zone, so for the fast e-bike a bare posted-50
   road is barely worse than a quiet street (1.1 instead of 1.4) and

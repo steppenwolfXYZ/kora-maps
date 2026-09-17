@@ -433,6 +433,13 @@ constexpr float kDeviationPenaltySec = 3.0f;
 //                 this share of the extra riding time a rough surface
 //                 costs is forgiven in the COST (the displayed time
 //                 stays honest). 0.5 = half, 0.8 = most of it.
+//   route_turn    share of the turn penalty (upstream's stop-impact
+//                 seconds with their stress multiplier, plus the flat
+//                 per-turn seconds) charged when the turn is INTO an
+//                 official cycle route edge — a signed route's own
+//                 corners must not price it out of following it (the
+//                 zigzag rule is for grids, not for a lane in the
+//                 forest). 1 = full, 0 = free; the deviation cost stays.
 // Balanced is this file's own tuning; Road ignores traffic and earns
 // nothing from infrastructure.
 struct CharacterProfile {
@@ -442,29 +449,31 @@ struct CharacterProfile {
   float quiet_boost;
   const char* surface;
   float surface_relief;
+  float route_turn;
 };
-constexpr CharacterProfile kCharacterRoad{0.0f, 0.0f, 1.00f, 1.00f, "fast", 0.0f};
-constexpr CharacterProfile kCharacterFast{0.5f, 0.5f, 0.96f, 1.00f, "fast", 0.0f};
-constexpr CharacterProfile kCharacterBalanced{1.0f, 1.0f, 0.92f, 0.95f, "balanced", 0.0f};
-constexpr CharacterProfile kCharacterRelaxed{1.5f, 1.4f, 0.86f, 0.86f, "leisure", 0.5f};
-constexpr CharacterProfile kCharacterQuiet{2.2f, 2.0f, 0.74f, 0.80f, "leisure", 0.8f};
+constexpr CharacterProfile kCharacterRoad{0.0f, 0.0f, 1.00f, 1.00f, "fast", 0.0f, 1.0f};
+constexpr CharacterProfile kCharacterFast{0.5f, 0.5f, 0.96f, 1.00f, "fast", 0.0f, 1.0f};
+constexpr CharacterProfile kCharacterBalanced{1.0f, 1.0f, 0.92f, 0.95f, "balanced", 0.0f, 1.0f};
+constexpr CharacterProfile kCharacterRelaxed{1.5f, 1.4f, 0.86f, 0.86f, "leisure", 0.5f, 0.25f};
+constexpr CharacterProfile kCharacterQuiet{2.2f, 2.0f, 0.74f, 0.80f, "leisure", 0.8f, 0.0f};
 
 // ── Turns scale with speed ──────────────────────────────────────────────
-// The flat per-turn seconds (kTurnSecByType) are sized for a 20 km/h
+// The flat per-turn seconds (kTurnSecByType) are sized for a 25 km/h
 // rider. Braking into a tight corner and getting back up to speed costs
-// more the faster one rides, so they scale with the rider's flat speed
-// (time AND cost — the displayed duration carries it). Piecewise linear
-// over these points: leisurely 0.75, normal 1.0, fast / e-bike 1.2,
-// professional 1.4, fast e-bike 1.5 — the S-Pedelec has the power to
-// get back up to speed quickly, so it pays less than its speed alone
-// would suggest. Falls out of the pace ruler and the e-bike types
-// without a knob of its own.
+// more the faster one rides (the physics: ~1.5 s at 20 km/h, ~3 s at
+// 25, ~6.5 s at 30 with a normal effort out of the corner), so they
+// scale with the rider's flat speed (time AND cost — the displayed
+// duration carries it). Piecewise linear over these points: leisurely
+// 0.5, normal 0.75, fast / e-bike 1.0, professional and fast e-bike
+// 1.25 — the S-Pedelec has the power to get back up to speed quickly.
+// Falls out of the pace ruler and the e-bike types without a knob of
+// its own.
 constexpr float kTurnScalePoints[][2] = {
-    {15.0f, 0.75f},
-    {20.0f, 1.00f},
-    {25.0f, 1.20f},
-    {30.0f, 1.40f},
-    {45.0f, 1.50f},
+    {15.0f, 0.50f},
+    {20.0f, 0.75f},
+    {25.0f, 1.00f},
+    {30.0f, 1.25f},
+    {45.0f, 1.25f},
 };
 
 // ── Fast e-bike on roads up to 50 km/h ──────────────────────────────────
@@ -1399,6 +1408,7 @@ public:
   float route_bonus_;          // kora fork: factor for official-cycle-route edges
   float surface_relief_;       // kora fork: share of the surface slowdown forgiven in cost
   float turn_scale_;           // kora fork: flat per-turn seconds scaled by flat speed
+  float route_turn_;           // kora fork: share of the turn penalty into a cycle-route edge
 
   // Average speed (kph) on smooth, flat roads.
   float speed_;
@@ -1518,12 +1528,14 @@ BicycleCost::BicycleCost(const Costing& costing)
     tw_.quiet_boost = cp->quiet_boost;
     route_bonus_ = cp->route_bonus;
     surface_relief_ = cp->surface_relief;
+    route_turn_ = cp->route_turn;
   } else {
     tw_.avoidance = costing_options.avoidance_scale();
     tw_.great_scale = costing_options.bonus_scale();
     tw_.quiet_boost = 1.0f;
     route_bonus_ = 1.0f - (1.0f - kora::kBikeNetworkFactor) * costing_options.bonus_scale();
     surface_relief_ = 0.0f;
+    route_turn_ = 1.0f;
   }
   // kora fork: the fast e-bike's own road curve (kora Fast e-bike block).
   if (motor == &kora::kSbikeMotor) {
@@ -1903,6 +1915,11 @@ Cost BicycleCost::TransitionCost(const baldr::DirectedEdge* edge,
   if (!edge->roundabout()) {
     seconds += turn_scale_ * kora::kTurnSecByType[static_cast<uint32_t>(turn)];
   }
+  // kora fork: a turn INTO an official cycle route pays only the
+  // character's share of the turn penalty (kora Route character block).
+  if (edge->bike_network()) {
+    seconds *= route_turn_;
+  }
 
   // kora fork: the crossing rule, at the request's avoidance scale.
   float penalty = tw_.avoidance *
@@ -1982,6 +1999,11 @@ Cost BicycleCost::TransitionCostReverse(const uint32_t idx,
   // the rider's speed (kora Turns block).
   if (!edge->roundabout()) {
     seconds += turn_scale_ * kora::kTurnSecByType[static_cast<uint32_t>(turn)];
+  }
+  // kora fork: a turn INTO an official cycle route pays only the
+  // character's share (the forward move enters `edge` here too).
+  if (edge->bike_network()) {
+    seconds *= route_turn_;
   }
 
   // kora fork: the crossing rule (pred is the edge being left here too).
