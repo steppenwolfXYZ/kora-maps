@@ -44,13 +44,17 @@ not reachable from the client and has no UI.
   tapping a muted route line on the map selects its card.
 - For each ferry / car-shuttle crossing aboard the winning route, one
   extra query avoids that single crossing (others stay usable). The
-  land variant is judged by DISTANCE ratio, in three bands: within
-  ~1.25× it becomes the suggested route itself (the crossing demoted
-  to an alternative — riding is the sporting default when the detour
-  is modest); within ~1.5× it joins as an alternative; beyond that it
-  is not offered (circumnavigating a lake or the Lötschberg massif).
-  Distance, not time, on purpose: a mountain pass instead of a shuttle
-  rides similar kilometres in many more hours and must stay on offer.
+  land variant is judged by the DISTANCE ratio of the land SECTION
+  against the crossing itself — never of the whole route, which would
+  make the verdict depend on how far away the crossing happens to sit
+  (the Simplon shuttle won from Visp and lost from Bern). Three bands:
+  within 2.5× the land section becomes the suggested route itself (the
+  crossing demoted to an alternative — riding is the sporting default,
+  a pass instead of a tunnel ride included); within 4× it joins as an
+  alternative; beyond that it is not offered (circumnavigating a lake
+  or the Lötschberg massif). Distance, not time, on purpose: a
+  mountain pass instead of a shuttle rides similar kilometres in many
+  more hours and must stay on offer.
   Crossing routes carry a chip — "ferry" for ships, "car shuttle" for
   an Autoverlad; a train through a mountain is never called a ferry.
   The elevation profile and ascent totals treat on-board sections as
@@ -78,7 +82,13 @@ before the query and where the transit tab keeps it.
   editing chrome (mode tabs, endpoint inputs, action row) collapses
   into one summary row: from → to plus an edit button. Tapping the row
   or the button expands the editing chrome again in place; running a
-  fresh query collapses it again. The panel does not move.
+  fresh query collapses it again. The panel does not move. Two simple
+  rules: loading a route collapses; opening the panel never does,
+  independent of whether the open loads a route. So the tabs and
+  endpoint fields are always shown on open — on a reopen that
+  restores retained results as much as on an open whose query runs
+  right away (deep link, route from / to here) — and the next query
+  the user triggers collapses.
 - **Result cards below the summary row**, as in the transit tab. The
   panel's height is capped so a strip of map stays visible below it.
 - **Resize handle on the bottom edge** of the collapsed panel — the

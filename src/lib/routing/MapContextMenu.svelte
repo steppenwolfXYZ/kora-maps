@@ -46,9 +46,17 @@
 		// defaults apply (current location may prefill From). With From
 		// prefilled both fields end up set, so nothing gets focus.
 		if (!routingState.open) {
-			if (side === 'via') routingState.openPanel();
-			else if (fromPrefilled) routingState.openPanel({ prefillCurrent: false, focus: null });
-			else routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from' });
+			// The pick lands after the open; tell the open whether it
+			// completes a direct query so that query keeps the editing
+			// chrome (opening never collapses the panel).
+			const expectQuery = routingState.travelMode !== 'transit' && (
+				side === 'via' ? !!routingState.from && !!routingState.to
+				: side === 'from' ? !!routingState.to
+				: !!routingState.from
+			);
+			if (side === 'via') routingState.openPanel({ expectQuery });
+			else if (fromPrefilled) routingState.openPanel({ prefillCurrent: false, focus: null, expectQuery });
+			else routingState.openPanel({ prefillCurrent: false, focus: side === 'from' ? 'to' : 'from', expectQuery });
 		}
 		onClose();
 		// Resolve the address first, then set the endpoint once — setting it

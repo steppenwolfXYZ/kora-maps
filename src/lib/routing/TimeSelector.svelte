@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { slide } from 'svelte/transition';
+	import OptionsButton from './OptionsButton.svelte';
 	import type { TimeMode } from './types';
 
 	interface Props {
@@ -194,21 +195,7 @@
 			<div class="ts-swap">{@render swap()}</div>
 		{/if}
 		{#if onToggleOptions}
-			<button
-				class="ts-options icon-btn"
-				class:open={optionsOpen}
-				onclick={onToggleOptions}
-				title="More options"
-				aria-expanded={optionsOpen}
-			>
-				<span class="ts-options-icon">
-					<span class="material-symbols-outlined" aria-hidden="true">tune</span>
-					{#if !optionsOpen && optionsModified}
-						<span class="ts-options-dot" aria-hidden="true"></span>
-					{/if}
-				</span>
-				<span class="ts-options-label">Options</span>
-			</button>
+			<OptionsButton open={optionsOpen} modified={optionsModified} onToggle={onToggleOptions} />
 		{/if}
 	</div>
 	{#if optionsOpen && options}
@@ -312,47 +299,6 @@
 		margin-right: auto;
 	}
 
-	/* Base look + hover from .icon-btn (app.css); sizing only here. Icon
-	   plus a "Options" label — the bare glyph was hard to spot and a
-	   small target on touch, so the button is a labelled pill with a
-	   comfortable hit area. The open state is the active state —
-	   gradient fill, white glyph and text (per ux-guidelines.md). */
-	.ts-options {
-		flex: 0 0 auto;
-		gap: 0.25rem;
-		/* Shared row height with the mode toggle beside it. */
-		min-height: var(--ts-row-h);
-		padding: 0 0.7rem 0 0.55rem;
-		font-family: var(--font-ui);
-		font-size: 0.8rem;
-		line-height: 1.2;
-	}
-	.ts-options :global(.material-symbols-outlined) { font-size: 1.15rem; line-height: 1; }
-	.ts-options.open,
-	.ts-options.open:hover {
-		background: var(--gradient-brand);
-		color: var(--white);
-	}
-	.ts-options.open :global(.material-symbols-outlined) { color: var(--white); }
-	/* Non-default indicator while collapsed: small gradient dot badged onto
-	   the tune glyph (badges belong on the icon, not on the label), sitting
-	   mostly outside the glyph box at its top-right so it covers as little
-	   of it as possible. The white ring keeps the two apart. */
-	.ts-options-icon {
-		position: relative;
-		display: inline-flex;
-		align-items: center;
-	}
-	.ts-options-dot {
-		position: absolute;
-		top: -0.15rem;
-		right: -0.25rem;
-		width: 0.6rem;
-		height: 0.6rem;
-		border-radius: 50%;
-		background: var(--gradient-brand);
-		border: 1px solid var(--white);
-	}
 	.ts-mode button {
 		display: inline-flex;
 		align-items: center;

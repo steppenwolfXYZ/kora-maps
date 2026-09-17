@@ -33,9 +33,22 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 BENCHMARK = ROOT / "valhalla" / "fork" / "bicycle_benchmark.yaml"
 
-# Mirror the client's request (src/lib/routing/valhalla.ts): hybrid bike,
-# strong hill avoidance, maneuvers for the street chain.
-DEFAULT_OPTIONS = {"bicycle_type": "hybrid", "use_hills": 0.1}
+# Mirror the client's default request (src/lib/routing/valhalla.ts +
+# optionParams.ts): normal bicycle at Normal pace (20 km/h flat), the
+# Balanced ruler stop, strong hill avoidance, maneuvers for the street
+# chain. The ruler stop goes to the engine as one `route_character`
+# bundle (valhalla/fork/README.md).
+DEFAULT_OPTIONS = {
+    "bicycle_type": "hybrid",
+    "cycling_speed": 20,
+    "route_character": "balanced",
+    "use_hills": 0.1,
+}
+# The client's stops (bicycle-route-options.md), kept in step with
+# optionParams.ts by hand.
+PACES = {"leisurely": 15, "normal": 20, "fast": 25, "pro": 30}
+ROADS = ("road", "fast", "balanced", "relaxed", "quiet")
+BIKE_TYPES = {"bicycle": "hybrid", "racing": "road", "ebike": "ebike", "sbike": "sbike"}
 
 
 def request(url: str, pair: dict, options: dict, alternates: int) -> dict:
@@ -104,6 +117,9 @@ def main() -> int:
     ap.add_argument("--only", action="append", help="pair id to run (repeatable)")
     ap.add_argument("--alternates", type=int, default=2, help="alternates to print for context")
     ap.add_argument("--exclude-steps", action="store_true", help="send exclude_steps=true (the avoid-stairs toggle)")
+    ap.add_argument("--bike-type", choices=sorted(BIKE_TYPES), default="bicycle", help="the client's bike type (default bicycle)")
+    ap.add_argument("--pace", choices=sorted(PACES), default="normal", help="pace stop for pedal bikes (default normal = 20 km/h)")
+    ap.add_argument("--roads", choices=sorted(ROADS), default="balanced", help="fast <-> nice ruler stop (default balanced)")
     ap.add_argument("--json", type=Path, help="dump raw responses to this file")
     args = ap.parse_args()
 
@@ -115,6 +131,11 @@ def main() -> int:
             return 2
 
     options = dict(DEFAULT_OPTIONS)
+    options["bicycle_type"] = BIKE_TYPES[args.bike_type]
+    options["cycling_speed"] = PACES[args.pace]
+    if args.bike_type == "racing":
+        options["avoid_bad_surfaces"] = 0.9
+    options["route_character"] = args.roads
     if args.exclude_steps:
         options["exclude_steps"] = True
 

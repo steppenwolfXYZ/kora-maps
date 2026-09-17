@@ -156,6 +156,28 @@ function isTransit(mode: string): boolean {
 	return mode !== 'WALK' && mode !== 'BIKE' && mode !== 'CAR';
 }
 
+/** Total distance travelled over an itinerary in metres. Walk legs use
+ * MOTIS's own `distance`; transit legs carry none, so their length is
+ * measured along the leg polyline (haversine over the decoded points —
+ * the same geometry the map draws). A transit leg without geometry
+ * falls back to the straight line between its stops. Same-stop walk
+ * legs (platform changes) contribute nothing, as in walkMetres. */
+export function itineraryMetres(it: Itinerary): number {
+	let m = 0;
+	for (const leg of it.legs) {
+		if (leg.mode === 'WALK' && leg.from?.stopId != null && leg.from.stopId === leg.to?.stopId) continue;
+		if (leg.distance != null) { m += leg.distance; continue; }
+		const coords = legCoords(leg);
+		if (coords.length >= 2) {
+			for (let i = 1; i < coords.length; i++) m += haversineMeters(coords[i - 1], coords[i]);
+			continue;
+		}
+		const a = placeCoord(leg.from), b = placeCoord(leg.to);
+		if (a && b) m += haversineMeters(a, b);
+	}
+	return m;
+}
+
 /** Bbox of one leg — decoded polyline when present, plus the from/to
  * place coords as fallback. Used by Map.svelte to focus a clicked leg
  * from the expanded result card. */

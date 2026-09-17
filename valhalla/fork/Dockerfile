@@ -5,17 +5,23 @@
 #
 # The fork overlays / patches:
 #   src/sif/bicyclecost.cc                  — full-file overlay: the three-tier
-#                                             weighting model, pushed-bike
-#                                             access, stairs pricing, crossing
-#                                             rule, exclude_steps
+#                                             weighting model, rider-power speed
+#                                             model (+ e-bike profiles),
+#                                             pushed-bike access, stairs pricing,
+#                                             crossing rule, the kora request
+#                                             options
 #   src/thor/triplegbuilder.cc              — full-file overlay: pushed-bike
 #                                             sections come back as pedestrian
 #                                             travel_mode maneuvers so the
 #                                             client can draw them dotted
-#   patches/options-proto-exclude-steps.patch
-#                                           — adds `bool exclude_steps = 98` to
+#   patches/options-proto-kora-bicycle.patch
+#                                           — adds `exclude_steps` (98),
+#                                             `avoidance_scale` (99),
+#                                             `bonus_scale` (100),
+#                                             `surface_profile` (101) and
+#                                             `route_character` (102) to
 #                                             Costing.Options (the avoid-stairs
-#                                             toggle's request option)
+#                                             toggle and the fast ↔ nice ruler)
 #
 # Build (from the repo root, or via scripts/setup_routing.sh step 2):
 #   docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork

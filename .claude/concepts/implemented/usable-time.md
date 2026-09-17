@@ -60,7 +60,12 @@ usable-time group of three rows:
   that toggles a short inline explainer of what usable time means.
 
 Shown only when usable time is positive — an all-bus connection shows
-nothing rather than "0 min". The collapsed card is unchanged.
+no time rows rather than "0 min". The collapsed card is unchanged.
+
+The same box always ends with a **Distance** row, set off from the time
+rows by a thin separator line: the total distance travelled, walks by
+their router distance and rides measured along their polylines (the
+geometry the map draws).
 
 ### Feature 2 — rescue in the quality filter
 

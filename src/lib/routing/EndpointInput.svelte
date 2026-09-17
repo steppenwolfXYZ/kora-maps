@@ -7,6 +7,7 @@
 		type IndexedStation
 	} from './stationSearch';
 	import { loadStationIndex } from './stationIndex';
+	import { placeEndpoint, pointKey, searchRecentPlaces, type ConnectPlace } from './connect.svelte';
 	import { geolocationDenied, hasGeolocation } from './geolocation.svelte';
 	import { searchPlaces, type GeocodeResult } from '$lib/geocoding/client';
 	import { AutocompleteScheduler } from '$lib/geocoding/scheduler';
@@ -27,6 +28,11 @@
 	const STATION_FALLBACK_ICON = 'directions_transit_filled';
 	const POI_ICON = 'place';
 	const ADDRESS_ICON = 'home_work';
+	// Recent places (geocoding-search.md § Recent places) wear the history
+	// glyph in place of their type icon — the icon is what says "you've
+	// been here".
+	const RECENT_ICON = 'history';
+	const RECENT_LIMIT = 5;
 
 	function stationIcon(s: IndexedStation): string {
 		return (s.m && STATION_MODE_ICON[s.m]) || STATION_FALLBACK_ICON;
@@ -35,7 +41,8 @@
 	// One side of the routing panel's From / To pair. Shows the current
 	// endpoint label; focusing turns the row into a search input whose
 	// dropdown lists "Current location" (when available) as the first
-	// suggestion, then transit-station matches from the local index, then
+	// suggestion, then the user's recent places whose label starts with the
+	// typed text, then transit-station matches from the local index, then
 	// Photon geocoding matches (addresses + POIs) — see geocoding-search.md.
 
 	interface Props {
@@ -144,7 +151,24 @@
 		};
 	});
 
-	const stationResults = $derived(searchStations(index, query));
+	// Recent places section (geocoding-search.md § Recent places): the
+	// user's most-used places whose label starts with the typed text, at
+	// the top of the dropdown. Transit via rows take stations only.
+	const recentResults = $derived(
+		searchRecentPlaces(query, { stationsOnly: via && !mixedRanking, limit: RECENT_LIMIT })
+	);
+	// Dedup keys: a place shown as a recent is dropped from the station
+	// and geocoder sections (merged UIC; ~1 m coord key or identical
+	// display name).
+	const recentKeys = $derived(new Set(recentResults.map((r) => r.u)));
+	const recentNames = $derived(new Set(recentResults.map((r) => r.n)));
+	function isRecentStation(s: IndexedStation): boolean { return recentKeys.has(s.u); }
+	function isRecentGeo(r: GeocodeResult): boolean {
+		return recentKeys.has(pointKey(r.coord)) || recentNames.has(r.displayName);
+	}
+
+	const stationResults = $derived(searchStations(index, query).filter((s) => !isRecentStation(s)));
+	const geoRows = $derived(geoResults.filter((r) => !isRecentGeo(r)));
 
 	// Fire the geocoding request when query changes. Below 2 chars, clear
 	// stale results and skip the network (matches the proxy's own gate).
@@ -276,6 +300,7 @@
 
 	type Row =
 		| { kind: 'current' }
+		| { kind: 'recent'; place: ConnectPlace }
 		| { kind: 'station'; station: IndexedStation }
 		| { kind: 'geo'; result: GeocodeResult };
 
@@ -284,14 +309,17 @@
 	const MIXED_LIMIT = 10;
 
 	const rows = $derived.by<Row[]>(() => {
-		const head: Row[] = showCurrent ? [{ kind: 'current' }] : [];
+		const head: Row[] = [
+			...(showCurrent ? [{ kind: 'current' as const }] : []),
+			...recentResults.map((p) => ({ kind: 'recent' as const, place: p }))
+		];
 		if (!mixedRanking) {
 			// Transit tab (via rows included): stations keep their dedicated
 			// area at the top, geocoder results follow below the divider.
 			return [
 				...head,
 				...stationResults.map((s) => ({ kind: 'station' as const, station: s })),
-				...geoResults.map((r) => ({ kind: 'geo' as const, result: r }))
+				...geoRows.map((r) => ({ kind: 'geo' as const, result: r }))
 			];
 		}
 		// Cycling / walking: one merged list ranked by plain match quality
@@ -300,11 +328,13 @@
 		// first (stable sort over the concatenation order), so a station
 		// and a same-named POI don't shuffle between keystrokes.
 		const scored: { row: Row; score: number }[] = [
-			...searchStationsPlain(index, query).map((s) => ({
-				row: { kind: 'station' as const, station: s.station },
-				score: s.score
-			})),
-			...geoResults.map((r) => ({
+			...searchStationsPlain(index, query)
+				.filter((s) => !isRecentStation(s.station))
+				.map((s) => ({
+					row: { kind: 'station' as const, station: s.station },
+					score: s.score
+				})),
+			...geoRows.map((r) => ({
 				row: { kind: 'geo' as const, result: r },
 				score: plainMatchScore(r.displayName, query)
 			}))
@@ -313,14 +343,25 @@
 		return [...head, ...scored.slice(0, MIXED_LIMIT).map((x) => x.row)];
 	});
 
-	// Index at which the geo section starts (used for a divider above it).
-	// The mixed list interleaves the two sources, so it has no divider.
-	const geoStartIdx = $derived(
-		mixedRanking ? -1 : (showCurrent ? 1 : 0) + stationResults.length
+	// Index at which the recents section ends (divider below it when it
+	// has rows and something follows) and at which the geo section starts
+	// (divider above it). The mixed list interleaves stations and geo
+	// results, so it only has the recents divider.
+	const recentEndIdx = $derived(
+		recentResults.length ? (showCurrent ? 1 : 0) + recentResults.length : -1
 	);
+	const geoStartIdx = $derived(
+		mixedRanking ? -1 : (showCurrent ? 1 : 0) + recentResults.length + stationResults.length
+	);
+
+	function pickRecent(p: ConnectPlace) {
+		// The same endpoint the Connect tile produces.
+		commit(placeEndpoint(p));
+	}
 
 	function pickRow(row: Row) {
 		if (row.kind === 'current') pickCurrent();
+		else if (row.kind === 'recent') pickRecent(row.place);
 		else if (row.kind === 'station') pickStation(row.station);
 		else pickGeo(row.result);
 	}
@@ -385,8 +426,8 @@
 				{#if !query.trim()}
 					<li class="ep-hint">Start typing to search stations or locations</li>
 				{/if}
-				{#each rows as row, i (row.kind === 'current' ? 'c' : row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
-					{#if row.kind === 'geo' && i === geoStartIdx && geoStartIdx > 0}
+				{#each rows as row, i (row.kind === 'current' ? 'c' : row.kind === 'recent' ? `r:${row.place.u}` : row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
+					{#if (i === recentEndIdx) || (row.kind === 'geo' && i === geoStartIdx && geoStartIdx > 0)}
 						<li class="ep-divider" aria-hidden="true"></li>
 					{/if}
 					{#if row.kind === 'current'}
@@ -400,6 +441,18 @@
 						>
 							<span class="ep-icon material-symbols-outlined">my_location</span>
 							<span class="ep-text">Current location</span>
+						</li>
+					{:else if row.kind === 'recent'}
+						<li
+							class="ep-row-item"
+							class:highlighted={highlighted === i}
+							role="option"
+							aria-selected={highlighted === i}
+							onmousedown={(e) => { e.preventDefault(); pickRecent(row.place); }}
+							onmouseenter={() => (highlighted = i)}
+						>
+							<span class="ep-icon material-symbols-outlined" aria-hidden="true">{RECENT_ICON}</span>
+							<span class="ep-text">{row.place.n}</span>
 						</li>
 					{:else if row.kind === 'station'}
 						<li

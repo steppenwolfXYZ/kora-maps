@@ -52,7 +52,10 @@ function parseVias(url: URL): MotisVia[] {
 function parseOptions(url: URL): RoutingOptionValues {
 	const walk = url.searchParams.get('walkSpeed');
 	const safety = url.searchParams.get('safety');
+	// The bike fields of the value set are irrelevant to the transit
+	// search and stay at their defaults.
 	return {
+		...DEFAULT_OPTIONS,
 		walkSpeed: isWalkSpeedTier(walk) ? walk : DEFAULT_OPTIONS.walkSpeed,
 		safety: isSafetyMode(safety) ? safety : DEFAULT_OPTIONS.safety,
 		minimizeWalking: url.searchParams.get('minWalk') === '1'

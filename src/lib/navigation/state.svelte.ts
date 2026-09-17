@@ -509,6 +509,7 @@ async function refreshAlternatives() {
 	try {
 		const routes = await fetchNavigationRoutes({
 			mode: 'bike', from: fix.coord, to: route.requestedTo, vias: remainingVias(route),
+			bike: route.requestedBike ?? undefined,
 			fromHeading: heading
 		}, ac.signal);
 		if (ac.signal.aborted || !active) return;
@@ -564,6 +565,9 @@ async function recalculate() {
 			from: f.coord,
 			to: r0.requestedTo,
 			vias: remainingVias(r0),
+			// The same rider model the planned route used (bicycle-
+			// route-options.md § 6): bike type, pace, ruler stop, stairs.
+			bike: r0.requestedBike ?? undefined,
 			// From the direction of travel: turning back is a U-turn the
 			// engine prices and reports, not a silent reversal.
 			fromHeading: heading

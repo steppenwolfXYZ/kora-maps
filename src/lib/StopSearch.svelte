@@ -5,6 +5,7 @@
 	import { searchPlaces, type GeocodeResult } from '$lib/geocoding/client';
 	import { AutocompleteScheduler } from '$lib/geocoding/scheduler';
 	import { openStationPopup, openPlacePopup } from '$lib/map/popups/handlers';
+	import { pointKey, searchRecentPlaces, type ConnectPlace } from '$lib/routing/connect.svelte';
 
 	let { map }: { map: maplibregl.Map | null } = $props();
 
@@ -26,6 +27,10 @@
 	const STATION_FALLBACK_ICON = 'directions_transit_filled';
 	const POI_ICON = 'place';
 	const ADDRESS_ICON = 'home_work';
+	// Recent places (geocoding-search.md § Recent places): same section,
+	// glyph and cap as the routing endpoint inputs.
+	const RECENT_ICON = 'history';
+	const RECENT_LIMIT = 5;
 
 	let index = $state<IndexedStation[]>([]);
 	let indexError = $state<string | null>(null);
@@ -74,25 +79,40 @@
 		return c ? [c.lng, c.lat] : null;
 	});
 
+	const recentResults = $derived(searchRecentPlaces(query, { limit: RECENT_LIMIT }));
+	// A place shown as a recent is dropped from the station and geocoder
+	// sections (merged UIC; ~1 m coord key or identical display name).
+	const recentKeys = $derived(new Set(recentResults.map((r) => r.u)));
+	const recentNames = $derived(new Set(recentResults.map((r) => r.n)));
+
 	const stationResults = $derived(
-		searchStations(index, query, MAX_STATIONS, mapCenter)
+		searchStations(index, query, MAX_STATIONS, mapCenter).filter((s) => !recentKeys.has(s.u))
 	);
+	const geoRows = $derived(geoResults.filter(
+		(r) => !recentKeys.has(pointKey(r.coord)) && !recentNames.has(r.displayName)
+	));
 
 	type Row =
+		| { kind: 'recent'; place: ConnectPlace }
 		| { kind: 'station'; station: IndexedStation }
 		| { kind: 'geo'; result: GeocodeResult };
 
 	const rows = $derived<Row[]>([
+		...recentResults.map((p) => ({ kind: 'recent' as const, place: p })),
 		...stationResults.map((s) => ({ kind: 'station' as const, station: s })),
-		...geoResults.map((r) => ({ kind: 'geo' as const, result: r }))
+		...geoRows.map((r) => ({ kind: 'geo' as const, result: r }))
 	]);
+	// Divider positions: below the recents section (when something
+	// follows) and above the geo section.
+	const stationStartIdx = $derived(recentResults.length);
+	const geoStartIdx = $derived(recentResults.length + stationResults.length);
 
 	$effect(() => {
 		void rows;
 		highlighted = 0;
 	});
 
-	function selectStation(e: IndexedStation) {
+	function selectStation(e: { n: string; u: string; c: [number, number] }) {
 		if (!map) return;
 		map.flyTo({ center: e.c, zoom: FLYTO_ZOOM, speed: 4.8, essential: true });
 		// Popup opens once the camera has settled — the station popup's
@@ -114,8 +134,17 @@
 		close();
 	}
 
+	function selectRecent(p: ConnectPlace) {
+		if (p.ty === 'point') {
+			selectGeo({ coord: p.c, displayName: p.n, kind: p.k ?? 'address' });
+		} else {
+			selectStation(p);
+		}
+	}
+
 	function selectRow(row: Row) {
-		if (row.kind === 'station') selectStation(row.station);
+		if (row.kind === 'recent') selectRecent(row.place);
+		else if (row.kind === 'station') selectStation(row.station);
 		else selectGeo(row.result);
 	}
 
@@ -174,8 +203,8 @@
 			{:else if rows.length === 0}
 				<li class="empty">No matches</li>
 			{:else}
-				{#each rows as row, i (row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
-					{#if row.kind === 'geo' && i === stationResults.length && stationResults.length > 0}
+				{#each rows as row, i (row.kind === 'recent' ? `r:${row.place.u}` : row.kind === 'station' ? `s:${row.station.u}` : `g:${i}`)}
+					{#if (i === stationStartIdx && i > 0) || (row.kind === 'geo' && i === geoStartIdx && i > stationStartIdx)}
 						<li class="divider" aria-hidden="true"></li>
 					{/if}
 					<li
@@ -190,14 +219,16 @@
 						onmouseenter={() => (highlighted = i)}
 					>
 						<span class="mode-icon material-symbols-outlined" aria-hidden="true">
-							{#if row.kind === 'station'}
+							{#if row.kind === 'recent'}
+								{RECENT_ICON}
+							{:else if row.kind === 'station'}
 								{(row.station.m && MODE_ICON[row.station.m]) || STATION_FALLBACK_ICON}
 							{:else}
 								{row.result.kind === 'address' ? ADDRESS_ICON : POI_ICON}
 							{/if}
 						</span>
 						<span class="stop-name">
-							{row.kind === 'station' ? row.station.n : row.result.displayName}
+							{row.kind === 'recent' ? row.place.n : row.kind === 'station' ? row.station.n : row.result.displayName}
 						</span>
 					</li>
 				{/each}

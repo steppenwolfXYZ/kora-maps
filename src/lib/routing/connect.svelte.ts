@@ -9,7 +9,10 @@ import type { Endpoint } from './types';
 // real usage is still thin.
 
 const STORAGE_KEY = 'kora.connect.stations';
-const MAX_ENTRIES = 30;
+// The grid shows its top ten; the endpoint / map searches read the whole
+// store as their recent-places memory (geocoding-search.md § Recent
+// places), which is why it keeps far more than the tiles need.
+const MAX_ENTRIES = 100;
 // Usage decay half-life-ish constant: an unused place's score halves in
 // ~60 days (decay applied lazily whenever the place is used again).
 const DECAY_DAYS = 90;
@@ -58,8 +61,40 @@ function isValidEntry(e: unknown): e is ConnectPlace {
 /** Storage key of a point endpoint, rounded to ~1 m so repeated use of the
  * same map right-click / geocoder hit lands on the same tile. Never collides
  * with a station key (those are bare numeric UICs). */
-function pointKey(coord: [number, number]): string {
+export function pointKey(coord: [number, number]): string {
 	return `pt:${coord[0].toFixed(5)},${coord[1].toFixed(5)}`;
+}
+
+/** Label folding for the recent-places match: accents and case like the
+ * station search, plus every punctuation / whitespace run collapsed to
+ * one space, so "Bahnhofstrasse 10, Zürich" and a typed
+ * "bahnhofstrasse 10 zur" compare on the same footing. */
+export function foldPlaceLabel(s: string): string {
+	return s.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+/** Recent places matching a typed query (geocoding-search.md § Recent
+ * places): the folded label must START with the folded query — a
+ * deliberately narrow rule meant for fast hits from little typing; the
+ * fresh search results take over once the user types more. Whole-label
+ * matches first, then by usage score. `stationsOnly` serves the transit
+ * via rows, which take stations only. */
+export function searchRecentPlaces(
+	query: string,
+	opts: { stationsOnly?: boolean; limit?: number } = {}
+): ConnectPlace[] {
+	const q = foldPlaceLabel(query);
+	if (!q) return [];
+	const hits: { e: ConnectPlace; exact: boolean }[] = [];
+	for (const e of entries) {
+		if (opts.stationsOnly && e.ty === 'point') continue;
+		const label = foldPlaceLabel(e.n);
+		if (!label.startsWith(q)) continue;
+		hits.push({ e, exact: label === q });
+	}
+	hits.sort((a, b) => (a.exact === b.exact ? b.e.score - a.e.score : a.exact ? -1 : 1));
+	return hits.slice(0, opts.limit ?? 5).map((h) => h.e);
 }
 
 /** The endpoint a stored place routes to. */

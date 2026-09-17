@@ -6,7 +6,11 @@
 	import ResultCard from './ResultCard.svelte';
 	import DirectRouteCard from './DirectRouteCard.svelte';
 	import ConnectGrid from './ConnectGrid.svelte';
+	import { slide } from 'svelte/transition';
 	import RoutingOptions from './RoutingOptions.svelte';
+	import AvoidStairsToggle from './AvoidStairsToggle.svelte';
+	import BikeRulers from './BikeRulers.svelte';
+	import OptionsButton from './OptionsButton.svelte';
 	import { computeCardStates } from './ranking';
 	import { fmtDuration } from './itineraryFormat';
 	import { routingOptions } from './options.svelte';
@@ -483,10 +487,12 @@
 		if (delta !== 0) resultsEl.scrollTop = topPreTop + delta;
 	});
 
-	// More-options expander (routing-options.md § UI). Session-local —
-	// the persisted values are in options.svelte.ts, only the open/closed
-	// state resets with the panel.
+	// More-options expanders (routing-options.md § UI; the cycling tab's
+	// own in bicycle-route-options.md § 6). Session-local — the persisted
+	// values are in options.svelte.ts, only the open/closed state resets
+	// with the panel.
 	let optionsOpen = $state(false);
+	let bikeOptionsOpen = $state(false);
 
 	// Main routing shell. Replaces the map menu / stop search top-controls
 	// while open (Map.svelte decides visibility). Runs a query whenever
@@ -510,6 +516,12 @@
 		void routingOptions.walkSpeed;
 		void routingOptions.safety;
 		void routingOptions.minimizeWalking;
+		// The cycling options are Valhalla request params
+		// (bicycle-route-options.md § 8).
+		void routingOptions.bikeType;
+		void routingOptions.bikePace;
+		void routingOptions.bikeRoads;
+		void routingOptions.avoidStairs;
 		if (!from || !to) return;
 		void routingState.runQuery();
 	});
@@ -800,10 +812,27 @@
 			</TimeSelector>
 		</div>
 	{:else}
-		<!-- Direct tabs keep only the swap control. -->
+		<!-- Slim control row of the direct tabs: on the cycling tab the
+		     avoid-stairs switch at the head, then the More-options expander
+		     (bicycle-route-options.md § 6 — bike type and the rulers sit
+		     behind it), the shared swap at the tail. -->
 		<div class="rp-direct-row">
+			{#if routingState.travelMode === 'bike'}
+				<AvoidStairsToggle />
+				<OptionsButton
+					open={bikeOptionsOpen}
+					modified={!routingOptions.bikeOptionsDefault}
+					onToggle={() => (bikeOptionsOpen = !bikeOptionsOpen)}
+					label="More options"
+				/>
+			{/if}
 			{@render swapButton()}
 		</div>
+		{#if routingState.travelMode === 'bike' && bikeOptionsOpen}
+			<div class="rp-bike-options" transition:slide={{ duration: 180 }}>
+				<BikeRulers />
+			</div>
+		{/if}
 	{/if}
 
 	{#if !routeSet}
@@ -1264,12 +1293,22 @@
 	}
 
 	/* Slim control row of the direct tabs: the shared swap button pinned
-	   to the tail column. */
+	   to the tail column, the cycling tab's Options expander at the head
+	   (space-between keeps the swap at the tail when it is alone). */
 	.rp-direct-row {
 		display: flex;
 		align-items: center;
-		justify-content: flex-end;
+		gap: 0.6rem;
 		min-height: 2rem;
+		--ts-row-h: 2rem;
+	}
+	.rp-direct-row > :global(.rp-swap) { margin-left: auto; }
+	/* The panel is a height-capped flex column: with overflow hidden a
+	   flex child may shrink below its content (min-height resolves to
+	   0), which clipped the lower ruler's description. Never shrink —
+	   the slide transition clips itself while animating. */
+	.rp-bike-options {
+		flex: 0 0 auto;
 	}
 
 	.rp-endpoints {

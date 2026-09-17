@@ -1,5 +1,6 @@
 import { PUBLIC_VALHALLA_URL } from '$env/static/public';
 
+import { bikeCostingOptions, DEFAULT_BIKE_OPTIONS, type BikeOptionValues } from './optionParams';
 import { decodePolyline } from './polyline';
 import type { DirectRoute, RouteManeuver } from './types';
 
@@ -74,6 +75,10 @@ export interface DirectRouteArgs {
 	 * walking legs at the user's set speed tier. Omitted → engine default
 	 * (5.1 km/h, the same base the transit stack uses). */
 	walkSpeedKmh?: number | null;
+	/** Bike only: the cycling tab's option set (bicycle-route-options.md)
+	 * — bike type, pace, fast ↔ nice stop, avoid-stairs. Omitted → the
+	 * defaults (normal bicycle, Normal pace, Balanced, stairs priced). */
+	bike?: BikeOptionValues;
 	/** Navigation only: the rider's current heading (degrees, 0 = north)
 	 * at the origin. The engine then routes from the direction of travel
 	 * — turning around is a priced U-turn maneuver, not a free reversal
@@ -137,8 +142,8 @@ interface ValhallaRouteResponse {
  * stairs metres surfaced on the bike cards (the Kora costing fork prices
  * stairs steeply, uphill more than downhill — bicycle-costing-fork.md — so
  * a route only contains stairs when every alternative is clearly worse;
- * `exclude_steps: true` in the bicycle costing options removes them
- * entirely, which is what the avoid-stairs toggle will send). */
+ * the avoid-stairs toggle sends `exclude_steps: true`, which removes them
+ * entirely). */
 const MANEUVER_STEPS_ENTER = 40;
 /** Maneuver type kFerryEnter — boarding a water ferry or a car-shuttle
  * train. Its length is the on-board distance. The maneuver's `ferry`
@@ -152,15 +157,16 @@ function costingOptions(args: DirectRouteArgs): Record<string, unknown> {
 	// read as 24).
 	const COUNTRY_CROSSING_COST_SEC = 120;
 	if (args.mode === 'bike') {
-		// Hills price themselves through the fork's everyday grade→speed
-		// curve (bicycle-costing-fork.md § Hills); use_hills only scales
-		// the steep-discomfort penalty for pushing-territory grades, and
-		// 0.1 keeps that near full strength until the hilliness
-		// preference ships. Hybrid bike ≈ everyday utility cycling
-		// (18 km/h base).
+		// The rider model — bike type, pace (flat speed → rider power),
+		// the fast ↔ nice ruler scales and avoid-stairs — comes from the
+		// cycling options (optionParams.ts bikeCostingOptions). Hills
+		// price themselves through the fork's rider-power speed table
+		// (bicycle-costing-fork.md § Hills); use_hills only scales the
+		// steep-discomfort penalty for pushing-territory grades, and 0.1
+		// keeps that near full strength (no hilliness preference yet).
 		return {
 			bicycle: {
-				bicycle_type: 'hybrid',
+				...bikeCostingOptions(args.bike ?? DEFAULT_BIKE_OPTIONS),
 				use_hills: 0.1,
 				country_crossing_cost: COUNTRY_CROSSING_COST_SEC
 			}
@@ -255,7 +261,7 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 	let stairsM = 0;
 	let ferryM = 0;
 	let shuttleM = 0;
-	const ferryCrossings: [number, number][] = [];
+	const ferryCrossings: { mid: [number, number]; lengthM: number }[] = [];
 	// Crossing spans as global shape-index ranges — the elevation profile
 	// is flattened across them (the DEM samples the massif ABOVE a
 	// tunnel, so an on-board section would otherwise draw a mountain the
@@ -304,7 +310,7 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 					const b = legStart + m.begin_shape_index;
 					const e = legStart + m.end_shape_index;
 					const mid = coords[Math.floor((b + e) / 2)];
-					if (mid) ferryCrossings.push(mid);
+					if (mid) ferryCrossings.push({ mid, lengthM: m.length * 1000 });
 					crossingRanges.push([b, e]);
 				}
 			}
@@ -351,7 +357,8 @@ function tripToRoute(trip: ValhallaTrip, args: DirectRouteArgs): DirectRoute | n
 		maneuvers,
 		requestedFrom: args.from,
 		requestedTo: args.to,
-		requestedVias: args.vias ?? []
+		requestedVias: args.vias ?? [],
+		requestedBike: mode === 'bike' ? (args.bike ?? DEFAULT_BIKE_OPTIONS) : null
 	};
 }
 
@@ -416,16 +423,22 @@ async function requestRoutes(
 		.filter((r): r is DirectRoute => r !== null);
 }
 
-/** Avoid-this-crossing variants are judged by DISTANCE ratio against
- * the crossing route — deliberately not time: a mountain pass instead
- * of a car shuttle rides similar kilometres in many more hours and is
- * the sporting default, while circumnavigating a lake (or the whole
- * Lötschberg massif) multiplies the kilometres. Three bands:
+/** Avoid-this-crossing variants are judged by DISTANCE ratio of the
+ * land SECTION against the crossing itself — deliberately not time (a
+ * mountain pass instead of a car shuttle rides similar kilometres in
+ * many more hours and is the sporting default, while circumnavigating a
+ * lake or the whole Lötschberg massif multiplies the kilometres), and
+ * deliberately not the whole route: the variant is identical outside
+ * the crossing, so its extra distance plus the on-board length IS the
+ * land section, and judging that keeps the verdict the same whether the
+ * crossing sits on a short hop or a 140 km trip (whole-route ratios let
+ * the Simplon shuttle win from Visp and lose from Bern). Three bands:
  * ratio ≤ PROMOTE → the land route becomes the suggested route and the
  * crossing an alternative; ≤ SHOW → offered as an alternative; above →
- * not offered at all. */
-const AVOID_FERRY_PROMOTE_RATIO = 1.25;
-const AVOID_FERRY_SHOW_RATIO = 1.5;
+ * not offered at all. The Simplon pass is ~1.8× the Brig–Iselle
+ * shuttle, the Grimsel loop many times the Lötschberg hop. */
+const AVOID_FERRY_PROMOTE_RATIO = 2.5;
+const AVOID_FERRY_SHOW_RATIO = 4.0;
 
 /** ~100 m exclusion box around a crossing's midpoint — enough to sever
  * that ferry / shuttle line without touching nearby land routes. */
@@ -460,9 +473,15 @@ export async function fetchDirectRoutes(
 	let promoted: DirectRoute | null = null;
 	for (const crossing of primary.ferryCrossings.slice(0, 3)) {
 		try {
-			const variant = (await requestRoutes(args, [crossingPolygon(crossing)], 0, signal))[0];
+			const variant = (await requestRoutes(args, [crossingPolygon(crossing.mid)], 0, signal))[0];
 			if (variant === undefined) continue;
-			const ratio = variant.distanceM / primary.distanceM;
+			// Land section ≈ the crossing's length plus whatever the variant
+			// added to the whole route (the rest is shared); a crossing
+			// shorter than the noise floor is judged by the route instead.
+			const sectionM = Math.max(0, variant.distanceM - primary.distanceM) + crossing.lengthM;
+			const ratio = crossing.lengthM > 100
+				? sectionM / crossing.lengthM
+				: variant.distanceM / primary.distanceM;
 			if (ratio > AVOID_FERRY_SHOW_RATIO) continue;
 			const dup = routes.some(
 				(r) =>

@@ -1,5 +1,6 @@
 import {
-	DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
+	BIKE_PACES, BIKE_ROADS, BIKE_TYPES, DEFAULT_OPTIONS, SAFETY_MODES, WALK_SPEED_TIERS,
+	type BikePace, type BikeRoads, type BikeType,
 	type RoutingOptionValues, type SafetyMode, type WalkSpeedTier
 } from './options.svelte';
 import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type RoutingQuery, type TimeMode, type TravelMode, type Via } from './types';
@@ -34,9 +35,16 @@ import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type Routing
 //                     instead of re-resolving "now" ('now' still parses,
 //                     for legacy links). Refresh-to-now is the panel's
 //                     explicit button, never a reload side effect.
-//   walk, safety, minWalk — routing options (routing-options.md), written
-//                     only off their defaults; absent = defaults. Restores
-//                     apply them session-only, never into localStorage.
+//   walk, safety, minWalk — transit routing options (routing-options.md),
+//                     written only off their defaults; absent = defaults.
+//                     Restores apply them session-only, never into
+//                     localStorage.
+//   bike, pace, roads, stairs — the cycling tab's options
+//                     (bicycle-route-options.md § 7), alongside mode=bike
+//                     only, written only off their defaults: bike =
+//                     racing | ebike | sbike, pace = leisurely | fast | pro,
+//                     roads = quiet | relaxed | fast | road, stairs = avoid.
+//                     Same session-only restore rule.
 // A `?from=…&to=…` presence is enough to open the routing panel on cold load.
 
 export const URL_FROM = 'from';
@@ -56,6 +64,10 @@ export const URL_ROUTE = 'route';
 export const URL_WALK = 'walk';
 export const URL_SAFETY = 'safety';
 export const URL_MIN_WALK = 'minWalk';
+export const URL_BIKE = 'bike';
+export const URL_PACE = 'pace';
+export const URL_ROADS = 'roads';
+export const URL_STAIRS = 'stairs';
 
 /** Endpoint serialisation: coord as `lat,lng` (7 fractional digits, ≈1 cm).
  * `station` needs the lookup callback so a UIC round-trips through the
@@ -187,9 +199,27 @@ export function urlHasRoutingQuery(url: URL): boolean {
 	return url.searchParams.has(URL_FROM) || url.searchParams.has(URL_TO);
 }
 
-/** Parse the option params back into a full value set — invalid or
- * absent params fall back to the defaults. */
-export function paramsToOptions(url: URL): RoutingOptionValues {
+/** Parse the option params of the link's tab back into that tab's
+ * complete value group — invalid or absent params fall back to the
+ * defaults. Only the active tab's group is returned (transit: walk /
+ * safety / minWalk; bike: bike / pace / roads / stairs; walk: nothing),
+ * so restoring a link never touches the other tab's saved values. */
+export function paramsToOptions(url: URL, travel: TravelMode): Partial<RoutingOptionValues> {
+	if (travel === 'bike') {
+		const bike = url.searchParams.get(URL_BIKE);
+		const pace = url.searchParams.get(URL_PACE);
+		const roads = url.searchParams.get(URL_ROADS);
+		return {
+			bikeType: BIKE_TYPES.some((t) => t.id === bike)
+				? bike as BikeType : DEFAULT_OPTIONS.bikeType,
+			bikePace: BIKE_PACES.some((p) => p.id === pace)
+				? pace as BikePace : DEFAULT_OPTIONS.bikePace,
+			bikeRoads: BIKE_ROADS.some((r) => r.id === roads)
+				? roads as BikeRoads : DEFAULT_OPTIONS.bikeRoads,
+			avoidStairs: url.searchParams.get(URL_STAIRS) === 'avoid'
+		};
+	}
+	if (travel === 'walk') return {};
 	const walk = url.searchParams.get(URL_WALK);
 	const safety = url.searchParams.get(URL_SAFETY);
 	return {
@@ -209,7 +239,7 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 	travel: TravelMode;
 	time: string | null;
 	route: string | null;
-	options: RoutingOptionValues;
+	options: Partial<RoutingOptionValues>;
 } {
 	const travel = paramToTravelMode(url.searchParams.get(URL_MODE));
 	const vias = paramsToVias(url, lookup);
@@ -236,7 +266,7 @@ export function readRoutingQuery(url: URL, lookup?: StationLookup): {
 		mode: paramToMode(url.searchParams.get(URL_MODE)),
 		time: paramToTime(url.searchParams.get(URL_TIME)),
 		route: url.searchParams.get(URL_ROUTE),
-		options: paramsToOptions(url)
+		options: paramsToOptions(url, travel)
 	};
 }
 
@@ -263,9 +293,10 @@ export function writeRoutingQuery(url: URL, q: {
 	mode: TimeMode;
 	/** Travel mode (pedestrian-bicycle-routing.md § Deep links). 'bike' /
 	 * 'walk' write themselves into the `mode` param and drop every
-	 * transit-only param (time, via waits, options, route selection);
-	 * absent or 'transit' keeps today's serialisation. Vias themselves
-	 * ride along on every tab. */
+	 * transit-only param (time, via waits, transit options, route
+	 * selection); 'bike' additionally writes the cycling options
+	 * (bicycle-route-options.md § 7). Absent or 'transit' keeps today's
+	 * serialisation. Vias themselves ride along on every tab. */
 	travel?: TravelMode;
 	time: string | null;
 	route?: string | null;
@@ -327,6 +358,22 @@ export function writeRoutingQuery(url: URL, q: {
 	else url.searchParams.delete(URL_SAFETY);
 	if (o && o.minimizeWalking) url.searchParams.set(URL_MIN_WALK, '1');
 	else url.searchParams.delete(URL_MIN_WALK);
+	// Cycling options: only non-default values, and only alongside a bike
+	// query. The pace is written even while an e-bike is selected — it is
+	// remembered across the type switch and the link should reproduce the
+	// sender's full state.
+	const b = hasQuery && q.travel === 'bike' ? q.options : undefined;
+	if (b && b.bikeType !== DEFAULT_OPTIONS.bikeType)
+		url.searchParams.set(URL_BIKE, b.bikeType);
+	else url.searchParams.delete(URL_BIKE);
+	if (b && b.bikePace !== DEFAULT_OPTIONS.bikePace)
+		url.searchParams.set(URL_PACE, b.bikePace);
+	else url.searchParams.delete(URL_PACE);
+	if (b && b.bikeRoads !== DEFAULT_OPTIONS.bikeRoads)
+		url.searchParams.set(URL_ROADS, b.bikeRoads);
+	else url.searchParams.delete(URL_ROADS);
+	if (b && b.avoidStairs) url.searchParams.set(URL_STAIRS, 'avoid');
+	else url.searchParams.delete(URL_STAIRS);
 }
 
 export function clearRoutingQuery(url: URL) {
@@ -344,4 +391,8 @@ export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_WALK);
 	url.searchParams.delete(URL_SAFETY);
 	url.searchParams.delete(URL_MIN_WALK);
+	url.searchParams.delete(URL_BIKE);
+	url.searchParams.delete(URL_PACE);
+	url.searchParams.delete(URL_ROADS);
+	url.searchParams.delete(URL_STAIRS);
 }

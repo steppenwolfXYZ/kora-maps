@@ -102,6 +102,34 @@ let mapModeFlag = $state(false);
 // meaningful while the direct tab has queried — CSS scopes the collapsed
 // layout to narrow viewports.
 let directSearchExpanded = $state(false);
+// Opening the panel never lands in the collapsed view: the tabs and the
+// endpoint fields are always visible on open, whether or not the open
+// loads a route. Every open sets `directSearchExpanded` (covers a reopen
+// that restores retained results without re-querying) and — only when
+// the open itself will run a direct query (URL restore, "route from / to
+// here" with both endpoints set) — arms this one-shot so that query
+// keeps the editing chrome. A query the user triggers afterwards
+// collapses as usual, so the flag is armed solely for an open-caused
+// query, never for "the next query, whatever it is".
+let expandOnNextDirectQuery = false;
+
+/** Dedup key of the direct cycling / walking query — everything the
+ * Valhalla request can see. */
+function directQueryKey(): string {
+	return JSON.stringify({
+		travel: travelMode, from, to, vias: viaSignature(),
+		walkSpeed: travelMode === 'walk' ? routingOptions.walkSpeed : null,
+		bike: travelMode === 'bike' ? routingOptions.bikeSnapshot() : null
+	});
+}
+
+/** Whether the panel's query effect will run a direct query from the
+ * state as it stands at open time (both endpoints set on a direct tab,
+ * and not the retained result of an earlier run). */
+function openWillRunDirectQuery(): boolean {
+	return travelMode !== 'transit' && !!from && !!to
+		&& (directQueryKey() !== lastQueryKey || !!error);
+}
 
 // Shared-connection view (connection-sharing.md § Shared view). `sharedShare`
 // holds the share document while a /s/<id> landing drives the panel;
@@ -438,9 +466,12 @@ async function runDirectQuery(key: string) {
 	resetCascadeState();
 	directRoutes = [];
 	directSelected = 0;
-	// A fresh query always lands collapsed — the results and the map
-	// with the new routes are what the user asked for.
-	directSearchExpanded = false;
+	// A fresh query lands collapsed — the results and the map with the
+	// new routes are what the user asked for — except the query an open
+	// itself triggers, which keeps the editing chrome (see
+	// expandOnNextDirectQuery).
+	directSearchExpanded = expandOnNextDirectQuery;
+	expandOnNextDirectQuery = false;
 	try {
 		if (from!.type === 'current' || to!.type === 'current') {
 			try { resolvedCurrentCoord = await resolveCurrent(); }
@@ -466,7 +497,9 @@ async function runDirectQuery(key: string) {
 			// tier → engine default 5.1 km/h, identical to the transit base).
 			walkSpeedKmh: m === 'walk'
 				? (routingOptions.pedestrianSpeedMs != null ? routingOptions.walkSpeedKmh : null)
-				: null
+				: null,
+			// The cycling tab's rider model (bicycle-route-options.md).
+			bike: m === 'bike' ? routingOptions.bikeSnapshot() : undefined
 		}, ac.signal);
 		if (ac.signal.aborted) return;
 		directRoutes = routes;
@@ -534,9 +567,17 @@ export const routingState = {
 		return results;
 	},
 
-	openPanel(opts?: { prefillCurrent?: boolean; focus?: 'from' | 'to' | null }) {
+	openPanel(opts?: {
+		prefillCurrent?: boolean; focus?: 'from' | 'to' | null;
+		/** The open will complete a direct query whose endpoint arrives
+		 * async (map context menu) — keep the editing chrome through it.
+		 * Default: derived from the state at open time. */
+		expectQuery?: boolean;
+	}) {
 		if (panelOpen) return;
 		panelOpen = true;
+		directSearchExpanded = true;
+		expandOnNextDirectQuery = opts?.expectQuery ?? openWillRunDirectQuery();
 		// Fresh open with no state: prefill From with current location (concept
 		// § Endpoint inputs). If URL restoration filled `from` first, skip.
 		// Skipped when geolocation is unavailable or already denied — the
@@ -582,6 +623,7 @@ export const routingState = {
 	 * reflects what is visible. */
 	closePanel() {
 		panelOpen = false;
+		expandOnNextDirectQuery = false;
 		sharedShare = null;
 		sharedOnly = false;
 		sharedExpired = false;
@@ -984,7 +1026,8 @@ export const routingState = {
 		from: Endpoint | null; to: Endpoint | null; vias?: Via[];
 		mode: TimeMode; travel?: TravelMode; time: string | null;
 		route: string | null;
-		options?: RoutingOptionValues;
+		/** The link's tab's option group only (url.ts paramsToOptions). */
+		options?: Partial<RoutingOptionValues>;
 	}) {
 		from = next.from;
 		to = next.to;
@@ -1000,6 +1043,8 @@ export const routingState = {
 		selectedFingerprint = next.route;
 		pushedEntry = false;
 		panelOpen = true;
+		directSearchExpanded = true;
+		expandOnNextDirectQuery = openWillRunDirectQuery();
 	},
 
 	/** Endpoint-input refresh button on a "Current location" endpoint:
@@ -1036,10 +1081,7 @@ export const routingState = {
 		// (no cascade, no time). Dedup key covers everything the Valhalla
 		// request can see.
 		if (travelMode !== 'transit') {
-			const directKey = JSON.stringify({
-				travel: travelMode, from, to, vias: viaSignature(),
-				walkSpeed: travelMode === 'walk' ? routingOptions.walkSpeed : null
-			});
+			const directKey = directQueryKey();
 			if (directKey === lastQueryKey && !error) return;
 			await runDirectQuery(directKey);
 			return;

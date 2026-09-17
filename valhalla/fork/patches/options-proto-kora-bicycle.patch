@@ -1,0 +1,33 @@
+diff --git a/proto/descriptors/options.proto b/proto/descriptors/options.proto
+index 7d80e3b..c6bba90 100644
+--- a/proto/descriptors/options.proto
++++ b/proto/descriptors/options.proto
+@@ -362,6 +362,28 @@ message Costing {
+     oneof has_low_class_factor {
+       float low_class_factor = 97;
+     }
++    // kora fork: bicycle only — refuse stairs outright (bicycle-costing-fork.md,
++    // the avoid-stairs toggle). Default false keeps stock behaviour.
++    bool exclude_steps = 98;
++    // kora fork: bicycle only — the fast ↔ nice ruler (bicycle-route-options.md).
++    // avoidance_scale multiplies the excess of every traffic penalty, bonus_scale
++    // the discount of the infrastructure bonuses; the parser defaults both to 1.
++    oneof has_avoidance_scale {
++      float avoidance_scale = 99;
++    }
++    oneof has_bonus_scale {
++      float bonus_scale = 100;
++    }
++    // kora fork: bicycle only — surface speed / surcharge profile for the
++    // hybrid-based types: "fast" (default), "balanced" or "leisure".
++    oneof has_surface_profile {
++      string surface_profile = 101;
++    }
++    // kora fork: bicycle only — the fast ↔ nice ruler stop as one bundle:
++    // "road", "fast", "balanced", "relaxed" or "quiet" (bicycle-route-options.md).
++    oneof has_route_character {
++      string route_character = 102;
++    }
+   }
+ 
+   oneof has_options {

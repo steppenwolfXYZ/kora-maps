@@ -1,3 +1,4 @@
+import type { BikeOptionValues } from './optionParams';
 // Endpoint = one of three tagged variants (see transit-routing.md § Endpoint
 // inputs). `station` and `point` carry the coord MOTIS needs; `current` is
 // resolved to a coord at query time from the geolocation API.
@@ -80,10 +81,12 @@ export interface DirectRoute {
 	 * Vereina). Split from ferryM by the service name, since the engine
 	 * reports both crossing kinds identically. */
 	shuttleM: number;
-	/** Midpoint [lon, lat] of each ferry / shuttle crossing aboard this
-	 * route — one per boarding, in route order. Drives the per-crossing
-	 * avoid-this-ferry variant queries. */
-	ferryCrossings: [number, number][];
+	/** Each ferry / shuttle crossing aboard this route — one per
+	 * boarding, in route order: its midpoint [lon, lat] (the exclusion
+	 * box of the avoid-this-crossing variant query is drawn around it)
+	 * and its on-board length in metres (the yardstick the land section
+	 * is judged against). */
+	ferryCrossings: { mid: [number, number]; lengthM: number }[];
 	/** The query's requested endpoints, [lon, lat] — where the user
 	 * actually wants to go, BEFORE Valhalla snapped onto the street
 	 * network. The map pins sit here; a thin walking connector bridges
@@ -93,6 +96,11 @@ export interface DirectRoute {
 	/** Requested via points in route order, [lon, lat] — the via pins on
 	 * the map. Empty for a via-less query. */
 	requestedVias: [number, number][];
+	/** Bike only: the cycling options the route was computed with
+	 * (bicycle-route-options.md) — navigation recalculates with the same
+	 * rider model. Null for walk routes; absent on routes persisted
+	 * before the options existed (treated as the defaults). */
+	requestedBike?: BikeOptionValues | null;
 	/** Bike only: [start, end] index ranges into `coords` where the bike
 	 * is pushed (walkable-but-not-ridable sections — the fork reports
 	 * them as pedestrian-mode maneuvers, bicycle-costing-fork.md). The

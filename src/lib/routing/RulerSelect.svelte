@@ -6,13 +6,16 @@
 	// Clicking the track jumps straight to the nearest stop; arrow keys
 	// move one stop.
 
+	import RacingBikeIcon from './RacingBikeIcon.svelte';
+
 	interface Stop {
 		id: string;
 		label: string;
 		desc: string;
-		/** Material Symbols glyph shown next to the description while this
-		 * stop is selected/previewed. */
+		/** Material Symbols glyph shown in the handle while this stop is
+		 * selected/previewed — or the inline racing-bike SVG. */
 		icon?: string;
+		svg?: 'racing';
 	}
 
 	let { stops, value, onChange, label, icon }: {
@@ -167,7 +170,7 @@
 			style:left="{shownPct}%"
 			style:background={handleBackground(shownPct, dragging)}
 		>
-			{#if shown?.icon}<span class="material-symbols-outlined ruler-handle-icon" aria-hidden="true">{shown.icon}</span>{/if}
+			{#if shown?.svg}<RacingBikeIcon />{:else if shown?.icon}<span class="material-symbols-outlined ruler-handle-icon" aria-hidden="true">{shown.icon}</span>{/if}
 		</div>
 	</div>
 	</div>
@@ -278,7 +281,8 @@
 		transition: left 0.12s ease-out;
 		pointer-events: none;
 	}
-	.ruler-handle :global(.ruler-handle-icon) {
+	.ruler-handle :global(.ruler-handle-icon),
+	.ruler-handle :global(.rbi) {
 		font-size: 1rem;
 		line-height: 1;
 		color: var(--white);

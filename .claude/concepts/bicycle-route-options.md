@@ -22,8 +22,8 @@ declared mandatory still has no UI.
 
 ### 1. Bike type
 
-Four types, a segmented choice, always visible on the cycling tab
-(on one line with the avoid-stairs toggle, § 5):
+Four types, chosen from a dropdown that shows each type's icon, name
+and a one-line description (inside the "more options" area, § 6):
 
 | Type | Behaviour |
 |---|---|
@@ -76,33 +76,70 @@ whole grade→speed curve, not only the flat speed:
 
 ### 4. Fast ↔ nice ruler
 
-One ruler with five stops. It scales the model's traffic-related
-levers around today's tuning, which becomes the middle stop. Two
-request-level scalars carry it: **`avoidance_scale`** multiplies the
-*excess* of every traffic penalty (bare through roads priced by posted
-speed, painted-lane and sharrow factors, the extra-lane step, and all
-crossing costs — base, per lane, signal, and thereby the T-junction
-share); **`bonus_scale`** multiplies the discount of the two
-infrastructure bonuses (separated cycle infrastructure, official
-cycle-route membership).
+One ruler with five stops. Each stop is one bundle of engine numbers,
+sent as the request option **`route_character`** (`road` / `fast` /
+`balanced` / `relaxed` / `quiet`); every per-stop number lives in the
+engine's tuning block, so tuning never touches the client. Balanced is
+today's model. Default: Balanced.
 
-| Stop | `avoidance_scale` | `bonus_scale` | Reads as |
-|---|---|---|---|
-| Road | 0 | 0 | traffic ignored, cycle paths earn nothing |
-| Fast | 0.5 | 0.5 | direct, main roads tolerated |
-| Balanced | 1.0 | 1.0 | today's model |
-| Relaxed | 1.5 | 1.4 | |
-| Quiet | 2.2 | 2.0 | accepts real detours for cycle paths and signed routes |
+| Stop | Traffic penalties | Cycle-path bonus | Cycle-route bonus | Quiet boost | Surfaces | Surface relief |
+|---|---|---|---|---|---|---|
+| Road | off | off | none | none | fast | none |
+| Fast | half | half | 0.96 | none | fast | none |
+| Balanced | as today | as today (0.90) | 0.92 | 0.95 | balanced | none |
+| Relaxed | 1.5× | 1.4× (0.86) | 0.86 | = cycle path (0.86) | leisure | 50 % |
+| Quiet | 2.2× | 2× (0.80) | 0.74 | = cycle path (0.80) | leisure | 80 % |
 
-Default: Balanced.
-
-- **Not scaled** by the ruler: hills, turn and deviation costs, pushed
-  metres, stairs, service roads, ferries and car shuttles, surface
-  handling, alpine guards. They are not a fast-versus-nice question.
-- **Road keeps one penalty:** a carriageway with a signed parallel
-  cycle path (`bicycle=use_sidepath`) stays priced as today, because a
-  blue-signed cycle path is legally mandatory in Switzerland.
+- **Traffic penalties** scale by their excess over 1: bare through roads
+  priced by posted speed, painted-lane and sharrow factors, the
+  extra-lane step, and all crossing costs (base, per lane, signal, and
+  thereby the T-junction share). Never scaled: hills, deviation cost,
+  pushed metres, stairs, service roads, ferries and car shuttles,
+  alpine guards, and the signed-cycle-path factor (`bicycle=use_sidepath`,
+  legally mandatory in Switzerland).
+- **Cycle-path bonus**: the great tier for physically separated cycle
+  infrastructure, scaled by its discount. Real separated cycle paths
+  stay great at every stop.
+- **Cycle-route bonus**: the factor for edges on an official cycle
+  route (any network level). Strong at the calm stops: on a cycle tour
+  the signed route is the point.
+- **Quiet boost**: at the calm stops the environment counts, not the
+  infrastructure grade. Narrow unclassified roads (no second lane in the
+  direction of travel — the graph has no width, and 88 % of Swiss
+  unclassified roads carry no lane or width tag; the few tagged with two
+  lanes are real roads), tracks, and bike-allowed paths / footways get
+  the same factor as a separated cycle path at Relaxed and Quiet, a
+  slightly smaller one at Balanced. A cycle path beside a main road is
+  thus no better than a gravel lane along the river there; the graph
+  cannot tell it from a cycle path through a park.
+- **Surfaces** follow the stop for the normal bicycle and both e-bike
+  types, as a profile: Road / Fast keep the engine's hybrid tables
+  (compacted / dirt / gravel / path at 0.8 / 0.6 / 0.4 / 0.25 speed,
+  surcharge from dirt); Balanced keeps those speeds with a milder
+  surcharge (1.5 / 2.0 / 4.5 instead of 2.5 / 4.5 / 7.0); Relaxed /
+  Quiet ride gravel and dirt as normal ground (0.9 / 0.8 / 0.7 / 0.4,
+  surcharge on path only). The racing bicycle keeps the engine's road
+  tables at every stop.
+- **Surface relief**: at the calm stops a share of the extra riding
+  time a rough surface costs is forgiven in the cost only — half at
+  Relaxed, most (80 %) at Quiet. Displayed times stay honest.
 - The ruler is available for every bike type.
+
+### 4a. Speed-dependent turns and the fast e-bike
+
+- **Turns scale with speed.** The flat per-turn seconds (right 3 s,
+  left 4 s, U-turn 8 s at 20 km/h; left and right differ little on
+  narrow streets, the crossing rule prices big junctions) are sized for
+  a 20 km/h rider and scale with the rider's flat speed, in time and
+  cost: braking into a tight corner and getting back up to speed costs
+  more the faster one rides. Leisurely 0.75×, fast and e-bike 1.2×,
+  professional 1.4×, fast e-bike 1.5× (its motor gets it back up to
+  speed quickly). This gives the pace ruler depth without a knob of its
+  own.
+- **Fast e-bike on roads up to 50 km/h.** At 45 km/h the rider moves
+  with the traffic of a 50 zone, so for the fast e-bike a bare posted-50
+  road is barely worse than a quiet street (1.1 instead of 1.4) and
+  paint on it is the plateau. Faster roads price as for everyone.
 
 ### 5. Avoid stairs
 
@@ -118,10 +155,12 @@ priced as today.
 ### 6. Where the options live
 
 - On the cycling tab, in the input area where the transit tab shows
-  its time controls: bike type and the avoid-stairs toggle always
-  visible, sharing one line; pace ruler and fast ↔ nice ruler behind
-  the transit tab's "more options" pattern (expander with the
-  non-default indicator, snapping rulers, live description text).
+  its time controls, one control row: the avoid-stairs toggle, then the
+  "More options" button (both always visible), the swap at the tail. Bike
+  type dropdown, pace ruler and fast ↔ nice ruler sit behind the
+  expander (the transit tab's "more options" pattern: non-default
+  indicator, snapping rulers, live description text). The pace ruler
+  shows the racing-bike glyph at its Professional stop.
 - Every cycling query — the main request, its alternatives, the
   per-crossing land variants, and navigation recalculations
   (`bicycle-navigation.md` § recalculation) — carries the same options.
@@ -145,8 +184,10 @@ priced as today.
   **`ebike`** and **`sbike`**, for the assisted types.
 - Pace maps onto the existing `cycling_speed` (flat km/h); for the
   e-bike types the option is ignored and the type's model applies.
-- New fork options **`avoidance_scale`** and **`bonus_scale`** (floats,
-  default 1.0); `exclude_steps` as today.
+- New fork option **`route_character`** (string, one of the five stops);
+  `exclude_steps` as today. The engine keeps the earlier scalars
+  `avoidance_scale` / `bonus_scale` / `surface_profile` as a fallback
+  for requests without a route character.
 - Everything is query-time: no tile rebuild, no matrix rebuild.
 
 ## Constraints

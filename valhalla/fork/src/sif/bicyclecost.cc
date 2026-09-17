@@ -10,9 +10,11 @@
 // with a "kora fork:" comment so a VALHALLA_REF bump can re-apply it onto
 // the new upstream copy.
 //
-// Model in one paragraph: an edge's cost is its honest riding time — an
-// everyday constant-power speed curve (halves around 3 % climb) prices
-// hills, so altitude avoids itself — multiplied by a quality factor:
+// Model in one paragraph: an edge's cost is its honest riding time — a
+// rider-power model (the request's flat speed sets the rider's sustained
+// watts; every grade's speed follows from that power, an everyday rider
+// halves around 3 % climb; e-bike types add a motor with an assist cap)
+// prices hills, so altitude avoids itself — multiplied by a quality factor:
 // great (separated infrastructure, slight bonus), fine (painted lanes,
 // quiet streets: the plateau, ≈ 1.0, shorter/faster wins) or, for bare
 // through roads, a speed-limit-driven factor (30 km/h free … 80 km/h
@@ -35,9 +37,17 @@
 //
 // Request options: everything upstream accepts still parses. `use_roads`
 // is accepted for compatibility but inert — the tier model replaces what
-// it used to scale. New: `exclude_steps` (bool, default false).
+// it used to scale. New: `exclude_steps` (bool, default false);
+// `route_character` (`road` / `fast` / `balanced` / `relaxed` / `quiet`
+// — the fast ↔ nice ruler of bicycle-route-options.md, one bundle of
+// per-stop numbers in the kora Route character block); `bicycle_type`
+// additionally accepts `ebike` / `sbike` (motor-assisted rider models,
+// capped at 25 / 45 km/h). Without `route_character` the older scalars
+// `avoidance_scale` / `bonus_scale` (floats, default 1) and
+// `surface_profile` (`fast` / `balanced` / `leisure`) still apply.
 
 #include "sif/bicyclecost.h"
+#include <cmath>
 #include "baldr/directededge.h"
 #include "baldr/graphconstants.h"
 #include "baldr/nodeinfo.h"
@@ -76,6 +86,21 @@ namespace kora {
 // The plateau principle: every "fine" surface sits within a few percent of
 // 1.0 so none of them can buy a detour against another; only the tier
 // boundaries move a route.
+// The fast ↔ nice ruler (bicycle-route-options.md § 4) scales these per
+// request through the Route character block below: `avoidance`
+// multiplies the EXCESS over 1 of every traffic penalty (bare-road speed
+// curve, painted-lane / sharrow factors, the extra-lane step, and all
+// crossing seconds — base, per lane, signal, T-junction share, the
+// enter-bad nudge); `great_scale` the DISCOUNT of the great tier; the
+// official-route factor and the quiet boost are set directly. 1 / 1 is
+// this file's tuning; 0 / 0 is the Road stop (traffic ignored, cycle
+// paths earn nothing). Never scaled: hills, deviation, pushing, stairs,
+// service roads, ferries, alpine guards, and the use_sidepath factor (a
+// signed cycle path is legally mandatory). The old request scalars
+// `avoidance_scale` / `bonus_scale` still drive avoidance / great_scale
+// when no route_character is sent.
+constexpr float kAvoidanceScaleMax = 5.0f;
+constexpr float kBonusScaleMax = 3.0f; // keeps great × route ≥ 0.5 (A* bound)
 constexpr float kGreatFactor = 0.90f;      // separated lanes, dedicated cycleways
 constexpr float kFineFactor = 1.00f;       // painted lanes, quiet streets, living streets
 constexpr float kSharedPathFactor = 1.10f; // paths shared with pedestrians (still fine)
@@ -153,36 +178,47 @@ constexpr baldr::RoadClass kThroughClassLimit = baldr::RoadClass::kTertiary;
 // between comparable options, never wins a meaningful detour.
 constexpr float kBikeNetworkFactor = 0.92f;
 
-// ── Hills ───────────────────────────────────────────────────────────────
-// The PRIMARY hill mechanism is honest time: kEverydaySpeedFactor below
-// replaces upstream's grade→speed curve, which models an athletic rider
-// holding speed by pushing harder (10 % before speed halves). An everyday
-// utility rider at constant comfortable power halves around 3 % and is
-// near walking pace at 10 %; downhill is capped by city braking, not
-// physics. With time priced honestly, altitude avoids itself — the
-// discomfort penalty (kSteepDiscomfort) only kicks in where most
-// cyclists would start pushing. An e-bike mode will later select a much
-// flatter curve via bicycle_type; this one is the muscle-bike profile.
-// Grade buckets (index 0-15, upstream's):
-//   -10, -8, -6.5, -5, -3, -1.5, 0, 1.5, 3, 5, 6.5, 8, 10, 11.5, 13, 15 %
-constexpr float kEverydaySpeedFactor[] = {
-    1.70f, // -10%  braking-capped, ~30 km/h
-    1.70f, // -8%
-    1.65f, // -6.5%
-    1.60f, // -5%
-    1.40f, // -3%
-    1.20f, // -1.5%
-    1.00f, // 0%    18 km/h base (hybrid)
-    0.80f, // 1.5%
-    0.55f, // 3%    ~10 km/h — the realistic halving point
-    0.40f, // 5%    ~7 km/h
-    0.33f, // 6.5%
-    0.28f, // 8%    ~5 km/h
-    0.22f, // 10%   ~4 km/h — pushing territory
-    0.19f, // 11.5%
-    0.17f, // 13%
-    0.15f  // 15%
+// ── Hills: rider power, not a speed table ────────────────────────────────
+// The primary hill mechanism is honest time. The request's flat speed
+// (`cycling_speed`) describes the RIDER: it fixes the watts they sustain
+// on the flat against rolling resistance and air drag, and every grade's
+// riding speed then follows from that same power against gravity —
+// a professional climbs proportionally faster than a leisurely rider,
+// not just on the flat. Calibration (bicycle-route-options.md § Speed
+// model): at 20 km/h flat (≈ 90 W) the speed halves around a 3 % climb
+// and is at walking pace near 10 % — the everyday-rider curve the old
+// hand-written table encoded at 18 km/h. Descents are capped by city
+// braking, not physics. The per-grade table is computed once per
+// request in the constructor (ride_speed_kph_).
+//
+// E-bike types (`ebike` / `sbike`) use the same model: the rider at
+// Normal effort plus a motor, and the motor cuts out at the type's assist
+// cap. Above the cap only rider and gravity act — downhill both types run
+// faster than the cap by themselves; on the flat they sit exactly at it
+// (the motor fills up to the cap, the rider alone cannot exceed it). The
+// basic e-bike's motor is moderate, so climbs slow it noticeably
+// (mid-teens km/h on 6 %); the fast e-bike's is strong enough to hold ~45
+// on gentle climbs and stay in the 30s on 6 %. Watts are tuning numbers.
+constexpr float kRiderBikeMassKg = 95.0f; // rider + bike + bag
+constexpr float kRollingResistance = 0.008f;
+constexpr float kDragAreaM2 = 0.5f; // CdA, upright posture
+constexpr float kAirDensityKgM3 = 1.2f;
+constexpr float kGravityMS2 = 9.81f;
+// Braking cap on descents: at least this, and a little above the rider's
+// own flat speed for faster riders / the fast e-bike.
+constexpr float kDescentCapMinKph = 32.0f;
+constexpr float kDescentCapFlatFactor = 1.15f;
+// Rider effort assumed on an e-bike (the pace ruler does not apply).
+constexpr float kEbikeRiderFlatKph = 20.0f;
+struct MotorProfile {
+  float motor_w;  // motor power at the wheel
+  float cap_kph;  // assist cut-off
 };
+constexpr MotorProfile kEbikeMotor{200.0f, 25.0f};
+constexpr MotorProfile kSbikeMotor{600.0f, 45.0f};
+// Upstream's 16 grade buckets, in percent.
+constexpr float kGradePct[] = {-10.0f, -8.0f, -6.5f, -5.0f, -3.0f, -1.5f, 0.0f,  1.5f,
+                               3.0f,   5.0f,  6.5f,  8.0f,  10.0f, 11.5f, 13.0f, 15.0f};
 // Extra discomfort ONLY in pushing territory (≥ ~10 % up) and on
 // treacherous descents — everything below that is priced by time alone.
 // Scaled by (1 - use_hills) like upstream's table; kHillStrength rescales
@@ -353,9 +389,10 @@ constexpr float kTurnSecByType[] = {
     1.5f,  // slight right
     3.0f,  // right
     5.0f,  // sharp right
-    10.0f, // reverse
+    8.0f,  // reverse
     6.0f,  // sharp left
-    5.0f,  // left
+    4.0f,  // left — on narrow streets left and right differ little; the
+           // crossing rule prices the real difference at big junctions
     2.0f   // slight left
 };
 
@@ -371,6 +408,114 @@ constexpr float kTurnSecByType[] = {
 // continuation we cannot legally use (oneway against us) does not
 // count — our turn is then the forced choice, not a deviation.
 constexpr float kDeviationPenaltySec = 3.0f;
+
+// ── Route character: the fast ↔ nice ruler's per-stop bundle ────────────
+// The client's five ruler stops (bicycle-route-options.md § 4) each
+// select one row here; everything a stop changes lives in this table.
+//   avoidance     scales the EXCESS over 1 of every traffic penalty
+//                 (bare-road speed curve, painted-lane / sharrow
+//                 factors, extra-lane step, all crossing seconds)
+//   great_scale   scales the DISCOUNT of the great tier (separated
+//                 cycle infrastructure)
+//   route_bonus   the factor an edge on an official cycle route gets
+//                 (any network level — the graph stores one bit)
+//   quiet_boost   factor for the "away from traffic" edges: narrow
+//                 unclassified roads (no second lane in this direction —
+//                 88 % of CH unclassified roads carry no lane or width
+//                 tag at all, and the few tagged lanes=2 are real roads),
+//                 tracks, and bike-allowed paths / footways. ≥ 1 = off.
+//                 At the calm stops it equals the great tier: on a
+//                 cycle tour a gravel lane is as good as a cycle path
+//                 beside a road, which the graph cannot tell apart from
+//                 a cycle path through a park.
+//   surface       the surface speed / surcharge tables (next block)
+//   surface_relief cost-only compensation of the surface slowdown:
+//                 this share of the extra riding time a rough surface
+//                 costs is forgiven in the COST (the displayed time
+//                 stays honest). 0.5 = half, 0.8 = most of it.
+// Balanced is this file's own tuning; Road ignores traffic and earns
+// nothing from infrastructure.
+struct CharacterProfile {
+  float avoidance;
+  float great_scale;
+  float route_bonus;
+  float quiet_boost;
+  const char* surface;
+  float surface_relief;
+};
+constexpr CharacterProfile kCharacterRoad{0.0f, 0.0f, 1.00f, 1.00f, "fast", 0.0f};
+constexpr CharacterProfile kCharacterFast{0.5f, 0.5f, 0.96f, 1.00f, "fast", 0.0f};
+constexpr CharacterProfile kCharacterBalanced{1.0f, 1.0f, 0.92f, 0.95f, "balanced", 0.0f};
+constexpr CharacterProfile kCharacterRelaxed{1.5f, 1.4f, 0.86f, 0.86f, "leisure", 0.5f};
+constexpr CharacterProfile kCharacterQuiet{2.2f, 2.0f, 0.74f, 0.80f, "leisure", 0.8f};
+
+// ── Turns scale with speed ──────────────────────────────────────────────
+// The flat per-turn seconds (kTurnSecByType) are sized for a 20 km/h
+// rider. Braking into a tight corner and getting back up to speed costs
+// more the faster one rides, so they scale with the rider's flat speed
+// (time AND cost — the displayed duration carries it). Piecewise linear
+// over these points: leisurely 0.75, normal 1.0, fast / e-bike 1.2,
+// professional 1.4, fast e-bike 1.5 — the S-Pedelec has the power to
+// get back up to speed quickly, so it pays less than its speed alone
+// would suggest. Falls out of the pace ruler and the e-bike types
+// without a knob of its own.
+constexpr float kTurnScalePoints[][2] = {
+    {15.0f, 0.75f},
+    {20.0f, 1.00f},
+    {25.0f, 1.20f},
+    {30.0f, 1.40f},
+    {45.0f, 1.50f},
+};
+
+// ── Fast e-bike on roads up to 50 km/h ──────────────────────────────────
+// At 45 km/h the S-Pedelec rides WITH the traffic of a 50 zone, so a
+// bare 50 road is barely worse than a quiet street and paint on it is
+// the plateau: its own bare-road curve (posted 50 → 1.1 instead of 1.4)
+// and a paint threshold of 60 instead of kPaintSpeedKph. Faster roads
+// price as for everyone.
+constexpr float kSbikeBareSpeedPoints[][2] = {
+    {30.0f, 1.00f},
+    {50.0f, 1.10f},
+    {60.0f, 1.60f},
+    {80.0f, 2.20f},
+};
+constexpr uint32_t kSbikePaintSpeedKph = 60;
+
+// ── Surfaces: profiles per route character ──────────────────────────────
+// Upstream prices surfaces per bicycle type twice: a speed factor per
+// surface (real time) and a cost surcharge for surfaces at or worse
+// than the type's "penalized from" level (avoid_bad_surfaces × a table
+// per step beyond it). Its hybrid numbers treat gravel like a road
+// bike would (0.4× speed AND +0.63 cost), which chased routes off a
+// gravel national cycle route (Veloland 8's Aareweg between Kiesen and
+// Thun). The request's `surface_profile` — the client maps its fast ↔
+// nice ruler onto it (bicycle-route-options.md § 4) — picks one of
+// three tables for the hybrid-based types (bicycle, ebike, sbike):
+//   fast      everyday commuting: upstream's hybrid speeds, surcharge
+//             from dirt (upstream's table) — speed matters, rough
+//             ground is worth avoiding.
+//   balanced  hybrid speeds, a milder surcharge from dirt.
+//   leisure   cycle-tour mode: gravel and dirt are normal ground —
+//             gentler speeds, surcharge on path only.
+// The road type (racing bicycle) keeps upstream's tables at every
+// stop — surface avoidance is that type's identity; cross / mountain
+// are untouched too (not offered by the client).
+// Surface order: paved_smooth, paved, paved_rough, compacted, dirt,
+// gravel, path, impassable (index 0..7).
+struct SurfaceProfile {
+  float speed[8];       // speed factor per surface
+  Surface penalize_from; // first surface that carries a surcharge
+  float surcharge[4];    // avoid_bad_surfaces × this, per step from penalize_from
+};
+constexpr SurfaceProfile kSurfaceFast{{1.0f, 1.0f, 1.0f, 0.8f, 0.6f, 0.4f, 0.25f, 0.0f},
+                                      Surface::kDirt,
+                                      {2.5f, 4.5f, 7.0f, 7.0f}};
+constexpr SurfaceProfile kSurfaceBalanced{{1.0f, 1.0f, 1.0f, 0.8f, 0.6f, 0.4f, 0.25f, 0.0f},
+                                          Surface::kDirt,
+                                          {1.5f, 2.0f, 4.5f, 4.5f}};
+constexpr SurfaceProfile kSurfaceLeisure{{1.0f, 1.0f, 1.0f, 0.9f, 0.8f, 0.7f, 0.4f, 0.0f},
+                                         Surface::kPath,
+                                         {4.5f, 4.5f, 4.5f, 4.5f}};
 
 // ── Crossings (cost seconds added at the transition) ────────────────────
 // Applied when the road being ENTERED is through-traffic class and the
@@ -426,6 +571,8 @@ constexpr float kDefaultUseRoad = 0.25f;          // Factor between 0 and 1 (kor
 constexpr float kDefaultAvoidBadSurfaces = 0.25f; // Factor between 0 and 1
 constexpr float kDefaultUseLivingStreets = 0.5f;  // Factor between 0 and 1
 const std::string kDefaultBicycleType = "hybrid"; // Bicycle type
+const std::string kDefaultSurfaceProfile = "fast"; // kora fork: surface profile
+const std::string kDefaultRouteCharacter = "";    // kora fork: empty = use the scalars
 
 // Default turn costs - modified by the stop impact.
 constexpr float kTCStraight = 0.15f;
@@ -502,6 +649,9 @@ constexpr float kDefaultUseHills = 0.25f;
 constexpr ranged_default_t<float> kUseRoadRange{0.0f, kDefaultUseRoad, 1.0f};
 constexpr ranged_default_t<float> kUseHillsRange{0.0f, kDefaultUseHills, 1.0f};
 constexpr ranged_default_t<float> kAvoidBadSurfacesRange{0.0f, kDefaultAvoidBadSurfaces, 1.0f};
+// kora fork: the fast ↔ nice ruler scales (see the kora block).
+constexpr ranged_default_t<float> kAvoidanceScaleRange{0.0f, 1.0f, kora::kAvoidanceScaleMax};
+constexpr ranged_default_t<float> kBonusScaleRange{0.0f, 1.0f, kora::kBonusScaleMax};
 
 constexpr ranged_default_t<float> kBSSCostRange{0, kDefaultBssCost, kMaxPenalty};
 constexpr ranged_default_t<float> kBSSPenaltyRange{0, kDefaultBssPenalty, kMaxPenalty};
@@ -583,7 +733,7 @@ inline uint32_t posted_speed(const graph_tile_ptr& tile, const DirectedEdge* edg
   return limit;
 }
 
-inline Tier classify(const graph_tile_ptr& tile, const DirectedEdge* edge) {
+inline Tier classify(const graph_tile_ptr& tile, const DirectedEdge* edge, uint32_t paint_kph) {
   const Use use = edge->use();
   const CycleLane lane = edge->cyclelane();
   if (use == Use::kCycleway) {
@@ -612,7 +762,7 @@ inline Tier classify(const graph_tile_ptr& tile, const DirectedEdge* edge) {
   // Paint on a through road: on the plateau in a 30 zone, slightly below
   // it from kPaintSpeedKph (tier_factor adds the lane steps).
   if (lane == CycleLane::kDedicated || lane == CycleLane::kShared) {
-    if (posted_speed(tile, edge) < kora::kPaintSpeedKph) {
+    if (posted_speed(tile, edge) < paint_kph) {
       return Tier::kFine;
     }
     return lane == CycleLane::kDedicated ? Tier::kPaintedLane : Tier::kSharrow;
@@ -620,10 +770,58 @@ inline Tier classify(const graph_tile_ptr& tile, const DirectedEdge* edge) {
   return Tier::kBad; // bare through road — priced by speed in tier_factor
 }
 
+// kora fork: a factor's excess over 1, scaled by the avoidance ruler.
+inline float scaled_excess(float factor, float scale) {
+  return 1.0f + (factor - 1.0f) * scale;
+}
+
+// kora fork: rider-power model (see the kora Hills block). Power a rider
+// sustains to hold `flat_kph` on level ground.
+inline float rider_power_w(float flat_kph) {
+  const float v = flat_kph / 3.6f;
+  const float rolling = kora::kRollingResistance * kora::kRiderBikeMassKg * kora::kGravityMS2;
+  const float drag = 0.5f * kora::kAirDensityKgM3 * kora::kDragAreaM2 * v * v;
+  return (rolling + drag) * v;
+}
+
+// Steady speed (km/h) at which `power_w` balances rolling resistance,
+// gravity at `grade_pct` and air drag. f(v) = a·v + c·v³ with a negative
+// on descents, so f is not monotone near zero — but f(0) = 0 < P and
+// f(hi) > P, and the crossing above f's minimum is unique: bisection.
+inline float speed_at_grade_kph(float power_w, float grade_pct) {
+  const float g = grade_pct / 100.0f;
+  const float sin_theta = g / std::sqrt(1.0f + g * g);
+  const float a = kora::kRiderBikeMassKg * kora::kGravityMS2 * (kora::kRollingResistance + sin_theta);
+  const float c = 0.5f * kora::kAirDensityKgM3 * kora::kDragAreaM2;
+  float lo = 0.0f, hi = 40.0f; // m/s — beyond any braking cap
+  for (int i = 0; i < 50; ++i) {
+    const float mid = 0.5f * (lo + hi);
+    const float f = a * mid + c * mid * mid * mid;
+    if (f < power_w) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return 0.5f * (lo + hi) * 3.6f;
+}
+
+// kora fork: everything the tier factor needs from the request — the
+// route character's numbers plus the bike type's road curve (see the
+// kora Route character / Fast e-bike blocks).
+struct TierWeights {
+  float avoidance = 1.0f;
+  float great_scale = 1.0f;
+  float quiet_boost = 1.0f; // ≥ 1: off
+  const float (*bare)[2] = kora::kBareSpeedPoints;
+  size_t bare_n = sizeof(kora::kBareSpeedPoints) / sizeof(kora::kBareSpeedPoints[0]);
+  uint32_t paint_kph = kora::kPaintSpeedKph;
+};
+
 // The speed curve for through roads without bike infrastructure.
-inline float bare_speed_factor(uint32_t speed_kph) {
-  const auto& pts = kora::kBareSpeedPoints;
-  constexpr size_t n = sizeof(kora::kBareSpeedPoints) / sizeof(kora::kBareSpeedPoints[0]);
+inline float bare_speed_factor(uint32_t speed_kph, const TierWeights& w) {
+  const auto* pts = w.bare;
+  const size_t n = w.bare_n;
   const float s = static_cast<float>(speed_kph);
   if (s <= pts[0][0]) {
     return pts[0][1];
@@ -654,27 +852,50 @@ inline float extra_lane_step(const DirectedEdge* edge) {
   return kora::kExtraLaneStep * static_cast<float>(lanes - 1);
 }
 
-inline float tier_factor(const graph_tile_ptr& tile, Tier tier, const DirectedEdge* edge) {
+// kora fork: the "away from traffic" edges the quiet boost applies to
+// (kora Route character block): narrow unclassified roads and tracks.
+// Bike-allowed paths qualify through their tier (kSharedPath).
+inline bool quiet_road(const DirectedEdge* edge) {
+  const Use use = edge->use();
+  if (use == Use::kTrack) {
+    return true;
+  }
+  return use == Use::kRoad && edge->classification() == baldr::RoadClass::kUnclassified &&
+         edge->lanecount() < 2 && !edge->use_sidepath();
+}
+
+// `w` carries the request's ruler numbers (see the kora tiers and Route
+// character blocks): traffic penalties scale by their excess over 1, the
+// great tier by its discount, quiet roads / tracks / shared paths drop to
+// the quiet boost when one is set; use_sidepath is deliberately unscaled.
+inline float tier_factor(const graph_tile_ptr& tile,
+                         Tier tier,
+                         const DirectedEdge* edge,
+                         const TierWeights& w) {
   switch (tier) {
     case Tier::kGreat:
-      return kora::kGreatFactor;
+      return 1.0f - (1.0f - kora::kGreatFactor) * w.great_scale;
     case Tier::kFine:
-      return kora::kFineFactor;
+      return (w.quiet_boost < 1.0f && quiet_road(edge)) ? std::min(kora::kFineFactor, w.quiet_boost)
+                                                        : kora::kFineFactor;
     case Tier::kSharedPath:
-      return kora::kSharedPathFactor;
+      return w.quiet_boost < 1.0f ? std::min(kora::kSharedPathFactor, w.quiet_boost)
+                                  : kora::kSharedPathFactor;
     case Tier::kService:
       return kora::kServiceRoadFactor;
     case Tier::kPaintedLane:
     case Tier::kSharrow: {
       const float base = tier == Tier::kPaintedLane ? kora::kPaintedLaneFactor : kora::kSharrowFactor;
       const float speed_scale =
-          bare_speed_factor(posted_speed(tile, edge)) / bare_speed_factor(kora::kPaintSpeedKph);
-      return base * speed_scale + extra_lane_step(edge);
+          bare_speed_factor(posted_speed(tile, edge), w) / bare_speed_factor(w.paint_kph, w);
+      return scaled_excess(base * speed_scale + extra_lane_step(edge), w.avoidance);
     }
     case Tier::kBad:
     default:
-      return edge->use_sidepath() ? kora::kUseSidepathFactor
-                                  : bare_speed_factor(posted_speed(tile, edge)) + extra_lane_step(edge);
+      return edge->use_sidepath()
+                 ? kora::kUseSidepathFactor
+                 : scaled_excess(bare_speed_factor(posted_speed(tile, edge), w) + extra_lane_step(edge),
+                                 w.avoidance);
   }
 }
 
@@ -921,7 +1142,8 @@ inline float crossing_penalty(baldr::RoadClass from_rc,
                               const DirectedEdge* to,
                               const NodeInfo* node,
                               Turn::Type turn,
-                              const graph_tile_ptr& tile) {
+                              const graph_tile_ptr& tile,
+                              const TierWeights& w) {
   float penalty = 0.0f;
   // Roundabouts are the safe way across a big road — never a crossing to
   // penalize (entering / circulating; the exit is an exempt right turn).
@@ -967,7 +1189,7 @@ inline float crossing_penalty(baldr::RoadClass from_rc,
       }
     }
   }
-  if (!from_through && classify(tile, to) == Tier::kBad && !to->use_sidepath() &&
+  if (!from_through && classify(tile, to, w.paint_kph) == Tier::kBad && !to->use_sidepath() &&
       posted_speed(tile, to) >= kora::kEnterBadSpeedKph) {
     penalty += kora::kEnterBadPenalty;
   }
@@ -1140,8 +1362,18 @@ public:
    * upstream makes (factor 0.5) still underestimates.
    */
   virtual float AStarCostFactor() const override {
-    // Assume max speed of 2 * the average speed set for costing
-    return kSpeedFactor[static_cast<uint32_t>(2 * speed_)] * min_linear_cost_factor_;
+    // kora fork: the fastest the bike ever rides is the descent cap, and
+    // the smallest edge factor is the great tier times the official-route
+    // bonus at the request's bonus scale (kBonusScaleMax keeps that
+    // ≥ 0.5); every other term only adds. Seconds per metre at the cap
+    // times that floor underestimates every ridden, pushed or ferried
+    // metre.
+    // The quiet boost never goes below the great tier, and the surface
+    // relief never forgives more than the surface's own extra time, so
+    // cost per metre stays ≥ flat-speed time × great × route bonus.
+    const float great = 1.0f - (1.0f - kora::kGreatFactor) * tw_.great_scale;
+    const float min_factor = std::min(great, tw_.quiet_boost) * route_bonus_;
+    return (3.6f / max_ride_speed_kph_) * min_factor * min_linear_cost_factor_;
   }
 
   /**
@@ -1163,9 +1395,17 @@ public:
   float avoid_bad_surfaces_; // Preference of avoiding bad surfaces for the bike type
   bool exclude_steps_;       // kora fork: refuse stairs outright (avoid-stairs toggle)
   bool request_ignores_turns_; // kora fork: the request asked to ignore turn restrictions
+  TierWeights tw_;             // kora fork: the ruler's tier numbers + the type's road curve
+  float route_bonus_;          // kora fork: factor for official-cycle-route edges
+  float surface_relief_;       // kora fork: share of the surface slowdown forgiven in cost
+  float turn_scale_;           // kora fork: flat per-turn seconds scaled by flat speed
 
   // Average speed (kph) on smooth, flat roads.
   float speed_;
+  // kora fork: riding speed per grade bucket from the rider-power model
+  // (motor and caps applied), and its maximum (the descent cap) for A*.
+  float ride_speed_kph_[16];
+  float max_ride_speed_kph_;
 
   // Bicycle type
   BicycleType type_;
@@ -1176,6 +1416,9 @@ public:
 
   // Surface speed factors (based on road surface type).
   const float* surface_speed_factor_;
+  // kora fork: cost surcharge table per step from minimal_surface_penalized_
+  // (upstream's kSurfaceFactors, or the request's surface profile's).
+  const float* surface_cost_factor_;
 
   // Elevation/grade penalty (weighting applied based on the edge's weighted
   // grade (relative value from 0-15)
@@ -1217,27 +1460,113 @@ BicycleCost::BicycleCost(const Costing& costing)
   get_base_costs(costing);
 
   // Get the bicycle type - enter as string and convert to enum
+  // kora fork: `ebike` / `sbike` are hybrid bikes with a motor profile —
+  // the upstream enum (and the trip leg's travel type) stays untouched.
   const std::string& bicycle_type = costing_options.transport_type();
+  const kora::MotorProfile* motor = nullptr;
   if (bicycle_type == "cross") {
     type_ = BicycleType::kCross;
   } else if (bicycle_type == "road") {
     type_ = BicycleType::kRoad;
   } else if (bicycle_type == "mountain") {
     type_ = BicycleType::kMountain;
+  } else if (bicycle_type == "ebike") {
+    type_ = BicycleType::kHybrid;
+    motor = &kora::kEbikeMotor;
+  } else if (bicycle_type == "sbike") {
+    type_ = BicycleType::kHybrid;
+    motor = &kora::kSbikeMotor;
   } else {
     type_ = BicycleType::kHybrid;
   }
 
-  speed_ = costing_options.cycling_speed();
+  // kora fork: the rider-power speed table (kora Hills block). For an
+  // e-bike the request's cycling_speed is ignored — its flat speed is the
+  // assist cap, and the rider pedals at Normal effort.
+  const float rider_flat_kph = motor ? kora::kEbikeRiderFlatKph : costing_options.cycling_speed();
+  const float rider_w = rider_power_w(rider_flat_kph);
+  speed_ = motor ? motor->cap_kph : rider_flat_kph;
+  const float descent_cap = std::max(kora::kDescentCapMinKph, speed_ * kora::kDescentCapFlatFactor);
+  max_ride_speed_kph_ = 0.0f;
+  for (uint32_t i = 0; i <= kMaxGradeFactor; i++) {
+    float v = speed_at_grade_kph(rider_w, kora::kGradePct[i]);
+    if (motor) {
+      const float assisted = speed_at_grade_kph(rider_w + motor->motor_w, kora::kGradePct[i]);
+      // Below the cap the motor sets the pace; at the cap it cuts out and
+      // the rider alone continues — never slower than the cap it reached.
+      v = assisted <= motor->cap_kph ? assisted : std::max(motor->cap_kph, v);
+    }
+    v = std::min(v, descent_cap);
+    // Riding can never be slower than walking the bike at that grade.
+    v = std::max(v, kora::kPushSpeedKph * kora::kPushGradeSpeedFactor[i]);
+    ride_speed_kph_[i] = v;
+    max_ride_speed_kph_ = std::max(max_ride_speed_kph_, v);
+  }
+  // kora fork: the fast ↔ nice ruler (kora Route character block). A
+  // known route_character selects its bundle; otherwise the older
+  // scalars apply with no quiet boost and no surface relief.
+  const std::string& character = costing_options.route_character();
+  const kora::CharacterProfile* cp = character == "road"       ? &kora::kCharacterRoad
+                                     : character == "fast"     ? &kora::kCharacterFast
+                                     : character == "balanced" ? &kora::kCharacterBalanced
+                                     : character == "relaxed"  ? &kora::kCharacterRelaxed
+                                     : character == "quiet"    ? &kora::kCharacterQuiet
+                                                               : nullptr;
+  if (cp) {
+    tw_.avoidance = cp->avoidance;
+    tw_.great_scale = cp->great_scale;
+    tw_.quiet_boost = cp->quiet_boost;
+    route_bonus_ = cp->route_bonus;
+    surface_relief_ = cp->surface_relief;
+  } else {
+    tw_.avoidance = costing_options.avoidance_scale();
+    tw_.great_scale = costing_options.bonus_scale();
+    tw_.quiet_boost = 1.0f;
+    route_bonus_ = 1.0f - (1.0f - kora::kBikeNetworkFactor) * costing_options.bonus_scale();
+    surface_relief_ = 0.0f;
+  }
+  // kora fork: the fast e-bike's own road curve (kora Fast e-bike block).
+  if (motor == &kora::kSbikeMotor) {
+    tw_.bare = kora::kSbikeBareSpeedPoints;
+    tw_.bare_n = sizeof(kora::kSbikeBareSpeedPoints) / sizeof(kora::kSbikeBareSpeedPoints[0]);
+    tw_.paint_kph = kora::kSbikePaintSpeedKph;
+  }
+  // kora fork: turn seconds scale with the flat speed (kora Turns block).
+  {
+    const auto& pts = kora::kTurnScalePoints;
+    constexpr size_t n = sizeof(kora::kTurnScalePoints) / sizeof(kora::kTurnScalePoints[0]);
+    turn_scale_ = pts[n - 1][1];
+    if (speed_ <= pts[0][0]) {
+      turn_scale_ = pts[0][1];
+    } else {
+      for (size_t i = 1; i < n; ++i) {
+        if (speed_ <= pts[i][0]) {
+          const float f = (speed_ - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]);
+          turn_scale_ = pts[i - 1][1] + f * (pts[i][1] - pts[i - 1][1]);
+          break;
+        }
+      }
+    }
+  }
   avoid_bad_surfaces_ = costing_options.avoid_bad_surfaces();
   minimal_surface_penalized_ = kWorstAllowedSurface[static_cast<uint32_t>(type_)];
   worst_allowed_surface_ = avoid_bad_surfaces_ == 1.0f ? minimal_surface_penalized_ : Surface::kPath;
 
   // Set the surface speed factors for the bicycle type.
+  surface_cost_factor_ = kSurfaceFactors;
   if (type_ == BicycleType::kRoad) {
     surface_speed_factor_ = kRoadSurfaceSpeedFactors;
   } else if (type_ == BicycleType::kHybrid) {
-    surface_speed_factor_ = kHybridSurfaceSpeedFactors;
+    // kora fork: the hybrid-based types take the request's surface
+    // profile (kora Surfaces block) instead of upstream's tables.
+    const std::string profile = cp ? std::string(cp->surface) : costing_options.surface_profile();
+    const kora::SurfaceProfile& sp = profile == "leisure"    ? kora::kSurfaceLeisure
+                                     : profile == "balanced" ? kora::kSurfaceBalanced
+                                                             : kora::kSurfaceFast;
+    surface_speed_factor_ = sp.speed;
+    surface_cost_factor_ = sp.surcharge;
+    minimal_surface_penalized_ = sp.penalize_from;
+    worst_allowed_surface_ = avoid_bad_surfaces_ == 1.0f ? minimal_surface_penalized_ : Surface::kPath;
   } else if (type_ == BicycleType::kCross) {
     surface_speed_factor_ = kCrossSurfaceSpeedFactors;
   } else {
@@ -1256,7 +1585,7 @@ BicycleCost::BicycleCost(const Costing& costing)
 
   // Populate the grade penalties (based on use_hills factor - value between 0 and 1)
   // kora fork: the steep-discomfort table (pushing territory only) scaled
-  // by kHillStrength — honest time from the everyday speed curve is the
+  // by kHillStrength — honest time from the rider-power speed table is the
   // primary hill mechanism.
   float use_hills = costing_options.use_hills();
   float avoid_hills = (1.0f - use_hills);
@@ -1488,40 +1817,51 @@ Cost BicycleCost::EdgeCost(const baldr::DirectedEdge* edge,
     return {shortest_ ? edge->length() : cost, sec};
   }
 
-  // kora fork: tier factor + official-route bonus + hills + surface.
+  // kora fork: tier factor + official-route bonus + hills + surface, the
+  // tier and bonus terms at the request's ruler scales.
   const uint32_t grade = effective_grade(edge);
-  float factor = tier_factor(tile, classify(tile, edge), edge);
+  float factor = tier_factor(tile, classify(tile, edge, tw_.paint_kph), edge, tw_);
   // T2 terrain: ridable in principle, a last resort in practice.
   if (edge->sac_scale() == SacScale::kMountainHiking) {
     factor *= kora::kSacT2CostFactor;
   }
   if (edge->bike_network()) {
-    factor *= kora::kBikeNetworkFactor;
+    factor *= route_bonus_;
   }
   factor += grade_penalty[grade];
 
   // If surface is worse than the minimum we add a surface factor
+  // (kora fork: from the type's / profile's table, see kora Surfaces).
   if (edge->surface() >= minimal_surface_penalized_) {
-    factor +=
-        avoid_bad_surfaces_ * kSurfaceFactors[static_cast<uint32_t>(edge->surface()) -
-                                              static_cast<uint32_t>(minimal_surface_penalized_)];
+    factor += avoid_bad_surfaces_ *
+              surface_cost_factor_[std::min<uint32_t>(3, static_cast<uint32_t>(edge->surface()) -
+                                                         static_cast<uint32_t>(minimal_surface_penalized_))];
   }
 
-  // Compute bicycle speed based on surface factor and grade (dismount
-  // edges returned above via the pushed branch — kora fork). Lower bike
-  // speed for rougher surfaces (amount depends on the bicycle type). The
-  // everyday grade→speed curve is the primary hill mechanism; the grade
-  // is the capped one so DEM spikes on through roads distort neither
-  // cost nor the displayed time.
-  uint32_t bike_speed = static_cast<uint32_t>(
-      (speed_ * surface_speed_factor_[static_cast<uint32_t>(edge->surface())] *
-       kora::kEverydaySpeedFactor[grade]) +
-      0.5f);
+  // Compute bicycle speed from the rider-power table (kora fork — the
+  // primary hill mechanism; dismount edges returned above via the pushed
+  // branch) and the surface factor (rougher surfaces slow the bike by an
+  // amount that depends on the bicycle type). The grade is the capped
+  // one so DEM spikes on through roads distort neither cost nor the
+  // displayed time. Surface factors of 0 mark refused surfaces, which
+  // Allowed() already rejects; guard anyway.
+  const float surface_factor =
+      std::max(0.1f, surface_speed_factor_[static_cast<uint32_t>(edge->surface())]);
+  const float bike_speed = ride_speed_kph_[grade] * surface_factor;
+  // kora fork: surface relief (kora Route character block) — forgive a
+  // share of the surface's extra riding time in the cost only. The
+  // extra time is (1/s - 1) of the smooth-surface time; the cost keeps
+  // (1 - relief) of it, i.e. the factor (1 + e(1 - r)) · s on the
+  // honest, slowed seconds.
+  if (surface_relief_ > 0.0f && surface_factor < 1.0f) {
+    const float extra = 1.0f / surface_factor - 1.0f;
+    factor *= (1.0f + extra * (1.0f - surface_relief_)) * surface_factor;
+  }
 
   factor *= EdgeFactor(edgeid);
 
   // Compute elapsed time based on speed. Modulate cost with weighting factors.
-  float sec = (edge->length() * kSpeedFactor[bike_speed]);
+  float sec = edge->length() * 3.6f / bike_speed;
   return {shortest_ ? edge->length() : sec * factor, sec};
 }
 
@@ -1558,13 +1898,15 @@ Cost BicycleCost::TransitionCost(const baldr::DirectedEdge* edge,
     seconds += stopimpact * turn_cost;
   }
 
-  // kora fork: flat per-turn cost (braking + navigation load).
+  // kora fork: flat per-turn cost (braking + navigation load), scaled by
+  // the rider's speed (kora Turns block).
   if (!edge->roundabout()) {
-    seconds += kora::kTurnSecByType[static_cast<uint32_t>(turn)];
+    seconds += turn_scale_ * kora::kTurnSecByType[static_cast<uint32_t>(turn)];
   }
 
-  // kora fork: the crossing rule.
-  float penalty = crossing_penalty(pred.classification(), pred.use(), edge, node, turn, tile);
+  // kora fork: the crossing rule, at the request's avoidance scale.
+  float penalty = tw_.avoidance *
+                  crossing_penalty(pred.classification(), pred.use(), edge, node, turn, tile, tw_);
 
   // kora fork: deviation from the intuitive continuation (cost only).
   if (is_deviation(tile, node, idx, pred.classification(), edge)) {
@@ -1636,13 +1978,15 @@ Cost BicycleCost::TransitionCostReverse(const uint32_t idx,
     seconds += stopimpact * turn_cost;
   }
 
-  // kora fork: flat per-turn cost (braking + navigation load).
+  // kora fork: flat per-turn cost (braking + navigation load), scaled by
+  // the rider's speed (kora Turns block).
   if (!edge->roundabout()) {
-    seconds += kora::kTurnSecByType[static_cast<uint32_t>(turn)];
+    seconds += turn_scale_ * kora::kTurnSecByType[static_cast<uint32_t>(turn)];
   }
 
   // kora fork: the crossing rule (pred is the edge being left here too).
-  float penalty = crossing_penalty(pred->classification(), pred->use(), edge, node, turn, tile);
+  float penalty = tw_.avoidance *
+                  crossing_penalty(pred->classification(), pred->use(), edge, node, turn, tile, tw_);
 
   // kora fork: deviation from the intuitive continuation (cost only).
   if (is_deviation(tile, node, idx, pred->classification(), edge)) {
@@ -1688,14 +2032,29 @@ void ParseBicycleCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kAvoidBadSurfacesRange, json, "/avoid_bad_surfaces", avoid_bad_surfaces,
                           warnings);
   JSON_PBF_DEFAULT(co, kDefaultBicycleType, json, "/bicycle_type", transport_type);
-  // kora fork: avoid-stairs toggle.
+  // kora fork: surface profile (kora Surfaces block), lower-cased below.
+  JSON_PBF_DEFAULT(co, kDefaultSurfaceProfile, json, "/surface_profile", surface_profile);
+  std::transform(co->mutable_surface_profile()->begin(), co->mutable_surface_profile()->end(),
+                 co->mutable_surface_profile()->begin(),
+                 [](const unsigned char ch) { return std::tolower(ch); });
+  // kora fork: route character (kora Route character block), lower-cased.
+  JSON_PBF_DEFAULT(co, kDefaultRouteCharacter, json, "/route_character", route_character);
+  std::transform(co->mutable_route_character()->begin(), co->mutable_route_character()->end(),
+                 co->mutable_route_character()->begin(),
+                 [](const unsigned char ch) { return std::tolower(ch); });
+  // kora fork: avoid-stairs toggle and the fast ↔ nice ruler scales.
   JSON_PBF_DEFAULT_V2(co, false, json, "/exclude_steps", exclude_steps);
+  JSON_PBF_RANGED_DEFAULT(co, kAvoidanceScaleRange, json, "/avoidance_scale", avoidance_scale,
+                          warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kBonusScaleRange, json, "/bonus_scale", bonus_scale, warnings);
 
   // convert string to enum, set ranges and defaults based on enum
   BicycleType type;
   std::transform(co->mutable_transport_type()->begin(), co->mutable_transport_type()->end(),
                  co->mutable_transport_type()->begin(),
                  [](const unsigned char ch) { return std::tolower(ch); });
+  // kora fork: `ebike` / `sbike` keep their string (the constructor reads
+  // it) and take the hybrid defaults here.
   if (co->transport_type() == "cross") {
     type = BicycleType::kCross;
   } else if (co->transport_type() == "road") {

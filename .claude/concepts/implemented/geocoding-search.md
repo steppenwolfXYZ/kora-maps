@@ -25,6 +25,49 @@ The routing endpoint inputs currently offer "point on map" as their only non-tra
 - **Includes both addresses and POIs** in one result list — no separate categories. POIs and addresses render differently (see Display format) but the user picks from a single list.
 - No `lang` parameter (see Language).
 
+### Recent places
+
+The user's most-used places are offered ahead of the fresh search results,
+so a place routed to often is found with a few characters.
+
+- **Source**: the most-used-places store behind the Connect grid
+  (`kora.connect.stations`) — stations, addresses and POIs with their
+  recency-decayed usage score, bumped by every endpoint of a shown route.
+  No second store. The store keeps **100** places (was 30) so the search
+  has a longer memory than the ten tiles need; the grid still shows its
+  top ten.
+- **Where**: the routing panel's From, To and via inputs on every travel
+  tab, and the map's main search bar. Transit via rows stay station-only,
+  so only recent stations appear there.
+- **Match rule — the beginning matches**: a recent place qualifies when
+  its label, folded like the station search (accents, case) with
+  punctuation and repeated spaces collapsed, **starts with** the typed
+  text folded the same way. The label is the place's display label
+  including house number and city, so `bahnhofstr 1` finds
+  `Bahnhofstrasse 10, Zürich` and `Bahnhofstrasse 1, Bern`, while
+  `bahnhofstrasse 12` finds neither. The rule is deliberately narrow: it
+  exists for fast results from little typing — once the user types more,
+  the fresh results take over.
+- **Placement**: matching recents form their own section at the top of
+  the dropdown, directly below the Current-location row when that is
+  shown, above the station and geocoder sections (and above the direct
+  tabs' mixed list).
+- **Ordering**: a place whose whole label equals the typed text comes
+  first; then by usage score, descending. No mode, tier or distance term.
+- **Cap**: at most 5 recent rows.
+- **Empty query**: nothing — the hint line only, as today.
+- **Deduplication**: a place shown as a recent is dropped from the
+  station and geocoder sections (same merged UIC for stations; same ~1 m
+  coordinate key or identical display name for points). Geocoder results
+  arrive asynchronously; the rule applies whenever they land.
+- **Display**: the row carries the `history` glyph in the icon slot in
+  place of the station-mode / address / POI icon; text and highlight
+  behaviour are those of every other row. The glyph joins the self-hosted
+  icon subset.
+- Selecting a recent row sets the endpoint exactly as the stored place
+  routes it (the same endpoint the Connect tile produces). Picking it
+  does not bump usage by itself — the shown route does.
+
 ### Reverse geocoding (map click)
 
 - Triggered by clicking on the map while a routing endpoint is being set via pin, and by the place popup filling in a POI's address (`popups.md` § Place popup).
@@ -70,4 +113,5 @@ This applies to forward search only. Reverse geocoding fires once per map click,
 - Photon matches on the OSM `name` field only, not name+category. Queries like "restaurant kronenhalle" return zero results; the user must type just "kronenhalle". This is a Photon limitation; document it in the UI copy if it surfaces as a user pain point. Do not try to strip category prefixes client-side — the mapping is fragile across languages and hides the real behaviour.
 - No persistent storage of geocoding results anywhere (Photon TOS; also aligns with future Stadia free-tier constraints if a provider swap ever goes that way).
 - The rate-limit queue is exactly one slot deep — replaces do not stack. Two rapid keystrokes while a request is in flight must not produce two follow-up requests.
+- Recent places prepend a section; the station and geocoder searches' own ranking, limits, rate limiting and bbox are unchanged. Storage failures degrade to "no recents section".
 - Provider swaps must not require client code changes. The proxy's request/response shape is the contract; it may translate provider quirks internally.

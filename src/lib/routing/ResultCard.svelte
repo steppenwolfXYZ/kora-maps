@@ -17,6 +17,7 @@
 	import { rankOptionsFor, routingState } from './state.svelte';
 	import { buildSharePayload, createShare } from './share';
 	import SharePopup from './SharePopup.svelte';
+	import { itineraryMetres } from './routeGeoJSON';
 
 	interface Props {
 		itinerary: Itinerary;
@@ -309,6 +310,9 @@
 
 	// Usable time (usable-time.md) for the expanded details footer.
 	let usableSecs = $derived(usableSeconds(itinerary));
+	// Total distance travelled (walks + rides along their polylines) —
+	// last row of the same footer box, below a separator.
+	let totalMetres = $derived(itineraryMetres(itinerary));
 	let showUsableInfo = $state(false);
 
 	/** Marker text for the collapsed legs strip: the requested wait when
@@ -679,10 +683,10 @@
 					</button>
 				{/if}
 			{/each}
-			{#if usableSecs >= 60}
-				<!-- usable-time.md § Display: only when positive — an all-bus
-				     connection shows nothing rather than "0 min". -->
-				<div class="leg-usable">
+			<div class="leg-usable">
+				{#if usableSecs >= 60}
+					<!-- usable-time.md § Display: only when positive — an all-bus
+					     connection shows no time rows rather than "0 min". -->
 					<div class="lu-row">
 						<span class="lu-label">Total travel time</span>
 						<strong>{fmtDuration(itinerary.duration)}</strong>
@@ -709,8 +713,13 @@
 							count; short hops and buses don't.
 						</p>
 					{/if}
+					<hr class="lu-sep" />
+				{/if}
+				<div class="lu-row">
+					<span class="lu-label">Distance</span>
+					<strong>{fmtDistance(totalMetres)}</strong>
 				</div>
-			{/if}
+			</div>
 		</div>
 	{/if}
 	<button
@@ -1138,9 +1147,11 @@
 		border-top: 1px solid var(--gray-100);
 		padding-top: 0.35rem;
 	}
-	/* Usable-time group of the expanded details (usable-time.md): total /
-	   active / usable rows in a set-off box, values bold and a shade
-	   darker, labels plain — same value/label treatment as the meta row. */
+	/* Footer box of the expanded details: the usable-time group
+	   (usable-time.md: total / active / usable rows, only when usable time
+	   is positive), a thin separator, then the distance row (walks + rides
+	   measured along their polylines) — values bold and a shade darker,
+	   labels plain, same value/label treatment as the meta row. */
 	.leg-usable {
 		margin: 0.35rem 0 0.1rem;
 		padding: 0.4rem 0.55rem;
@@ -1167,6 +1178,14 @@
 		padding: 0.08rem 0;
 	}
 	.lu-label { display: inline-flex; align-items: center; gap: 0.25rem; }
+	/* Gradient hairline between the time rows and the distance row —
+	   165° input variant, thin and wide (ux-guidelines.md § Usage rules). */
+	.lu-sep {
+		border: 0;
+		height: 1px;
+		background: var(--gradient-brand-input);
+		margin: 0.3rem 0;
+	}
 	.leg-usable strong { font-weight: 600; color: var(--gray-700); }
 	/* The (i) explainer toggle is a shared .icon-btn (app.css) — only
 	   sizing here, per ux-guidelines.md § Icon button system. */
