@@ -9,6 +9,7 @@
 	import { slide } from 'svelte/transition';
 	import RoutingOptions from './RoutingOptions.svelte';
 	import AvoidStairsToggle from './AvoidStairsToggle.svelte';
+	import StrollerToggle from './StrollerToggle.svelte';
 	import BikeRulers from './BikeRulers.svelte';
 	import OptionsButton from './OptionsButton.svelte';
 	import { computeCardStates } from './ranking';
@@ -516,6 +517,7 @@
 		void routingOptions.walkSpeed;
 		void routingOptions.safety;
 		void routingOptions.minimizeWalking;
+		void routingOptions.stroller;
 		// The cycling options are Valhalla request params
 		// (bicycle-route-options.md § 8).
 		void routingOptions.bikeType;
@@ -815,8 +817,13 @@
 		<!-- Slim control row of the direct tabs: on the cycling tab the
 		     avoid-stairs switch at the head, then the More-options expander
 		     (bicycle-route-options.md § 6 — bike type and the rulers sit
-		     behind it), the shared swap at the tail. -->
+		     behind it); on the walking tab the stroller switch
+		     (routing-options.md § Stroller mode); the shared swap at the
+		     tail. -->
 		<div class="rp-direct-row">
+			{#if routingState.travelMode === 'walk'}
+				<StrollerToggle />
+			{/if}
 			{#if routingState.travelMode === 'bike'}
 				<AvoidStairsToggle />
 				<OptionsButton

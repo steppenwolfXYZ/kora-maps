@@ -116,6 +116,9 @@ export async function planMotis(args: MotisPlanArgs, signal?: AbortSignal): Prom
 	params.set('alternativesEpsilon', String(o.alternativesEpsilon));
 	params.set('alternativesMax', String(o.alternativesMax));
 	if (o.koraWalkPoints) params.set('koraWalkPoints', o.koraWalkPoints);
+	// Fork-only stroller mode (routing-options.md § Stroller mode): the
+	// stroller transfer table + stroller-costed live walks.
+	if (o.koraProfile) params.set('koraProfile', o.koraProfile);
 	params.set('searchWindow', String(args.searchWindow));
 	// Routing options — only sent off their defaults.
 	if (o.pedestrianSpeedMs != null)

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { routingOptions } from './options.svelte';
 	import { slide } from 'svelte/transition';
 	import type { DirectRoute } from './types';
 	import { fmtDistance, fmtDuration } from './itineraryFormat';
@@ -171,13 +172,16 @@
 				car shuttle {fmtDistance(route.shuttleM)}
 			</span>
 		{/if}
-		{#if route.stairsM > 0 && route.mode === 'bike'}
-			<!-- Bike-only: stairs mean pushing / carrying. On foot stairs
-			     are unremarkable and get no call-out (the wheelchair /
-			     stroller mode will handle avoidance, not a warning). -->
+		{#if route.stairsM > 0 && (route.mode === 'bike' || (route.mode === 'walk' && routingOptions.stroller))}
+			<!-- Bike: stairs mean pushing / carrying. On foot stairs are
+			     unremarkable and get no call-out — except in stroller mode
+			     (routing-options.md § Stroller mode), where the flight has
+			     to be carried. -->
 			<span
 				class="drc-stat drc-stairs"
-				title={`Includes ${fmtDistance(route.stairsM)} of stairs — push or carry the bike`}
+				title={route.mode === 'bike'
+					? `Includes ${fmtDistance(route.stairsM)} of stairs — push or carry the bike`
+					: `Includes ${fmtDistance(route.stairsM)} of stairs — carry the stroller`}
 			>
 				stairs {fmtDistance(route.stairsM)}
 			</span>

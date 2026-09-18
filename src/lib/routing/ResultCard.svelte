@@ -138,7 +138,8 @@
 		'long-wait':       'hourglass_top',
 		'very-slow':       'snail',
 		'tight-transfer':  'transfer_within_a_station',
-		'lucky-transfer':  'sprint'
+		'lucky-transfer':  'sprint',
+		'stairs':          'stairs'
 	};
 	// The four transfer tiers escalate glyph-first, colour-second: the
 	// transfer glyph (the same one the safety ruler wears, so the warning
@@ -194,6 +195,9 @@
 			case 'very-slow': return `${fmtDuration(w.value)} slower than the fastest route`;
 			case 'tight-transfer': return spareTooltip(SEVERITY_TIER[w.severity], w.value);
 			case 'lucky-transfer': return spareTooltip('lucky', w.value);
+			case 'stairs': return w.severity === 'strong'
+				? `Includes a long flight of stairs (${Math.round(w.value)} m) — only route found`
+				: `Includes stairs (${Math.round(w.value)} m) — carry the stroller`;
 		}
 	}
 	// Per-transfer marks for the expanded leg list (routing-options.md

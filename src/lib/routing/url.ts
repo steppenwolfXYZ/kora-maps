@@ -39,6 +39,9 @@ import { MAX_VIAS, MAX_VIA_WAIT_MIN, type Endpoint, type FilledVia, type Routing
 //                     written only off their defaults; absent = defaults.
 //                     Restores apply them session-only, never into
 //                     localStorage.
+//   stroller        — stroller mode (routing-options.md § Stroller mode),
+//                     `1` when on; the one option both the transit and the
+//                     walking tab's links carry. Same session-only rule.
 //   bike, pace, roads, stairs — the cycling tab's options
 //                     (bicycle-route-options.md § 7), alongside mode=bike
 //                     only, written only off their defaults: bike =
@@ -68,6 +71,7 @@ export const URL_BIKE = 'bike';
 export const URL_PACE = 'pace';
 export const URL_ROADS = 'roads';
 export const URL_STAIRS = 'stairs';
+export const URL_STROLLER = 'stroller';
 
 /** Endpoint serialisation: coord as `lat,lng` (7 fractional digits, ≈1 cm).
  * `station` needs the lookup callback so a UIC round-trips through the
@@ -202,8 +206,9 @@ export function urlHasRoutingQuery(url: URL): boolean {
 /** Parse the option params of the link's tab back into that tab's
  * complete value group — invalid or absent params fall back to the
  * defaults. Only the active tab's group is returned (transit: walk /
- * safety / minWalk; bike: bike / pace / roads / stairs; walk: nothing),
- * so restoring a link never touches the other tab's saved values. */
+ * safety / minWalk / stroller; bike: bike / pace / roads / stairs; walk:
+ * stroller), so restoring a link never touches the other tab's saved
+ * values. */
 export function paramsToOptions(url: URL, travel: TravelMode): Partial<RoutingOptionValues> {
 	if (travel === 'bike') {
 		const bike = url.searchParams.get(URL_BIKE);
@@ -219,7 +224,8 @@ export function paramsToOptions(url: URL, travel: TravelMode): Partial<RoutingOp
 			avoidStairs: url.searchParams.get(URL_STAIRS) === 'avoid'
 		};
 	}
-	if (travel === 'walk') return {};
+	const stroller = url.searchParams.get(URL_STROLLER) === '1';
+	if (travel === 'walk') return { stroller };
 	const walk = url.searchParams.get(URL_WALK);
 	const safety = url.searchParams.get(URL_SAFETY);
 	return {
@@ -227,7 +233,8 @@ export function paramsToOptions(url: URL, travel: TravelMode): Partial<RoutingOp
 			? walk as WalkSpeedTier : DEFAULT_OPTIONS.walkSpeed,
 		safety: SAFETY_MODES.some((m) => m.id === safety)
 			? safety as SafetyMode : DEFAULT_OPTIONS.safety,
-		minimizeWalking: url.searchParams.get(URL_MIN_WALK) === '1'
+		minimizeWalking: url.searchParams.get(URL_MIN_WALK) === '1',
+		stroller
 	};
 }
 
@@ -358,6 +365,10 @@ export function writeRoutingQuery(url: URL, q: {
 	else url.searchParams.delete(URL_SAFETY);
 	if (o && o.minimizeWalking) url.searchParams.set(URL_MIN_WALK, '1');
 	else url.searchParams.delete(URL_MIN_WALK);
+	// Stroller mode belongs to the transit AND the walking tab.
+	const s = hasQuery && q.travel !== 'bike' ? q.options : undefined;
+	if (s && s.stroller) url.searchParams.set(URL_STROLLER, '1');
+	else url.searchParams.delete(URL_STROLLER);
 	// Cycling options: only non-default values, and only alongside a bike
 	// query. The pace is written even while an e-bike is selected — it is
 	// remembered across the type switch and the link should reproduce the
@@ -391,6 +402,7 @@ export function clearRoutingQuery(url: URL) {
 	url.searchParams.delete(URL_WALK);
 	url.searchParams.delete(URL_SAFETY);
 	url.searchParams.delete(URL_MIN_WALK);
+	url.searchParams.delete(URL_STROLLER);
 	url.searchParams.delete(URL_BIKE);
 	url.searchParams.delete(URL_PACE);
 	url.searchParams.delete(URL_ROADS);

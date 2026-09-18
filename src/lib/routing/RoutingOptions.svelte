@@ -1,9 +1,9 @@
 <script lang="ts">
 	// Expanded "more options" area of the routing panel
-	// (routing-options.md): walking-speed ruler, minimize-walking
-	// checkbox, transfer-safety ruler. Values live in options.svelte.ts
-	// (localStorage-persisted); speed/safety changes re-run the query,
-	// minimize-walking only re-ranks the fetched results.
+	// (routing-options.md): walking-speed ruler, transfer-safety ruler,
+	// minimize-walking and stroller toggles. Values live in
+	// options.svelte.ts (localStorage-persisted); every change re-runs
+	// the query.
 	import RulerSelect from './RulerSelect.svelte';
 	import {
 		routingOptions, SAFETY_MODES, WALK_SPEED_TIERS,
@@ -24,6 +24,13 @@
 		// A query param since the server-side minwalk work
 		// (routing-options.md § Minimize walking) — full re-query, like
 		// the rulers.
+		routingState.optionsChanged();
+	}
+	function toggleStroller() {
+		routingOptions.setStroller(!routingOptions.stroller);
+		// Switches the search onto the stroller transfer table and every
+		// live walk onto the stroller costing (routing-options.md
+		// § Stroller mode) — full re-query.
 		routingState.optionsChanged();
 	}
 </script>
@@ -59,6 +66,22 @@
 			aria-pressed={routingOptions.minimizeWalking}
 		>
 			<span class="ro-toggle-label">Minimize walking</span>
+			<span class="switch" aria-hidden="true"></span>
+		</button>
+	</div>
+	<div class="ro-group">
+		<!-- Stroller mode (routing-options.md § Stroller mode): stairs
+		     priced by altitude on every walk, warnings on the cards. The
+		     same value drives the walking tab's toggle. -->
+		<button
+			class="ro-toggle"
+			class:active={routingOptions.stroller}
+			onclick={toggleStroller}
+			aria-pressed={routingOptions.stroller}
+			title="Avoid stairs where possible — short flights are carried, long ones only when nothing else connects"
+		>
+			<span class="material-symbols-outlined ro-toggle-icon" aria-hidden="true">stroller</span>
+			<span class="ro-toggle-label">Stroller</span>
 			<span class="switch" aria-hidden="true"></span>
 		</button>
 	</div>
@@ -100,6 +123,11 @@
 		cursor: pointer;
 	}
 	.ro-toggle:hover .ro-toggle-label {
+		color: var(--anthracite);
+	}
+	.ro-toggle :global(.ro-toggle-icon) {
+		font-size: 1.15rem;
+		line-height: 1;
 		color: var(--anthracite);
 	}
 	.switch {

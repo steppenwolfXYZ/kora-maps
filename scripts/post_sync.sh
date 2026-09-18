@@ -72,6 +72,7 @@ if ! docker info >/dev/null 2>&1; then
 	exit 1
 fi
 for f in motis/data/tt.bin motis/data/valhalla_footpath_matrix.csv \
+         motis/data/valhalla_footpath_matrix_stroller.csv \
          valhalla/data/valhalla_tiles.tar data/gtfs_motis/stops.txt; do
 	if [ ! -s "$f" ]; then
 		warn "missing or empty: $f"
@@ -136,7 +137,8 @@ NEED_IMPORT=0
 # fresh mtime would then demand an import of a feed the synced index already
 # describes.
 for input in data/gtfs_routed/shapes.txt \
-             motis/data/valhalla_footpath_matrix.csv; do
+             motis/data/valhalla_footpath_matrix.csv \
+             motis/data/valhalla_footpath_matrix_stroller.csv; do
 	if [ -f "$input" ] && [ "$input" -nt motis/data/tt.bin ]; then
 		note "newer than the index: $input"
 		NEED_IMPORT=1

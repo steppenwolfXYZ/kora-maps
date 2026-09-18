@@ -95,9 +95,10 @@ bounded span.
   comfort rules alike), give or take the ranking's time slack. So on
   the departure axis a journey is settled when coverage reaches its
   arrival + slack; on the arrival axis, when coverage reaches back to
-  its departure − slack. Under minimize walking the reach grows by the
-  reverse-displacement window (3 h), since a walk-lighter journey that
-  far out on the primary axis may still displace.
+  its departure − slack. Case 2 only ever compares concurrent journeys
+  (`transit-routing.md` § Ranking), so this one reach holds in every
+  mode — the former minimize-walking 3 h reverse-displacement window
+  is gone.
 - The cascade keeps hopping until the required number of *settled*
   survivors exists, so the initial query typically covers about one
   hop beyond the shown arrivals. That is the overfetch, and it is

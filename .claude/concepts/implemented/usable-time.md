@@ -88,9 +88,9 @@ duration ratio 190/140 = 1.36. Survives both gates with headroom.
   (Rules 0, 0b, 0c, 0d) and Case 2 are untouched — those remove noise
   or comfort-inferior options, which a hassle advantage cannot redeem.
 - The rescue only ever *adds* survivors: a rescued connection is the
-  slower one of its pair, so it cannot newly dominate anything, and it
-  does not time-beat its dominators on Case 2's primary axis. No new
-  drops, no mutual-drop risk.
+  slower one of its pair, so it cannot newly dominate anything, and
+  being slower it cannot out-rate its dominators in Case 2's
+  effective-time comparison either. No new drops, no mutual-drop risk.
 - Badges and warnings are unchanged. A rescued connection may carry a
   very-slow warning when it crosses those thresholds (at the 1.5×
   ratio cap this only happens at the boundary).

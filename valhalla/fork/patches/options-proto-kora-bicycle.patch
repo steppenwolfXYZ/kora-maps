@@ -2,7 +2,7 @@ diff --git a/proto/descriptors/options.proto b/proto/descriptors/options.proto
 index 7d80e3b..c6bba90 100644
 --- a/proto/descriptors/options.proto
 +++ b/proto/descriptors/options.proto
-@@ -362,6 +362,28 @@ message Costing {
+@@ -362,6 +362,32 @@ message Costing {
      oneof has_low_class_factor {
        float low_class_factor = 97;
      }
@@ -28,6 +28,10 @@ index 7d80e3b..c6bba90 100644
 +    oneof has_route_character {
 +      string route_character = 102;
 +    }
++    // kora fork: pedestrian only — the stroller stairs model
++    // (routing-options.md § Stroller mode). Default false keeps stock
++    // behaviour.
++    bool kora_stroller = 103;
    }
  
    oneof has_options {

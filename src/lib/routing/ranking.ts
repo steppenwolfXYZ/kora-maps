@@ -1,4 +1,5 @@
-import type { Itinerary, Leg, LegPlace, TimeMode } from './types';
+import type { Itinerary, Leg, LegPlace } from './types';
+import { stairsClass } from './optionParams';
 
 // Quality ranking for the merged cascade results — see transit-routing.md
 // § Ranking. Four unconditional prunes run on Pareto-time-dominated
@@ -14,18 +15,11 @@ import type { Itinerary, Leg, LegPlace, TimeMode } from './types';
 //     more of the user's day for no time benefit. A survives only when
 //     BOTH the time gap AND the comfort gap are marginal.
 //   Case 2 (non-overlapping): neither Pareto-dominates in time — legitimate
-//     different time slots. A survives unless it's meaningfully worse in
-//     comfort than the gap-scaled allowance permits. Score is Case 2's
-//     escape hatch and is never used for sorting.
-
-const TRANSFER_PENALTY_SEC = 600;    // one boarding ≈ 5 min of walking
-const WALK_PER_SEC = 2;              // full linear rate for the first 30 min
-// Walking cost is soft-capped: small walking differences (0–30 min) stay
-// as sensitive as before, but each further second is worth a quarter as
-// much — a 30-min-vs-3-h walking difference no longer overwhelms every
-// realistic temporal-gap allowance.
-const WALK_SOFT_CAP_SEC = 30 * 60;   // linear knee-point (30 min)
-const WALK_TAIL_PER_SEC = 0.5;       // shallow slope past the knee
+//     different time slots. A survives unless a CONCURRENT B (underway at
+//     some common moment) beats it in effective time by more than the
+//     gap-scaled allowance. Direction-blind: whether B is the earlier or
+//     the later slot does not matter, only how close the slots are and
+//     how much better B rates on the full ranking (duration + comfort).
 // Absorbs seconds-granular walk-offset jitter (Valhalla walk legs shift
 // itinerary endpoints by seconds) — but must stay below 60 s: transit
 // times are minute-granular, and a full minute is a real difference on
@@ -35,26 +29,19 @@ export const T_SLACK_MS = 50 * 1000;        // start/end jitter that still count
 // Case 1 (overlapping) marginality thresholds.
 const OVERLAP_TIME_MAX_MS = 9 * 60 * 1000;   // both endpoints must be within 9 min
 const OVERLAP_COMFORT_MAX_PCT = 0.20;        // effective-time worseness ≤ 20%
-// Case 2 (non-overlapping) calibration.
-const MARGIN = 300;
-// Cube-root curve for the allowance: rises fast at short gaps so a rare
-// fast option can't nuke its neighbours (2 min gap already needs ≥15 min
-// extra walking to prune), saturates gracefully at long gaps (2 h → ~8000
-// ≈ 65 min extra walking under the soft cap). Linear couldn't hit both
-// "steep at 2 min" and "sane at 2 h" simultaneously.
-const PENALTY_K = 430;
-// The gap is floored at 2 min: Case 2 removes only clearly worse
-// connections, so the allowance never drops below the 2-min value
-// (~1820 ≈ 15 min extra walking). Without the floor the curve went
-// negative at near-zero gaps, and two identical-time near-ties (e.g. a
-// direct walk vs. a walk + one-stop bus hybrid) mutually dropped each
-// other, leaving neither.
-const GAP_FLOOR_SEC = 120;
-// Minimize-walking reverse displacement (a slower low-walk connection
-// dropping a faster walk-heavy one) only fires within this primary-axis
-// distance — beyond it, the faster option is "the only one around" and
-// stays regardless of walking.
-export const REVERSE_DISPLACE_MAX_GAP_MS = 3 * 3600 * 1000;
+// Case 2 (non-overlapping) allowance: how much worse in EFFECTIVE TIME
+// (seconds) A may be than a concurrent B before it drops — a floor plus
+// the time gap between the two slots (`gap = min(|Δstart|, |Δend|)`).
+// The floor keeps near-ties apart: two connections in essentially the
+// same slot never drop each other over a few minutes, and since the
+// allowance is always positive a mutual drop is impossible. The slope
+// makes the allowance grow with the distance between the slots, so a
+// distinct slot survives a bigger quality deficit the further away the
+// better option is. Read per direction: an earlier B must arrive more
+// than 2·gap + floor earlier for A to drop; a later B must depart more
+// than 2·gap + floor later.
+const CASE2_ALLOWANCE_FLOOR_SEC = 5 * 60;
+const CASE2_ALLOWANCE_PER_GAP_SEC = 1;
 // Usable-time rescue (usable-time.md): a Case-1-dominated A survives
 // when its hassle time (judged duration − usable time) beats every
 // dominator's by this margin AND its judged duration stays within the
@@ -174,11 +161,6 @@ export function boardingCount(it: Itinerary): number {
 	return transit;
 }
 
-// Minimize-walking mode (routing-options.md § Minimize walking): the
-// relative importance shifts from ~timing 80 / transfers 10 / walking 10
-// to ~timing 40 / transfers 10 / walking 50 — expressed here as a flat
-// multiplier on the walking cost terms (transfer terms untouched).
-const MINIMIZE_WALK_MULT = 4;
 // Rule 0e (minimize-walking only): a same-route-minus-a-vehicle variant
 // escapes Rule 0 by being faster, but a marginal saving must not buy
 // meaningful extra walking — the trade survives only when the time
@@ -192,6 +174,10 @@ const MINWALK_SUBSET_SAVE_RATIO = 3;
 export interface RankOptions {
 	/** Weight walking ~5x heavier in pruning, badges and comfort. */
 	minimizeWalking?: boolean;
+	/** Stroller mode (routing-options.md § Stroller mode): arms the
+	 * stairs warning — medium for flights up to 2 m of rise, strong
+	 * beyond; 1–2 steps never warn. Off, stairs are unremarkable. */
+	stroller?: boolean;
 	/** comfort-walk-baseline.md: the query's unavoidable walking in
 	 * seconds (shortest walk from the start to any sufficiently served
 	 * stop + the same on the destination side, 0 per station endpoint).
@@ -257,34 +243,10 @@ function viaForcedChanges(it: Itinerary, opts?: RankOptions): number {
 	return n;
 }
 
-/** Walking cost with a soft cap at 30 min: full linear rate below the
- * knee, quarter rate above. Keeps small walking differences meaningful
- * while bounding the score inflation from multi-hour hikes. */
-function walkCost(walkSec: number, opts?: RankOptions): number {
-	if (opts?.minimizeWalking) {
-		// No soft cap in minimize-walking: discounting long walking is
-		// exactly what this mode must not do. The capped cost shrank the
-		// walk-heavy-vs-low-walk score gaps to ~the pruning allowance,
-		// so near-identical connections fell on opposite sides of the
-		// boundary (routing-options.md § Minimize walking).
-		return MINIMIZE_WALK_MULT * WALK_PER_SEC * walkSec;
-	}
-	const base = WALK_PER_SEC * Math.min(walkSec, WALK_SOFT_CAP_SEC);
-	const tail = WALK_TAIL_PER_SEC * Math.max(0, walkSec - WALK_SOFT_CAP_SEC);
-	return base + tail;
-}
-
-/** Comfort score — lower is better. Only used as the dominance escape
- * hatch, never for sorting. */
-export function itineraryScore(it: Itinerary, opts?: RankOptions): number {
-	return TRANSFER_PENALTY_SEC * boardingCount(it) + walkCost(walkSeconds(it), opts);
-}
-
 interface Entry {
 	it: Itinerary;
 	start: number;
 	end: number;
-	score: number;
 	effTime: number;
 	walk: number;
 	/** Judged duration (seconds) — the rescue's ratio-cap base. */
@@ -546,50 +508,38 @@ function droppedByOverlap(a: Entry, b: Entry, opts?: RankOptions): boolean {
 	return a.effTime / b.effTime - 1 > OVERLAP_COMFORT_MAX_PCT;
 }
 
-/** Case 2 (non-overlapping): B time-beats A on the query's primary axis
- * (arrival for leave-at, departure for arrive-by, within T_SLACK) AND A's
- * comfort penalty over B exceeds the gap-scaled allowance.
+/** Case 2 (non-overlapping): B is CONCURRENT with A — underway at some
+ * common moment, i.e. B departs before A arrives and arrives after A
+ * departs (within T_SLACK) — and beats A in effective time by more than
+ * the gap-scaled allowance.
  *
- * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance, floored at
- * GAP_FLOOR_SEC. Two options far apart on one axis but near-identical on
- * the other are treated as near-ties: the tight axis limits how much
- * comfort penalty the worse one can afford. `allowed = −MARGIN +
- * PENALTY_K · max(gap, floor)^(1/3)` — the cube-root rises fast so even
- * a small gap only tolerates a fairly steep comfort difference, and
- * saturates gracefully so a 2 h gap sits around a "dramatic" allowance
- * rather than an absurd one. */
-function droppedByNonOverlap(
-	a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions
-): boolean {
-	// Minimize-walking (routing-options.md § Minimize walking): Case 2
-	// becomes direction-blind — the score-vs-allowance test applies even
-	// when A is the FASTER one, so a much-lower-walk B can displace a
-	// fast walk-heavy A. This reverse direction carries a HARD gap
-	// ceiling on the primary axis: with the uncapped minwalk walk costs,
-	// score gaps outgrow the cube-root allowance at any distance, and
-	// without the ceiling next-morning low-walk connections wiped out
-	// every same-day option the moment a "later" load brought them in.
-	// Within the ceiling, drops are decisive (uncapped costs); beyond
-	// it, a slower low-walk option never displaces a faster one.
-	// Mutual drops stay impossible (the score difference has one sign),
-	// and Pareto-dominating pairs never reach this rule (Case 1's
-	// territory).
-	const timeBeats = mode === 'arrive'
-		? b.start >= a.start - T_SLACK_MS
-		: b.end <= a.end + T_SLACK_MS;
-	if (!timeBeats) {
-		if (!opts?.minimizeWalking) return false;
-		const primaryGapMs = mode === 'arrive'
-			? Math.abs(a.start - b.start)
-			: Math.abs(a.end - b.end);
-		if (primaryGapMs > REVERSE_DISPLACE_MAX_GAP_MS) return false;
-	}
-	const gapSec = Math.max(GAP_FLOOR_SEC, Math.min(
-		Math.abs(a.start - b.start),
-		Math.abs(a.end - b.end)
-	) / 1000);
-	const allowed = -MARGIN + PENALTY_K * Math.cbrt(gapSec);
-	return a.score - b.score > allowed;
+ * Direction-blind: neither the query mode nor which slot is earlier
+ * plays a role, so the request timestamp cannot tip the outcome — the
+ * same pair is judged identically whichever way the list was loaded.
+ * The comparison is the full ranking (effective time: duration plus
+ * comfort, `effectiveTime`), never comfort alone: a B that only arrives
+ * earlier because it departs earlier gains nothing on it.
+ *
+ * `gap = min(|Δstart|, |Δend|)` — the tighter axis distance. Two options
+ * far apart on one axis but near-identical on the other are treated as
+ * near-ties: the tight axis limits how much worse the worse one may be.
+ * `allowed = FLOOR + gap` (seconds of effective time).
+ *
+ * The concurrency condition is what keeps the settled display's reach
+ * at T_SLACK (search-coverage-window.md § Settled display): every
+ * dropper of a journey departs before it arrives and arrives after it
+ * departs, so coverage reaching one slack past a journey on either axis
+ * has seen every dropper. A connection wholly before or after another
+ * is a distinct slot and never prunes it. Mutual drops are impossible —
+ * the allowance is positive and the effective-time difference has one
+ * sign — and Pareto-dominating pairs never reach this rule (Case 1's
+ * territory). */
+function droppedByNonOverlap(a: Entry, b: Entry): boolean {
+	const concurrent = b.start < a.end + T_SLACK_MS && b.end > a.start - T_SLACK_MS;
+	if (!concurrent) return false;
+	const gapSec = Math.min(Math.abs(a.start - b.start), Math.abs(a.end - b.end)) / 1000;
+	const allowed = CASE2_ALLOWANCE_FLOOR_SEC + CASE2_ALLOWANCE_PER_GAP_SEC * gapSec;
+	return a.effTime - b.effTime > allowed;
 }
 
 /** Dispatches (a, b) to the case-specific rule. Two unconditional prunes
@@ -618,7 +568,7 @@ function droppedByNonOverlap(
  * Then: when B Pareto-time-dominates A the pair is overlapping (Case 1).
  * When A dominates B the pair is B's problem, not A's — return false.
  * Otherwise apply Case 2. */
-function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): boolean {
+function droppedBy(a: Entry, b: Entry, opts?: RankOptions): boolean {
 	// Rule 0 also fires on an exact time tie (both endpoints within
 	// T_SLACK): B strictly dominating A is not required — riding a subset
 	// of B's vehicles with MORE walking for identical times wins nothing
@@ -677,22 +627,19 @@ function droppedBy(a: Entry, b: Entry, mode: TimeMode, opts?: RankOptions): bool
 		return droppedByOverlap(a, b, opts);
 	}
 	if (paretoTimeDominates(a, b)) return false;
-	return droppedByNonOverlap(a, b, mode, opts);
+	return droppedByNonOverlap(a, b);
 }
 
 /** Drop each itinerary that some other beats under the two-case rule
  * (Case 1 overlapping, Case 2 non-overlapping). Input order is preserved;
  * the caller sorts chronologically afterwards. */
-export function pruneDominated(
-	its: Itinerary[], mode: TimeMode, opts?: RankOptions
-): Itinerary[] {
+export function pruneDominated(its: Itinerary[], opts?: RankOptions): Itinerary[] {
 	const entries: Entry[] = its.map((it) => {
 		const dur = judgedDuration(it, opts);
 		return {
 			it,
 			start: Date.parse(it.startTime),
 			end: Date.parse(it.endTime),
-			score: itineraryScore(it, opts),
 			effTime: effectiveTime(it, opts),
 			walk: walkSeconds(it),
 			dur,
@@ -705,7 +652,7 @@ export function pruneDominated(
 	});
 	return entries
 		.filter((a, ai) => !entries.some((b, bi) =>
-			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, mode, opts))))
+			b !== a && (sameVehiclesDropped(a, b, ai, bi) || droppedBy(a, b, opts))))
 		.map((e) => e.it);
 }
 
@@ -714,7 +661,7 @@ export function pruneDominated(
 
 export type Badge = 'best' | 'good' | 'bad';
 export type WarningKind =
-	'long-walk' | 'long-wait' | 'very-slow' | 'tight-transfer' | 'lucky-transfer';
+	'long-walk' | 'long-wait' | 'very-slow' | 'tight-transfer' | 'lucky-transfer' | 'stairs';
 // standard = plain red icon; medium = white icon in a yellow circle;
 // strong = white icon in a red circle. One icon per kind, highest
 // severity wins.
@@ -727,7 +674,8 @@ export interface Warning {
 	// tier. All kinds carry seconds: long-walk = longest walk leg,
 	// long-wait = longest transfer wait, very-slow = duration gap to the
 	// fastest surviving itinerary, tight-transfer / lucky-transfer =
-	// spare seconds of the worst transfer (may be negative).
+	// spare seconds of the worst transfer (may be negative); stairs =
+	// stairs METRES (length) of the worst walk leg.
 	value: number;
 }
 
@@ -1051,6 +999,16 @@ export function computeCardStates(itins: Itinerary[], opts?: RankOptions): CardS
 		if (wait >= STRONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'strong', value: wait });
 		else if (wait >= MEDIUM_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'medium', value: wait });
 		else if (wait >= LONG_WAIT_SEC) warnings.push({ kind: 'long-wait', severity: 'standard', value: wait });
+		// Stroller mode: the worst walk leg's stairs class decides
+		// (routing-options.md § Stroller mode). Every Valhalla-routed walk
+		// leg carries its stairs metres; legs without the field count as 0.
+		if (opts?.stroller) {
+			const stairs = it.legs.reduce(
+				(m, l) => (l.mode === 'WALK' ? Math.max(m, l.koraStairsM ?? 0) : m), 0);
+			const cls = stairsClass(stairs);
+			if (cls === 'long') warnings.push({ kind: 'stairs', severity: 'strong', value: stairs });
+			else if (cls === 'medium') warnings.push({ kind: 'stairs', severity: 'medium', value: stairs });
+		}
 		const dur = durations[i];
 		const slowGap = dur - minDur;
 		// Gate the whole chain on the minimum absolute difference so the

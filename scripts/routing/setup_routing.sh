@@ -15,7 +15,8 @@
 #                                                        first elevation build downloads ~min)
 #   4  Start Valhalla (first run builds tiles)          (first run ~20-40 min, later instant)
 #   5  Preprocess GTFS for MOTIS (platform snap)        (~1 min; always runs, cheap)
-#   6  Build the Valhalla footpath matrix               (hours on a laptop; skipped when
+#   6  Build the Valhalla footpath matrices             (foot: hours on a laptop; stroller:
+#                                                        ~1/16 of that; each skipped when
 #                                                        complete, resumes partial runs)
 #   7  MOTIS import                                     (~10 min; skipped if index present)
 #   8  Start MOTIS server + smoke test                  (seconds)
@@ -25,7 +26,7 @@
 #   --force-image     rebuild the MOTIS and Valhalla fork docker images
 #   --force-osm       re-patch both preprocessed OSM PBFs
 #   --force-elevation regenerate the Mapterhorn elevation cells
-#   --force-matrix    delete matrix CSV + checkpoint, recompute from scratch
+#   --force-matrix    delete both matrix CSVs + checkpoints, recompute from scratch
 #   --force-import    re-run the MOTIS import
 #
 # Step selection (for orchestrators that overlap this script's phases
@@ -469,24 +470,33 @@ if want 6; then
 # .claude/runbooks/matrix_build_remote.md) ships without a checkpoint
 # and is therefore treated as complete. Heavy on a laptop.
 echo ""
-echo "▶ Step 6 — Valhalla footpath matrix"
-MATRIX_CSV=motis/data/valhalla_footpath_matrix.csv
-MATRIX_CKPT=motis/data/valhalla_footpath_matrix.checkpoint
-if [[ $FORCE_MATRIX -eq 1 ]]; then
-  rm -f "$MATRIX_CSV" "$MATRIX_CKPT"
-  echo "  --force-matrix: deleted CSV + checkpoint"
-fi
-if [[ -f "$MATRIX_CSV" && ! -f "$MATRIX_CKPT" ]]; then
-  echo "  matrix complete — skipped (--force-matrix to recompute)"
-else
-  # A checkpoint without a CSV is stale resume state — the builder
-  # would skip those sources and leave holes in a fresh build.
-  if [[ -f "$MATRIX_CKPT" && ! -f "$MATRIX_CSV" ]]; then
-    rm -f "$MATRIX_CKPT"
-    echo "  removed stale checkpoint (no CSV)"
+echo "▶ Step 6 — Valhalla footpath matrices (foot + stroller)"
+# Two matrices, one per walker (routing-options.md § Stroller mode): the
+# foot matrix feeds the default + full transfer tables, the stroller one
+# the stroller table. Same skip / resume logic each; the import refuses
+# to run without both.
+build_matrix() {
+  local profile="$1" csv="$2" ckpt="$3"
+  if [[ $FORCE_MATRIX -eq 1 ]]; then
+    rm -f "$csv" "$ckpt"
+    echo "  --force-matrix: deleted $profile CSV + checkpoint"
   fi
-  time python3 scripts/routing/build_valhalla_footpath_matrix.py
-fi
+  if [[ -f "$csv" && ! -f "$ckpt" ]]; then
+    echo "  $profile matrix complete — skipped (--force-matrix to recompute)"
+  else
+    # A checkpoint without a CSV is stale resume state — the builder
+    # would skip those sources and leave holes in a fresh build.
+    if [[ -f "$ckpt" && ! -f "$csv" ]]; then
+      rm -f "$ckpt"
+      echo "  removed stale $profile checkpoint (no CSV)"
+    fi
+    time python3 scripts/routing/build_valhalla_footpath_matrix.py --profile "$profile"
+  fi
+}
+build_matrix foot     motis/data/valhalla_footpath_matrix.csv \
+                      motis/data/valhalla_footpath_matrix.checkpoint
+build_matrix stroller motis/data/valhalla_footpath_matrix_stroller.csv \
+                      motis/data/valhalla_footpath_matrix_stroller.checkpoint
 fi
 
 if want 7; then

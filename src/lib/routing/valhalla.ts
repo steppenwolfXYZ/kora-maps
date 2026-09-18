@@ -75,6 +75,10 @@ export interface DirectRouteArgs {
 	 * walking legs at the user's set speed tier. Omitted → engine default
 	 * (5.1 km/h, the same base the transit stack uses). */
 	walkSpeedKmh?: number | null;
+	/** Walk only: stroller mode (routing-options.md § Stroller mode) —
+	 * the fork's stroller pedestrian costing (stairs priced by altitude,
+	 * the same walker the transit stack's stroller table describes). */
+	stroller?: boolean;
 	/** Bike only: the cycling tab's option set (bicycle-route-options.md)
 	 * — bike type, pace, fast ↔ nice stop, avoid-stairs. Omitted → the
 	 * defaults (normal bicycle, Normal pace, Balanced, stairs priced). */
@@ -174,8 +178,8 @@ function costingOptions(args: DirectRouteArgs): Record<string, unknown> {
 	}
 	// Stairs are a normal part of walking: zero the engine's default 30 s
 	// per-flight penalty (pedestrian-bicycle-routing.md § Pedestrian
-	// costing). The later wheelchair / stroller mode avoids them via its
-	// own costing options instead.
+	// costing). Stroller mode prices them by altitude through the fork's
+	// own costing option instead (below).
 	//
 	// Ferries: walking is slow and ships are fast, so at the neutral
 	// default every slightly-viable ferry wins. use_ferry 0.17 prices a
@@ -197,6 +201,10 @@ function costingOptions(args: DirectRouteArgs): Record<string, unknown> {
 	// Match the transit tab's walking-speed tier so a direct walk and a
 	// transit walking leg of the same length agree on duration.
 	if (args.walkSpeedKmh != null) pedestrian.walking_speed = args.walkSpeedKmh;
+	// Stroller mode (routing-options.md § Stroller mode): the fork's
+	// stairs-by-altitude model — identical to what the MOTIS fork sends
+	// for transit walks and what the stroller matrix was built with.
+	if (args.stroller) pedestrian.kora_stroller = true;
 	return { pedestrian };
 }
 

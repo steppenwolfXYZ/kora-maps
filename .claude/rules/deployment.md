@@ -53,7 +53,7 @@ The MOTIS binary is the Kora fork (`motis/fork/`, image tag `koramaps/motis:foot
 
 One-time server prep: install docker + compose plugin, `systemctl enable --now docker`, add `ga_koramaps` to the `docker` group, create `/var/www/koramaps.app/motis/` (owned by `ga_koramaps`), add the nginx location, keep 8080 closed in the cloud firewall, confirm ~5 GB free disk. Because the transfer table is built at import, both the two-tier split and the minimum-transfer-time floor only exist in indexes produced by an image that carries them — an index imported by an older image silently lacks them (the `koraFullTransfers` profile then degrades to the capped table). After bumping the fork, re-import before judging routing behaviour.
 
-Re-import cycle (all local): `python3 scripts/routing/build_station_walk_network.py` → `python3 scripts/routing/preprocess_gtfs_for_motis.py` → `python3 scripts/routing/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/routing/build_valhalla_footpath_matrix.py`** (writes `motis/data/valhalla_footpath_matrix.csv` — Valhalla must be running locally, see below) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
+Re-import cycle (all local): `python3 scripts/routing/build_station_walk_network.py` → `python3 scripts/routing/preprocess_gtfs_for_motis.py` → `python3 scripts/routing/check_gtfs_motis_consistency.py` (aborts on a mixed-vintage sidecar; `setup_routing.sh` step 7 runs it for you) → **`python3 scripts/routing/build_valhalla_footpath_matrix.py`** and **`… --profile stroller`** (write `motis/data/valhalla_footpath_matrix.csv` and `…_stroller.csv` — Valhalla must be running locally, see below; the import needs both, `routing-options.md` § Stroller mode) → `docker compose --profile import up motis-import` (in `motis/`) → `./scripts/deploy/deploy_motis.sh --with-data` (the fresh import must ship, so the data flag is required here).
 
 ## Valhalla deploy (`scripts/deploy/deploy_valhalla.sh`)
 
@@ -140,7 +140,7 @@ importing a feed it had never been sent.
 | Group | Source | Size | Contents |
 |---|---|---|---|
 | `assets` | `static/map-assets/` | ~470 MB | pmtiles, style.json, search/line/color indexes, glyph fonts |
-| `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + the footpath matrix CSV |
+| `motis` | `motis/data/` | ~6.3 GB | prebuilt nigiri / OSR / shapes indexes + both footpath matrix CSVs (foot + stroller) |
 | `valhalla` | `valhalla/data/` | ~1.0 GB | `valhalla_tiles.tar` + admins |
 | `lookup` | `data/` (raw + filtered feeds, derived) | ~550 MB on the wire | both GTFS feeds whole, atlas CSV, diagnostics, identity, all OSM way extracts |
 | `routed` | `data/gtfs_routed/` + `data/gtfs_motis/stops.txt` | ~6.2 GB | pfaedle's feed — input to `--start 6` and to a Mac re-import |

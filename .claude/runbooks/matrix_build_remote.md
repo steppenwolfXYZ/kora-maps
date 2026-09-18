@@ -117,6 +117,11 @@ Sanity-check the result: no self-pairs, no duration above
 All under `motis/data/`:
 
 - **`valhalla_footpath_matrix.csv`** — the deliverable.
+- **`valhalla_footpath_matrix_stroller.csv`** — the second deliverable
+  since stroller mode (`routing-options.md` § Stroller mode): the same
+  builder with `--profile stroller` (stroller stairs costing, 30-min cap,
+  ~1/16 of the foot run). Own checkpoint / failed-pairs / unroutable
+  files with the `_stroller` suffix. The import needs both CSVs.
   `from_stop_id,to_stop_id,duration_sec`, one row per ordered pair under
   `MAX_FOOTPATH_SEC` (7200 s). ~1 GB for the CH feed. Stop IDs are the
   platform-level IDs from `stops.txt`, so they match what the MOTIS

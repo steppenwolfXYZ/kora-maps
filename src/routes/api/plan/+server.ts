@@ -25,7 +25,7 @@ import { PlanDeadlineError, planCascade, type Extension, type PlanQuery } from '
 //   time                 ISO timestamp (always concrete; the client pins
 //                        "now" before sending)
 //   via, viaMinimumStay  comma lists — stop ids and minutes, same order
-//   walkSpeed, safety, minWalk   routing options (routing-options.md)
+//   walkSpeed, safety, minWalk, stroller   routing options (routing-options.md)
 //   extend               comma list of "earlier" | "later" — the history
 //                        of the earlier/later clicks on this query
 //   share                share fingerprint to verify (connection-sharing.md)
@@ -58,7 +58,8 @@ function parseOptions(url: URL): RoutingOptionValues {
 		...DEFAULT_OPTIONS,
 		walkSpeed: isWalkSpeedTier(walk) ? walk : DEFAULT_OPTIONS.walkSpeed,
 		safety: isSafetyMode(safety) ? safety : DEFAULT_OPTIONS.safety,
-		minimizeWalking: url.searchParams.get('minWalk') === '1'
+		minimizeWalking: url.searchParams.get('minWalk') === '1',
+		stroller: url.searchParams.get('stroller') === '1'
 	};
 }
 

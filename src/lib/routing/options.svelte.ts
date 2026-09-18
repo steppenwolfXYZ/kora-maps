@@ -13,9 +13,9 @@ import {
 // key. The value model, the tier tables and the engine parameter
 // derivations live in optionParams.ts (pure — shared with the server-side
 // planning engine and the Valhalla request builder); this module only
-// holds the reactive store. The "reckless" safety mode and the step-free
-// toggle are deferred (separately shippable per the concept) and
-// deliberately absent here.
+// holds the reactive store. The stroller toggle (routing-options.md
+// § Stroller mode) is shared by the transit and walking tabs. The
+// "reckless" safety mode is deferred and deliberately absent here.
 
 // Re-exported so existing importers (panel, URL round-trip) keep one
 // import site for the option model.
@@ -38,6 +38,7 @@ function readStorage(): RoutingOptionValues {
 			walkSpeed: isWalkSpeedTier(p.walkSpeed) ? p.walkSpeed : DEFAULTS.walkSpeed,
 			safety: isSafetyMode(p.safety) ? p.safety : DEFAULTS.safety,
 			minimizeWalking: p.minimizeWalking === true,
+			stroller: p.stroller === true,
 			bikeType: isBikeType(p.bikeType) ? p.bikeType : DEFAULTS.bikeType,
 			bikePace: isBikePace(p.bikePace) ? p.bikePace : DEFAULTS.bikePace,
 			bikeRoads: isBikeRoads(p.bikeRoads) ? p.bikeRoads : DEFAULTS.bikeRoads,
@@ -62,6 +63,7 @@ export const routingOptions = {
 	get walkSpeed() { return values.walkSpeed; },
 	get safety() { return values.safety; },
 	get minimizeWalking() { return values.minimizeWalking; },
+	get stroller() { return values.stroller; },
 	get bikeType() { return values.bikeType; },
 	get bikePace() { return values.bikePace; },
 	get bikeRoads() { return values.bikeRoads; },
@@ -74,7 +76,8 @@ export const routingOptions = {
 	get isDefault() {
 		return values.walkSpeed === DEFAULTS.walkSpeed
 			&& values.safety === DEFAULTS.safety
-			&& !values.minimizeWalking;
+			&& !values.minimizeWalking
+			&& !values.stroller;
 	},
 
 	/** The cycling tab's expander holds the bike type and the two rulers
@@ -139,6 +142,12 @@ export const routingOptions = {
 	setMinimizeWalking(v: boolean) {
 		if (values.minimizeWalking === v) return;
 		values = { ...values, minimizeWalking: v };
+		writeStorage();
+	},
+
+	setStroller(v: boolean) {
+		if (values.stroller === v) return;
+		values = { ...values, stroller: v };
 		writeStorage();
 	},
 

@@ -83,6 +83,7 @@ export async function plan(args: PlanArgs, signal?: AbortSignal): Promise<PlanRe
 	if (args.options.walkSpeed !== 'normal') params.set('walkSpeed', args.options.walkSpeed);
 	if (args.options.safety !== 'balanced') params.set('safety', args.options.safety);
 	if (args.options.minimizeWalking) params.set('minWalk', '1');
+	if (args.options.stroller) params.set('stroller', '1');
 	if (args.extensions.length > 0) params.set('extend', args.extensions.join(','));
 	if (args.share) params.set('share', args.share);
 

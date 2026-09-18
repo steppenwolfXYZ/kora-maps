@@ -1,6 +1,5 @@
 import {
-	boardingCount, pruneDominated, walkSeconds, type RankOptions,
-	REVERSE_DISPLACE_MAX_GAP_MS, T_SLACK_MS
+	boardingCount, pruneDominated, walkSeconds, type RankOptions, T_SLACK_MS
 } from '$lib/routing/ranking';
 import { itineraryFingerprint } from '$lib/routing/fingerprint';
 import { shareFingerprint } from '$lib/routing/share';
@@ -342,13 +341,12 @@ class Cascade {
 	}
 
 	/** How far past a journey coverage must reach before no unseen
-	 * dominator can exist: every Pareto or comfort dominator departs
-	 * before the journey's arrival (arrives after its departure, for the
-	 * arrival axis), give or take the ranking's time slack. Minimize
-	 * walking adds its reverse-displacement reach — a walk-lighter
-	 * journey up to 3 h later on the primary axis may still displace. */
+	 * dominator can exist: every dominator — Pareto (Case 1) or
+	 * concurrent (Case 2) — departs before the journey's arrival and
+	 * arrives after its departure, give or take the ranking's time
+	 * slack. The same in every mode. */
 	private settleReachMs(): number {
-		return T_SLACK_MS + (this.q.options.minimizeWalking ? REVERSE_DISPLACE_MAX_GAP_MS : 0);
+		return T_SLACK_MS;
 	}
 
 	/** Settled: coverage on one axis spans the journey plus the reach, so
@@ -381,8 +379,8 @@ class Cascade {
 		// themselves; far-side ones against everything.
 		const near: 1 | -1 = this.q.mode === 'arrive' ? -1 : 1;
 		const opts = this.rankOptions(state);
-		const nearPruned = pruneDominated(candidates.filter((it) => this.side(it) === near), this.q.mode, opts);
-		const farPruned = pruneDominated(candidates, this.q.mode, opts).filter((it) => this.side(it) !== near);
+		const nearPruned = pruneDominated(candidates.filter((it) => this.side(it) === near), opts);
+		const farPruned = pruneDominated(candidates, opts).filter((it) => this.side(it) !== near);
 		const forward = near === 1 ? nearPruned : farPruned;
 		const backward = near === 1 ? farPruned : nearPruned;
 		// Each side shows its settled survivors nearest the query time:
@@ -430,7 +428,10 @@ class Cascade {
 			// Full 2-h transfer table rides along with the wide walking
 			// budget — both mark "sparse service, search exhaustively"
 			// (transfer-point-optimization.md § Two-tier transfer table).
-			fullTransfers: budget === WIDE_PRE_POST_SEC,
+			// Never in stroller mode: no 2-h stroller table exists and the
+			// cascade never escalates there (routing-options.md § Stroller
+			// mode).
+			fullTransfers: budget === WIDE_PRE_POST_SEC && !this.q.options.stroller,
 			options: this.optionParams
 		}, this.callSignal());
 	}
@@ -568,11 +569,17 @@ class Cascade {
 			state.departures = q.mode === 'leave' ? span : null;
 			state.arrivals = q.mode === 'arrive' ? span : null;
 		};
+		// Stroller mode drops the escalation entirely (routing-options.md
+		// § Stroller mode): the stroller transfer table is capped at the
+		// default 30 min and there is no wide tier to fall back to, so the
+		// query runs the narrow flow only — share verification included
+		// (the shared connection was computed narrow too).
+		const stroller = q.options.stroller;
 		// Share verification must not depend on the narrow-radius
 		// heuristics: a shared connection with a long first/last-mile walk
 		// would be invisible to the narrow query and read as expired. Go
 		// wide from the start.
-		if (q.share) state.budget = WIDE_PRE_POST_SEC;
+		if (q.share && !stroller) state.budget = WIDE_PRE_POST_SEC;
 
 		// Stage 1 — narrow initial query (fast for typical cases).
 		let res = await this.query(q.mode, q.time, INITIAL_SEARCH_WINDOW_SEC, state.budget);
@@ -599,7 +606,7 @@ class Cascade {
 		// Escalation replaces `combined` (different candidate set with a
 		// wider walking radius, not comparable via merge).
 		const initialEpoch = Date.parse(q.time);
-		if (state.budget === NARROW_PRE_POST_SEC) {
+		if (state.budget === NARROW_PRE_POST_SEC && !stroller) {
 			const c = state.combined;
 			const best = c.length === 0 ? null : c.reduce((a, b) =>
 				q.mode === 'arrive'
@@ -627,7 +634,7 @@ class Cascade {
 		// Only arm the sparse-gap escalation check while the narrow budget
 		// is still in effect. If stage 2 already went wide there is no
 		// wider budget to retry with.
-		const shouldEscalate = state.budget === NARROW_PRE_POST_SEC
+		const shouldEscalate = state.budget === NARROW_PRE_POST_SEC && !stroller
 			? (frontier: number) => hasSparseServiceGap(state.combined, initialEpoch, frontier, q.mode)
 			: undefined;
 		const outcome = await this.runHopCascade(state, advanceDir, shouldEscalate);

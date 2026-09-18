@@ -83,7 +83,7 @@ Three ways to enter routing state:
 
 Walking legs carry an ascent / descent profile, so a flat 2 km stroll and a 2 km climb are distinguishable before the connection is opened.
 
-- The router supplies each WALK leg's ascent and descent in metres (`elevationUp` / `elevationDown` on the leg). They come from the elevation profile sampled along the walk, filtered so that terrain-model jitter never accumulates into invented climb; a leg with no elevation data available simply omits both fields, and every display below then falls back to showing nothing.
+- The router supplies each WALK leg's ascent and descent in metres (`elevationUp` / `elevationDown` on the leg), plus its stairs metres (`koraStairsM`, read by the stroller-mode stairs warning). They come from the elevation profile sampled along the walk, filtered so that terrain-model jitter never accumulates into invented climb; a leg with no elevation data available simply omits both fields, and every display below then falls back to showing nothing.
 - **Summary line** (the transfers · walking row of every card): walking time (bold) and the walked distance (plain), separated by a space — the same pairing the walk rows of the leg list use. The itinerary's summed ascent / descent is deliberately **not** printed here; it lives in a tooltip on the distance (`53 m ascent · 2 m descent`), so the row never grows. Format: `1 transfer · **12 min** 950 m walking`.
 - **Per-leg walk rows** in the expanded leg list: ascent / descent renders on walks **longer than 10 minutes** only — the walks where the profile changes how the leg feels. Time bold, distance plain, single spaces throughout. Format: `35 min 2.9 km (↑ 53m ↓ 2m)`.
 - Both halves of the pair always render together, so a genuinely flat long walk reads as an explicit `↑ 0m ↓ 0m` rather than looking like missing data.
@@ -134,6 +134,7 @@ Warnings are independent flags — a single card can carry any number of them, r
 Initial warning set and thresholds:
 
 - **Long walk** — any single WALK leg lasts **> 20 min** (standard), **> 40 min** (medium), **> 1 h** (strong). Icon: walking figure.
+- **Stairs** (stroller mode only, `routing-options.md` § Stroller mode) — the worst WALK leg's stairs metres (`koraStairsM`, from the router's steps maneuvers) class it: 1–2 steps never warn, up to 2 m of rise is **medium**, more is **strong**. Off stroller mode stairs are unremarkable. Icon: stairs.
 - **Long wait at transfer** — the gap between two consecutive transit legs is **≥ 1 h** (standard), **≥ 2 h** (medium), **≥ 3 h** (strong). Icon: hourglass / wait glyph.
 - **Very slow** — total duration is **≥ 1.5 ×** (standard), **≥ 2 ×** (medium), **≥ 2.5 ×** (strong) the fastest surviving itinerary's duration, AND the absolute gap is **≥ 10 min** (so the ratio thresholds don't fire on short trips where a 1.5× ratio is only a few minutes). Icon: snail.
 
@@ -166,14 +167,9 @@ Rule 0 additionally fires on an **exact time tie** — both endpoints within `T_
 
 **Rule 0f — same-corridor domination**: every rule above recognises "the same connection" only by trip identity, so a dominated journey riding the same tracks under a *different line number* got Case 1's courtesy keep like a genuinely different route. Rule 0f closes that: when B Pareto-dominates A in time and the two ride the **same corridor**, A is B in disguise — departing earlier only to wait or ride longer through the same stations — and is dropped without marginality or the usable-time rescue (its extra usable time is just extra ride on the same corridor). "Same corridor" is verified with the fork's ε-alternates ride-through test ported to primary-vs-primary pairs (`near-optimal-endpoint-alternatives.md` § Ride-through redundancy): the two journeys' ridden parent-station sets (board, alight, and interior stops where the response carries them) must overlap by ≥ 75% of the **smaller** set — that denominator keeps express-vs-local pairs matching in both directions — after excluding shared anchors (a first-boarding or last-alighting station common to both, which carries no corridor information). A survives when it offers any structural advantage: fewer boardings (a direct train against a same-corridor transfer chain is a real alternative), or meaningfully less walking (> 60 s, the shared jitter slack). An empty station set after anchor exclusion decides nothing and falls through to Case 1. Canonical case: Thun → Eigerplatz, RE1 15:59 (one extra stop in Münsingen) vs IC6 16:04, identical 16:41 arrival, both continuing on the same bus 10 — different line numbers, same corridor, pure extra wait.
 
-The two cases exist because they warrant fundamentally different treatment. An overlapping worse option is only worth showing if it's essentially the same trip (near-tie in time AND comfort); otherwise the user pays real time cost for no chronological reason to consider it. A non-overlapping option is a genuine alternative time slot; the further apart the slots, the more comfort penalty the user might tolerate for a distinct schedule choice.
+The two cases exist because they warrant fundamentally different treatment. An overlapping worse option is only worth showing if it's essentially the same trip (near-tie in time AND comfort); otherwise the user pays real time cost for no chronological reason to consider it. A non-overlapping option is a genuine alternative time slot; the further apart the slots, the bigger a quality deficit the user might tolerate for a distinct schedule choice.
 
-- **Score** — a single number combining transfer count and walking time, used only as Case 2's escape hatch (never for sorting):
-
-  `score = TRANSFER_PENALTY_SEC * boardings + walk_cost(walk_seconds)`
-
-  - `boardings` = number of transit legs (same definition as the badge comfort factor's `transfer_malus` — walk-only = 0, so a pure walk carries no vehicle penalty at all); `walk_seconds` = sum of all WALK-leg durations including inter-station transfer walks (same as the card's walking total) — except same-stop change-buffer legs: MOTIS renders a same-platform transfer's mandatory change time as a WALK leg from a stop to itself, and that is waiting, not walking; counting it distorted the comfort rating.
-  - Walking cost is **soft-capped**: full linear rate `WALK_PER_SEC = 2` for the first `WALK_SOFT_CAP_SEC = 30` min, then a much shallower `WALK_TAIL_PER_SEC = 0.5` beyond. `TRANSFER_PENALTY_SEC = 600`, so 5 min walking still costs about the same as one transfer at the short end. The knee bounds the score inflation from multi-hour hikes — a 30 min vs. 3 h walking difference no longer outweighs every realistic temporal-gap allowance — while keeping small walking differences (10 vs. 15 min) as sensitive as before.
+- **Score.** There is no separate comfort score any more: Case 2 compares the effective time (below). The former `score = 600 · boardings + walk_cost` — soft-capped walking, uncapped and ×4 under minimize walking — existed only as Case 2's escape hatch and went with the rule's rework.
 
 - **Case 1 — overlapping: strict marginality.** When B Pareto-dominates A in time (per the overlapping definition above), A survives only if BOTH conditions hold:
 
@@ -186,28 +182,20 @@ The two cases exist because they warrant fundamentally different treatment. An o
 
   **Usable-time rescue.** A dominated A survives Case 1 entirely (both tests) when its hassle time — judged duration minus usable time — beats B's by ≥ 10 min and its judged duration is ≤ 1.5× B's. This keeps slower direct connections whose long uninterrupted rides are worth more than the faster chain of changes (canonical: Bern → Chur direct IR35 vs IC + IC3). Applies after the Rule 0* prunes, which it never overrides. See `usable-time.md`.
 
-- **Case 2 — non-overlapping: gap-scaled comfort tolerance.** When neither option Pareto-dominates the other in time, A is dropped when there exists another non-overlapping B such that:
+- **Case 2 — non-overlapping: gap-scaled quality tolerance among concurrent slots.** When neither option Pareto-dominates the other in time, A is dropped when there exists another B such that:
 
-  - B time-beats A on the query's **primary axis** (`leave-at`: `B.end ≤ A.end + T_SLACK`; `arrive-by`: `B.start ≥ A.start − T_SLACK`) **and**
-  - A's comfort penalty over B exceeds the gap-scaled allowance: `A.score − B.score > −MARGIN + PENALTY_K · max(gap, GAP_FLOOR)^(1/3)`, where `gap = min(|A.start − B.start|, |A.end − B.end|)` in seconds and `GAP_FLOOR` = 120 s.
+  - A and B are **concurrent** — underway at some common moment: `B.start < A.end + T_SLACK` **and** `B.end > A.start − T_SLACK`. A connection wholly before or after another is a distinct slot and never prunes it. **and**
+  - B beats A on the **full ranking** by more than the gap-scaled allowance: `A.effective_time − B.effective_time > ALLOWANCE_FLOOR + gap`, with `gap = min(|A.start − B.start|, |A.end − B.end|)`, everything in seconds. `effective_time` is the same definition Case 1 and § Badges use — duration × comfort factor in normal mode, duration + walking / boarding penalties under minimize walking (`comfort-walk-baseline.md`).
 
-  In words: A survives unless it's meaningfully worse in comfort than the allowance at that gap — never less than the 2-min allowance (Case 2 removes only clearly worse connections; a similar non-overlapping connection is never removed), rising to a large positive at multi-hour gaps (A can afford substantial comfort penalties for distinct time slots). The cube-root shape rises fast enough that even a 2 min gap already tolerates a fairly steep comfort difference (so a rare fast option can't nuke its neighbours), then saturates gracefully so the 2 h allowance is "dramatic" rather than absurd. The floor exists because the raw curve went negative below ~0.3 s gap, so two identical-time near-ties (e.g. a direct walk vs. a walk + one-stop bus hybrid) each dropped the other, leaving neither.
+  The rule is **direction-blind**: whether B is the earlier or the later slot does not matter, and the query mode plays no role. Read per direction: an earlier B must arrive more than `2 · gap + floor` earlier than A; a later B must depart more than `2 · gap + floor` later. Either way the request timestamp cannot tip the outcome — the same pair is judged identically whichever way the list was loaded.
 
-  Across all pairs, this reduces to: for each candidate A, the tightest of the four axis-distances to any neighbor (|Δstart|, |Δend| to prev + next) sets the allowance ceiling — the closer A sits to a good neighbor on any single time axis, the less comfort penalty A is allowed.
+  Why the full ranking and not a comfort score: the earlier form compared a comfort-only score (boardings + walking) and required B to beat A on the query's *primary axis* (arrival for leave-at, departure for arrive-by). That made an earlier-departing connection "better" merely for arriving earlier, and a later departure counted for nothing. Under minimize walking a doorstep bus arriving 30 min earlier deleted an S-Bahn connection departing 32 min later with the same three boardings and a shorter duration, over 12 min of walking (canonical: Châtel-St-Denis → Bern, bus 492 18:15 vs S50 18:59 — the 19:59 twin survived only because its doorstep counterpart happened to fall outside every search window). With effective time in the comparison, "departs earlier, arrives earlier, same duration" is a wash, and the primary-axis test — a crutch that kept a slow low-comfort B from displacing a fast A — is no longer needed. The reverse displacement (a later, much better slot removing an earlier one) therefore exists in every mode now, not only under minimize walking.
 
-  Calibration:
+  Why concurrency: it is the natural "close enough" bound — B departs while A is still to come or under way — and it is what keeps the settled display's reach (`search-coverage-window.md`) at one slack in every mode: every dropper of a journey departs before it arrives and arrives after it departs. The minimize-walking 3-hour reverse-displacement window is gone with it.
 
-  - `T_SLACK` (~60 s) keeps near-identical start/end jitter from tipping the comparison.
-  - `MARGIN` = 300, `PENALTY_K` = 430, `GAP_FLOOR` = 120 s, giving:
-    - 0 gap up to 2 min → ~1820, the floor (drops only if ≥ ~15 min extra walking / ≥ 3 boardings)
-    - 5 min gap → ~2570
-    - 10 min gap → ~3230
-    - 30 min gap → ~4920
-    - 1 h gap → ~6290
-    - 2 h gap → ~8000 (dramatic — ≥ ~65 min extra walking or ~13 boardings under the soft cap)
-    - beyond 2 h keeps rising slowly.
+  Calibration: `ALLOWANCE_FLOOR` = 5 min, slope 1 (one minute of allowance per minute of gap). The floor keeps near-ties apart — two connections in essentially the same slot never drop each other over a few minutes, and since the allowance is always positive a mutual drop is impossible; the slope lets a distinct slot survive a bigger deficit the further away the better option is. 2 min gap → 7 min; 10 min → 15 min; 30 min → 35 min; 1 h → 65 min.
 
-  Both cases are symmetric — for `arrive-by` the Case 2 "primary axis" swaps from arrival to departure; the Pareto-dominance test in Case 1 and the comfort arithmetic in Case 2 are identical.
+  Both cases are mode-independent: Case 1's Pareto test and Case 2's concurrency and effective-time arithmetic are identical for `leave-at` and `arrive-by`.
 
   Consequences:
 
@@ -215,13 +203,17 @@ The two cases exist because they warrant fundamentally different treatment. An o
   - overlapping, leaves 3 min earlier + arrives 5 min later, 30% worse effective time → dropped by Case 1 (comfort test: 30% > 20%).
   - overlapping, leaves 3 min earlier + arrives 5 min later, 10% worse effective time → survives Case 1 (both marginal).
   - overlapping, leaves 13 min earlier + arrives at the same minute, 33 min less walking, minimize-walking active → survives Case 1 (time test skipped for the lower-walk option; comfort test passes). Same pair without the option → dropped (13 min > 9 min).
-  - non-overlapping, both endpoints within slack (essentially the same time), somewhat worse comfort → both survive Case 2 (the floor keeps the allowance at the 2-min value; dropped only if ≥ ~15 min extra walking / ≥ 3 boardings worse).
-  - non-overlapping, later start + later arrival by 30 min each, ≈ 30 min extra walking → survives Case 2 (comfort penalty within allowance).
-  - non-overlapping, a rare fast option surrounded by regular options with ~15 min more walking → the neighbours all survive Case 2 from ~2 min gap onward. (Neighbours that the rare fast Pareto-dominates in time — i.e. it leaves later AND arrives earlier than a specific neighbour — fall into Case 1 for that pair and are dropped there.)
+  - non-overlapping, both endpoints within slack (essentially the same time) → both survive Case 2 unless one is more than 5 min worse in effective time, which equal times only allow through a large comfort gap.
+  - non-overlapping, later start + later arrival by 30 min each, ≈ 30 min extra walking → survives Case 2 (normal mode: a few percent of effective time; minimize walking: a ~30 min penalty against a 35 min allowance).
+  - non-overlapping, B arrives 30 min earlier but also departs 32 min earlier, 9 min better effective time under minimize walking (the Châtel case) → survives: 30 min gap, 35 min allowance.
+  - non-overlapping, B leaves 2 min earlier and arrives 24 min earlier with fewer boardings (Bern → Zürich, IC81 06:02 vs IC6 + RE12 + RE37 06:04) → dropped: 2 min gap, 7 min allowance, ~28 min worse.
+  - non-overlapping, B leaves 5 min earlier and arrives 24 min earlier (Bern → Zürich, IC1 06:31 vs IR16 06:36) → the IR16 drops: 5 min gap, 10 min allowance, ~20 min worse. The slow train right behind the fast one is no longer listed — a deliberate consequence of judging the full ranking; the floor and slope are the knobs if that proves too strict.
+  - non-overlapping, B departs 21 min later and arrives 7 min later with a 15 min better effective time (Thun → Eigerplatz, S1 + bus 9 14:12 vs IC6 + bus 9 14:33) → dropped by the later slot (7 min gap, 12 min allowance).
+  - non-overlapping, a rare fast option surrounded by regular options → neighbours a few minutes away on both axes survive (the allowance grows with the gap); only a clearly worse immediate neighbour drops. Neighbours the rare fast Pareto-dominates in time fall into Case 1 for that pair and are dropped there.
 
 - **Chronological sort survives.** Ranking is applied only as a filter — surviving itineraries are still sorted earliest-arrival first (leave-at) or latest-departure first (arrive-by), so the "leave now" answer stays at the top.
 
-- **Direct walk-only options** are scored the same way (`boardings = 0`, `walk = duration`), which gives them an inherent comfort edge: every transit itinerary pays at least one boarding penalty (score + badge malus), so a pure walk rates better than walking nearly as far plus a short hop. A multi-hour walk is still dropped when a transit option time-dominates it or arrives no later with a hugely better score, and surfaces on its own when no transit option does — including walks that arrive sooner than any transit, which always survive.
+- **Direct walk-only options** are judged like everything else (`boardings = 0`, `walk = duration`): a pure walk carries no boarding malus, so it out-rates walking nearly as far plus a short hop. A multi-hour walk is dropped by a transit option that time-dominates it or by a concurrent one that beats it in effective time by more than the allowance, and surfaces on its own when no transit option does. A walk that arrives sooner than any transit option is no longer guaranteed to survive: a later-departing transit connection arriving a few minutes after it with a much shorter effective time displaces it like any other slot.
 
 ### Route color index
 
@@ -234,7 +226,7 @@ Routing state is serialised into the URL query string, following the existing `?
 
 - Query parameters: `from`, `to`, `mode` (`leave` or `arrive`), `time` (ISO 8601), and `fromName` / `toName` when the paired endpoint is a `point` with a display label (`geocoding-search.md` § URL persistence).
 - `time` is always concrete once a query has run: a "now" panel time is stamped with the timestamp the query actually ran at, so a shared or reloaded URL reproduces the shown results. A reload never re-resolves to a fresh "now" — the panel's refresh-to-now button is the only way to re-anchor. (The literal `now` still parses, for legacy links.) The panel itself keeps displaying "now"; the stamp lives only in the URL.
-- Routing options (`routing-options.md`) ride along as `walk`, `safety`, `minWalk` — written only when off their defaults, so absent params mean defaults. On cold-load restore they apply **session-only**: the link's options drive the tab's queries but never overwrite the recipient's localStorage prefs.
+- Routing options (`routing-options.md`) ride along as `walk`, `safety`, `minWalk`, `stroller` — written only when off their defaults, so absent params mean defaults. `stroller` is shared with the walking tab and is the one option a walking-tab link carries. On cold-load restore they apply **session-only**: the link's options drive the tab's queries but never overwrite the recipient's localStorage prefs.
 - Endpoint serialisation: `station` → UIC; `point` → `lat,lng`; `current` → `me`.
 - The URL is written on any input, time, or option change, and on issuing a query, via SvelteKit's `replaceState`.
 - Opening a route URL on cold load reproduces the panel state (including options) and issues the query.

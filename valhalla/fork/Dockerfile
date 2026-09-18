@@ -85,7 +85,7 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DENABLE_TE
 COPY patches/ /src/valhalla/kora-patches/
 COPY src/ /src/valhalla/src/
 RUN for p in /src/valhalla/kora-patches/*.patch; do git apply --verbose "$p"; done && \
-    touch -c src/sif/bicyclecost.cc src/thor/triplegbuilder.cc && \
+    touch -c src/sif/bicyclecost.cc src/sif/pedestriancost.cc src/thor/triplegbuilder.cc && \
     make -C build all -j${CONCURRENCY} && \
     make -C build install
 

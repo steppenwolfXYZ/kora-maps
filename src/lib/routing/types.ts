@@ -228,6 +228,10 @@ export interface Leg {
 	 * motis/fork/README.md). Absent when the router had no elevation. */
 	elevationUp?: number;
 	elevationDown?: number;
+	/** Metres of stairs along a WALK leg (kora fork, from the router's
+	 * steps maneuvers; 0 when none). Drives the stroller-mode stairs
+	 * warning (routing-options.md § Stroller mode). */
+	koraStairsM?: number;
 	from?: LegPlace;
 	to?: LegPlace;
 	routeShortName?: string;

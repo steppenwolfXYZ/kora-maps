@@ -10,8 +10,9 @@ that is not bicycle costing is upstream, byte for byte.
 | File | Kind | Purpose |
 |---|---|---|
 | `src/sif/bicyclecost.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | The whole Kora weighting model: rider-power speed model (the request's flat speed sets the rider's watts, every grade's speed follows — honest hill time; `ebike` / `sbike` add a motor with a 25 / 45 km/h assist cap), quality tiers with speed-priced bare roads, painted-lane / sharrow factors with lane steps on 50 km/h+ through roads, per-metre service-road factor (no entry fee), DEM-artifact grade cap on through roads, official-route bonus, zero destination-only and service-road entry penalties, ferry / car-shuttle pricing (service speed + boarding wait + high on-board cost), pushed-bike access (grade-aware pace, per-section allowance, sac_scale / impassable-surface guards), turn restrictions obeyed only where the maneuver crosses a road posted above 30 km/h, stairs as hauling time + committing fees, per-turn cost, deviation penalty, junction-based lane-scaled crossing rule (turn-direction shares, multi-lane T-junctions), the `exclude_steps` request option, and the `avoidance_scale` / `bonus_scale` ruler scales (bicycle-route-options.md). All tunables sit in the `kora` namespace at the top of the file — the one place to change numbers; every kora-specific line is marked `kora fork:`. Requirements record: `bicycle-costing-fork.md`. |
+| `src/sif/pedestriancost.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | The stroller pedestrian model (`routing-options.md` § Stroller mode): with `kora_stroller = true` a stairs edge is priced by altitude (length × 0.5 rise per metre) — 1–2 steps (≤ 1.5 m) cost ~3 s search-only, up to 2 m of rise adds 40 s of real time per metre, more adds 80 s of real time per metre plus a 5 min/m search-only penalty. Everything else is upstream byte for byte. Used by both the live walks (MOTIS fork + walking tab) and the stroller footpath matrix, which must describe the same walker. |
 | `src/thor/triplegbuilder.cc` | full-file overlay of upstream's copy at `VALHALLA_REF` | Pushed-bike sections are reported as pedestrian `travel_mode` maneuvers (upstream already does this for dismount + steps; the overlay extends the condition to not-ridable-but-walkable edges). Maneuvers never merge across a mode change, so the client gets exact shape ranges to draw dotted. |
-| `patches/options-proto-kora-bicycle.patch` | `git apply` patch on `proto/descriptors/options.proto` | Adds `bool exclude_steps = 98`, `float avoidance_scale = 99`, `float bonus_scale = 100`, `string surface_profile = 101` and `string route_character = 102` to `Costing.Options` — all in `oneof` wrappers, as upstream does: the `JSON_PBF_*` parser macros check `has_<field>_case()`, which only a oneof member has. Fields 98–102 must stay unused upstream — check on a bump. |
+| `patches/options-proto-kora-bicycle.patch` | `git apply` patch on `proto/descriptors/options.proto` | Adds `bool exclude_steps = 98`, `float avoidance_scale = 99`, `float bonus_scale = 100`, `string surface_profile = 101`, `string route_character = 102` and (pedestrian) `bool kora_stroller = 103` to `Costing.Options` — all in `oneof` wrappers, as upstream does: the `JSON_PBF_*` parser macros check `has_<field>_case()`, which only a oneof member has. Fields 98–102 must stay unused upstream — check on a bump. |
 
 Request API: everything upstream accepts still parses. `use_roads` is
 accepted but inert (the tier model replaces what it scaled). Kora
@@ -30,6 +31,12 @@ additions under `costing_options.bicycle`:
 
 The client's mapping of its bike type / pace / roads stops onto these
 lives in `src/lib/routing/optionParams.ts` (`bikeCostingOptions`).
+
+Kora addition under `costing_options.pedestrian`:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `kora_stroller` (bool) | `false` | the stroller toggle (`routing-options.md` § Stroller mode): stairs priced by altitude — 1–2 steps ~3 s cost-only, ≤ 2 m rise +40 s/m real time, more +80 s/m real time plus 5 min/m cost-only. Foot access rules otherwise (no kerb / grade / surface limits). Sent by the walking tab and by the MOTIS fork's live calls; baked into the stroller footpath matrix |
 
 ## Build
 

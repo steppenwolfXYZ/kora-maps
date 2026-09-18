@@ -33,6 +33,7 @@ scripts/routing/setup_routing.sh skips on). Delete the CSV + checkpoint
 from __future__ import annotations
 
 import argparse
+import copy
 import concurrent.futures
 import csv
 import http.client
@@ -52,6 +53,26 @@ OUT_CSV = ROOT / "motis" / "data" / "valhalla_footpath_matrix.csv"
 CHECKPOINT = ROOT / "motis" / "data" / "valhalla_footpath_matrix.checkpoint"
 UNROUTABLE_CSV = ROOT / "motis" / "data" / "valhalla_unroutable_stops.csv"
 FAILED_PAIRS_CSV = ROOT / "motis" / "data" / "valhalla_failed_pairs.csv"
+
+# Stroller profile (routing-options.md § Stroller mode): a second matrix
+# built with the fork's stroller pedestrian costing (stairs priced by
+# altitude), selected with `--profile stroller`. Its own CSV, checkpoint
+# and diagnostics, so the two builds never touch each other's state. The
+# fork imports it into its stroller transfer slot
+# (KORA_STROLLER_MATRIX_PATH); the constants below are swapped in by
+# main() for that profile and every function reads them at call time.
+STROLLER_OUT_CSV = ROOT / "motis" / "data" / "valhalla_footpath_matrix_stroller.csv"
+STROLLER_CHECKPOINT = ROOT / "motis" / "data" / "valhalla_footpath_matrix_stroller.checkpoint"
+STROLLER_UNROUTABLE_CSV = ROOT / "motis" / "data" / "valhalla_unroutable_stops_stroller.csv"
+STROLLER_FAILED_PAIRS_CSV = ROOT / "motis" / "data" / "valhalla_failed_pairs_stroller.csv"
+# Stroller transfers are capped at 30 min — the same cap as the default
+# foot transfer table (KORA_TRANSFER_CAP_MINUTES), so stroller queries
+# search a table of the default's size; the cascade never escalates to
+# a wide budget in stroller mode, so no 2-h tier exists for it. The
+# radius follows: 5.1 km/h × 30 min = 2.55 km straight line, 3 km leaves
+# headroom for detours. The whole build is ~1/16 of the foot matrix.
+STROLLER_MAX_FOOTPATH_SEC = 1800
+STROLLER_RADIUS_M = 3_000.0
 
 # Straight-line search radius for candidate targets. Any pair further
 # apart than this in metres is not queried at all. Must exceed the
@@ -733,8 +754,40 @@ def _append_checkpoint(stop_id: str) -> None:
         f.write(stop_id + "\n")
 
 
+def _select_profile(profile: str) -> None:
+    """Swap the module-level paths / caps / costing for the profile.
+
+    Every function reads these names at call time, so rebinding them
+    here (before any work) switches the whole build."""
+    global OUT_CSV, CHECKPOINT, UNROUTABLE_CSV, FAILED_PAIRS_CSV
+    global MAX_FOOTPATH_SEC, RADIUS_M, COSTING_JSON
+    if profile == "foot":
+        return
+    assert profile == "stroller", profile
+    OUT_CSV = STROLLER_OUT_CSV
+    CHECKPOINT = STROLLER_CHECKPOINT
+    UNROUTABLE_CSV = STROLLER_UNROUTABLE_CSV
+    FAILED_PAIRS_CSV = STROLLER_FAILED_PAIRS_CSV
+    MAX_FOOTPATH_SEC = STROLLER_MAX_FOOTPATH_SEC
+    RADIUS_M = STROLLER_RADIUS_M
+    # Same walker as the foot matrix plus the stroller stairs model —
+    # MUST match costing(/*stroller=*/true) in motis/fork/src/
+    # kora_valhalla.cc, exactly as the foot block matches the foot call.
+    COSTING_JSON = copy.deepcopy(COSTING_JSON)
+    COSTING_JSON["costing_options"]["pedestrian"]["kora_stroller"] = True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--profile",
+        choices=("foot", "stroller"),
+        default="foot",
+        help="Which walker to build the matrix for: foot (default, the "
+             "2-h transfer table) or stroller (routing-options.md § "
+             "Stroller mode — stairs priced by altitude, 30-min cap, "
+             "own CSV / checkpoint / diagnostics).",
+    )
     ap.add_argument(
         "--restart",
         action="store_true",
@@ -756,6 +809,9 @@ def main() -> None:
              "block-level skipping BISECT_FLOOR_PAIRS causes.",
     )
     args = ap.parse_args()
+    _select_profile(args.profile)
+    print(f"Profile: {args.profile} (cap {MAX_FOOTPATH_SEC // 60} min, "
+          f"radius {RADIUS_M / 1000:.1f} km) → {OUT_CSV.name}")
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     if args.restart:

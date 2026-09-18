@@ -15,7 +15,7 @@
 # Groups (all run by default; --only a,b selects, --no-routed drops the
 # big one):
 #   assets    static/map-assets/     ~470 MB  pmtiles, style, indexes, glyphs
-#   motis     motis/data/            ~6.3 GB  nigiri/OSR/shapes indexes + matrix
+#   motis     motis/data/            ~6.3 GB  nigiri/OSR/shapes indexes + both matrices
 #   valhalla  valhalla/data/         ~1.0 GB  tile extract + admins
 #   lookup    data/ (raw + filtered  ~550 MB  both GTFS feeds, atlas CSV,
 #             feeds, derived tables) on wire  diagnostics, OSM way extracts
@@ -194,14 +194,16 @@ if want assets && have assets "static/map-assets/style.json"; then
 fi
 
 # ── motis ────────────────────────────────────────────────────────────
-# Two transfers, because -z is worth it for exactly one file here: the
-# indexes are binary and incompressible, the matrix is text and
-# compresses ~8.5x. Excluding the CSV from the index transfer also keeps
-# --delete from removing the local copy in the gap between the two
-# (rsync never deletes excluded files without --delete-excluded).
+# Two kinds of transfer, because -z is worth it for exactly the CSVs
+# here: the indexes are binary and incompressible, the matrices are text
+# and compress ~8.5x. Excluding the CSVs from the index transfer also
+# keeps --delete from removing the local copies in the gap between the
+# transfers (rsync never deletes excluded files without
+# --delete-excluded).
 if want motis && have motis "motis/data/tt.bin"; then
 	pull "MOTIS indexes → motis/data/" "motis/data/" \
 		--delete --exclude 'valhalla_footpath_matrix.csv' \
+		--exclude 'valhalla_footpath_matrix_stroller.csv' \
 		-- "motis/data/"
 
 	# The matrix always travels with the indexes. It used to be opt-in, on
@@ -213,6 +215,13 @@ if want motis && have motis "motis/data/tt.bin"; then
 		pull "footpath matrix → motis/data/ (1.8 GB text, compressed in flight)" \
 			"motis/data/" -z \
 			-- "motis/data/valhalla_footpath_matrix.csv"
+	fi
+	# The stroller matrix (routing-options.md § Stroller mode) — the
+	# import refuses to run without it, so it travels the same way.
+	if have motis "motis/data/valhalla_footpath_matrix_stroller.csv"; then
+		pull "stroller footpath matrix → motis/data/ (compressed in flight)" \
+			"motis/data/" -z \
+			-- "motis/data/valhalla_footpath_matrix_stroller.csv"
 	fi
 fi
 

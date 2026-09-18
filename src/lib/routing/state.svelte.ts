@@ -204,11 +204,12 @@ let walkBaselineSec = $state(0);
 
 /** Ranking knobs shared by publishResults and the panel's card states. */
 export function rankOptionsFor(): {
-	minimizeWalking: boolean; plannedDwellSec: number;
+	minimizeWalking: boolean; stroller: boolean; plannedDwellSec: number;
 	viaWaitByStop: Map<string, number> | null; walkBaselineSec: number;
 } {
 	return {
 		minimizeWalking: routingOptions.minimizeWalking,
+		stroller: routingOptions.stroller,
 		plannedDwellSec: plannedDwellSec(vias),
 		viaWaitByStop: viaWaitByStop(),
 		walkBaselineSec
@@ -498,6 +499,9 @@ async function runDirectQuery(key: string) {
 			walkSpeedKmh: m === 'walk'
 				? (routingOptions.pedestrianSpeedMs != null ? routingOptions.walkSpeedKmh : null)
 				: null,
+			// Stroller mode is shared with the transit tab
+			// (routing-options.md § Stroller mode).
+			stroller: m === 'walk' && routingOptions.stroller,
 			// The cycling tab's rider model (bicycle-route-options.md).
 			bike: m === 'bike' ? routingOptions.bikeSnapshot() : undefined
 		}, ac.signal);

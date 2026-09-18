@@ -83,15 +83,17 @@ same number, so loading more results never re-rates what is shown. It
 resets with the query. In each mode a single effective time —
 multiplicative in normal mode, additive under minimize walking — drives
 pruning (the Case 1 comfort test, unchanged as a 20 % ratio over that
-effective time), badges and auto-select. The Case 2 penalty score is a
-separate scale and stays as it is.
+effective time), badges and auto-select. The Case 2 penalty score was
+a separate scale at the time; Case 2 has since moved onto the same
+effective time (`transit-routing.md` § Ranking).
 
 ## Constraints
 
 - Everything that is not the comfort malus keeps using raw walking:
   long-walk warnings, the 30-minute direct-walk suppression under
-  minimize walking, the Case 2 penalty score, the subset-prune saving
-  ratio and the walking exemption of Case 1.
+  minimize walking, the subset-prune saving ratio and the walking
+  exemption of Case 1 (the Case 2 penalty score, also on this list
+  originally, no longer exists).
 - The Case 1 window (9 min / 20 %) and the Case 2 allowance curve are
   not retuned here. Under the additive pricing the Rosengarten case
   rates best outright (42 min effective against 51.5 and 53.7 for its

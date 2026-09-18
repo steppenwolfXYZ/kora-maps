@@ -1,6 +1,6 @@
 # Routing Options
 
-Walking speed, connection safety, minimize-walking, and step-free mode
+Walking speed, connection safety, minimize-walking, and stroller mode
 for the connection search — plus the "more options" UI that hosts them.
 
 ## Problem
@@ -22,13 +22,14 @@ and the "more options" UI with persistence and URL round-trip.
 
 Open:
 
-- **Reckless** (§ 2, safety stop 4) — the ruler ships with three stops.
-  Still needs the routing core to accept negative transfer slack.
-- **Step-free mode** (§ 5) — not built; the toggle is absent. Still
-  needs the second, step-free footpath matrix.
-- **The `> 40 min` standard walk-point class** (§ Constraints) — still
-  ships as +9; correcting it to the intended +8 remains a separate
-  deliberate decision.
+- **Reckless** (§ 2, safety stop 4) — **deferred** (decided 2026-09-18).
+  The ruler ships with three stops; still needs the routing core to
+  accept negative transfer slack. Not scheduled.
+- **Stroller mode** (§ 5) — implemented 2026-09-18 (replaces the earlier
+  step-free / wheelchair plan; a wheelchair tier is deferred). Needs the
+  second, stroller-costed footpath matrix in every deployment.
+- ~~The `> 40 min` standard walk-point class~~ — resolved 2026-09-18
+  by the finer ladder in § 4 (both tables now top out at +6).
 
 ## Requirements
 
@@ -198,18 +199,27 @@ toggle is active:
 
   | walk | standard | minwalk |
   |---|---|---|
-  | ≤ 5 min | +0 | +0 |
+  | ≤ 3 min | +0 | +0 |
+  | ≤ 5 min | +0 | +1 |
   | ≤ 10 min | +1 | +2 |
   | ≤ 20 min | +2 | +3 |
-  | ≤ 40 min | +4 | +6 |
-  | > 40 min | +8 | +6 |
+  | ≤ 30 min | +3 | +4 |
+  | ≤ 40 min | +4 | +5 |
+  | ≤ 50 min | +5 | +6 |
+  | > 50 min | +6 | +6 |
 
-  Rationale: 0–5 min walks are fine; avoiding a 5–10 min walk is
-  worth an extra transfer; the 10–30 min band has the most potential
-  and is priced steepest relative to boardings. No extra class above
-  40 min: long walks are not this mode's search concern — wide-budget
-  candidates with long walks may exist (see Escalation below), and
-  demoting them is the client ranking's job.
+  (Ladder refined 2026-09-18; the original shipped as 0/1/2/4/9 vs
+  0/2/3/6/6 with class edges at 5/10/20/40 min.) Rationale: one point
+  per ~10 min of walking, minwalk one class ahead of standard —
+  avoiding a 5–10 min walk is worth an extra transfer, and the
+  10–30 min band is where minimize walking has the most potential.
+  Class boundaries cost nothing (a walk's price is the level it lands
+  on, not the number of rows), so the ladder is fine-grained up to
+  50 min and flat above: long walks are not this mode's search
+  concern — wide-budget candidates with long walks may exist (see
+  Escalation below), and demoting them is the client ranking's job.
+  The flat top (+6 instead of the former +9) also caps the highest
+  level a walk-heavy query can reach, so RAPTOR runs fewer rounds.
 
   The table applies everywhere the standard one does: transfer walks,
   access/egress seeds, reconstruction, alternates pricing.
@@ -226,21 +236,12 @@ candidates is the ranking's job, below.)
 
 **Ranking (client), beyond the weight shift:**
 
-- The walking cost is **not soft-capped** in this mode (full linear
-  rate at any length) — discounting long walking is exactly what the
-  mode must not do; capped costs made walk-heavy-vs-low-walk prunes
-  hover at the allowance boundary, so near-identical connections fell
-  on opposite sides of it.
-- The non-overlapping dominance rule (Case 2) becomes
-  **direction-blind**: the score-vs-allowance test applies regardless
-  of which connection is faster, so a much-lower-walk connection can
-  displace a faster walk-heavy one. The reverse direction (slower
-  displaces faster) carries a **hard ceiling of 3 hours** on the
-  primary axis: a low-walk alternative further away than that never
-  displaces the only fast option — the cube-root allowance alone
-  cannot provide this bound once walk costs are uncapped.
-  Pareto-dominating pairs stay in the overlapping rule (Case 1), so
-  mutual drops are impossible.
+- *Superseded by the Case 2 rework (`transit-routing.md` § Ranking):*
+  the uncapped ×4 walking cost and the comfort score it fed are gone.
+  Case 2 now compares the mode's effective time (additive under this
+  option, `comfort-walk-baseline.md`), is direction-blind in every
+  mode, and bounds displacement by concurrency instead of the former
+  3-hour ceiling on the primary axis.
 - The overlapping dominance rule (Case 1) gains a **walking
   exception**: when the Pareto-dominated connection walks meaningfully
   less (> 60 s) than its dominator, the 9-minute marginality window is
@@ -287,29 +288,71 @@ the re-weighting on its own first, and implement walking-optimized
 candidate generation afterwards if the re-ranked results aren't
 walking-friendly enough.
 
-### 5. Step-free mode (wheelchair / stroller)
+### 5. Stroller mode
 
-**Not implemented yet** — nothing of this section ships today.
+One toggle ("Stroller"), on the transit tab's more-options area and on
+the walking tab's control row. It **composes with** walking speed,
+safety and minimize walking — it does not replace them (you can run
+with a stroller). The original plan was a wheelchair / step-free mode;
+that is deferred: a wheelchair tier needs kerb, gradient and surface
+rules of its own and would become a third matrix. Should it come, the
+toggle grows into an accessibility ruler (Normal / Stroller /
+Wheelchair) rather than a second switch.
 
-One toggle ("Step-free"). It **composes with** walking speed and
-safety — it does not replace them (electric vs. hand-driven wheelchairs
-differ wildly in speed; you can run with a stroller).
+**Stairs pricing.** Stairs are not banned — a stroller can be carried —
+they are priced by altitude, in three classes. Altitude is derived from
+the stair's length at a fixed rise-per-metre (0.5), because the terrain
+model is far too coarse to measure a single flight; the classes are
+therefore length classes in disguise:
 
-- Pedestrian routing avoids stairs entirely and adds a fixed time
-  penalty per elevator use. Live calls switch to the wheelchair-style
-  costing; the plan request reuses the existing `pedestrianProfile`
-  parameter.
-- Transfers need a **second precomputed footpath matrix** built with
-  the step-free costing; the import loads both and query time selects
-  by profile. Separately shippable — until the matrix ships, the
-  toggle is hidden.
+| Stairs | Elapsed time | Search-only penalty | Warning |
+|---|---|---|---|
+| 1–2 steps (length ≤ 1.5 m) | unchanged | ~3 s | none |
+| up to 2 m of rise | +40 s per metre of rise | none | **medium** (level 2) |
+| more than 2 m of rise | +80 s per metre of rise | +5 min per metre of rise | **strong** (level 3) |
+
+- "Elapsed time" is real walking time: it reaches the displayed leg
+  durations and the transfer matrix. The search-only penalty is cost
+  the router minimises but never shows, so a long flight is taken only
+  when nothing else connects the two points — and then at honest time.
+- The long-stairs elapsed rate is deliberately steeper than the medium
+  one (80 vs 40 s/m). The penalty alone decides only the path between
+  one stop pair; between journeys RAPTOR compares durations, so a
+  transfer whose sole option is a long flight would otherwise compete
+  as if it were harmless. Doubling its real time makes stair-free
+  journeys elsewhere win where they exist.
+- Elevators keep their normal 60 s per ride. Kerbs, surfaces and
+  gradients are untouched — those are wheelchair concerns.
+
+**Two matrices.** Transfers in stroller mode come from a **second
+precomputed footpath matrix** built with the stroller costing; the
+import loads both and the query selects the table by profile
+(`koraProfile=stroller`, a fork-only plan parameter). The stroller
+matrix is capped at 30 minutes — the same cap as the default foot
+table, so query performance is the default's — and the cascade's
+escalation (wide walking budget, full 2-hour table) is **dropped
+entirely** while the toggle is on: the stroller query runs the narrow
+flow only. Station endpoints read the stroller table; coordinate
+endpoints and walk legs go to the live router with the stroller
+costing. A deployment whose index lacks the stroller table refuses
+stroller queries with an error rather than degrading to the foot table.
+
+**Walking tab.** The same toggle applies the stroller costing to the
+direct walking routes; a walk route's stairs metres are then shown on
+its card.
+
+**Warnings.** Every displayed walk (transit walk leg or direct route)
+carries its stairs metres from the router. A stroller-mode connection
+gets the stairs warning at the severity of its worst walk per the
+table above (medium / strong); short flights never warn. Off stroller
+mode stairs stay unremarkable and produce no warning.
 
 ### 6. UI: "more options" expander
 
 - A "more options" button sits to the right of the Leave-at /
   Arrive-by toggle and expands the connection-search input area to
   reveal: walking-speed ruler, Minimize-walking checkbox, safety
-  ruler, Step-free toggle.
+  ruler, Stroller toggle.
 - Ruler controls: a draggable handle that snaps to discrete stops;
   the description text below the ruler updates live while dragging.
 - When the area is collapsed and any setting differs from its
@@ -318,8 +361,9 @@ differ wildly in speed; you can run with a stroller).
   (`kora_routing_prefs`) once the user changes anything; defaults are
   Normal / Balanced / both toggles off.
 - Non-default settings also ride in the routing URL (`walk`, `safety`,
-  `minWalk` — see `transit-routing.md` § Deep link), so a shared link
-  reproduces the results. Restoring from a URL applies them
+  `minWalk`, `stroller` — see `transit-routing.md` § Deep link), so a
+  shared link reproduces the results. `stroller` is the one option the
+  walking tab's links carry too. Restoring from a URL applies them
   session-only, never into the recipient's localStorage.
 - Labels English only; i18n is out of scope.
 
@@ -328,10 +372,10 @@ differ wildly in speed; you can run with a stroller).
 - Default state (Normal, Balanced, no toggles) must produce
   byte-identical queries and results to today — no regression for
   users who never open the options.
-- Transfer scaling is linear on the matrix durations. In step-free
-  mode this also scales the elevator share of a transfer, which does
-  not really get faster when you walk faster — accepted approximation,
-  since matrix durations are opaque single numbers.
+- Transfer scaling is linear on the matrix durations. In stroller mode
+  this also scales the elevator and stair-carrying share of a transfer,
+  which does not really get faster when you walk faster — accepted
+  approximation, since matrix durations are opaque single numbers.
 - Warning math and safety feasibility must use the same walking-speed
   value the backend used, or warnings will contradict the results.
 - The transfer table's one-minute resolution must not leak into the
@@ -350,6 +394,11 @@ differ wildly in speed; you can run with a stroller).
 - Minimize walking must never fake a different walking speed toward
   the server — that would drop connections a normal-pace walker can
   make and distort every displayed time.
-- The standard table's `> 40 min` class ships as +9 in the current
-  code; the intended value is +8 (typo). Correcting it changes default
-  routing behavior slightly and is a deliberate, separate decision.
+- The walk-point ladder is a compile-time table in the fork; changing
+  it changes default routing behavior and needs a fork image rebuild
+  (query-time only, no re-import).
+- The stroller matrix and the live stroller costing must describe the
+  same walker, exactly as the foot matrix and the foot costing do:
+  changing the stair constants means rebuilding the stroller matrix.
+- Stroller mode composes with every other option; it never fakes a
+  walking speed and never changes the foot matrix.

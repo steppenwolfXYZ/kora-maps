@@ -94,6 +94,11 @@ export interface RoutingOptionValues extends BikeOptionValues {
 	walkSpeed: WalkSpeedTier;
 	safety: SafetyMode;
 	minimizeWalking: boolean;
+	/** Stroller mode (routing-options.md § Stroller mode): stairs priced
+	 * by altitude on every walk — transit walks via the fork's stroller
+	 * transfer table + live costing, the walking tab via the same
+	 * costing option. Shared by both tabs; composes with everything. */
+	stroller: boolean;
 }
 
 export const DEFAULT_BIKE_OPTIONS: BikeOptionValues = {
@@ -107,6 +112,7 @@ export const DEFAULT_OPTIONS: RoutingOptionValues = {
 	walkSpeed: 'normal',
 	safety: 'balanced',
 	minimizeWalking: false,
+	stroller: false,
 	...DEFAULT_BIKE_OPTIONS
 };
 
@@ -189,6 +195,10 @@ export interface PlanOptionParams {
 	koraWalkPoints: 'minwalk' | null;
 	alternativesEpsilon: number;
 	alternativesMax: number;
+	/** `koraProfile=stroller` (routing-options.md § Stroller mode): the
+	 * fork searches the stroller transfer table and prices every live
+	 * walk with the stroller costing. Null off. */
+	koraProfile: 'stroller' | null;
 }
 
 export function pedestrianSpeedMs(v: RoutingOptionValues): number | null {
@@ -212,6 +222,25 @@ export function planOptionParams(v: RoutingOptionValues): PlanOptionParams {
 		minTransferMin: factor != null && factor < 1 ? 1 : 0,
 		koraWalkPoints: v.minimizeWalking ? 'minwalk' : null,
 		alternativesEpsilon: v.minimizeWalking ? 900 : 540,
-		alternativesMax: v.minimizeWalking ? 5 : 3
+		alternativesMax: v.minimizeWalking ? 5 : 3,
+		koraProfile: v.stroller ? 'stroller' : null
 	};
+}
+
+// ── Stroller stairs classes (routing-options.md § Stroller mode) ─────────
+// Mirror of the fork's pedestrian costing constants: altitude is length ×
+// STAIR_RISE_PER_M; flights up to SHORT_STAIRS_M of length are 1–2 steps
+// (no warning), up to MEDIUM_STAIRS_RISE_M of rise warn medium, more
+// warn strong. Keep in sync with valhalla/fork/src/sif/pedestriancost.cc.
+export const STAIR_RISE_PER_M = 0.5;
+export const SHORT_STAIRS_M = 1.5;
+export const MEDIUM_STAIRS_RISE_M = 2;
+
+export type StairsClass = 'none' | 'short' | 'medium' | 'long';
+
+/** Class of a walk's stairs from its stairs metres (length). */
+export function stairsClass(stairsM: number): StairsClass {
+	if (!(stairsM > 0)) return 'none';
+	if (stairsM <= SHORT_STAIRS_M) return 'short';
+	return stairsM * STAIR_RISE_PER_M <= MEDIUM_STAIRS_RISE_M ? 'medium' : 'long';
 }
