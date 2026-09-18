@@ -41,7 +41,12 @@ Kora addition under `costing_options.pedestrian`:
 ## Build
 
 ```
-docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
+# once per machine and per VALHALLA_REF — the baseline image (clone, deps,
+# full compile), tagged so it is never GC'd:
+docker build --build-arg VALHALLA_REF=3.8.3 -t koramaps/valhalla-baseline:3.8.3 -f valhalla/fork/Dockerfile.baseline valhalla/fork
+# every fork iteration — patches + overlays on the baseline:
+docker build --build-arg VALHALLA_REF=3.8.3 -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
+# (or simply ./scripts/routing/setup_routing.sh --steps 2, which does both)
 ```
 
 `scripts/routing/setup_routing.sh` step 2b does this for you and rebuilds whenever

@@ -9,7 +9,8 @@
 #
 # Steps:
 #   1  Create docker network `koramaps`                 (instant; skipped if present)
-#   2  Build the MOTIS + Valhalla fork images           (~30-60 min compile each; skipped if
+#   2  Build the MOTIS + Valhalla fork images           (baseline images once per pin, 30-90 min
+#                                                        each; fork overlays ~5-10 min; skipped if
 #                                                        up to date with motis/fork, valhalla/fork)
 #   3  Patch OSM PBFs + admin bounds + elevation        (~minutes each; skipped if up to date;
 #                                                        first elevation build downloads ~min)
@@ -136,6 +137,37 @@ fi
 fi
 
 if want 2; then
+# ── Baseline images ─────────────────────────────────────────────────
+# Each fork builds on a BASELINE image — toolchain + upstream at the pin +
+# every dependency clone + the full unmodified compile — tagged
+# koramaps/<engine>-baseline:<pin> (motis/fork/Dockerfile.baseline,
+# valhalla/fork/Dockerfile.baseline). A tagged image is never garbage-
+# collected; the single-file build used to keep the baseline as a cached
+# layer, and BuildKit's cache GC evicted it, after which every retry
+# re-cloned MOTIS's ~30 dependency repos until GitHub rate-limited the
+# machine. Built once per machine and per pin; a pin bump gets a new tag.
+# The pin is read from the fork Dockerfile's ARG line — the one place it
+# lives — and passed to both builds.
+ensure_baseline() {
+  local image="$1" pin="$2" dockerfile="$3" ctx="$4" arg="$5"
+  if docker image inspect "$image:$pin" >/dev/null 2>&1; then
+    echo "  baseline $image:$pin present — reused"
+  else
+    echo "  baseline $image:$pin missing — building (once per machine and pin)"
+    time docker build --build-arg "$arg=$pin" -t "$image:$pin" -f "$dockerfile" "$ctx"
+  fi
+}
+MOTIS_PIN="$(sed -n 's/^ARG MOTIS_REF=//p' motis/fork/Dockerfile | head -1)"
+if [[ -z "$MOTIS_PIN" ]]; then
+  echo "cannot read MOTIS_REF from motis/fork/Dockerfile" >&2
+  exit 1
+fi
+VALHALLA_PIN_IMG="$(sed -n 's/^ARG VALHALLA_REF=//p' valhalla/fork/Dockerfile | head -1)"
+if [[ -z "$VALHALLA_PIN_IMG" ]]; then
+  echo "cannot read VALHALLA_REF from valhalla/fork/Dockerfile" >&2
+  exit 1
+fi
+
 # ── Step 2: MOTIS fork image ────────────────────────────────────────
 echo ""
 echo "▶ Step 2 — MOTIS fork image (koramaps/motis:footpath-matrix)"
@@ -159,7 +191,9 @@ image_stale() {
 if ! image_stale; then
   echo "  image up to date with motis/fork/ — skipped (--force-image to rebuild)"
 else
-  time docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
+  ensure_baseline koramaps/motis-baseline "$MOTIS_PIN" motis/fork/Dockerfile.baseline motis/fork MOTIS_REF
+  time docker build --build-arg "MOTIS_REF=$MOTIS_PIN" \
+    -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
   touch "$IMAGE_STAMP"
   # A new binary can build a different transfer table from identical
   # inputs, but MOTIS's task hash covers only the data (timetable, osm,
@@ -192,7 +226,9 @@ valhalla_image_stale() {
 if ! valhalla_image_stale; then
   echo "  image up to date with valhalla/fork/ — skipped (--force-image to rebuild)"
 else
-  time docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
+  ensure_baseline koramaps/valhalla-baseline "$VALHALLA_PIN_IMG" valhalla/fork/Dockerfile.baseline valhalla/fork VALHALLA_REF
+  time docker build --build-arg "VALHALLA_REF=$VALHALLA_PIN_IMG" \
+    -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
   touch "$VALHALLA_IMAGE_STAMP"
 fi
 fi

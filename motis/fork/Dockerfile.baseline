@@ -1,0 +1,68 @@
+# Kora Maps fork of MOTIS — BASELINE image: toolchain + upstream MOTIS at
+# MOTIS_REF + its ~30 dependency clones + the full unmodified compile.
+# Tagged as an ordinary image, koramaps/motis-baseline:<MOTIS_REF>, so it
+# is NEVER garbage-collected: BuildKit's cache GC once evicted this layer
+# out of the single-file build, and every retry re-cloned all 30
+# dependency repos from GitHub until GitHub rate-limited the machine.
+# Images are only removed by an explicit `docker image rm/prune -a`.
+#
+# Built once per machine and per MOTIS_REF by scripts/routing/
+# setup_routing.sh step 2, which passes the pin from motis/fork/Dockerfile:
+#   docker build --build-arg MOTIS_REF=<sha> -t koramaps/motis-baseline:<sha> \
+#       -f motis/fork/Dockerfile.baseline motis/fork
+# The fork's Dockerfile then starts FROM this image and only compiles the
+# overlaid files. Nothing here is fork-specific — do not add overlays.
+#
+# Native arm64 build under Ubuntu 24.04. Runs natively on Apple Silicon
+# and on the CAX11 (both linux/arm64). Upstream's own `linux-arm64-release`
+# preset cross-compiles from x86_64 inside a specialised docker-cpp-build
+# image; running that under Rosetta segfaults inside GCC. Building natively
+# with the distro toolchain is slower to set up but reliable, and the
+# output binary is the same shape (linux/arm64 ELF).
+#
+# Docker Desktop needs ≥6 GB memory allocated or the link step OOMs.
+FROM ubuntu:24.04
+ARG MOTIS_REF
+RUN test -n "$MOTIS_REF" || { echo "MOTIS_REF build arg is required (setup_routing.sh passes the pin from motis/fork/Dockerfile)"; exit 1; }
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc-14 g++-14 \
+        cmake \
+        ninja-build \
+        mold \
+        git \
+        curl \
+        ca-certificates \
+        pkg-config \
+        python3 \
+        libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+
+RUN git config --global --add safe.directory '*'
+
+WORKDIR /
+RUN git clone https://github.com/motis-project/motis.git src && \
+    cd src && git checkout "$MOTIS_REF"
+
+WORKDIR /src
+
+# --- Baseline build --------------------------------------------------
+# Configure + fully compile the UNMODIFIED motis (~60-90 min). The
+# intermediate .o files stay in /src/build/ so the fork Dockerfile's
+# ninja incremental logic reuses them.
+# -j4: ninja's default (-j nproc) OOM-kills cc1plus — several of the
+# template-heavy TUs (osr route.cc, routing.cc) peak at 2-3 GB each,
+# and 6 in parallel exceed Docker Desktop's memory allowance.
+RUN cmake -G Ninja -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=gcc \
+        -DCMAKE_CXX_COMPILER=g++ \
+        -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=mold" \
+        -DMOTIS_MIMALLOC=ON && \
+    cmake --build build --target motis -- -j4

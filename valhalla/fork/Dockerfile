@@ -23,8 +23,17 @@
 #                                             Costing.Options (the avoid-stairs
 #                                             toggle and the fast ↔ nice ruler)
 #
-# Build (from the repo root, or via scripts/setup_routing.sh step 2):
-#   docker build -t koramaps/valhalla:bicycle-costing -f valhalla/fork/Dockerfile valhalla/fork
+# Build (both steps; scripts/routing/setup_routing.sh step 2b does this):
+#   1. the BASELINE image — upstream at VALHALLA_REF + deps + full compile,
+#      once per machine and per pin, from Dockerfile.baseline:
+#        docker build --build-arg VALHALLA_REF=<ver> -t koramaps/valhalla-baseline:<ver> \
+#            -f valhalla/fork/Dockerfile.baseline valhalla/fork
+#   2. this file — FROM that image, apply the patches + overlays, recompile
+#      only the touched translation units:
+#        docker build --build-arg VALHALLA_REF=<ver> -t koramaps/valhalla:bicycle-costing \
+#            -f valhalla/fork/Dockerfile valhalla/fork
+# The baseline is a tagged IMAGE, not a cached layer, so BuildKit's cache
+# GC can never evict it and force a full re-clone + recompile.
 #
 # DROP-IN for ghcr.io/valhalla/valhalla-scripted:<VALHALLA_REF>. The runner
 # stage below IS upstream's Dockerfile-scripted, fed with our patched build
@@ -43,39 +52,14 @@
 # README.md), then expect a tile rebuild AND a matrix rebuild.
 ARG VALHALLA_REF=3.8.3
 
-# ─── Stage 1: build upstream + overlay ──────────────────────────────────
-# Mirrors upstream docker/Dockerfile's builder stage (same base, same deps
-# script, same cmake flags) so the binaries match what the stock image
-# ships. Two-layer pattern for fast fork iterations: the UNMODIFIED tree
-# compiles once (cached until VALHALLA_REF or the toolchain changes), then
-# the overlay lands and only the touched translation units recompile.
-FROM ubuntu:24.04 AS builder
+# ─── Stage 1: the fork overlay on the baseline image ────────────────────
+# The baseline (Dockerfile.baseline) carries the clone at VALHALLA_REF, the
+# deps and the compiled build/; PATH, LD_LIBRARY_PATH and WORKDIR
+# /src/valhalla are inherited from it. Its tag IS the pin, so a
+# VALHALLA_REF bump can never build on a stale baseline.
+FROM koramaps/valhalla-baseline:${VALHALLA_REF} AS builder
 ARG VALHALLA_REF
-
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
-ENV LD_LIBRARY_PATH=/usr/local/lib
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends sudo git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-RUN git config --global --add safe.directory '*'
-
-WORKDIR /src
-RUN git clone --depth 1 --branch "$VALHALLA_REF" --recurse-submodules --shallow-submodules \
-        https://github.com/valhalla/valhalla.git valhalla
-WORKDIR /src/valhalla
-
-# Upstream's own dependency script (apt packages + prime_server from source).
-RUN bash ./scripts/install-linux-deps.sh
-
-# Baseline: configure + compile the untouched upstream tree. Same flags as
-# upstream's Dockerfile so the result is the stock 3.x binary set. -j is
-# capped: several TUs peak at 2-3 GB and Docker Desktop's default memory
-# allowance is the binding constraint on the dev Mac.
 ARG CONCURRENCY=4
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DENABLE_TESTS=Off \
-        -DENABLE_SINGLE_FILES_WERROR=Off -DVALHALLA_VERSION_MODIFIER=kora-bicycle && \
-    make -C build all -j${CONCURRENCY}
 
 # ─── Fork overlay (fast per iteration) ──────────────────────────────────
 # The proto patch regenerates options.pb.h, which most of the tree includes

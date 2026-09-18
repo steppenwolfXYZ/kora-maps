@@ -34,7 +34,12 @@ and the platform-matching machinery.
 ## Build
 
 ```
-docker build -t koramaps/motis:footpath-matrix -f Dockerfile .
+# once per machine and per MOTIS_REF — the baseline image (toolchain, clone,
+# dependency checkouts, full compile), tagged so it is never GC'd:
+docker build --build-arg MOTIS_REF=<sha> -t koramaps/motis-baseline:<sha> -f Dockerfile.baseline .
+# every fork iteration — overlays on the baseline, ~5-10 min:
+docker build --build-arg MOTIS_REF=<sha> -t koramaps/motis:footpath-matrix -f Dockerfile .
+# (or simply ./scripts/routing/setup_routing.sh --steps 2, which does both)
 ```
 
 First build ~60-90 min (full upstream compile, cached); fork iterations

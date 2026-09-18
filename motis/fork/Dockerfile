@@ -79,23 +79,23 @@
 #                                    pre-bump indexes.
 # No OSR walking fallback anywhere; OSR remains for non-foot profiles.
 #
-# Build:
-#   docker build -t koramaps/motis:footpath-matrix -f motis/fork/Dockerfile motis/fork
+# Build (both steps; scripts/routing/setup_routing.sh step 2 does this):
+#   1. the BASELINE image — toolchain + upstream MOTIS at MOTIS_REF + all
+#      dependency clones + the full unmodified compile (60-90 min), once
+#      per machine and per pin, from Dockerfile.baseline:
+#        docker build --build-arg MOTIS_REF=<sha> -t koramaps/motis-baseline:<sha> \
+#            -f motis/fork/Dockerfile.baseline motis/fork
+#   2. this file — FROM that image, COPY the fork's overlays, re-run
+#      cmake --build; ninja recompiles only the overlaid files + the link
+#      (~5-10 min per iteration on the fork):
+#        docker build --build-arg MOTIS_REF=<sha> -t koramaps/motis:footpath-matrix \
+#            -f motis/fork/Dockerfile motis/fork
+# The baseline is a tagged IMAGE, not a cached layer, so BuildKit's cache
+# GC can never evict it (that eviction once re-fired all 30 dependency
+# clones on every retry until GitHub rate-limited the machine). It is
+# removed only by an explicit `docker image rm` / `prune -a`.
 #
-# Native arm64 build under Ubuntu 24.04. Runs natively on Apple Silicon
-# and on the CAX11 (both linux/arm64). Upstream's own `linux-arm64-release`
-# preset cross-compiles from x86_64 inside a specialised docker-cpp-build
-# image; running that under Rosetta segfaults inside GCC. Building natively
-# with the distro toolchain is slower to set up but reliable, and the
-# output binary is the same shape (linux/arm64 ELF).
-#
-# Two-stage build pattern for fast fork iterations:
-#   1. Layer A compiles the UNMODIFIED upstream MOTIS (60-90 min once,
-#      Docker caches it — invalidated only when MOTIS_REF changes).
-#   2. COPY the fork's src/ + include/ overlays, re-run cmake --build.
-#      Ninja recompiles only the overlaid files + the link
-#      (~5-10 min per iteration on the fork).
-#
+# Native arm64 build under Ubuntu 24.04 (see Dockerfile.baseline).
 # Docker Desktop needs ≥6 GB memory allocated or the link step OOMs.
 #
 # MOTIS_REF is PINNED to the commit the fork's full-file overlays are
@@ -107,51 +107,11 @@
 # this ARG. See README.md for the checklist.
 ARG MOTIS_REF=061857d38a375248ae62b4ce722753368a75e474
 
-FROM ubuntu:24.04 AS build
-ARG MOTIS_REF
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc-14 g++-14 \
-        cmake \
-        ninja-build \
-        mold \
-        git \
-        curl \
-        ca-certificates \
-        pkg-config \
-        python3 \
-        libatomic1 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
-
-RUN git config --global --add safe.directory '*'
-
-WORKDIR /
-RUN git clone https://github.com/motis-project/motis.git src && \
-    cd src && git checkout "$MOTIS_REF"
-
-WORKDIR /src
-
-# --- Baseline build (cached across fork iterations) --------------------
-# Configure + fully compile the UNMODIFIED motis. This layer is expensive
-# (~60-90 min) but only invalidates when MOTIS_REF or the base toolchain
-# changes. The intermediate .o files stay in /src/build/ so the next
-# layer's ninja incremental logic reuses them.
-# -j4: ninja's default (-j nproc) OOM-kills cc1plus — several of the
-# template-heavy TUs (osr route.cc, routing.cc) peak at 2-3 GB each,
-# and 6 in parallel exceed Docker Desktop's memory allowance.
-RUN cmake -G Ninja -S . -B build \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_COMPILER=gcc \
-        -DCMAKE_CXX_COMPILER=g++ \
-        -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=mold" \
-        -DMOTIS_MIMALLOC=ON && \
-    cmake --build build --target motis -- -j4
+# The baseline image carries the toolchain, the clone at MOTIS_REF, the
+# dependency checkouts and the compiled /src/build (Dockerfile.baseline).
+# Its tag IS the pin, so a MOTIS_REF bump can never build on a stale
+# baseline. WORKDIR /src is inherited from it.
+FROM koramaps/motis-baseline:${MOTIS_REF} AS build
 
 # --- Fork overlay (fast per iteration) ---------------------------------
 # Overlay the fork's files (new ones land next to upstream's; patched

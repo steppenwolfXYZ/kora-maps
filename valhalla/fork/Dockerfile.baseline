@@ -1,0 +1,46 @@
+# Kora Maps fork of Valhalla — BASELINE image: upstream Valhalla at
+# VALHALLA_REF, its dependency script, and the full unmodified compile
+# (~30-60 min). Tagged as an ordinary image,
+# koramaps/valhalla-baseline:<VALHALLA_REF>, so BuildKit's cache GC can
+# never evict it — an evicted baseline layer re-clones and recompiles
+# everything on every retry (that bit the MOTIS fork first). Images are
+# only removed by an explicit `docker image rm/prune -a`.
+#
+# Built once per machine and per VALHALLA_REF by scripts/routing/
+# setup_routing.sh step 2b, which passes the pin from valhalla/fork/Dockerfile:
+#   docker build --build-arg VALHALLA_REF=<ver> -t koramaps/valhalla-baseline:<ver> \
+#       -f valhalla/fork/Dockerfile.baseline valhalla/fork
+# Nothing here is fork-specific — do not add overlays or patches.
+# ─── Baseline: build the untouched upstream ─────────────────────────────
+# Mirrors upstream docker/Dockerfile's builder stage (same base, same deps
+# script, same cmake flags) so the binaries match what the stock image
+# ships. The fork's Dockerfile starts FROM this image and recompiles only
+# the overlaid translation units.
+FROM ubuntu:24.04
+ARG VALHALLA_REF
+RUN test -n "$VALHALLA_REF" || { echo "VALHALLA_REF build arg is required (setup_routing.sh passes the pin from valhalla/fork/Dockerfile)"; exit 1; }
+
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/lib
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends sudo git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git config --global --add safe.directory '*'
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "$VALHALLA_REF" --recurse-submodules --shallow-submodules \
+        https://github.com/valhalla/valhalla.git valhalla
+WORKDIR /src/valhalla
+
+# Upstream's own dependency script (apt packages + prime_server from source).
+RUN bash ./scripts/install-linux-deps.sh
+
+# Baseline: configure + compile the untouched upstream tree. Same flags as
+# upstream's Dockerfile so the result is the stock 3.x binary set. -j is
+# capped: several TUs peak at 2-3 GB and Docker Desktop's default memory
+# allowance is the binding constraint on the dev Mac.
+ARG CONCURRENCY=4
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DENABLE_TESTS=Off \
+        -DENABLE_SINGLE_FILES_WERROR=Off -DVALHALLA_VERSION_MODIFIER=kora-bicycle && \
+    make -C build all -j${CONCURRENCY}
