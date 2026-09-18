@@ -57,28 +57,30 @@ std::string const& base_url() {
 // import-time matrix and these query-time calls must describe the same
 // walker. destination_only_penalty / driveway_factor neutralize
 // Valhalla's car-oriented driveway defaults (Swiss footway shortcuts
-// routinely cross driveways).
-json::object costing() {
+// routinely cross driveways). `stroller` adds the fork's stroller
+// stairs model (routing-options.md § Stroller mode) — the same flag the
+// builder's `--profile stroller` bakes into the stroller matrix.
+json::object costing(bool const stroller) {
+  auto pedestrian = json::object{
+      {"walking_speed", kWalkSpeedKmh},
+      {"use_hills", 1.0},
+      {"use_lit", 0.0},
+      {"destination_only_penalty", 0.0},
+      {"driveway_factor", 1.0},
+      // Lifts are not free: Valhalla defaults this to 0, which
+      // priced a ride between levels below the ramp next to it
+      // and sent walks through station underpasses to ride back
+      // up. kElevatorPenaltySec covers wait plus ride. Requires
+      // Valhalla >= 3.8 — on 3.5.1 the option was accepted and
+      // silently ignored.
+      {"elevator_penalty", kElevatorPenaltySec},
+  };
+  if (stroller) {
+    pedestrian["kora_stroller"] = true;
+  }
   return {
       {"costing", "pedestrian"},
-      {"costing_options",
-       json::object{
-           {"pedestrian",
-            json::object{
-                {"walking_speed", kWalkSpeedKmh},
-                {"use_hills", 1.0},
-                {"use_lit", 0.0},
-                {"destination_only_penalty", 0.0},
-                {"driveway_factor", 1.0},
-                // Lifts are not free: Valhalla defaults this to 0, which
-                // priced a ride between levels below the ramp next to it
-                // and sent walks through station underpasses to ride back
-                // up. kElevatorPenaltySec covers wait plus ride. Requires
-                // Valhalla >= 3.8 — on 3.5.1 the option was accepted and
-                // silently ignored.
-                {"elevator_penalty", kElevatorPenaltySec},
-            }},
-       }},
+      {"costing_options", json::object{{"pedestrian", std::move(pedestrian)}}},
   };
 }
 
@@ -321,12 +323,14 @@ std::optional<std::pair<double, double>> elevation_gain(
 
 std::optional<walk_route> route(geo::latlng const& from,
                                 geo::latlng const& to,
-                                std::chrono::seconds const max) {
-  auto const key = coord_key(from) + "|" + coord_key(to);
+                                std::chrono::seconds const max,
+                                bool const stroller) {
+  auto const key =
+      coord_key(from) + "|" + coord_key(to) + (stroller ? "|s" : "|f");
   auto result = route_cache().get(key);
 
   if (!result.has_value()) {
-    auto body = costing();
+    auto body = costing(stroller);
     body["locations"] = locations_json({from, to});
     body["directions_options"] = json::object{{"units", "kilometers"}};
     // Ask for the elevation profile along the shape — it feeds the
@@ -351,6 +355,7 @@ std::optional<walk_route> route(geo::latlng const& from,
 
     auto duration = 0.0;
     auto distance_km = 0.0;
+    auto stairs_km = 0.0;
     auto shape = geo::polyline{};
     auto profile = std::vector<double>{};
     auto has_profile = false;
@@ -361,6 +366,24 @@ std::optional<walk_route> route(geo::latlng const& from,
       distance_km += num(summary.at("length"));
       auto decoded = decode_polyline6(lo.at("shape").as_string());
       shape.insert(end(shape), begin(decoded), end(decoded));
+      // Stairs metres: the length of every steps maneuver (Valhalla
+      // maneuver type 40, kStepsEnter — the same accounting the app's
+      // walking tab does client-side).
+      if (auto const* ms = lo.if_contains("maneuvers");
+          ms != nullptr && ms->is_array()) {
+        for (auto const& m : ms->as_array()) {
+          if (!m.is_object()) {
+            continue;
+          }
+          auto const& mo = m.as_object();
+          auto const* t = mo.if_contains("type");
+          auto const* len = mo.if_contains("length");
+          if (t != nullptr && t->is_int64() && t->as_int64() == 40 &&
+              len != nullptr && (len->is_double() || len->is_int64())) {
+            stairs_km += num(*len);
+          }
+        }
+      }
       if (auto const* e = lo.if_contains("elevation");
           e != nullptr && e->is_array()) {
         has_profile = true;
@@ -420,6 +443,7 @@ std::optional<walk_route> route(geo::latlng const& from,
                        std::chrono::seconds{static_cast<std::int64_t>(
                            std::ceil(duration))},
                        distance_km * 1000.0, std::move(shape),
+                       stairs_km * 1000.0,
                        gain ? std::optional<double>{gain->first}
                             : std::optional<double>{},
                        gain ? std::optional<double>{gain->second}
@@ -445,7 +469,8 @@ std::vector<std::optional<std::chrono::seconds>> matrix_chunk(
     std::vector<geo::latlng> const& stops,
     std::size_t const start,
     std::size_t const n,
-    bool const forward) {
+    bool const forward,
+    bool const stroller) {
   auto many = json::array{};
   for (auto i = start; i != start + n; ++i) {
     many.push_back(
@@ -453,7 +478,7 @@ std::vector<std::optional<std::chrono::seconds>> matrix_chunk(
   }
   auto const one = locations_json({pos});
 
-  auto body = costing();
+  auto body = costing(stroller);
   body["sources"] = forward ? one : many;
   body["targets"] = forward ? std::move(many) : one;
 
@@ -504,10 +529,11 @@ std::vector<std::optional<std::chrono::seconds>> matrix_chunk(
 std::vector<std::optional<std::chrono::seconds>> one_to_many(
     geo::latlng const& pos,
     std::vector<geo::latlng> const& stops,
-    bool const forward) {
-  auto const key = fmt::format("{}|{}|{}|{}", coord_key(pos),
-                               forward ? 'f' : 'b', stops.size(),
-                               stops_fingerprint(stops));
+    bool const forward,
+    bool const stroller) {
+  auto const key = fmt::format("{}|{}|{}|{}|{}", coord_key(pos),
+                               forward ? 'f' : 'b', stroller ? 's' : 'w',
+                               stops.size(), stops_fingerprint(stops));
   if (auto const hit = matrix_cache().get(key); hit.has_value()) {
     return *hit;
   }
@@ -523,7 +549,7 @@ std::vector<std::optional<std::chrono::seconds>> one_to_many(
   for (auto start = std::size_t{0U}; start < stops.size(); start += kChunk) {
     auto const n = std::min(kChunk, stops.size() - start);
     futures.push_back(std::async(std::launch::async, [&, start, n]() {
-      return matrix_chunk(pos, stops, start, n, forward);
+      return matrix_chunk(pos, stops, start, n, forward, stroller);
     }));
   }
 

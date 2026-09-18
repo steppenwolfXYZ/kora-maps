@@ -59,6 +59,12 @@ struct osr_parameters {
   // endpoint (from `pedestrianSpeed`); every other endpoint keeps the
   // neutral 1.0.
   double kora_walk_factor_{1.0};
+
+  // kora fork: stroller mode (routing-options.md § Stroller mode) —
+  // every live Valhalla call (offsets, walk legs, direct walks) uses the
+  // stroller costing and the query searches the stroller transfer
+  // table. Set only by the plan endpoint (`koraProfile=stroller`).
+  bool kora_stroller_{false};
 };
 
 osr_parameters get_osr_parameters(api::plan_params const&);

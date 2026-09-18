@@ -42,6 +42,15 @@ namespace motis::kora_valhalla {
 // table.
 constexpr auto const kFullTransferProfile = nigiri::kKoraFullTransferProfile;
 
+// Profile slot holding the STROLLER transfer table (routing-options.md
+// § Stroller mode): the second Valhalla matrix, built with the stroller
+// costing (stairs priced by altitude) and capped like the default foot
+// table. Selected per query by the fork-only `koraProfile=stroller`
+// flag; in that mode `koraFullTransfers` is ignored (the cascade never
+// escalates for strollers) and station-endpoint offsets read this
+// table. An index without it refuses stroller queries outright.
+constexpr auto const kStrollerProfile = nigiri::kKoraStrollerProfile;
+
 // Base walking speed baked into every Valhalla call. MUST stay equal to
 // WALK_SPEED_KMH in scripts/routing/build_valhalla_footpath_matrix.py — the
 // matrix (transfer table) and the live query-time walks describe the
@@ -94,6 +103,11 @@ struct walk_route {
   std::chrono::seconds duration_;
   double distance_m_;
   geo::polyline shape_;
+  // Metres of stairs along the walk, summed from Valhalla's steps
+  // maneuvers (type 40). 0 when none. Surfaced as leg.koraStairsM so
+  // the app can warn in stroller mode (routing-options.md § Stroller
+  // mode).
+  double stairs_m_{0.0};
   // Noise-filtered ascent / descent along the walk, in metres, derived
   // from the elevation profile Valhalla samples every
   // kElevationIntervalM along the shape. nullopt when the response
@@ -105,9 +119,12 @@ struct walk_route {
 
 // Point-to-point pedestrian route. Returns nullopt when Valhalla finds
 // no path or the walk exceeds `max`. Throws on transport failure.
+// `stroller` selects the stroller costing (kora_stroller = true) — the
+// caches are keyed by it, so the two walkers never share an entry.
 std::optional<walk_route> route(geo::latlng const& from,
                                 geo::latlng const& to,
-                                std::chrono::seconds max);
+                                std::chrono::seconds max,
+                                bool stroller);
 
 // One query coordinate against many stop coordinates.
 // forward=true: walking pos -> stop (pre-transit).
@@ -117,7 +134,8 @@ std::optional<walk_route> route(geo::latlng const& from,
 std::vector<std::optional<std::chrono::seconds>> one_to_many(
     geo::latlng const& pos,
     std::vector<geo::latlng> const& stops,
-    bool forward);
+    bool forward,
+    bool stroller);
 
 // Startup probe: GET /status once, abort the process with a clear
 // message when Valhalla is unreachable. Called from server() — never

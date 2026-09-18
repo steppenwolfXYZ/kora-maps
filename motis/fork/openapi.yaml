@@ -5326,6 +5326,13 @@ components:
             Set on WALK legs only. Absent when no elevation data was
             available.
           type: integer
+        koraStairsM:
+          description: |
+            kora fork: metres of stairs along this leg, summed from the
+            pedestrian router's steps maneuvers. Set on Valhalla-routed
+            WALK legs (0 when there are none); the app's stroller-mode
+            stairs warning reads it (routing-options.md § Stroller mode).
+          type: integer
         interlineWithPreviousLeg:
           description: For transit legs, if the rider should stay on the vehicle as it changes route names.
           type: boolean

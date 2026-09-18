@@ -13,16 +13,21 @@
 // minimize-walking toggle — routing-options.md § Minimize walking):
 //
 //                     standard   minwalk
-//   walk <=  5 min ->   +0         +0    (plain transfer = 1 point)
+//   walk <=  3 min ->   +0         +0    (plain transfer = 1 point)
+//   walk <=  5 min ->   +0         +1
 //   walk <= 10 min ->   +1         +2
 //   walk <= 20 min ->   +2         +3
-//   walk <= 40 min ->   +4         +6
-//   walk  > 40 min ->   +9         +6
+//   walk <= 30 min ->   +3         +4
+//   walk <= 40 min ->   +4         +5
+//   walk <= 50 min ->   +5         +6
+//   walk  > 50 min ->   +6         +6
 //
-// minwalk prices the 10-30 min walk band steepest relative to extra
-// boardings (avoiding a 5-10 min walk is worth an extra transfer). It
-// has no extra class above 40 min: minwalk queries never use the wide
-// walking budgets, so their walks are capped at ~30 min anyway.
+// One point per ~10 min of walking, minwalk one class ahead of
+// standard (avoiding a 5-10 min walk is worth an extra transfer).
+// Class boundaries are free — the cost of a walk is the level it
+// lands on, not the number of rows — so the ladder is fine-grained
+// up to 50 min and flat above: the top value (+6) bounds the highest
+// level a query can reach and therefore the rounds RAPTOR runs.
 // There is NO default for the `minwalk` argument on purpose — every
 // call site must pass the query's flag, or search and reconstruction
 // could disagree on levels.
@@ -48,16 +53,21 @@ namespace nigiri::routing {
 constexpr unsigned kora_walk_delta(int const walk_minutes,
                                    bool const minwalk) {
   if (minwalk) {
-    return walk_minutes <= 5    ? 0U
+    return walk_minutes <= 3    ? 0U
+           : walk_minutes <= 5  ? 1U
            : walk_minutes <= 10 ? 2U
            : walk_minutes <= 20 ? 3U
+           : walk_minutes <= 30 ? 4U
+           : walk_minutes <= 40 ? 5U
                                 : 6U;
   }
   return walk_minutes <= 5    ? 0U
          : walk_minutes <= 10 ? 1U
          : walk_minutes <= 20 ? 2U
+         : walk_minutes <= 30 ? 3U
          : walk_minutes <= 40 ? 4U
-                              : 9U;
+         : walk_minutes <= 50 ? 5U
+                              : 6U;
 }
 
 }  // namespace nigiri::routing

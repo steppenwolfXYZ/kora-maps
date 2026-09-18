@@ -31,7 +31,10 @@
 //
 // Non-foot profiles (wheelchair, car) are left empty. The map has no
 // wheelchair / car routing surface, and the concept scopes Valhalla to
-// pedestrians. If a future profile needs the matrix path, extend
+// pedestrians. The fork's own stroller slot (kKoraStrollerProfile) is
+// filled from KORA_STROLLER_MATRIX_PATH — the second, stroller-costed
+// matrix (routing-options.md § Stroller mode), capped like the default
+// table. If a future profile needs the matrix path, extend
 // routed_transfers_settings rather than adding another env var.
 //
 // Everything else in the MOTIS binary is unmodified. The transfer table
@@ -68,6 +71,12 @@ namespace motis {
 namespace {
 
 constexpr auto kEnvVar = "KORA_FOOTPATH_MATRIX_PATH";
+// kora fork: the STROLLER matrix (routing-options.md § Stroller mode) —
+// built by `build_valhalla_footpath_matrix.py --profile stroller` with
+// the stroller stairs costing, capped at the default transfer cap.
+// Loaded into nigiri::kKoraStrollerProfile; required like the foot
+// matrix (no silent fallback: a missing file aborts the import).
+constexpr auto kStrollerEnvVar = "KORA_STROLLER_MATRIX_PATH";
 
 // GTFS transfers.txt of the feed being imported — source of the
 // operator's own per-pair minimum transfer times. Default matches the
@@ -312,12 +321,13 @@ void load_matrix_into(
     std::unordered_map<std::string, n::location_idx_t> const& id_idx,
     std::unordered_map<std::uint64_t, unsigned> const& official_minimums,
     n::vector_map<n::location_idx_t, std::vector<n::footpath>>& transfers,
-    std::chrono::seconds max_duration) {
-  auto const* env = std::getenv(kEnvVar);
+    std::chrono::seconds max_duration,
+    char const* env_var = kEnvVar) {
+  auto const* env = std::getenv(env_var);
   utl::verify(env != nullptr && *env != '\0',
               "kora fork: {} not set — refusing to fall back to MOTIS's OSM "
               "walker (see valhalla-pedestrian-router.md, No silent fallback)",
-              kEnvVar);
+              env_var);
 
   auto const path = std::string{env};
   auto in = std::ifstream{path};
@@ -494,6 +504,17 @@ elevator_footpath_map_t compute_footpaths(
       publish(kora_valhalla::kFullTransferProfile,
               std::chrono::duration_cast<std::chrono::minutes>(
                   mode.max_duration_));
+
+      // Stroller table (routing-options.md § Stroller mode): the second
+      // matrix, same cap as the default foot table — stroller queries
+      // never escalate, so this is their whole transfer reach. Same
+      // minimum-transfer-time floor.
+      for (auto& fps : transfers) {
+        fps.clear();
+      }
+      load_matrix_into(id_idx, official_minimums, transfers, cap,
+                       kStrollerEnvVar);
+      publish(kora_valhalla::kStrollerProfile, cap);
     } else {
       // Non-foot profiles: keep the transfer table empty. The map's UI
       // does not surface wheelchair or car routing; leaving these empty

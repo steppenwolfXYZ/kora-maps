@@ -288,7 +288,8 @@ api::Itinerary street_routing(osr::ways const& w,
             : std::chrono::seconds{static_cast<std::int64_t>(std::ceil(
                   static_cast<double>(max.count()) /
                   (geometry_only ? std::min(walk_factor, 1.0) : walk_factor)))};
-    auto const walk = kora_valhalla::route(from.pos_, to.pos_, base_budget);
+    auto const walk = kora_valhalla::route(from.pos_, to.pos_, base_budget,
+                                           osr_params.kora_stroller_);
     if (!walk.has_value()) {
       if (!start_time.has_value() || !end_time.has_value()) {
         return {};
@@ -352,6 +353,11 @@ api::Itinerary street_routing(osr::ways const& w,
                 ? std::optional<std::int64_t>{static_cast<std::int64_t>(
                       std::lround(*walk->descent_m_))}
                 : std::optional<std::int64_t>{},
+        // kora fork: metres of stairs on this walk (routing-options.md
+        // § Stroller mode — the app's stairs warning). Always set on a
+        // Valhalla-routed walk, 0 when there are none.
+        .koraStairsM_ = std::optional<std::int64_t>{
+            static_cast<std::int64_t>(std::lround(walk->stairs_m_))},
         // steps_ stays empty: Valhalla maneuvers are not mapped to
         // MOTIS step instructions; the app does not render steps.
         .legGeometry_ = detailed_leg

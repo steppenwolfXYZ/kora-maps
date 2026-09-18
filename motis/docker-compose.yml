@@ -46,6 +46,11 @@ services:
       # baked the transfer table into tt_ext.bin), but setting it
       # keeps dev/prod config identical.
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # Second matrix, built with the stroller costing (routing-options.md
+      # § Stroller mode; `build_valhalla_footpath_matrix.py --profile
+      # stroller`). Import loads it into the stroller transfer slot and
+      # aborts if it is missing — same no-silent-fallback rule.
+      KORA_STROLLER_MATRIX_PATH: /data/data/valhalla_footpath_matrix_stroller.csv
       # GTFS transfers.txt of the feed being imported — source of the
       # operator's own per-pair minimum transfer times, which floor the
       # matrix at import (transfer-point-optimization.md § Minimum
@@ -82,6 +87,11 @@ services:
       - ./data:/data/data
     environment:
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      # Second matrix, built with the stroller costing (routing-options.md
+      # § Stroller mode; `build_valhalla_footpath_matrix.py --profile
+      # stroller`). Import loads it into the stroller transfer slot and
+      # aborts if it is missing — same no-silent-fallback rule.
+      KORA_STROLLER_MATRIX_PATH: /data/data/valhalla_footpath_matrix_stroller.csv
       # GTFS transfers.txt of the feed being imported — source of the
       # operator's own per-pair minimum transfer times, which floor the
       # matrix at import (transfer-point-optimization.md § Minimum

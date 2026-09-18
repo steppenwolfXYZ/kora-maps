@@ -20,14 +20,16 @@ constexpr auto const adr_ext_version = []() {
   return meta_entry_t{"adr_ext_bin_ver", 6U};
 };
 constexpr auto const n_version = []() {
-  // kora fork: upstream 37 + 1000. The types.h overlay bumps kNProfiles
-  // to 6, which changes the timetable binary layout — this bump makes
-  // every import task fingerprinted on the nigiri version (tt,
-  // osr_footpath) rebuild instead of silently serving pre-bump indexes
-  // (the "import-skip trap", README § Runtime environment). The +1000
-  // offset keeps future upstream bumps (38, 39, …) distinct so a
-  // MOTIS_REF bump still re-imports.
-  return meta_entry_t{"nigiri_bin_ver", 1037U};
+  // kora fork: upstream 37 + 1000 + 100 per fork layout change. The
+  // types.h overlay bumps kNProfiles (6 for the full transfer table,
+  // 7 for the stroller table), which changes the timetable binary
+  // layout — this bump makes every import task fingerprinted on the
+  // nigiri version (tt, osr_footpath) rebuild instead of silently
+  // serving pre-bump indexes (the "import-skip trap", README § Runtime
+  // environment). The +1000 offset keeps future upstream bumps (38,
+  // 39, …) distinct so a MOTIS_REF bump still re-imports; the +100
+  // steps keep fork-side layout changes distinct from those.
+  return meta_entry_t{"nigiri_bin_ver", 1137U};
 };
 constexpr auto const tbd_version = []() {
   return meta_entry_t{"tbd_bin_ver", 1U};

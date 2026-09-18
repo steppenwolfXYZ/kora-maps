@@ -311,7 +311,8 @@ std::vector<n::routing::offset> get_offsets(
             return r.tt_->locations_.coordinates_[l];
           });
       auto const durations = kora_valhalla::one_to_many(
-          pos.pos_, stop_coords, dir == osr::direction::kForward);
+          pos.pos_, stop_coords, dir == osr::direction::kForward,
+          osr_params.kora_stroller_);
 
       // kora fork: rescale the base-speed Valhalla durations to the
       // requested walking speed (routing-options.md). Factor 1.0 (no
@@ -579,9 +580,14 @@ std::vector<n::routing::offset> routing::get_offsets(
               // (transfer-point-optimization.md), and endpoint offsets
               // must keep full station walking reach. Pre-two-tier index
               // data has the full slot empty; fall back to foot then
-              // (which holds the full table in that data).
+              // (which holds the full table in that data). Stroller
+              // mode reads the stroller table instead — its 30-min cap
+              // is the mode's whole reach (routing-options.md § Stroller
+              // mode); an index without it was already refused below.
               auto const prf =
-                  tt_->locations_
+                  osr_params.kora_stroller_
+                      ? kora_valhalla::kStrollerProfile
+                  : tt_->locations_
                           .footpaths_out_[kora_valhalla::kFullTransferProfile]
                           .empty()
                       ? n::kFootProfile
@@ -995,6 +1001,11 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
   // (kora_walk_points.h), so walking-light journeys survive as their
   // own Pareto points. Fork-only URL param like the ones above.
   auto kora_minwalk_points = false;
+  // kora fork: stroller mode (routing-options.md § Stroller mode) —
+  // `koraProfile=stroller` switches every live walk to the stroller
+  // costing and the search onto the stroller transfer table. Fork-only
+  // URL param like the ones above.
+  auto kora_stroller = false;
   for (auto const& p : url.params()) {
     if (p.key == "alternativesEpsilon") {
       kora_alt_epsilon_sec = std::clamp(std::atoi(p.value.c_str()), 0, 1800);
@@ -1002,6 +1013,8 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
       kora_alt_max = std::clamp(std::atoi(p.value.c_str()), 0, 10);
     } else if (p.key == "koraWalkPoints") {
       kora_minwalk_points = p.value == "minwalk";
+    } else if (p.key == "koraProfile") {
+      kora_stroller = p.value == "stroller";
     }
   }
 
@@ -1114,6 +1127,20 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
     osr_params.kora_walk_factor_ =
         (kora_valhalla::kWalkSpeedKmh / 3.6) / *query.pedestrianSpeed_;
   }
+  osr_params.kora_stroller_ = kora_stroller;
+  // No silent fallback: a stroller query against an index whose stroller
+  // table was never imported must fail loudly, not run on the foot
+  // table — that would offer stair-heavy transfers under a stroller
+  // label. (Checked before any Valhalla call, so the error is the
+  // whole response.)
+  utl::verify(!kora_stroller ||
+                  !tt_->locations_.footpaths_out_
+                       .at(kora_valhalla::kStrollerProfile)
+                       .empty(),
+              "kora fork: stroller mode requested but the stroller "
+              "transfer table is empty — re-import with "
+              "KORA_STROLLER_MATRIX_PATH set (routing-options.md § "
+              "Stroller mode)");
   auto const detailed_transfers =
       query.detailedTransfers_.value_or(query.detailedLegs_);
 
@@ -1289,6 +1316,11 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
                   : query.pedestrianProfile_ ==
                           api::PedestrianProfileEnum::WHEELCHAIR
                       ? n::kWheelchairProfile
+                  // kora fork: stroller mode searches the stroller
+                  // table; koraFullTransfers is ignored there (no 2-h
+                  // tier exists for strollers — the cascade never
+                  // escalates in that mode).
+                  : kora_stroller ? kora_valhalla::kStrollerProfile
                       // kora fork: two-tier transfer table — the
                       // escalation flag selects the full 2-h table,
                       // default queries search the capped one.

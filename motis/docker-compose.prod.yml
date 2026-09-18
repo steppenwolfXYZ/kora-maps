@@ -27,6 +27,7 @@ services:
       # docker-compose.yml so a manual `docker compose run motis-import`
       # on the server (should we ever do that) would work.
       KORA_FOOTPATH_MATRIX_PATH: /data/data/valhalla_footpath_matrix.csv
+      KORA_STROLLER_MATRIX_PATH: /data/data/valhalla_footpath_matrix_stroller.csv
       # Query-time Valhalla endpoint (WALK offsets + WALK legs). Shared
       # `koramaps` docker network — one-time server prep:
       #   docker network create koramaps

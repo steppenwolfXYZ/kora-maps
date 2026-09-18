@@ -220,7 +220,14 @@ constexpr auto const kBikeProfile = profile_idx_t{4U};
 // entire long-distance queries. The bike / wheelchair slots stay free
 // for real bike / wheelchair routing later.
 constexpr auto const kKoraFullTransferProfile = profile_idx_t{5U};
-static constexpr auto const kNProfiles = profile_idx_t{6U};
+// kora fork: the STROLLER transfer table (routing-options.md § Stroller
+// mode) — the second, stroller-costed Valhalla matrix, capped like the
+// default foot table. Its own slot for the same reason as the full
+// table: the wheelchair slot (2) is hardwired to nigiri's GTFS
+// wheelchair-boarding checks in reconstruction, which this feed does
+// not carry, and the bike slot loses its lower-bound transit edges.
+constexpr auto const kKoraStrollerProfile = profile_idx_t{6U};
+static constexpr auto const kNProfiles = profile_idx_t{7U};
 
 using rt_trip_idx_t = cista::strong<std::uint32_t, struct _trip_idx>;
 using rt_add_trip_id_idx_t =
