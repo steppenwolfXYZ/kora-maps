@@ -37,7 +37,7 @@
 
 <div class="ro">
 	<!-- Soft group cards so belonging reads at a glance: one per topic —
-	     walking speed, transfer safety, minimize walking. -->
+	     walking speed, transfer safety, the two walking toggles. -->
 	<div class="ro-group">
 		<RulerSelect
 			label="Walking speed"
@@ -56,9 +56,9 @@
 			onChange={setSafety}
 		/>
 	</div>
-	<div class="ro-group">
+	<div class="ro-group ro-toggles">
 		<!-- Same switch pattern as MapMenu's layer toggles: label + pill
-		     switch, gradient when on. -->
+		     switch, gradient when on. Both toggles side by side. -->
 		<button
 			class="ro-toggle"
 			class:active={routingOptions.minimizeWalking}
@@ -68,8 +68,6 @@
 			<span class="ro-toggle-label">Minimize walking</span>
 			<span class="switch" aria-hidden="true"></span>
 		</button>
-	</div>
-	<div class="ro-group">
 		<!-- Stroller mode (routing-options.md § Stroller mode): stairs
 		     priced by altitude on every walk, warnings on the cards. The
 		     same value drives the walking tab's toggle. -->
@@ -106,6 +104,16 @@
 		background: var(--gray-50);
 		border-radius: 0.55rem;
 		padding: 0.45rem 0.6rem 0.5rem;
+	}
+	/* The two switches share one row, pushed to the group's edges so the
+	   spare space sits between them; wraps only when the panel is too
+	   narrow for both. */
+	.ro-toggles {
+		flex-direction: row;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.4rem 1.2rem;
 	}
 	/* Switch row — same pattern as MapMenu's layer toggles: text label,
 	   pill switch pinned right, gradient fill when on. */
