@@ -1080,10 +1080,15 @@
 			padding-bottom: 0.3rem;
 			gap: 0.45rem;
 		}
+		/* The mode tabs stay: switching to Transit (or Walking) from the
+		   collapsed panel must not cost a tap on "edit" first. The
+		   options area goes with the control row it belongs to — an open
+		   rulers panel would otherwise survive the collapse and eat the
+		   card list. */
 		.routing-panel.collapsed .rp-head,
-		.routing-panel.collapsed .rp-travel,
 		.routing-panel.collapsed .rp-endpoints,
 		.routing-panel.collapsed .rp-direct-row,
+		.routing-panel.collapsed .rp-bike-options,
 		.routing-panel.collapsed .rp-results-sep {
 			display: none;
 		}

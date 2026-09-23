@@ -79,8 +79,12 @@ only made the position jump. The panel stays at the top, where it was
 before the query and where the transit tab keeps it.
 
 - **Collapsed search once a route is loaded.** After a query the
-  editing chrome (mode tabs, endpoint inputs, action row) collapses
-  into one summary row: from → to plus an edit button. Tapping the row
+  editing chrome (endpoint inputs, action row, and any open options
+  area below it) collapses into one summary row: from → to plus an
+  edit button. The **mode tabs stay visible** in the collapsed state —
+  switching to transit or walking is a change of mind about the whole
+  trip, not an edit of this route, and must not cost a tap on "edit"
+  first. Tapping the row
   or the button expands the editing chrome again in place; running a
   fresh query collapses it again. The panel does not move. Two simple
   rules: loading a route collapses; opening the panel never does,

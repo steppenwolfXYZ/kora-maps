@@ -125,19 +125,28 @@ missing is the mode itself.
 ### 4. Off-route detection and recalculation
 
 - The rider's position is continuously projected onto the route. The
-  rider counts as off-route once the projected distance exceeds
-  **30 m** for at least **5 s** (a single bad fix must never trigger a
-  recalculation). Position accuracy is taken into account: a fix whose
-  reported accuracy is worse than the off-route distance is not
-  evidence of being off-route.
+  off-route distance is **coupled to the fix's own reported accuracy**
+  — at least 1.6× the accuracy radius, clamped into a **15–45 m** band
+  — so a precise fix is evidence a short way off the line while a
+  vague one only counts far off it. A fix whose reported accuracy is
+  worse than its distance from the line is never evidence, whatever
+  the band says.
+- The rider counts as off-route once that distance is exceeded for at
+  least **2.5 s**, or for **1.2 s** once the gap has **widened by
+  10 m** since the streak began — a rider riding away from the route
+  is already committed, and waiting out the full hold is metres to
+  undo. A single bad fix must never trigger a recalculation.
 - A recalculation requests a new route from the current position to
   the original destination with the same options the planned route
   used (avoid-stairs, walk/ride speed), and from the rider's current
   direction of travel: turning back is a priced U-turn the engine
   reports as the first maneuver, never a silent reversal. Via points
   already passed are dropped; those still ahead are kept.
-- Recalculations are rate-limited to **one per 10 s** at most, so a
-  rider wandering through a square does not fire a burst of requests.
+- Recalculations are rate-limited to **one per 10 s** at most, and,
+  once one has landed, additionally to **one per 25 m** of ground
+  covered since it — a rider held up off the route must not
+  re-request the route they already have. A failed recalculation is
+  exempt from the distance gate and retries on its own backoff.
 - The new route replaces the navigated route on the map and in the
   banner without interrupting following. Alternatives are requested
   alongside a recalculation and drawn per § 4a; they never replace the
@@ -176,6 +185,23 @@ missing is the mode itself.
   forced.
 - Alternatives never change the banner: guidance always follows the
   navigated route until the rider has actually switched.
+
+### 4b. Speed readout
+
+- While the map is following the rider, a circle in the **bottom-left
+  corner** shows the **current speed** in km/h. It appears once the
+  speed passes **3 km/h** and disappears below **2 km/h**, so standing
+  and pushing the bike leave the corner empty.
+- It is shown **only while following**. That corner belongs to the
+  re-center control once following is suspended, and the two must
+  never compete for it.
+- Speed comes from the platform's own figure where it reports one, and
+  otherwise from the rider's displacement over the last few seconds.
+- A small arrow badge on the circle marks the pace against the
+  **planned speed of the section being ridden** (the engine's own time
+  budget for that maneuver): **green up** when the rider is clearly
+  faster, **red down** when clearly slower, and **nothing** within a
+  deadband around it — riding the plan shows no arrow.
 
 ### 5. Keeping the screen on
 

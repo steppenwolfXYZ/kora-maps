@@ -16,6 +16,10 @@
 	--brand: #740013;
 	--brand-hover: #8a0418;
 	--warn: #b83232;
+	/* Semantic pair of --warn for the rare "better than expected" mark
+	   (the navigation speed circle's ahead-of-pace arrow). Not an accent:
+	   only ever a glyph beside a --warn one. */
+	--ok: #2e7d4f;
 	/* Kora gradient — the green→brown landscape ramp (nature → human
 	   spaces). Keep the endpoint values in sync with the inlined splash
 	   background in app.html, which cannot reference these variables

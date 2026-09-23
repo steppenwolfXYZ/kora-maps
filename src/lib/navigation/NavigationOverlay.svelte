@@ -2,7 +2,8 @@
 	// The chrome of bicycle navigation (bicycle-navigation.md): the
 	// maneuver banner at the top (with the × that ends the ride), the
 	// trip summary with the destination at the bottom, the re-center
-	// control while following is suspended, and — while following — the
+	// control while following is suspended, the speed circle in that same
+	// corner while it is not, and — while following — the
 	// rider's own arrow as a fixed screen element the map glides under
 	// (the camera puts the position exactly there, camera.ts
 	// RIDER_BOTTOM_PX).
@@ -36,6 +37,47 @@
 	// Guidance is relative to the old route while off it — the summary
 	// marks its numbers as approximate (concept § Off-route detection).
 	let approximate = $derived(navigation.offRoute);
+
+	// Speed readout (concept § Speed readout): a circle in the bottom-left
+	// corner, the spot the re-center control takes over once following is
+	// suspended — so it shows only while following, and never fights that
+	// button for the corner. Hysteresis around the show threshold keeps it
+	// from blinking at walking pace.
+	const SPEED_SHOW_KMH = 3;
+	const SPEED_HIDE_KMH = 2;
+	/** Fraction off the section's planned pace before the arrow appears —
+	 * a deadband, so riding the plan shows no arrow at all. */
+	const PACE_MARGIN = 0.12;
+
+	let speedKmh = $derived(navigation.speedMs * 3.6);
+	let speedVisible = $state(false);
+	$effect(() => {
+		if (!navigation.following || arrived) {
+			speedVisible = false;
+			return;
+		}
+		if (speedKmh >= SPEED_SHOW_KMH) speedVisible = true;
+		else if (speedKmh < SPEED_HIDE_KMH) speedVisible = false;
+	});
+
+	// Planned pace of the section being ridden, from the engine's own
+	// budget for that maneuver; the route average stands in before the
+	// first maneuver is under way.
+	let plannedMs = $derived.by(() => {
+		const cur = g?.current;
+		if (cur && cur.lengthM > 0 && cur.timeSec > 0) return cur.lengthM / cur.timeSec;
+		const r = navigation.route;
+		if (r && r.distanceM > 0 && r.durationSec > 0) return r.distanceM / r.durationSec;
+		return null;
+	});
+	/** 'ahead' = faster than planned, 'behind' = slower, null = on pace. */
+	let pace = $derived.by(() => {
+		if (plannedMs === null || !speedVisible) return null;
+		const ratio = navigation.speedMs / plannedMs;
+		if (ratio >= 1 + PACE_MARGIN) return 'ahead';
+		if (ratio <= 1 - PACE_MARGIN) return 'behind';
+		return null;
+	});
 </script>
 
 <div class="nav-banner" role="status" aria-live="polite">
@@ -105,6 +147,23 @@
 		<span class="material-symbols-outlined" aria-hidden="true">my_location</span>
 		Re-center
 	</button>
+{/if}
+
+{#if speedVisible}
+	<!-- Current speed, bottom-left: the number large, the unit small, and
+	     an arrow badge only when the pace is clearly off the section's
+	     planned one (green up = faster, red down = slower). -->
+	<div class="nav-speed" role="status" aria-label="Current speed">
+		<span class="nsp-val">{Math.round(speedKmh)}</span>
+		<span class="nsp-unit">km/h</span>
+		{#if pace}
+			<span class="nsp-pace" class:behind={pace === 'behind'}>
+				<span class="material-symbols-outlined" aria-hidden="true">
+					{pace === 'ahead' ? 'arrow_upward' : 'arrow_downward'}
+				</span>
+			</span>
+		{/if}
+	</div>
 {/if}
 
 {#if navigation.following && !navigation.followTransition}
@@ -344,6 +403,62 @@
 	.nav-recenter:hover {
 		background: var(--brand);
 		color: var(--white);
+	}
+
+	/* Speed circle — the re-center control's own corner (same bottom
+	   offset), shown only while following, so the two never overlap. */
+	.nav-speed {
+		position: absolute;
+		left: 1rem;
+		bottom: calc(6.6rem + env(safe-area-inset-bottom, 0px));
+		z-index: 3;
+		width: 3.6rem;
+		height: 3.6rem;
+		border-radius: var(--radius-pill);
+		background: var(--white);
+		box-shadow: var(--shadow-control);
+		font-family: var(--font-ui);
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		pointer-events: none;
+	}
+	.nsp-val {
+		font-size: 1.35rem;
+		font-weight: 700;
+		line-height: 1;
+		color: var(--anthracite);
+		font-variant-numeric: tabular-nums;
+	}
+	.nsp-unit {
+		font-size: 0.6rem;
+		font-weight: 600;
+		letter-spacing: 0.03em;
+		color: var(--gray-500);
+	}
+	/* Pace badge on the circle's shoulder: green up when the rider is
+	   ahead of the section's planned pace, red down when behind. */
+	.nsp-pace {
+		position: absolute;
+		top: -0.15rem;
+		right: -0.15rem;
+		width: 1.35rem;
+		height: 1.35rem;
+		border-radius: var(--radius-pill);
+		background: var(--white);
+		box-shadow: var(--shadow-control);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--ok);
+	}
+	.nsp-pace.behind {
+		color: var(--warn);
+	}
+	.nsp-pace .material-symbols-outlined {
+		font-size: 1rem;
+		line-height: 1;
 	}
 
 	/* The rider on screen: centre 150px above the bottom edge (camera.ts

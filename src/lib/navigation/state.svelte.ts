@@ -26,19 +26,33 @@ import {
 	type PositionFix
 } from './sensors';
 
-/** Off-route once the projected distance exceeds this for OFF_ROUTE_HOLD_MS
- * (concept § Off-route detection). */
-const OFF_ROUTE_DIST_M = 30;
-const OFF_ROUTE_HOLD_MS = 5000;
-/** Recalculations are rate-limited to one per this interval; failures
- * back off exponentially up to the max. */
+/** Off-route once the projected distance exceeds the fix's own
+ * threshold for OFF_ROUTE_HOLD_MS (concept § Off-route detection).
+ * The threshold rides on the fix's reported accuracy — a precise fix
+ * is evidence a short way off the line, a vague one only far off it —
+ * clamped into the min/max band. A gap that is visibly widening is a
+ * rider already riding away from the route, so it confirms after the
+ * shorter FAST hold once it has grown by GROWTH metres. */
+const OFF_ROUTE_DIST_MIN_M = 15;
+const OFF_ROUTE_DIST_MAX_M = 45;
+const OFF_ROUTE_ACCURACY_FACTOR = 1.6;
+const OFF_ROUTE_HOLD_MS = 2500;
+const OFF_ROUTE_FAST_HOLD_MS = 1200;
+const OFF_ROUTE_GROWTH_M = 10;
+/** Recalculations are rate-limited to one per this interval and to one
+ * per RECALC_MIN_MOVE_M of ground covered since the last successful
+ * one — the short holds above make the trigger reactive, the move gate
+ * keeps a rider standing still off the route from re-requesting the
+ * same route. A failed recalculation is exempt from the move gate and
+ * backs off exponentially up to the max instead. */
 const RECALC_MIN_INTERVAL_MS = 10_000;
+const RECALC_MIN_MOVE_M = 25;
 const RECALC_RETRY_MAX_MS = 60_000;
 /** Within this of the destination the ride counts as arrived; the
  * banner then offers Finish — navigation never ends on its own. */
 const ARRIVAL_RADIUS_M = 25;
 /** Heading sources, in order of trust (concept § Follow-me map). On the
- * route (fix within OFF_ROUTE_DIST_M) the marker locks to the projected
+ * route (fix within the off-route threshold) the marker locks to the projected
  * point and the arrow takes the route's own bearing there — turns show
  * the instant the projection passes the corner. Off it: the platform's
  * course when it reports a speed of at least COURSE_MIN_SPEED_MS;
@@ -69,6 +83,10 @@ const LOCK_ACCURACY_FACTOR = 0.8;
 const LOCK_DIST_MAX_M = 20;
 /** A via counts as passed once progress is this far beyond it. */
 const VIA_PASSED_MARGIN_M = 30;
+/** Ground speed for the readout (concept § Speed readout): the
+ * platform's own figure when it reports one, otherwise the rider's
+ * displacement over this window. */
+const SPEED_WINDOW_MS = 3000;
 /** A fix older than this makes the banner say so. */
 const POSITION_STALE_MS = 30_000;
 const STORAGE_KEY = 'kora.navigation';
@@ -87,7 +105,7 @@ const ALT_DIVERGE_M = 25;
 const ALT_SPENT_MARGIN_M = 30;
 const ALT_BUBBLE_AHEAD_M = 70;
 /** Switching by riding: the rider must be past the alternative's own
- * parting point by this much, within OFF_ROUTE_DIST_M of it, and
+ * parting point by this much, within the off-route threshold of it, and
  * clearly nearer to it than to the navigated route — near the parting
  * point both routes are close, and a jittery fix must not switch. */
 const ALT_SWITCH_PAST_M = 20;
@@ -145,6 +163,8 @@ let viewPitch = $state(0);
 let heading = $state<number | null>(null);
 let following = $state(true);
 let progressM = $state(0);
+// Ground speed in m/s for the on-screen readout; 0 while standing.
+let speedMs = $state(0);
 let offRouteM = $state(0);
 let offRoute = $state(false);
 let recalculating = $state(false);
@@ -171,7 +191,11 @@ let lastCompassApplyAt = 0;
 let track: PositionFix[] = [];
 let lastMoveAt = 0;
 let offSince: number | null = null;
+// Projected distance when the current off-route streak began — the
+// growth the fast hold looks for is measured against it.
+let offSinceDistM = 0;
 let lastRecalcAt = 0;
+let lastRecalcCoord: LonLat | null = null;
 let retryDelayMs = RECALC_MIN_INTERVAL_MS;
 let nextRetryAt = 0;
 let recalcAbort: AbortController | null = null;
@@ -252,6 +276,32 @@ function routeBearingAt(g: RouteGeometry, cumM: number, from: LonLat): number | 
 	return bearingDeg(from, ahead);
 }
 
+/** How far off the line this fix has to be to mean anything: at least
+ * OFF_ROUTE_ACCURACY_FACTOR × its own accuracy radius, inside the
+ * min/max band. Used for the off-route judgement, for the arrival's
+ * on-the-line test and for the switch onto a ridden alternative, so all
+ * three read "off the route" the same way. */
+function offRouteDistM(f: PositionFix): number {
+	return Math.min(
+		OFF_ROUTE_DIST_MAX_M,
+		Math.max(OFF_ROUTE_DIST_MIN_M, f.accuracyM * OFF_ROUTE_ACCURACY_FACTOR)
+	);
+}
+
+/** Ground speed for the readout: the platform's own figure when it
+ * reports one, otherwise the displacement over SPEED_WINDOW_MS. A
+ * standstill reads zero rather than the last speed. */
+function updateSpeedFromFix(f: PositionFix) {
+	if (f.speedMs !== null && f.speedMs >= 0) {
+		speedMs = f.speedMs;
+		return;
+	}
+	const ref = [...track].reverse().find((t) => f.at - t.at >= SPEED_WINDOW_MS);
+	if (!ref) return;
+	const dt = (f.at - ref.at) / 1000;
+	speedMs = dt > 0 ? distanceM(ref.coord, f.coord) / dt : 0;
+}
+
 function updateHeadingFromFix(f: PositionFix) {
 	track.push(f);
 	while (track.length > 0 && f.at - track[0].at > TRACK_WINDOW_MS) track.shift();
@@ -319,6 +369,7 @@ function applyFix(f: PositionFix) {
 	// Movement / course / stop bookkeeping runs on every fix, so the
 	// fallback heading is current the moment the route lock lets go.
 	updateHeadingFromFix(f);
+	updateSpeedFromFix(f);
 	if (!route || !geometry) {
 		displayCoord = f.coord;
 		onRoute = false;
@@ -327,6 +378,8 @@ function applyFix(f: PositionFix) {
 	const proj = projectOntoRoute(geometry, f.coord, progressM);
 	progressM = proj.cumM;
 	offRouteM = proj.distM;
+	// One threshold per fix, from its own accuracy (see offRouteDistM).
+	const offDist = offRouteDistM(f);
 	maneuverIdx = advanceManeuverIndex(route, geometry, progressM, maneuverIdx);
 
 	// Route lock (concept § Follow-me map): on the route, the marker
@@ -352,10 +405,10 @@ function applyFix(f: PositionFix) {
 	// past its parting point → that alternative is the route now. No
 	// hold, no request.
 	const precise = f.accuracyM < proj.distM;
-	if (proj.distM > OFF_ROUTE_DIST_M && precise) {
+	if (proj.distM > offDist && precise) {
 		const taken = alternatives.find((a) => {
 			const ap = projectOntoRoute(a.geometry, f.coord, null);
-			return ap.distM <= OFF_ROUTE_DIST_M
+			return ap.distM <= offDist
 				&& ap.distM < proj.distM * ALT_SWITCH_NEARER_FACTOR
 				&& ap.cumM > a.altDivergeM + ALT_SWITCH_PAST_M;
 		});
@@ -375,28 +428,45 @@ function applyFix(f: PositionFix) {
 		void refreshAlternatives();
 	}
 	const toGoal = distanceM(f.coord, route.requestedTo);
-	const nearEnd = geometry.totalM - progressM < ARRIVAL_RADIUS_M && proj.distM < OFF_ROUTE_DIST_M;
+	const nearEnd = geometry.totalM - progressM < ARRIVAL_RADIUS_M && proj.distM < offDist;
 	if (toGoal < ARRIVAL_RADIUS_M || nearEnd) {
 		arrive();
 		return;
 	}
 
-	// Off-route: sustained distance, and only from fixes precise enough
-	// to be evidence — a 60 m accuracy circle 40 m off the line says
-	// nothing (concept § Off-route detection).
-	const evidence = proj.distM > OFF_ROUTE_DIST_M && f.accuracyM < proj.distM;
+	// Off-route: sustained distance past this fix's own threshold, and
+	// only from fixes precise enough to be evidence at all — a 60 m
+	// accuracy circle 40 m off the line says nothing, which the band's
+	// upper clamp would otherwise let through (concept § Off-route
+	// detection).
+	const evidence = proj.distM > offDist && f.accuracyM < proj.distM;
 	if (evidence) {
-		if (offSince === null) offSince = f.at;
+		if (offSince === null) {
+			offSince = f.at;
+			offSinceDistM = proj.distM;
+		}
+		const heldMs = f.at - offSince;
+		// A widening gap needs no full hold: the rider is riding away
+		// from the line, and every second of waiting is metres to undo.
+		const widening = proj.distM - offSinceDistM >= OFF_ROUTE_GROWTH_M;
+		if (heldMs >= OFF_ROUTE_HOLD_MS || (widening && heldMs >= OFF_ROUTE_FAST_HOLD_MS)) {
+			offRoute = true;
+		}
 	} else {
 		offSince = null;
 		offRoute = false;
 		updateFailed = false;
 	}
-	if (offSince !== null && f.at - offSince >= OFF_ROUTE_HOLD_MS) offRoute = true;
+	// Rate limit: the interval always, plus — once a recalculation has
+	// actually landed — a minimum distance covered since it, so a rider
+	// held up off the route does not re-request the route they have.
+	const movedSinceRecalc = lastRecalcCoord === null
+		|| distanceM(lastRecalcCoord, f.coord) >= RECALC_MIN_MOVE_M;
 	if (
 		offRoute && !recalculating
 		&& f.at - lastRecalcAt >= RECALC_MIN_INTERVAL_MS
 		&& f.at >= nextRetryAt
+		&& (updateFailed || movedSinceRecalc)
 	) {
 		void recalculate();
 	}
@@ -555,6 +625,7 @@ async function recalculate() {
 	const f = fix;
 	recalculating = true;
 	lastRecalcAt = f.at;
+	lastRecalcCoord = f.coord;
 	recalcAbort?.abort();
 	const ac = new AbortController();
 	recalcAbort = ac;
@@ -669,8 +740,10 @@ async function start(
 	lastMoveAt = 0;
 	track = [];
 	lastRecalcAt = 0;
+	lastRecalcCoord = null;
 	retryDelayMs = RECALC_MIN_INTERVAL_MS;
 	nextRetryAt = 0;
+	speedMs = 0;
 	fix = null;
 	alternatives = [];
 	nextAltRefreshM = null;
@@ -681,7 +754,7 @@ async function start(
 	// leaving): no five-second hold — reroute from where the rider is
 	// right now. The persisted route is the planned one until the new
 	// route lands (recalculate() persists it, and brings alternatives).
-	if (!arrived && offRouteM > OFF_ROUTE_DIST_M) {
+	if (!arrived && offRouteM > offRouteDistM(first)) {
 		offRoute = true;
 		void recalculate();
 	} else if (planned.length > 0) {
@@ -760,6 +833,7 @@ function stop(): void {
 	displayCoord = null;
 	onRoute = false;
 	heading = null;
+	speedMs = 0;
 	arrived = false;
 	offRoute = false;
 	updateFailed = false;
@@ -808,6 +882,8 @@ export const navigation = {
 	get displayCoord() { return displayCoord; },
 	get onRoute() { return onRoute; },
 	get heading() { return heading; },
+	/** Ground speed in m/s — the readout's own value, 0 while standing. */
+	get speedMs() { return speedMs; },
 	get following() { return following; },
 	get followTransition() { return followTransition; },
 	get viewPitch() { return viewPitch; },
