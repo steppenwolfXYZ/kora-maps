@@ -621,42 +621,6 @@
 	role="dialog"
 	aria-label="Route planning"
 >
-	{#if collapsed}
-		<!-- Collapsed search row (narrow only, hidden by CSS on desktop):
-		     the from→to summary — a tap target that expands the editing
-		     chrome again — plus the edit pencil and close ×. -->
-		<div class="rp-collapsed-head">
-			<button
-				class="rp-collapsed-summary"
-				onclick={() => void expandSearch()}
-				aria-label="Edit the route"
-				title="Edit the route"
-			>
-				<span class="rp-collapsed-eps">
-					<span class="rp-collapsed-ep">
-						{routingState.from ? endpointLabel(routingState.from) : ''}
-					</span>
-					<span class="material-symbols-outlined rp-collapsed-arrow" aria-hidden="true">chevron_right</span>
-					<span class="rp-collapsed-ep">
-						{routingState.to ? endpointLabel(routingState.to) : ''}
-					</span>
-				</span>
-			</button>
-			<button
-				class="rp-collapsed-edit icon-btn"
-				onclick={() => void expandSearch()}
-				aria-label="Edit the route"
-				title="Edit the route"
-			>
-				<span class="material-symbols-outlined" aria-hidden="true">edit</span>
-			</button>
-			<button
-				class="rp-close icon-btn"
-				onclick={() => routingState.closePanel()}
-				aria-label="Close route planning"
-			>×</button>
-		</div>
-	{/if}
 	<div class="rp-head">
 		<span class="rp-title">
 			<span class="material-symbols-outlined rp-title-icon" aria-hidden="true">directions</span>
@@ -720,6 +684,43 @@
 			</button>
 		{/if}
 	</div>
+
+	{#if collapsed}
+		<!-- Collapsed search row (narrow only, hidden by CSS on desktop):
+		     the from→to summary — a tap target that expands the editing
+		     chrome again — plus the edit pencil and close ×. -->
+		<div class="rp-collapsed-head">
+			<button
+				class="rp-collapsed-summary"
+				onclick={() => void expandSearch()}
+				aria-label="Edit the route"
+				title="Edit the route"
+			>
+				<span class="rp-collapsed-eps">
+					<span class="rp-collapsed-ep">
+						{routingState.from ? endpointLabel(routingState.from) : ''}
+					</span>
+					<span class="material-symbols-outlined rp-collapsed-arrow" aria-hidden="true">chevron_right</span>
+					<span class="rp-collapsed-ep">
+						{routingState.to ? endpointLabel(routingState.to) : ''}
+					</span>
+				</span>
+			</button>
+			<button
+				class="rp-collapsed-edit icon-btn"
+				onclick={() => void expandSearch()}
+				aria-label="Edit the route"
+				title="Edit the route"
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">edit</span>
+			</button>
+			<button
+				class="rp-close icon-btn"
+				onclick={() => routingState.closePanel()}
+				aria-label="Close route planning"
+			>×</button>
+		</div>
+	{/if}
 
 	<!-- Endpoint rows (via-stops.md § Panel UI). The "+" of each row sits
 	     in its own column right of the field, not inside it: it acts on the
