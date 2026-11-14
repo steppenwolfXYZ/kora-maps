@@ -682,6 +682,18 @@
 			>
 				<span class="material-symbols-outlined" aria-hidden="true">unfold_less</span>
 			</button>
+		{:else if collapsed}
+			<!-- Its counterpart in the collapsed state, in the same place:
+			     the editing chrome back out. Same action as the summary
+			     row's pencil — the position is what makes it findable. -->
+			<button
+				class="rp-collapse icon-btn"
+				onclick={() => void expandSearch()}
+				aria-label="Show the route editor"
+				title="Show the route editor"
+			>
+				<span class="material-symbols-outlined" aria-hidden="true">unfold_more</span>
+			</button>
 		{/if}
 	</div>
 
