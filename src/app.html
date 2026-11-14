@@ -86,8 +86,9 @@
 			}
 		</style>
 		<style>
-			/* Splash screen shown while the map loads and geolocation
-			   resolves. Hidden by Map.svelte on the map's `load` event.
+			/* Splash screen covering the blank page until the app has
+			   hydrated, fetched style.json and painted the map's first
+			   frame (hidden by createMap.ts — tiles stream in after).
 			   Inline so it paints on the very first frame, before any
 			   external CSS/JS finishes loading. */
 			#kora-splash {

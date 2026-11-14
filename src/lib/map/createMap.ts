@@ -14,8 +14,8 @@ import { installHoverCursor } from './popups/handlers';
 import { mapUi, DEFAULT_VIEW } from './uiState.svelte';
 
 // Splash screen (rendered in app.html) is faded out and removed on the
-// map's `load` event, once the first tiles for the resolved initial
-// center are rendered. Idempotent — safe to call multiple times.
+// map's first painted frame after the style is in — tiles then stream
+// in visibly. Idempotent — safe to call multiple times.
 let splashHidden = false;
 function hideSplash() {
 	if (splashHidden) return;
@@ -63,6 +63,13 @@ export function createKoraMap(
 		maxPitch: 0,
 		attributionControl: false
 	});
+
+	// Splash screen (see app.html) — lift on the first frame painted
+	// with the style, not on `load`: `load` waits for the first tiles of
+	// every source (OpenFreeMap, Mapterhorn DEM, all transit pmtiles,
+	// glyphs), so the slowest third-party server held the splash for
+	// seconds. Tiles stream in visibly instead, like any web map.
+	map.once('style.load', () => map.once('render', hideSplash));
 
 	// Keep the URL hash in sync with the camera (router-aware
 	// replacement for MapLibre's `hash: true`). moveend covers user
@@ -183,10 +190,6 @@ export function createKoraMap(
 	map.on('zoom', updateZoom);
 
 	map.on('load', () => {
-		// Splash screen (see app.html) — lift once the first tiles for
-		// the initial view have rendered.
-		hideSplash();
-
 		// Sync the view in case the user toggled before the style
 		// finished loading (the baked default only covers 'standard').
 		applyViewMode(map, mapUi.viewMode);
