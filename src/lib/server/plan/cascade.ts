@@ -5,7 +5,7 @@ import { itineraryFingerprint } from '$lib/routing/fingerprint';
 import { shareFingerprint } from '$lib/routing/share';
 import { planOptionParams, type PlanOptionParams, type RoutingOptionValues } from '$lib/routing/optionParams';
 import type { Itinerary, PlanResponse, TimeMode } from '$lib/routing/types';
-import { allItineraries, planMotis, type MotisVia } from './motis';
+import { allItineraries, MAX_TRAVEL_MIN, planMotis, type MotisVia } from './motis';
 
 // The transit search cascade (server-side-transit-planning.md). One
 // /api/plan request runs the whole thing here against MOTIS over
@@ -122,6 +122,13 @@ const REQUEST_DEADLINE_MS = 25_000;
 const MOTIS_CALL_TIMEOUT_MS = 20_000;
 // Below this much remaining time no further hop is started.
 const MIN_HOP_BUDGET_MS = 1_500;
+// Empty-horizon hops (search-coverage-window.md § Empty horizon). MOTIS's
+// default driver (PONG) quits on its first empty search and reports the
+// zero-width interval [t, t) — the frontier cannot advance, and re-asking
+// the same window returns the same nothing. The empty search is still a
+// proof: no journey leaving at/after t arrives within maxTravelTime of t
+// (mirror for arrive-by). That horizon is what the hop records.
+const EMPTY_HORIZON_MS = MAX_TRAVEL_MIN * 60_000;
 
 /** A half-open time span [from, to) in epoch ms. */
 interface Span {
@@ -142,6 +149,16 @@ interface CascadeState {
 	 * mutated, so a cached state stays intact. */
 	departures: Span | null;
 	arrivals: Span | null;
+	/** Empty-horizon proofs (search-coverage-window.md § Empty horizon),
+	 * null until a hop came back empty with nothing covered.
+	 * `departuresClearTo`: no journey departing at or after
+	 * `departures.to` arrives before this instant. `arrivalsClearFrom`:
+	 * no journey arriving before `arrivals.from` departs after this
+	 * instant. Coverage only grows away from the proof's frontier, so a
+	 * proof stays valid — but only for the walking budget it was found
+	 * with; a budget change clears both. */
+	departuresClearTo: number | null;
+	arrivalsClearFrom: number | null;
 	/** Walking budget (pre/post seconds) the list was built with. */
 	budget: number;
 	/** Display quota per side: `forwardTarget` caps the journeys on the
@@ -358,8 +375,15 @@ class Cascade {
 		const end = Date.parse(it.endTime);
 		const d = state.departures;
 		const a = state.arrivals;
-		return (d !== null && d.from <= start && d.to >= end + reach)
-			|| (a !== null && a.to > end && a.from <= start - reach);
+		// An empty-horizon proof stands in for coverage past the frontier:
+		// a dominator departing beyond `d.to` would have to arrive by
+		// end + reach, which the proof rules out (mirror on arrivals).
+		const dClear = state.departuresClearTo;
+		const aClear = state.arrivalsClearFrom;
+		return (d !== null && d.from <= start
+				&& (d.to >= end + reach || (dClear !== null && dClear >= end + reach)))
+			|| (a !== null && a.to > end
+				&& (a.from <= start - reach || (aClear !== null && aClear <= start - reach)));
 	}
 
 	/** The list as the panel shows it: minimize-walking suppression,
@@ -509,7 +533,9 @@ class Cascade {
 	 *
 	 * `shouldEscalate` (when provided) is called with the new frontier
 	 * after every iteration; `true` returns 'escalate' so the caller can
-	 * redo the pipeline with the wide walking budget. */
+	 * redo the pipeline with the wide walking budget. An empty-horizon hop
+	 * (nothing covered) also returns 'escalate' while it is provided, and
+	 * otherwise ends the loop with the proof recorded. */
 	private async runHopCascade(
 		state: CascadeState,
 		dir: 1 | -1,
@@ -544,6 +570,21 @@ class Cascade {
 			for (const it of fresh) state.seen.add(itineraryFingerprint(it));
 			this.cover(state, dir, span);
 			if (fresh.length > 0) state.combined = [...state.combined, ...fresh];
+			// Empty horizon: the hop covered nothing, so the frontier did not
+			// move and the next hop would repeat this one verbatim. Nothing
+			// is reachable within the travel-time ceiling from here — under
+			// the narrow budget that is the sparse-service signal (e.g. the
+			// last lift down has gone, walking down is the only way out);
+			// otherwise this side is exhausted: record the proof and stop.
+			const stalled = dir === 1 ? span.to <= frontier : span.from >= frontier;
+			if (stalled) {
+				if (shouldEscalate) return 'escalate';
+				if (dir === 1) state.departuresClearTo = span.to + EMPTY_HORIZON_MS;
+				// The backward ping started one minute before the frontier
+				// (the fork's arrive-by interval includes the query minute).
+				else state.arrivalsClearFrom = span.from - 60_000 - EMPTY_HORIZON_MS;
+				break;
+			}
 			if (shouldEscalate?.(this.frontier(state, dir))) return 'escalate';
 		}
 		return 'done';
@@ -554,6 +595,7 @@ class Cascade {
 		const q = this.q;
 		const state: CascadeState = {
 			combined: [], seen: new Set(), departures: null, arrivals: null,
+			departuresClearTo: null, arrivalsClearFrom: null,
 			budget: NARROW_PRE_POST_SEC,
 			forwardTarget: q.mode === 'arrive' ? 0 : TARGET_RESULT_COUNT,
 			backwardTarget: q.mode === 'arrive' ? TARGET_RESULT_COUNT : 0,
@@ -568,6 +610,8 @@ class Cascade {
 			state.combined = insideSpan(r, q.mode, span);
 			state.departures = q.mode === 'leave' ? span : null;
 			state.arrivals = q.mode === 'arrive' ? span : null;
+			state.departuresClearTo = null;
+			state.arrivalsClearFrom = null;
 		};
 		// Stroller mode drops the escalation entirely (routing-options.md
 		// § Stroller mode): the stroller transfer table is capped at the
@@ -662,6 +706,8 @@ class Cascade {
 			seen: new Set(prev.seen),
 			departures: prev.departures,
 			arrivals: prev.arrivals,
+			departuresClearTo: prev.departuresClearTo,
+			arrivalsClearFrom: prev.arrivalsClearFrom,
 			budget: prev.budget,
 			forwardTarget: prev.forwardTarget + (direction === 'later' ? TARGET_RESULT_COUNT : 0),
 			backwardTarget: prev.backwardTarget + (direction === 'earlier' ? TARGET_RESULT_COUNT : 0),
@@ -688,6 +734,10 @@ class Cascade {
 		// the wide budget sticks for further extensions.
 		if (outcome === 'escalate') {
 			state.budget = WIDE_PRE_POST_SEC;
+			// Proofs found under the narrow budget say nothing about the
+			// wide one.
+			state.departuresClearTo = null;
+			state.arrivalsClearFrom = null;
 			await this.runHopCascade(state, dir);
 		}
 		return state;

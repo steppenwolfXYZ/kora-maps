@@ -15,6 +15,11 @@ const MOTIS_BASE = (env.MOTIS_INTERNAL_URL || 'http://localhost:8080').replace(/
 
 const NUM_ITINERARIES = 5;
 
+/** Base total-duration ceiling (minutes) sent as `maxTravelTime`; planned
+ * via waits are added on top. Also the horizon an empty search proves
+ * empty (cascade.ts § empty-horizon hops), so it is exported. */
+export const MAX_TRAVEL_MIN = 1440;
+
 /** A non-OK response from MOTIS. Carries the HTTP status so the endpoint
  * can classify it (4xx = the query itself was rejected, e.g. a stale stop
  * id; 5xx = engine trouble); the body is for the server log only. */
@@ -88,7 +93,7 @@ export async function planMotis(args: MotisPlanArgs, signal?: AbortSignal): Prom
 	// Planned via waits are part of that total, so the ceiling has to grow
 	// by them — otherwise a long errand silently returns nothing at all.
 	const dwellMin = args.vias.reduce((s, v) => s + Math.round(v.waitMin), 0);
-	params.set('maxTravelTime', String(1440 + dwellMin));
+	params.set('maxTravelTime', String(MAX_TRAVEL_MIN + dwellMin));
 	// directModes controls the non-transit fallback that MOTIS returns in
 	// `direct[]`. WALK is the default but set it explicitly so a
 	// walk-only itinerary always comes back for merging.

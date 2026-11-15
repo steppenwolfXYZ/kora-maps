@@ -65,6 +65,19 @@ bounded span.
 - The empty-hop streak limit no longer bounds a night: MOTIS's own
   extension carries a hop across a service gap in one call, so the
   cascade is bounded by the maximum span and the request deadline only.
+- **Empty horizon.** MOTIS's default search driver quits on its first
+  empty search and reports a zero-width interval at the frontier. A
+  hop that covers nothing must never be repeated — it returns the same
+  nothing until the request deadline (canonical case: Wasserfallen →
+  Thun after the last gondola down, 23 s and an empty list). The empty
+  search still proves that no journey leaving at or after the frontier
+  arrives within the travel-time ceiling (mirror for arrive-by). Under
+  the narrow walking budget an empty horizon triggers the wide-budget
+  escalation, like a sparse-service gap. Otherwise the side is
+  exhausted: the cascade stops hopping and records the proof
+  (`departuresClearTo` / `arrivalsClearFrom`), which the settled rule
+  accepts in place of coverage past the frontier. A proof is valid
+  only for the walking budget it was found with.
 - There is no merge cap: a hop merges every journey inside the reported
   span. The cap existed to keep a batch from replacing the visible list;
   the settled display (below) makes that impossible, and merging whole
