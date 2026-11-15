@@ -22,15 +22,30 @@ declare global {
 				color: string;
 				route: string;
 			};
-			/** Present while a routing itinerary is selected for map
-			 * rendering (route-display.md § Lifecycle). Carries the
-			 * fingerprint so browser back closes the route overlay and
-			 * forward restores it. */
+			/** The selected itinerary's fingerprint (route-display.md
+			 * § Lifecycle), stamped on the current entry — never pushed —
+			 * so back / forward onto the entry restores the selection. */
 			routeSelection?: string;
 			/** Present while bicycle navigation is active (bicycle-
 			 * navigation.md): entering pushes an entry carrying it, so
 			 * browser back leaves navigation and nothing else. */
 			navigation?: boolean;
+			/** Routing history layers (routing/state.svelte.ts § History
+			 * layers): panel open → route entered → mobile map mode, one
+			 * history entry each, so back peels exactly one layer. The
+			 * value is the `routingDepth` of the entry that pushed the
+			 * layer; 0 = stamped onto an existing entry (cold-load / share
+			 * restore), which cannot be popped and is cleared in place. */
+			routingPanel?: number;
+			routingQuery?: number;
+			routeMapMode?: number;
+			/** The map menu's own entry (same depth semantics) — back
+			 * closes the menu. */
+			mapMenu?: number;
+			/** Number of entries pushed through lib/historyStack.ts up to
+			 * and including this entry — lets a UI close pop a layer
+			 * together with everything above it. */
+			routingDepth?: number;
 		}
 	}
 }

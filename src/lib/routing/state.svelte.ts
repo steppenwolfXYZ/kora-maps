@@ -1,4 +1,4 @@
-import { pushState, replaceState } from '$app/navigation';
+import { replaceState } from '$app/navigation';
 import { browser } from '$app/environment';
 import { page } from '$app/state';
 import { plan, PlanRequestError, type Extension } from './client';
@@ -20,6 +20,10 @@ import {
 	type StationEndpoint, type TimeMode, type TravelMode, type Via
 } from './types';
 import { endpointToParam, writeRoutingQuery } from './url';
+import { isNarrow } from './layout';
+import {
+	hashJumpSuppressed, historyDepth, pushMarker, traverse, traverseInFlight
+} from '$lib/historyStack';
 
 // Reactive routing state (Svelte 5 runes). One instance shared across the
 // app — Map.svelte and RoutingPanel read from it, entry-point handlers
@@ -152,15 +156,6 @@ let pendingAbort: AbortController | null = null;
 // map-mode toggle) with unchanged inputs.
 let lastQueryKey: string | null = null;
 
-// Whether the current history entry was pushed by `selectItinerary` for
-// the active selection. Only then does `dismissSelectedItinerary` consume
-// it via history.back() — an auto-selected or URL-restored selection
-// lives on an entry it never pushed, so × must clear in place instead
-// (back() on a single-entry history is a silent no-op and the selection
-// would survive). Replace-stamping doesn't change the flag: a replaced
-// entry is still the pushed one.
-let pushedEntry = false;
-
 // The search cascade (narrow / wide walking budgets, time-advance hops,
 // dominance pruning) runs on the server — one GET /api/plan per user
 // action returns the final list (server-side-transit-planning.md). What
@@ -169,6 +164,92 @@ let pushedEntry = false;
 // endpoint stays stateless.
 let extensions: Extension[] = [];
 let resolvedCurrentCoord: [number, number] | null = null;
+
+// ── History layers ──────────────────────────────────────────────────────
+// The routing UI stacks up to three layers, each on its own history entry
+// so back (browser button, Android / PWA back gesture) peels exactly one:
+// panel open → route entered → mobile map mode. Only with every layer
+// gone does back leave the page. Edits inside a layer (time, endpoints,
+// tab, swap) replace, never push. UI closes (×, Clear route, map-mode
+// back) consume their entry via history.go() and let the orchestration
+// effect (map/orchestration.svelte.ts) do the teardown, so a later back
+// never lands on a stale layer. Each marker in page.state holds the
+// routingDepth of the entry that pushed it; 0 = stamped onto an existing
+// entry by a cold-load / share restore — not poppable, cleared in place.
+
+type LayerKey = 'routingPanel' | 'routingQuery' | 'routeMapMode';
+
+export type HistoryLayers = { panel: boolean; query: boolean; mapMode: boolean };
+
+export function readHistoryLayers(s: App.PageState): HistoryLayers {
+	return {
+		panel: s.routingPanel !== undefined,
+		query: s.routingQuery !== undefined,
+		mapMode: s.routeMapMode !== undefined
+	};
+}
+
+function pushLayer(key: LayerKey): boolean {
+	return pushMarker(key);
+}
+
+/** page.state minus the given layer markers (and the route selection,
+ * which never outlives the layers it sits on). */
+function stateWithout(keys: LayerKey[]): App.PageState {
+	const s: App.PageState = { ...page.state, routeSelection: undefined };
+	for (const k of keys) delete s[k];
+	return s;
+}
+
+// Set when a UI close (× / Clear route / map-mode back) pops history, so
+// the reconcile that follows knows the pop was not a user back — a user
+// back may be intercepted (collapsed direct search), a UI close never.
+let uiPop = false;
+
+/** Pop history to just below the entry that pushed `key`, together with
+ * everything above it. False when the layer has no poppable entry of its
+ * own — the caller then clears in place. */
+function unwindLayer(key: LayerKey): boolean {
+	if (traverseInFlight()) return true;
+	const at = page.state[key];
+	const d = historyDepth();
+	if (!at || at > d) return false;
+	uiPop = true;
+	traverse(-(d - at + 1));
+	return true;
+}
+
+// Cold-load / share restores open the panel on the landing entry itself:
+// its layers are stamped (marker 0) rather than pushed. The stamp waits a
+// tick — a share landing hydrates from onMount, before SvelteKit's router
+// accepts replaceState — and blocks the query-layer push meanwhile.
+let stampPending = false;
+
+function stampLayers(keys: LayerKey[]) {
+	stampPending = true;
+	setTimeout(() => {
+		stampPending = false;
+		if (!panelOpen) return;
+		const s: App.PageState = { ...page.state };
+		for (const k of keys) if (s[k] === undefined) s[k] = 0;
+		replaceState('', s);
+	}, 0);
+}
+
+/** A tap just entered a complete route in the open panel: give it its own
+ * layer unless it has one. Called only from user actions (never from the
+ * query effect), so the push rides that tap's activation. A route that
+ * arrives with the panel open in the same tap (popup / context-menu
+ * "route to here", reopen with a kept route) stays on the panel's entry —
+ * back then closes the panel, and Clear route clears in place. */
+function ensureQueryLayer() {
+	if (!panelOpen || !from || !to || stampPending) return;
+	if (page.state.routingQuery !== undefined) return;
+	pushLayer('routingQuery');
+}
+
+// Resolvers of clearRoute() callers waiting for an unwind to land.
+let clearWaiters: (() => void)[] = [];
 
 function abortInFlight() {
 	if (!pendingAbort) return;
@@ -375,7 +456,6 @@ function invalidateSelection() {
 	selectedFingerprint = null;
 	pendingFingerprint = null;
 	selectionInvalid = false;
-	pushedEntry = false;
 	expandedFingerprint = null;
 	mapModeFlag = false;
 	// Drop the history marker too. syncUrl() preserves page.state verbatim,
@@ -526,6 +606,70 @@ async function runDirectQuery(key: string) {
 	}
 }
 
+/** The panel close itself (routing-persistence.md § Restore on reopen):
+ * route data survives, the selection / shared context / map mode drop,
+ * and the URL loses its routing params. `state` is the page state to
+ * leave on the current entry — the caller decides which layer markers
+ * go with it. */
+function closePanelState(state: App.PageState) {
+	panelOpen = false;
+	expandOnNextDirectQuery = false;
+	sharedShare = null;
+	sharedOnly = false;
+	sharedExpired = false;
+	pendingShareFingerprint = null;
+	selectedItinerary = null;
+	selectedFingerprint = null;
+	pendingFingerprint = null;
+	selectionInvalid = false;
+	expandedFingerprint = null;
+	mapModeFlag = false;
+	abortInFlight();
+	// A close mid-query leaves the flags dangling — the aborted run
+	// skips its finally-clear because it no longer owns pendingAbort.
+	// lastQueryKey is only ever set by a completed run, so an aborted
+	// query re-runs via the panel's query effect on reopen.
+	loading = false;
+	loadingMore = null;
+	const url = currentUrl();
+	writeUrl(url, {
+		from: null, to: null, vias: [], mode: 'leave', time: null, route: null
+	});
+	replaceState(url, state);
+}
+
+/** The route clear itself — also drops the route and map-mode layer
+ * markers from the current entry (a no-op after a history pop, the
+ * in-place clear for a stamped or never-pushed layer). */
+function clearRouteState() {
+	abortInFlight();
+	from = null;
+	to = null;
+	vias = [];
+	mode = 'leave';
+	time = null;
+	resolvedNowTime = null;
+	results = [];
+	directRoutes = [];
+	directSelected = 0;
+	loading = false;
+	loadingMore = null;
+	error = null;
+	hasQueried = false;
+	lastQueryKey = null;
+	mapModeFlag = false;
+	resetCascadeState();
+	invalidateSelection();
+	const url = currentUrl();
+	writeUrl(url, {
+		from: null, to: null, vias: [], mode: 'leave', time: null, route: null
+	});
+	replaceState(url, stateWithout(['routingQuery', 'routeMapMode']));
+	const waiters = clearWaiters;
+	clearWaiters = [];
+	for (const w of waiters) w();
+}
+
 export const routingState = {
 	get open() { return panelOpen; },
 	get from() { return from; },
@@ -580,6 +724,10 @@ export const routingState = {
 	}) {
 		if (panelOpen) return;
 		panelOpen = true;
+		// Own history layer: back closes the panel (§ History layers).
+		// Pushed before the URL sync so the entry below keeps the pre-open
+		// address.
+		if (page.state.routingPanel === undefined) pushLayer('routingPanel');
 		directSearchExpanded = true;
 		expandOnNextDirectQuery = opts?.expectQuery ?? openWillRunDirectQuery();
 		// Fresh open with no state: prefill From with current location (concept
@@ -624,66 +772,76 @@ export const routingState = {
 	 * and `lastQueryKey` all survive, so reopening restores the exact view
 	 * with no re-query. Only the selection (map overlay) and any shared
 	 * context are dropped, plus the routing URL params — the address
-	 * reflects what is visible. */
-	closePanel() {
-		panelOpen = false;
-		expandOnNextDirectQuery = false;
-		sharedShare = null;
-		sharedOnly = false;
-		sharedExpired = false;
-		pendingShareFingerprint = null;
-		selectedItinerary = null;
-		selectedFingerprint = null;
-		pendingFingerprint = null;
-		selectionInvalid = false;
-		pushedEntry = false;
-		expandedFingerprint = null;
-		mapModeFlag = false;
-		abortInFlight();
-		// A close mid-query leaves the flags dangling — the aborted run
-		// skips its finally-clear because it no longer owns pendingAbort.
-		// lastQueryKey is only ever set by a completed run, so an aborted
-		// query re-runs via the panel's query effect on reopen.
-		loading = false;
-		loadingMore = null;
-		const url = currentUrl();
-		writeUrl(url, {
-			from: null, to: null, vias: [], mode: 'leave', time: null, route: null
-		});
-		if (url.href !== window.location.href) {
-			replaceState(url, { ...page.state, routeSelection: undefined });
-		}
+	 * reflects what is visible.
+	 *
+	 * UI close (×): pops the panel layer and everything above it; the
+	 * orchestration effect then runs the state close. `keepHistory` is the
+	 * line-detail handover — the panel closes but its entries stay, so back
+	 * from the line-detail view returns to the panel. */
+	closePanel(opts?: { keepHistory?: boolean }) {
+		if (!panelOpen) return;
+		if (!opts?.keepHistory && unwindLayer('routingPanel')) return;
+		// keepHistory leaves the entry's markers — route selection included —
+		// untouched, so back onto it restores the panel and the drawn route.
+		closePanelState(opts?.keepHistory
+			? { ...page.state }
+			: stateWithout(['routingPanel', 'routingQuery', 'routeMapMode']));
 	},
 
 	/** Reset to the no-route-set state (routing-persistence.md § Clear-route
 	 * button) — endpoints, time, results and selection all drop; the panel
-	 * stays open. Never touches the recents list. */
-	clearRoute() {
-		abortInFlight();
-		from = null;
-		to = null;
-		vias = [];
-		mode = 'leave';
-		time = null;
-		resolvedNowTime = null;
-		results = [];
-		directRoutes = [];
-		directSelected = 0;
-		loading = false;
-		loadingMore = null;
-		error = null;
-		hasQueried = false;
-		lastQueryKey = null;
-		resetCascadeState();
-		invalidateSelection();
-		const url = currentUrl();
-		writeUrl(url, {
-			from: null, to: null, vias: [], mode: 'leave', time: null, route: null
-		});
-		if (url.href !== window.location.href) {
-			replaceState(url, { ...page.state, routeSelection: undefined });
-		}
+	 * stays open. Never touches the recents list. Pops the route layer
+	 * when it has one (the orchestration effect then clears); resolves once
+	 * the route is cleared. */
+	clearRoute(): Promise<void> {
+		const done = new Promise<void>((resolve) => clearWaiters.push(resolve));
+		if (!unwindLayer('routingQuery')) clearRouteState();
+		return done;
 	},
+
+	/** Reconcile with a history step (orchestration effect on page.state):
+	 * a layer marker that vanished closes its layer; a panel marker that
+	 * reappears (back from the line-detail view, forward) reopens the
+	 * panel with its retained route. Returns true when a route layer
+	 * reappeared without its route (forward after a back cleared it) —
+	 * the caller then restores the route from the entry's URL. */
+	syncHistoryLayers(prev: HistoryLayers, cur: HistoryLayers): boolean {
+		const removed = (prev.panel && !cur.panel) || (prev.query && !cur.query)
+			|| (prev.mapMode && !cur.mapMode);
+		const byUi = uiPop;
+		if (removed) uiPop = false;
+		// A user back that would take the route off screen while the narrow
+		// direct-mode search is folded into its summary row first unfolds
+		// the search (pedestrian-bicycle-routing.md § Narrow-screen layout):
+		// expand, then step forward again so the route keeps its entry for
+		// the next back. A forward traversal adds no entry, so it doesn't
+		// trip the skippable-entry rule a re-push would.
+		const routeLeaving = (prev.panel && !cur.panel) || (prev.query && !cur.query);
+		if (routeLeaving && !byUi && panelOpen && !mapModeFlag
+			&& travelMode !== 'transit' && hasQueried && !directSearchExpanded && isNarrow()) {
+			directSearchExpanded = true;
+			if (traverse(1)) return false;
+		}
+		if (prev.panel && !cur.panel) {
+			if (panelOpen) closePanelState(stateWithout([]));
+			return false;
+		}
+		if (!prev.panel && cur.panel && !panelOpen) {
+			panelOpen = true;
+			directSearchExpanded = true;
+			expandOnNextDirectQuery = openWillRunDirectQuery();
+			focusRequest = null;
+			syncUrl();
+		}
+		if (prev.query && !cur.query && panelOpen) clearRouteState();
+		if (prev.mapMode && !cur.mapMode) mapModeFlag = false;
+		else if (!prev.mapMode && cur.mapMode) mapModeFlag = true;
+		return !prev.query && cur.query && panelOpen && !from && !to;
+	},
+
+	/** True for a moment after a UI close popped history — the map skips
+	 * the position-hash camera jump for that step. */
+	get unwindingHistory() { return hashJumpSuppressed(); },
 
 	/** Load a complete query in one shot (recents selection —
 	 * routing-persistence.md § Recent routes list). One state write + one
@@ -713,9 +871,9 @@ export const routingState = {
 		lastQueryKey = null;
 		resetCascadeState();
 		invalidateSelection();
+		ensureQueryLayer();
 		syncUrl();
 	},
-
 	setFrom(ep: Endpoint | null) {
 		abortInFlight();
 		from = ep;
@@ -726,6 +884,7 @@ export const routingState = {
 		error = null;
 		lastQueryKey = null;
 		invalidateSelection();
+		ensureQueryLayer();
 		syncUrl();
 	},
 
@@ -805,6 +964,7 @@ export const routingState = {
 		error = null;
 		lastQueryKey = null;
 		invalidateSelection();
+		ensureQueryLayer();
 		syncUrl();
 	},
 
@@ -910,55 +1070,53 @@ export const routingState = {
 		error = null;
 		lastQueryKey = null;
 		invalidateSelection();
+		ensureQueryLayer();
 		syncUrl();
 	},
 
 	/** Select one of the current `results` for map rendering (route-display.md
-	 * § Lifecycle). Pushes a browser history entry so back closes the route
-	 * view; state carries the fingerprint so the back/forward $effect in
-	 * Map.svelte can reconcile against it. */
+	 * § Lifecycle). Never a history entry: a loaded route always has a
+	 * selection (auto-select), so picking another connection is an edit
+	 * inside the route layer, not a layer of its own. The fingerprint is
+	 * stamped on the current entry so back / forward onto it can restore
+	 * the selection (orchestration's route-selection effect). */
 	selectItinerary(it: Itinerary) {
 		const fp = itineraryFingerprint(it);
-		const wasSelected = selectedFingerprint !== null;
 		selectedItinerary = it;
 		selectedFingerprint = fp;
 		pendingFingerprint = null;
 		selectionInvalid = false;
 		const url = currentUrl();
 		writeUrl(url, { from, to, mode, time, route: fp });
-		if (!wasSelected) {
-			pushState(url, { ...page.state, routeSelection: fp });
-			pushedEntry = true;
-		} else {
-			replaceState(url, { ...page.state, routeSelection: fp });
-		}
+		replaceState(url, { ...page.state, routeSelection: fp });
 	},
 
-	/** UI-driven close (× on the selected result card). When the current
-	 * history entry was pushed for this selection, pop it via
-	 * history.back() so back never lands on a stale route-view entry —
-	 * Map.svelte's back/forward $effect then does the teardown. Otherwise
-	 * (auto-select / URL restore) clear in place. */
+	/** Back / forward landed on an entry whose `routeSelection` matches one
+	 * of the current results: re-select it on that entry. */
+	restoreSelectionFromHistory(it: Itinerary) {
+		selectedItinerary = it;
+		selectedFingerprint = itineraryFingerprint(it);
+		pendingFingerprint = null;
+		selectionInvalid = false;
+			syncUrl();
+	},
+
+	/** UI-driven close (× on the selected result card) — clears in place;
+	 * selections never own a history entry. */
 	dismissSelectedItinerary() {
 		if (!selectedItinerary && !selectedFingerprint) return;
-		if (pushedEntry && page.state?.routeSelection) {
-			pushedEntry = false;
-			history.back();
-			return;
-		}
 		this.clearSelectedItineraryFromHistory();
 	},
 
-	/** Drop the current selection without touching browser history — used
-	 * by Map.svelte after a back-driven pop already consumed the pushed
-	 * entry. */
+	/** Drop the current selection without touching browser history — the
+	 * × above, and orchestration's route-selection effect when back lands
+	 * on an entry without a selection (the route layer below it). */
 	clearSelectedItineraryFromHistory() {
 		selectedItinerary = null;
 		selectedFingerprint = null;
 		pendingFingerprint = null;
 		selectionInvalid = false;
-		pushedEntry = false;
-		mapModeFlag = false;
+			mapModeFlag = false;
 		// Dismissing the shared card's selection exits the single-connection
 		// filter — the full list is then the only sensible thing to show.
 		sharedOnly = false;
@@ -983,12 +1141,21 @@ export const routingState = {
 	/** Mobile fullscreen map mode. No-op without a selection: the map icon
 	 * always selects first. Never armed by auto-select or URL restore. */
 	enterMapMode() {
-		if (selectedItinerary) mapModeFlag = true;
-		else if (travelMode !== 'transit' && directRoutes.length > 0) mapModeFlag = true;
+		if (mapModeFlag) return;
+		if (!selectedItinerary && !(travelMode !== 'transit' && directRoutes.length > 0)) return;
+		mapModeFlag = true;
+		// Own history layer: back returns to the list (§ History layers).
+		if (page.state.routeMapMode === undefined) pushLayer('routeMapMode');
 	},
 
+	/** Header back / details, Escape, widening past the narrow layout. */
 	exitMapMode() {
+		if (!mapModeFlag) return;
+		if (unwindLayer('routeMapMode')) return;
 		mapModeFlag = false;
+		if (page.state.routeMapMode !== undefined) {
+			replaceState('', stateWithout(['routeMapMode']));
+		}
 	},
 
 	/** Open the panel on a /s/<id> share landing (connection-sharing.md
@@ -1000,6 +1167,7 @@ export const routingState = {
 		panelOpen = true;
 		if (!share) {
 			sharedExpired = true;
+			stampLayers(['routingPanel']);
 			return;
 		}
 		from = share.from;
@@ -1012,7 +1180,7 @@ export const routingState = {
 		sharedOnly = true;
 		sharedExpired = false;
 		pendingShareFingerprint = share.fingerprint;
-		pushedEntry = false;
+			stampLayers(['routingPanel', 'routingQuery']);
 	},
 
 	/** Leave single-connection display (earlier/later buttons) — the list
@@ -1045,10 +1213,10 @@ export const routingState = {
 		if (next.options) routingOptions.applySession(next.options);
 		pendingFingerprint = next.route;
 		selectedFingerprint = next.route;
-		pushedEntry = false;
-		panelOpen = true;
+			panelOpen = true;
 		directSearchExpanded = true;
 		expandOnNextDirectQuery = openWillRunDirectQuery();
+		stampLayers(from && to ? ['routingPanel', 'routingQuery'] : ['routingPanel']);
 	},
 
 	/** Endpoint-input refresh button on a "Current location" endpoint:

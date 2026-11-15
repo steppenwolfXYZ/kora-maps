@@ -7,6 +7,7 @@
 // per-interaction updates don't pollute browser history.
 
 import { replaceState } from '$app/navigation';
+import { page } from '$app/state';
 
 // Entered by clicking a line badge in the station or line popup. "The
 // line" is all variants of its (ref, agency_id, mode) group: `keys` are
@@ -92,8 +93,8 @@ export function clearLineDeepLinkFromUrl() {
 	url.searchParams.delete(URL_LINE_PARAM);
 	// SvelteKit's replaceState, not window.history.replaceState — the
 	// raw call wipes the router's history state and trips its dev
-	// warning.
-	replaceState(url, {});
+	// warning. Other views' markers (routing layers) stay on the entry.
+	replaceState(url, { ...page.state, lineDetail: undefined });
 }
 
 export async function resolveLineDeepLink(keys: string[]): Promise<LineDetailSelection | null> {

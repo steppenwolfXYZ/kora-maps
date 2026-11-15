@@ -7,8 +7,11 @@
 // other's state — everything meets here.
 
 import type maplibregl from 'maplibre-gl';
+import { untrack } from 'svelte';
 import { page } from '$app/state';
-import { routingState } from '../routing/state.svelte';
+import { replaceState } from '$app/navigation';
+import { historyDepth, pushMarker, traverse } from '../historyStack';
+import { readHistoryLayers, routingState, type HistoryLayers } from '../routing/state.svelte';
 import { readRoutingQuery, urlHasRoutingQuery } from '../routing/url';
 import { loadStationIndex, type StationEntry } from '../routing/stationIndex';
 import { loadRouteColorIndex } from '../routing/legColor';
@@ -71,7 +74,7 @@ let altBubbles: maplibregl.Marker[] = [];
 /** Fed to createKoraMap so its hashchange listener knows when a
  * feature's history.back() close is consuming the hash step. */
 export const suppressHashJump = () =>
-	lineDetailState.closingViaBack || closingRouteViaBack;
+	lineDetailState.closingViaBack || closingRouteViaBack || routingState.unwindingHistory;
 
 // ── Line detail (line-detail-view.md) ───────────────────────────────────
 
@@ -94,11 +97,13 @@ export function enterLineDetail(
 	//      and applied its own edits; the delayed revert would then
 	//      overwrite them with the pre-route baseline.
 	//   2. Then closePanel so the "routing open → close line-detail"
-	//      effect doesn't fire mid-entry and tear us back down.
+	//      effect doesn't fire mid-entry and tear us back down. The
+	//      panel's history entries stay (keepHistory): back from the
+	//      line-detail view returns to the panel.
 	if (routingState.open) {
 		if (routingState.selectedItinerary) exitRouteOverlay(map);
 		if (directOverlayActive()) exitDirectRouteOverlay(map);
-		routingState.closePanel();
+		routingState.closePanel({ keepHistory: true });
 	}
 
 	lineDetailState.enter(map, sel, source);
@@ -177,9 +182,69 @@ export function setupMapOrchestration() {
 
 	// Routing panel opens → close any open line-detail (transit-routing.md
 	// § Routing panel: "Opening the routing panel closes any open
-	// line-detail-view").
+	// line-detail-view"). Torn down in place, not via exit(): the panel
+	// has just pushed its own entry on top of the line-detail one, which
+	// exit()'s history.back() would pop instead. The line-detail entry
+	// stays below, so back from the panel returns to the line.
 	$effect(() => {
-		if (routingState.open && lineDetailState.selection) exitLineDetailView();
+		if (routingState.open && lineDetailState.selection) {
+			untrack(() => {
+				lineDetailState.teardown(mapUi.mapRef);
+				clearLineDeepLinkFromUrl();
+			});
+		}
+	});
+
+	// Browser back / forward ↔ routing history layers (panel → route →
+	// map mode; routing/state.svelte.ts § History layers). Reacts to
+	// marker transitions between consecutive page states, so pushes and
+	// stamps the routing store makes itself are no-ops, and a cold load
+	// (first run) is never mistaken for a pop.
+	let prevLayers: HistoryLayers | null = null;
+	$effect(() => {
+		const cur = readHistoryLayers(page.state);
+		const prev = prevLayers;
+		prevLayers = cur;
+		if (!prev) return;
+		untrack(() => {
+			// Forward onto a route entry whose route a back had cleared: the
+			// entry's URL still carries the query — restore it like a cold
+			// load (re-query, re-select the URL's connection).
+			if (routingState.syncHistoryLayers(prev, cur)) restoreRoutingFromUrl();
+		});
+	});
+
+	// Map menu ↔ history (same rules as the routing layers, see
+	// historyStack.ts): opening pushes an entry, so back closes the menu;
+	// closing it any other way (its button, a map move on small screens)
+	// consumes that entry when it is still on top, else drops the marker
+	// in place. A marker reappearing (back onto the entry below a layer
+	// opened from the menu) reopens it.
+	let menuWasOpen = false;
+	$effect(() => {
+		const open = mapUi.menuOpen;
+		untrack(() => {
+			if (open && !menuWasOpen && page.state.mapMenu === undefined) {
+				pushMarker('mapMenu');
+			} else if (!open && menuWasOpen && page.state.mapMenu !== undefined) {
+				const at = page.state.mapMenu ?? 0;
+				if (!(at > 0 && at === historyDepth() && traverse(-1))) {
+					replaceState('', { ...page.state, mapMenu: undefined });
+				}
+			}
+		});
+		menuWasOpen = open;
+	});
+	let prevMenuMarker: boolean | null = null;
+	$effect(() => {
+		const cur = page.state.mapMenu !== undefined;
+		const prev = prevMenuMarker;
+		prevMenuMarker = cur;
+		if (prev === null || prev === cur) return;
+		untrack(() => {
+			if (!cur && mapUi.menuOpen) { menuWasOpen = false; mapUi.menuOpen = false; }
+			else if (cur && !mapUi.menuOpen) { menuWasOpen = true; mapUi.menuOpen = true; }
+		});
 	});
 
 	// Route selection reconciled with the map: install / update the
@@ -350,11 +415,12 @@ export function setupMapOrchestration() {
 		}
 	});
 
-	// Browser back / forward ↔ route selection. The pushed history entry
-	// (state.svelte.ts § selectItinerary) carries `routeSelection`; on
-	// back it disappears from page.state, so we clear the selection to
-	// match. Forward-restore: if the entry reappears while results still
-	// hold the matching itinerary, re-select it silently (no fresh push).
+	// Browser back / forward ↔ route selection. Selections are stamped on
+	// the current entry (never pushed — state.svelte.ts § selectItinerary);
+	// landing on an entry without one (the panel entry below a route)
+	// clears the selection to match. Forward-restore: if an entry with a
+	// fingerprint comes back while results still hold the matching
+	// itinerary, re-select it in place.
 	$effect(() => {
 		const histFp = page.state.routeSelection;
 		const curFp = routingState.selectedFingerprint;
@@ -367,8 +433,26 @@ export function setupMapOrchestration() {
 		} else if (histFp && !curFp && routingState.results.length > 0) {
 			const match = routingState.results.find(
 				(r) => itineraryFingerprint(r) === histFp);
-			if (match) routingState.selectItinerary(match);
+			if (match) routingState.restoreSelectionFromHistory(match);
 		}
+	});
+}
+
+/** Hydrate the routing store from the current URL's routing query, if it
+ * has one — the cold-load deep link, and a forward step back onto a
+ * route entry. `station` endpoints need the search index to resolve
+ * UIC → name/coord, so it is awaited. */
+function restoreRoutingFromUrl() {
+	const routingUrl = new URL(window.location.href);
+	if (!urlHasRoutingQuery(routingUrl)) return;
+	void loadStationIndex().then((idx) => {
+		const parsed = readRoutingQuery(routingUrl, (uic) => {
+			const e = idx?.get(uic);
+			// pid is required — without it formatPlace falls back to the
+			// legacy ch_Parent<uic> id, which 404s post-SLOID-migration.
+			return e ? { name: e.n, coord: e.c, mode: e.m, pid: e.p } : null;
+		});
+		routingState.hydrate(parsed);
 	});
 }
 
@@ -414,18 +498,7 @@ export function wireMapFeatures(map: maplibregl.Map) {
 	// ?from / ?to is on the URL, hydrate routing state from it — this
 	// opens the panel and reissues the query. `station` endpoints need
 	// the search index to resolve UIC → name/coord, so we await it.
-	const routingUrl = new URL(window.location.href);
-	if (urlHasRoutingQuery(routingUrl)) {
-		void loadStationIndex().then((idx) => {
-			const parsed = readRoutingQuery(routingUrl, (uic) => {
-				const e = idx?.get(uic);
-				// pid is required — without it formatPlace falls back to the
-				// legacy ch_Parent<uic> id, which 404s post-SLOID-migration.
-				return e ? { name: e.n, coord: e.c, mode: e.m, pid: e.p } : null;
-			});
-			routingState.hydrate(parsed);
-		});
-	}
+	restoreRoutingFromUrl();
 
 	map.on('load', () => {
 		// Deep link (line-detail-view.md § Deep link): once the style

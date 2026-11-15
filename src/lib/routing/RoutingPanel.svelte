@@ -578,14 +578,16 @@
 		void routingOptions.bikeRoads;
 		void routingOptions.avoidStairs;
 		if (!from || !to) return;
-		void routingState.runQuery();
+		// Untracked: only the inputs above may re-trigger a query — not
+		// whatever runQuery reads internally (history state, error flag).
+		untrack(() => void routingState.runQuery());
 	});
 
 	function clearRoute() {
-		routingState.clearRoute();
-		// The From input remounts in its empty-search form — focus lands
-		// there so the user can start the next route immediately.
-		void tick().then(() => fromInput?.focusSearch());
+		// The clear may land a history step later (it pops the route's back
+		// layer). The From input then remounts in its empty-search form —
+		// focus lands there so the user can start the next route right away.
+		void routingState.clearRoute().then(() => tick()).then(() => fromInput?.focusSearch());
 	}
 
 	function pickRecent(r: RecentRoute) {
