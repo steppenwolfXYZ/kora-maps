@@ -240,6 +240,36 @@
 		}
 	}
 
+	function pickFrom(ep: Endpoint | null) {
+		routingState.setFrom(ep);
+		// Picking a From with no To yet: move the cursor on so the
+		// destination can be typed right away.
+		if (ep && !routingState.to) void tick().then(() => toInput?.focusSearch());
+	}
+
+	/** Connect board tap mode: while the cursor sits in From or To, a tap
+	 * on a tile fills that field only — the same as picking the place from
+	 * the field's own dropdown. Asked at press time, while the field still
+	 * holds focus. A "Current location" tile is ignored when the other side
+	 * already uses it, as the dropdown would not offer it either. */
+	function armConnectTap(): ((ep: Endpoint) => void) | null {
+		if (fromInput?.isFocused()) {
+			return (ep) => {
+				if (ep.type === 'current' && routingState.to?.type === 'current') return;
+				fromInput?.stopEdit();
+				pickFrom(ep);
+			};
+		}
+		if (toInput?.isFocused()) {
+			return (ep) => {
+				if (ep.type === 'current' && routingState.from?.type === 'current') return;
+				toInput?.stopEdit();
+				routingState.setTo(ep);
+			};
+		}
+		return null;
+	}
+
 	let resultsEl: HTMLDivElement | null = $state(null);
 	let fromInput: EndpointInput | undefined = $state();
 	let toInput: EndpointInput | undefined = $state();
@@ -425,13 +455,25 @@
 		if (!el) return;
 		const end = () => endPull(true);
 		const cancel = () => endPull(false);
+		// A user scroll gesture in the results folds the transit options
+		// away, so the list gets the room. Wheel / touch rather than the
+		// `scroll` event: the panel scrolls the list itself (scroll to the
+		// selected card after a load, top compensation while earlier
+		// results stream in), and those must not close anything.
+		const closeOptions = () => {
+			if (optionsOpen) optionsOpen = false;
+		};
 		el.addEventListener('touchstart', onTouchStart, { passive: true });
 		el.addEventListener('touchmove', onTouchMove, { passive: false });
+		el.addEventListener('touchmove', closeOptions, { passive: true });
+		el.addEventListener('wheel', closeOptions, { passive: true });
 		el.addEventListener('touchend', end, { passive: true });
 		el.addEventListener('touchcancel', cancel, { passive: true });
 		return () => {
 			el.removeEventListener('touchstart', onTouchStart);
 			el.removeEventListener('touchmove', onTouchMove);
+			el.removeEventListener('touchmove', closeOptions);
+			el.removeEventListener('wheel', closeOptions);
 			el.removeEventListener('touchend', end);
 			el.removeEventListener('touchcancel', cancel);
 		};
@@ -746,12 +788,7 @@
 				label="From"
 				endpoint={routingState.from}
 				placeholder="Start"
-				onChange={(ep) => {
-					routingState.setFrom(ep);
-					// Picking a From with no To yet: move the cursor on so the
-					// destination can be typed right away.
-					if (ep && !routingState.to) void tick().then(() => toInput?.focusSearch());
-				}}
+				onChange={pickFrom}
 				otherIsCurrent={routingState.to?.type === 'current'}
 				onRefreshCurrent={() => routingState.refreshCurrentLocation()}
 				mixedRanking={direct}
@@ -876,7 +913,7 @@
 			</div>
 			<div class="rp-suggest-scroll">
 			{#if noRouteTab === 'connect'}
-				<ConnectGrid {getMapCenter} onConnect={connectRoute} />
+				<ConnectGrid {getMapCenter} onConnect={connectRoute} armTap={armConnectTap} />
 			{:else if recentRoutes.list.length > 0}
 				<!-- One row per route (click runs it): the two stops as
 				     boxes, chevron between. Truncated names surface in

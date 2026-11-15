@@ -223,6 +223,13 @@
 		inputEl?.blur();
 	}
 
+	/** Whether the cursor sits in this row's search input. Read by the
+	 * Connect board at press time — before the press blurs the input — to
+	 * decide whether a tile tap fills this side. */
+	export function isFocused(): boolean {
+		return inputEl !== null && document.activeElement === inputEl;
+	}
+
 	/** Programmatic focus for the panel's open-time cursor placement —
 	 * focuses the input without opening the dropdown. */
 	export function focusSearch() {

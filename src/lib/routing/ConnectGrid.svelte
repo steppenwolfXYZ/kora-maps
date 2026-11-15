@@ -7,6 +7,10 @@
 	// empty half-cells: a connection drawn through "Start" leaves From
 	// empty, through "Stop" leaves To empty (the place on the other end
 	// of the line fills the opposite side).
+	// Tap mode: while the cursor sits in the From or To field, a single tap
+	// on a place cell fills just that field — the other side is left as it
+	// is. Without a focused field a tap does nothing; the board stays a
+	// drag surface.
 	import { untrack } from 'svelte';
 	import {
 		connectStations, coldStartSuggestions, placeEndpoint, type ConnectPlace
@@ -16,10 +20,14 @@
 	import { modeMidColor } from './legColor';
 	import type { Endpoint } from './types';
 
-	let { getMapCenter, onConnect }: {
+	let { getMapCenter, onConnect, armTap }: {
 		getMapCenter: () => [number, number] | null;
 		/** Drag result: exactly one side may be null (empty start / stop). */
 		onConnect: (from: Endpoint | null, to: Endpoint | null) => void;
+		/** Asked at press time, before the press blurs the endpoint input:
+		 * returns the handler a tap on a place cell should feed (the
+		 * focused field's setter), or null when no field is focused. */
+		armTap?: () => ((ep: Endpoint) => void) | null;
 	} = $props();
 
 	const GRID_CAPACITY = 10;
@@ -109,6 +117,8 @@
 	let lineStart = $state<{ x: number; y: number } | null>(null);
 	let linePos = $state<{ x: number; y: number } | null>(null);
 	let dragTarget = $state<string | null>(null);
+	// Tap handler captured at press time (see armTap); not reactive.
+	let tapHandler: ((ep: Endpoint) => void) | null = null;
 
 	function endpointOf(id: string): Endpoint | null {
 		if (id === CURRENT) return { type: 'current' };
@@ -136,6 +146,9 @@
 		lineStart = relPoint(cell.left + cell.width / 2, cell.top + cell.height / 2);
 		linePos = relPoint(e.clientX, e.clientY);
 		dragTarget = null;
+		// Start / Stop are drag-only: they stand for "leave this side
+		// empty", which has no meaning as a tap into a field.
+		tapHandler = id === EMPTY_FROM || id === EMPTY_TO ? null : (armTap?.() ?? null);
 	}
 
 	function moveDrag(e: PointerEvent) {
@@ -147,8 +160,17 @@
 		dragTarget = id && validPair(dragFrom, id) ? id : null;
 	}
 
-	function endDrag() {
-		if (dragFrom && dragTarget) commit(dragFrom, dragTarget);
+	function endDrag(e: PointerEvent) {
+		if (dragFrom && dragTarget) {
+			commit(dragFrom, dragTarget);
+		} else if (dragFrom && tapHandler && e.type === 'pointerup') {
+			// Released on the cell it was pressed on: a tap.
+			const hit = document.elementFromPoint(e.clientX, e.clientY)
+				?.closest('[data-conn]') as HTMLElement | null;
+			const ep = hit?.dataset.conn === dragFrom ? endpointOf(dragFrom) : null;
+			if (ep) tapHandler(ep);
+		}
+		tapHandler = null;
 		dragFrom = null;
 		lineStart = null;
 		linePos = null;
@@ -177,9 +199,10 @@
 	onpointercancel={dragFrom ? endDrag : undefined}
 />
 
-<!-- The board is a pointer-drag surface; the cells carry no tap/keyboard
-     semantics (drag-only interaction, see concept). The endpoint inputs
-     above remain the accessible path to the same result. -->
+<!-- The board is a pointer-drag surface; the cells carry no keyboard
+     semantics, and a tap only means something while an endpoint field
+     holds the cursor (tap mode, above). The endpoint inputs remain the
+     accessible path to the same result. -->
 <div class="connect-board" class:dragging={dragFrom !== null} bind:this={boardEl}>
 	<div class="cells">
 		{#each tiles as t (t.u)}
