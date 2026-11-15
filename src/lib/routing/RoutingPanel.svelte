@@ -247,7 +247,7 @@
 		if (ep && !routingState.to) void tick().then(() => toInput?.focusSearch());
 	}
 
-	/** Connect board tap mode: while the cursor sits in From or To, a tap
+	/** Connect board tap mode: while the cursor sits in From, To or a via, a tap
 	 * on a tile fills that field only — the same as picking the place from
 	 * the field's own dropdown. Asked at press time, while the field still
 	 * holds focus. A "Current location" tile is ignored when the other side
@@ -265,6 +265,17 @@
 				if (ep.type === 'current' && routingState.from?.type === 'current') return;
 				toInput?.stopEdit();
 				routingState.setTo(ep);
+			};
+		}
+		const vi = viaInputs.findIndex((v) => v?.isFocused());
+		if (vi >= 0) {
+			return (ep) => {
+				// Only what the via row itself accepts: stations everywhere,
+				// points on the direct tabs, never "Current location".
+				// setVia would otherwise empty the row.
+				if (ep.type === 'current' || (ep.type === 'point' && !direct)) return;
+				viaInputs[vi]?.stopEdit();
+				routingState.setVia(vi, ep);
 			};
 		}
 		return null;

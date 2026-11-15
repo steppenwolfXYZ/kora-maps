@@ -7,7 +7,7 @@
 	// empty half-cells: a connection drawn through "Start" leaves From
 	// empty, through "Stop" leaves To empty (the place on the other end
 	// of the line fills the opposite side).
-	// Tap mode: while the cursor sits in the From or To field, a single tap
+	// Tap mode: while the cursor sits in the From, To or a via field, a single tap
 	// on a place cell fills just that field — the other side is left as it
 	// is. Without a focused field a tap does nothing; the board stays a
 	// drag surface.
